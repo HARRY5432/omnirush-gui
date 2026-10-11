@@ -37,7 +37,9 @@ type Record struct {
 	Root      string `json:"root"`
 	CRoot     string `json:"croot"`
 	Container string `json:"container"`
-	Runtime   string `json:"runtime"`
+	// Backend runs the box (docker, podman, bwrap, apple, wslc, wsl, ...).
+	Backend string `json:"backend"`
+	Runtime string `json:"runtime"`
 	// RuntimeArgs come before the runtime's own (`-e docker` through wsl.exe).
 	RuntimeArgs []string `json:"runtime_args"`
 	Host      string `json:"host"`
@@ -89,6 +91,11 @@ func main() {
 	start := time.Now()
 	code, timing, err := runRemote(rec, req)
 	if err != nil {
+		if rec.Runtime == "" && rec.Backend != "" {
+			// A backend with no `exec` of its own (bubblewrap, the WSL distro): boxd is the only way in.
+			fmt.Fprintf(os.Stderr, "omnirush sandbox: the sandbox is not reachable (%v); `omnirush sandbox status` says why\n", err)
+			os.Exit(125)
+		}
 		// boxd is not reachable (restarting, crashed): run it with the runtime's exec instead.
 		code = runtimeExec(rec, req)
 		timing.Fallback = true

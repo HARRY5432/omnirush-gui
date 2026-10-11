@@ -178,6 +178,7 @@ import {
 import { boxServiceFor } from "./box/desktop.js";
 import { prepareBoxInstallLog } from "./box/install-log.js";
 import { rememberServerDefault } from "./box/launch.js";
+import { normalizeBackend } from "./box/backends/index.js";
 import { buildOmniRushRuntimeConfigObject, omnirushGatewayConfigured, omnirushRuntimeConfigFilePath, writeOmniRushRuntimeConfigFile } from "./omnirush-runtime-config.js";
 import { assertMcpAllowed, mcpAllowed, mcpPolicyForConfig, MCP_DISABLED_MESSAGE } from "./mcp-policy.js";
 import { omnirushModelWantsReasoningSummary, readOmniRushModelCatalog } from "./omnirush-model-catalog.js";
@@ -200,7 +201,7 @@ import { createEngineV2Preview, type EngineV2Preview } from "./engine-v2-preview
 import { sessionUploaderEnabled } from "./session-uploader.js";
 import { startCaptureService, type CaptureService } from "./capture-client.js";
 import type { LateWritesGate } from "./capture-host.js";
-import { buildOpencodeProxyUrl, engineTarget, type EngineTarget } from "./session-upload-observer.js";
+import { buildOpencodeProxyUrl, engineTarget, turnsBeforeCapture, type EngineTarget } from "./session-upload-observer.js";
 import { OmniRushGatewayBroker } from "./omnirush-gateway-broker.js";
 import { awaitOmniRushModelCatalogSettled, startOmniRushModelCatalogSync } from "./omnirush-model-catalog-sync.js";
 import { OmniRushVoiceService, voiceProjectContext } from "./omnirush-voice.js";
@@ -1812,7 +1813,7 @@ export async function proxyOpencodeV2Request(input: {
     // capture v2's session-start manifest is taken before the prompt reaches the engine (at most about 3 s).
     await capture.archiveStartGate(uploadedSessionId, input.workspace.path, lateWritesGate(input.workspace));
     capture.boxSession(uploadedSessionId, boxInfo);
-    capture.startSession(uploadedSessionId, input.workspace.id, input.workspace.path);
+    capture.startSession(uploadedSessionId, input.workspace.id, input.workspace.path, await turnsBeforeCapture(capture, uploadedSessionId, engine));
     capture.recordPrompt(uploadedSessionId, { method, path: routePath, body: requestBody, engine: "v2", root: input.workspace.path, attachments: true, dispatchedAt: Date.now() });
     capture.captureSnapshot(uploadedSessionId, "prompt");
     capture.archiveSessionStarted(uploadedSessionId, input.workspace.path, engine);
@@ -2186,7 +2187,7 @@ export async function proxyOpencodeRequest(input: {
     // capture v2's session-start manifest is taken before the prompt reaches the engine (at most about 3 s).
     if (promptDispatch) await capture.archiveStartGate(uploadedSessionId, workspace.path, lateWritesGate(workspace, pool?.snapshot().generations.map((generation) => generation.pid) ?? []));
     if (promptDispatch) capture.boxSession(uploadedSessionId, boxInfo);
-    capture.startSession(uploadedSessionId, workspace.id, workspace.path);
+    capture.startSession(uploadedSessionId, workspace.id, workspace.path, promptDispatch ? await turnsBeforeCapture(capture, uploadedSessionId, engineTarget(baseUrl, headers, search)) : 0);
     capture.recordPrompt(uploadedSessionId, {
       method,
       path: normalizeOpencodeProxyPath(proxyPath),
@@ -3779,13 +3780,18 @@ function createRoutes(
     const workspace = await resolveWorkspace(config, ctx.params.id);
     const body = await readJsonBody(ctx.request);
     const mode = body.mode;
-    if ((mode !== "on" && mode !== "off" && mode !== null) || Object.keys(body).some((key) => key !== "mode")) {
-      throw new ApiError(400, "invalid_payload", "mode must be \"on\", \"off\" or null and the only field");
+    const keys = Object.keys(body);
+    // `mode`: the project's choice; `backend`: what runs boxes on this computer (auto, one backend id, native).
+    if (!keys.length || keys.some((key) => key !== "mode" && key !== "backend")
+      || ("mode" in body && mode !== "on" && mode !== "off" && mode !== null)
+      || ("backend" in body && (typeof body.backend !== "string" || !normalizeBackend(body.backend)))) {
+      throw new ApiError(400, "invalid_payload", "mode must be \"on\", \"off\" or null; backend must be \"auto\", a sandbox backend or \"native\"");
     }
     if (workspace.workspaceType !== "local") throw new ApiError(400, "box_unsupported", "The sandbox is for folders on this computer");
     const boxes = boxServiceFor(config);
     const before = JSON.stringify(await boxes.engineBits());
-    const status = await boxes.setMode(workspace, mode);
+    if (typeof body.backend === "string") await boxes.setBackend(body.backend);
+    const status = "mode" in body && (mode === "on" || mode === "off" || mode === null) ? await boxes.setMode(workspace, mode) : await boxes.status(workspace, { fresh: true });
     // The engine gets the box shell and plugin when the first workspace turns its box on (and loses them with the last).
     const engine = JSON.stringify(await boxes.engineBits()) === before ? { status: "unchanged" as const } : await applyBoxEngineConfig(config, "local_box");
     return jsonResponse({ ...status, engine });

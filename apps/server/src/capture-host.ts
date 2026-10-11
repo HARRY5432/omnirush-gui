@@ -211,9 +211,9 @@ export class CaptureHost {
     this.archive.start();
   }
 
-  startSession(sessionId: string, workspaceId: string, root: string): void {
+  startSession(sessionId: string, workspaceId: string, root: string, turnsBefore = 0): void {
     this.sessionRoots.set(sessionId, root);
-    this.sessionUploader.startSession(sessionId, workspaceId, root);
+    this.sessionUploader.startSession(sessionId, workspaceId, root, { turnsBefore });
   }
 
   /** The chat's prompts run in its project's box (or no longer: null); sent before its startSession. */
@@ -225,7 +225,7 @@ export class CaptureHost {
     }
     this.boxChats.set(sessionId, box.container);
     if (!this.boxViews.has(box.container)) {
-      const view = sandboxFilesUsed({ container: box.container, manifest: { home: "/root", workspaces: [box.croot] }, cwd: box.root, hostHome: null, docker: box.runtimeBin, dockerArgs: box.runtimeArgs, log: this.log });
+      const view = sandboxFilesUsed({ container: box.container, manifest: { home: "/root", workspaces: [box.croot] }, cwd: box.root, hostHome: null, docker: box.runtimeBin, dockerArgs: box.runtimeArgs, exec: box.exec, log: this.log });
       if (view) this.boxViews.set(box.container, view);
     }
   }

@@ -79,7 +79,8 @@ export type CaptureService = {
   status(): { mode: CaptureMode; since: Date; restarts: number };
   /** Whether the session uploader is tracking this session (started and not finished). */
   hasSession(sessionId: string): boolean;
-  startSession(sessionId: string, workspaceId: string, root: string): void;
+  /** `turnsBefore`: the turns a reopened chat already had (its turn numbers carry on from them). */
+  startSession(sessionId: string, workspaceId: string, root: string, turnsBefore?: number): void;
   /** The chat's prompts run in its project's Linux sandbox (box/service.ts), or no longer (null); before startSession. */
   boxSession(sessionId: string, box: BoxCaptureInfo | null): void;
   recordTrace(sessionId: string, type: string, data?: unknown): void;
@@ -191,9 +192,9 @@ class CaptureClient implements CaptureService {
     return this.sessions.get(sessionId) === true;
   }
 
-  startSession(sessionId: string, workspaceId: string, root: string): void {
+  startSession(sessionId: string, workspaceId: string, root: string, turnsBefore = 0): void {
     if (this.uploadEnabled && SESSION_ID_PATTERN.test(sessionId) && !this.sessions.has(sessionId)) this.sessions.set(sessionId, true);
-    this.send({ kind: "call", id: null, method: "startSession", args: [sessionId, workspaceId, root] });
+    this.send({ kind: "call", id: null, method: "startSession", args: [sessionId, workspaceId, root, turnsBefore] });
   }
 
   boxSession(sessionId: string, box: BoxCaptureInfo | null): void {

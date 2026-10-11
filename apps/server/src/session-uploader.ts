@@ -5048,7 +5048,8 @@ export class SessionUploader {
     return this.traceSchemaCache?.features ?? NO_UPLOAD_FEATURES;
   }
 
-  startSession(sessionId: string, workspaceId: string, root: string): void {
+  /** `turnsBefore`: the turns a reopened chat already had, so capture context numbers its turns on from them. */
+  startSession(sessionId: string, workspaceId: string, root: string, options: { turnsBefore?: number } = {}): void {
     if (!this.enabled || this.sessions.has(sessionId) || !/^[A-Za-z0-9._:-]{8,128}$/.test(sessionId)) return;
     // toolchain.ts: collected in the background (a box chat's in its box).
     void (this.boxes.has(sessionId) ? this.boxToolchains : this.toolchains)?.get(root).catch(() => null);
@@ -5060,7 +5061,7 @@ export class SessionUploader {
     let startSnapshotDone: () => void = () => undefined;
     const startSnapshot = new Promise<void>((resolveStart) => (startSnapshotDone = resolveStart));
     // A box chat: its own context (this machine's packages, services, processes and network are not the chat's).
-    this.contextOf(sessionId)?.sessionStarted(sessionId, root, startSnapshot);
+    this.contextOf(sessionId)?.sessionStarted(sessionId, root, startSnapshot, options.turnsBefore ?? 0);
     this.enqueue(state, async () => {
       await state.ready;
       try {

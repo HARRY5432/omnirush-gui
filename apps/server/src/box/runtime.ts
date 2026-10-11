@@ -1,9 +1,10 @@
-// Ported from the CLI (omnirush-cli src/box/runtime.js, feat/local-box);
-// keep the two in step. Only types were added here.
+// Ported from the CLI (omnirush-cli src/box/runtime.js,
+// feat/local-box-backends); keep the two in step. Only types were added here.
 //
-// Which container runtime runs a project's box: rootless Podman or Docker on
-// Linux, Docker Desktop / OrbStack / colima / Rancher Desktop / Podman
-// machine on macOS and Windows, Docker inside WSL2. Never blocks a start: a
+// The container engines a box backend can be (backends/container.ts): rootless
+// Podman or Docker on Linux, Docker Desktop / OrbStack / colima / Rancher
+// Desktop / Podman machine on macOS and Windows, Docker inside WSL2. Which
+// backend runs a box is chosen by backends/index.ts. Never blocks a start: a
 // probe has a short time limit, its result is cached, and "none" means the
 // session runs on this machine with one line saying why.
 //
@@ -12,10 +13,13 @@
 // /mnt/c, the docker-group permission error shown as "the reason is above".
 // Each of those has a rule below and a test.
 
-import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+import { runCommand, type RunCommand, type RunResult } from "./run.js";
+
+export { runCommand, type RunCommand, type RunOptions, type RunResult } from "./run.js";
 
 /** Probe results are reused this long (ms): a working runtime, and a missing one. */
 export const CACHE_OK_MS = 10 * 60_000;
@@ -23,11 +27,12 @@ export const CACHE_FAIL_MS = 2 * 60_000;
 
 type Env = NodeJS.ProcessEnv;
 
-export type RunResult = { code: number; stdout: string; stderr: string; error?: string };
-export type RunOptions = { env?: Env; timeoutMs?: number; input?: string | Buffer; maxBytes?: number };
-export type RunCommand = (bin: string, args: string[], options?: RunOptions) => Promise<RunResult>;
+/** A container CLI to probe; `prefix` goes before every call (`--context <name>`). */
+export type RuntimeCandidate = { name: string; bin: string; skipped?: string; prefix?: string[] };
 
-export type RuntimeCandidate = { name: string; bin: string; skipped?: string };
+/** One backend as `all` lists it (the settings card's "others"). */
+export type BackendAlternative = { backend: string; name: string; ok: boolean; version: string | null; flavor: string | null; reason: string | null; context?: string };
+
 export type RuntimeInfo = {
   ok: true;
   name: string;
@@ -38,12 +43,45 @@ export type RuntimeInfo = {
   rootless: boolean;
   flavor: string;
   vm: boolean;
-  /** A WSL engine: arguments before the runtime's own (["-e", "docker"] through wsl.exe). */
+  /** The backend id (backends/index.ts BACKENDS): what uploads record as sandbox.backend. */
+  backend?: string;
+  /** Why this backend: the ranked order, the setting, the server's allowlist. */
+  why?: string;
+  /** Arguments before the runtime's own (["-e", "docker"] through wsl.exe, ["--context", "colima"]). */
   prefix?: string[];
+  /** The docker context the runtime answered through (macOS, Windows). */
+  context?: string;
   wsl?: boolean;
+  /** The OmniRush WSL distro: its name, whether it is imported yet. */
+  distro?: string;
+  installed?: boolean;
+  state?: string | null;
+  /** bubblewrap: the bwrap boxrun runs, the id mapping, the launcher. */
+  bwrap?: string | null;
+  idmap?: string;
+  launcher?: string;
+  kernel?: string;
   cached?: boolean;
+  alternatives?: BackendAlternative[];
 };
-export type RuntimeFailure = { ok: false; name?: string; bin?: string; reason: string; tried?: Array<{ name?: string; bin?: string; reason: string }>; cached?: boolean };
+export type RuntimeTried = { backend?: string; name?: string; bin?: string; reason: string };
+export type RuntimeFailure = {
+  ok: false;
+  name?: string;
+  bin?: string;
+  backend?: string;
+  version?: string;
+  code?: string;
+  context?: string;
+  reason: string;
+  tried?: RuntimeTried[];
+  cached?: boolean;
+  /** The backend is set to native (this machine): no box, not a failure. */
+  native?: boolean;
+  /** macOS with nothing: the free option to offer (colima). */
+  hint?: string;
+  alternatives?: BackendAlternative[];
+};
 export type RuntimeResult = RuntimeInfo | RuntimeFailure;
 
 /** Whether this Linux is WSL (the kernel says Microsoft). */
@@ -115,47 +153,6 @@ export function candidates({ platform = process.platform, home = os.homedir(), e
     }
   }
   return out;
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function errorCode(error: unknown): string {
-  const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
-  return typeof code === "string" ? code : "spawn";
-}
-
-/** Run a program with a time limit; never throws. */
-export function runCommand(bin: string, args: string[], { env = process.env, timeoutMs = 8_000, input, maxBytes = 64 << 20 }: RunOptions = {}): Promise<RunResult> {
-  return new Promise((resolve) => {
-    let child: ChildProcess;
-    try {
-      child = spawn(bin, args, { env, stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"], windowsHide: true });
-    } catch (error) {
-      resolve({ code: -1, stdout: "", stderr: errorText(error), error: errorCode(error) });
-      return;
-    }
-    const out: Buffer[] = [];
-    let outBytes = 0;
-    const err: Buffer[] = [];
-    let done = false;
-    const finish = (value: RunResult) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      resolve(value);
-    };
-    const timer = setTimeout(() => {
-      try { child.kill("SIGKILL"); } catch { /* gone */ }
-      finish({ code: -1, stdout: Buffer.concat(out).toString("utf8"), stderr: Buffer.concat(err).toString("utf8"), error: "timeout" });
-    }, timeoutMs);
-    child.stdout?.on("data", (chunk: Buffer) => { outBytes += chunk.length; if (outBytes <= maxBytes) out.push(chunk); });
-    child.stderr?.on("data", (chunk: Buffer) => { if (err.length < 64) err.push(chunk); });
-    child.on("error", (error) => finish({ code: -1, stdout: "", stderr: errorText(error), error: errorCode(error) }));
-    child.on("close", (code) => finish({ code: code ?? -1, stdout: Buffer.concat(out).toString("utf8"), stderr: Buffer.concat(err).toString("utf8") }));
-    if (input !== undefined) child.stdin?.end(input);
-  });
 }
 
 function firstLine(text: unknown): string {
@@ -249,9 +246,12 @@ export async function probe(candidate: RuntimeCandidate, { run = runCommand, env
       return { ok: false, name, bin, reason: "DOCKER_HOST points at another machine, which cannot see this folder" };
     }
   }
-  const args = name === "podman" ? ["info", "--format", "json"] : ["info", "--format", "{{json .}}"];
+  const prefix = Array.isArray(candidate.prefix) ? candidate.prefix : [];
+  const args = [...prefix, ...(name === "podman" ? ["info", "--format", "json"] : ["info", "--format", "{{json .}}"])];
   const result = await run(bin, args, { env, timeoutMs });
-  if (result.code !== 0) return { ok: false, name, bin, reason: explainFailure(name, result, { platform, env }) };
+  // A docker context (OrbStack, colima, Desktop) has its own socket: its words decide, not the default socket.
+  const ownSocket = prefix.includes("--context") ? { exists: () => true } : {};
+  if (result.code !== 0) return { ok: false, name, bin, reason: explainFailure(name, result, { platform, env, ...ownSocket }) };
   let info: Info;
   try {
     info = JSON.parse(result.stdout);
@@ -326,70 +326,34 @@ export async function probeWsl(wslExe: string, { run = runCommand, env = process
   return { ok: false, name: "wsl", bin: wslExe, reason: "no Docker or Podman engine answers in the default WSL distribution" };
 }
 
-function cacheFile(boxHome: string): string {
-  return path.join(boxHome, "runtime.json");
-}
-
-function readCache(boxHome: string, now: number, key: string): RuntimeResult | null {
-  try {
-    const cached = JSON.parse(readFileSync(cacheFile(boxHome), "utf8"));
-    if (cached?.key !== key) return null;
-    const age = now - Number(cached.at);
-    if (!(age >= 0)) return null;
-    if (cached.result?.ok ? age < CACHE_OK_MS : age < CACHE_FAIL_MS) return cached.result;
-  } catch { /* none */ }
-  return null;
-}
-
-function writeCache(boxHome: string, key: string, result: RuntimeResult, now: number): void {
-  try {
-    mkdirSync(boxHome, { recursive: true });
-    const file = cacheFile(boxHome);
-    const tmp = `${file}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify({ key, at: now, result }), { mode: 0o600 });
-    renameSync(tmp, file);
-  } catch { /* best effort */ }
-}
-
 /**
- * The runtime for boxes on this machine (cached; `fresh` skips the cache):
- * the first candidate that answers, or { ok: false, reason, tried } where
- * `reason` is one line for the user.
+ * The backend for boxes on this machine (backends/index.ts: bubblewrap,
+ * Apple container, WSL containers, the OmniRush WSL distro, then the
+ * container engines above, in a ranked order per OS). Kept here under its
+ * old name.
  */
-export async function detectRuntime({ boxHome, env = process.env, platform = process.platform, home = os.homedir(), exists = existsSync, run = runCommand, wsl = platform === "linux" && isWsl(env), now = Date.now(), fresh = false, timeoutMs }: { boxHome?: string; env?: Env; platform?: NodeJS.Platform; home?: string; exists?: (file: string) => boolean; run?: RunCommand; wsl?: boolean; now?: number; fresh?: boolean; timeoutMs?: number } = {}): Promise<RuntimeResult> {
-  const key = JSON.stringify([platform, env.OMNIRUSH_BOX_RUNTIME || "", env.DOCKER_HOST || "", env.PATH || env.Path || ""]);
-  if (boxHome && !fresh) {
-    const cached = readCache(boxHome, now, key);
-    if (cached) return { ...cached, cached: true };
-  }
-  const list = candidates({ platform, home, env, exists, wsl });
-  const tried: RuntimeFailure[] = [];
-  let result: RuntimeResult | null = null;
-  for (const candidate of list) {
-    const probed = await probe(candidate, { run, env, platform, wsl, ...(timeoutMs ? { timeoutMs } : {}) });
-    if (probed.ok) { result = probed; break; }
-    tried.push(probed);
-  }
-  // Windows: a Docker or Podman engine inside an existing WSL 2 distro, used
-  // through wsl.exe (never installed or started for the user).
-  if (!result && platform === "win32" && env.OMNIRUSH_BOX_WSL !== "0") {
-    const wslExe = wslLauncher({ env, exists });
-    if (wslExe) {
-      const probed = await probeWsl(wslExe, { run, env, ...(timeoutMs ? { timeoutMs } : {}) });
-      if (probed.ok) result = probed;
-      else tried.push(probed);
-    }
-  }
-  if (!result) {
-    const reason = tried.length
-      ? tried.map((entry) => entry.reason).join("; ")
-      : platform === "linux"
-        ? "no container runtime found (install Podman or Docker)"
-        : platform === "darwin"
-          ? "no container runtime found (install Docker Desktop, OrbStack, colima or Podman)"
-          : "no container runtime found (install Docker Desktop with the WSL 2 backend, or Podman)";
-    result = { ok: false, reason, tried: tried.map(({ name, bin, reason: why }) => ({ name, bin, reason: why })) };
-  }
-  if (boxHome) writeCache(boxHome, key, result, now);
-  return result;
+export async function detectRuntime(opts: DetectOptions = {}): Promise<RuntimeResult> {
+  const { detectBackend } = await import("./backends/index.js");
+  return detectBackend(opts);
 }
+
+export type DetectOptions = {
+  boxHome?: string;
+  env?: Env;
+  platform?: NodeJS.Platform;
+  home?: string;
+  exists?: (file: string) => boolean;
+  run?: RunCommand;
+  wsl?: boolean;
+  now?: number;
+  fresh?: boolean;
+  /** Probe every backend and list them as `alternatives` (status). */
+  all?: boolean;
+  timeoutMs?: number;
+  /** A backend id, "auto" or "native" (the desktop setting); default OMNIRUSH_BOX_BACKEND. */
+  asked?: string | null;
+  /** The server's allowlist (local_box.backends); null: any. */
+  allow?: string[] | null;
+  arch?: string;
+  release?: string;
+};

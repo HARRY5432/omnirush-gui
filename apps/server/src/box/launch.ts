@@ -1,8 +1,12 @@
-// Ported from the CLI (omnirush-cli src/box/launch.js, feat/local-box); keep
-// the shared parts in step. Desktop differences: the per-project choice lives
-// in the workspace's OmniRush settings (service.ts), not box.json; the plan
-// is per workspace (one engine serves every project); a run tracks its turns
-// per chat; there is no --sandbox flag (OMNIRUSH_BOX=1|0 still overrides).
+// Ported from the CLI (omnirush-cli src/box/launch.js,
+// feat/local-box-backends); keep the shared parts in step. Desktop
+// differences: the per-project choice lives in the workspace's OmniRush
+// settings (service.ts), not box.json (box.json keeps only the machine's
+// backend, as the CLI's does); the plan is per workspace (one engine serves
+// every project); a run tracks its turns per chat; there is no --sandbox or
+// --sandbox-backend flag (OMNIRUSH_BOX=1|0 and OMNIRUSH_BOX_BACKEND still
+// override); a download with no detached command (the WSL distro) runs in
+// this process.
 //
 // Whether a chat runs in its project's box, and the box's part in a run:
 // the engine config bits (shell, plugin), the per-turn checkpoints, the
@@ -14,10 +18,12 @@
 // background, and a shell call waits for it (boxsh).
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { boxKey, containerName, gcBoxes, inspectImage, installShell, openBox, recordFile, rt, savedTurns, type Box, type BoxInstallLog, type BoxLabel, type BoxLog, type BoxRuntime, type CheckpointSummary } from "./box.js";
+import { boxKey, containerName, gcBoxes, installShell, openBox, recordFile, savedTurns, type Box, type BoxInstallLog, type BoxLabel, type BoxLog, type BoxRuntime, type CheckpointSummary } from "./box.js";
+import { driverFor, normalizeBackend } from "./backends/index.js";
+import type { BoxExec } from "./backends/types.js";
 import { detectStack, imageFor, loadPins, type BoxImage } from "./images.js";
 import { detectRuntime, runCommand, type RunCommand, type RuntimeResult } from "./runtime.js";
 
@@ -42,18 +48,73 @@ export function serverDefault(stateDir: string): ServerBoxDefault {
   }
 }
 
-/** Remembers local_box.default of a capabilities answer; whether it changed. */
+/** The server's allowlist of backends (local_box.backends; null: any). */
+export function serverBackends(stateDir: string): string[] | null {
+  try {
+    const value = JSON.parse(readFileSync(path.join(stateDir, "box-server.json"), "utf8"));
+    return Array.isArray(value?.backends) ? value.backends.filter((b: unknown): b is string => typeof b === "string") : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Remembers local_box.default (and its backends allowlist) of a capabilities answer; whether either changed. */
 export function rememberServerDefault(stateDir: string, capabilities: { local_box?: unknown } | null | undefined): boolean {
   const block = capabilities?.local_box;
   if (!block || typeof block !== "object") return false;
-  const fields = block as { default?: unknown; max_turn_bytes?: unknown };
+  const fields: { default?: unknown; max_turn_bytes?: unknown; backends?: unknown } = block;
   const value = isMode(fields.default) ? fields.default : "off";
-  const before = serverDefault(stateDir);
+  const backends = Array.isArray(fields.backends) ? fields.backends.filter((b): b is string => typeof b === "string").slice(0, 32) : null;
+  const before = JSON.stringify([serverDefault(stateDir), serverBackends(stateDir)]);
   try {
     mkdirSync(stateDir, { recursive: true });
-    writeFileSync(path.join(stateDir, "box-server.json"), JSON.stringify({ default: value, max_turn_bytes: fields.max_turn_bytes ?? null, at: Date.now() }), { mode: 0o600 });
+    writeFileSync(path.join(stateDir, "box-server.json"), JSON.stringify({ default: value, max_turn_bytes: fields.max_turn_bytes ?? null, backends, at: Date.now() }), { mode: 0o600 });
   } catch { /* best effort */ }
-  return before !== value;
+  return before !== JSON.stringify([value, backends]);
+}
+
+// --- the backend --------------------------------------------------------------------
+
+/** What the backend setting holds: "auto" (the ranked order), one backend id, or "native" (no box). */
+export type BackendSetting = string;
+
+/** The machine's box settings file (the CLI's box.json; the desktop keeps only `backend` in it). */
+export function settingsFile(stateDir: string): string {
+  return path.join(stateDir, "box.json");
+}
+
+/** The saved backend setting ("auto" when none). */
+export function readBackend(stateDir: string): BackendSetting {
+  try {
+    return normalizeBackend(JSON.parse(readFileSync(settingsFile(stateDir), "utf8"))?.backend) || "auto";
+  } catch {
+    return "auto";
+  }
+}
+
+/** Save the backend boxes on this machine use: "auto" or one id (the desktop setting). */
+export function saveBackend(stateDir: string, backend: unknown): BackendSetting {
+  const id = normalizeBackend(backend);
+  if (!id) throw new Error(`unknown sandbox backend "${String(backend)}"`);
+  let current: Record<string, unknown> = {};
+  try {
+    const value: unknown = JSON.parse(readFileSync(settingsFile(stateDir), "utf8"));
+    if (value && typeof value === "object" && !Array.isArray(value)) current = Object.fromEntries(Object.entries(value));
+  } catch { /* none */ }
+  mkdirSync(stateDir, { recursive: true });
+  const file = settingsFile(stateDir);
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify({ ...current, backend: id }, null, 2)}\n`, { mode: 0o600 });
+  renameSync(tmp, file);
+  return id;
+}
+
+/** The backend asked for, and by whom: OMNIRUSH_BOX_BACKEND, then the saved setting. */
+export function askedBackend({ env = process.env, stateDir }: { env?: NodeJS.ProcessEnv; stateDir: string }): { backend: string; source: "env" | "setting" | "auto" } {
+  const flag = String(env.OMNIRUSH_BOX_BACKEND || "").trim();
+  if (flag) return { backend: normalizeBackend(flag) ?? flag, source: "env" };
+  const saved = readBackend(stateDir);
+  return { backend: saved, source: saved !== "auto" ? "setting" : "auto" };
 }
 
 /**
@@ -72,14 +133,19 @@ export function resolveMode({ env = process.env, project, server, offered = fals
 
 // --- background download ---------------------------------------------------------------
 
-function pullMarker(home: string, image: string): string {
-  return path.join(home, "pulls", `${image.replace(/[^a-zA-Z0-9._-]+/g, "_")}.pid`);
+function pullMarker(home: string, runtime: Pick<BoxRuntime, "backend" | "name">, image: string): string {
+  return path.join(home, "pulls", `${runtime.backend ?? runtime.name}-${image.replace(/[^a-zA-Z0-9._-]+/g, "_")}.pid`);
 }
 
-/** Whether a background download of `image` is running. */
-export function pulling(home: string, image: string): boolean {
+/** Downloads running in this process (a backend with no detached command: the WSL distro). */
+const inProcess = new Set<string>();
+
+/** Whether a background download of `image` with this backend is running. */
+export function pulling(home: string, runtime: Pick<BoxRuntime, "backend" | "name">, image: string): boolean {
+  const marker = pullMarker(home, runtime, image);
+  if (inProcess.has(marker)) return true;
   try {
-    const pid = Number(readFileSync(pullMarker(home, image), "utf8"));
+    const pid = Number(readFileSync(marker, "utf8"));
     if (!pid) return false;
     process.kill(pid, 0);
     return true;
@@ -88,15 +154,30 @@ export function pulling(home: string, image: string): boolean {
   }
 }
 
-/** Start `pull` detached (survives this run); one at a time per image. */
-export function pullInBackground(runtime: BoxRuntime, image: string, home: string, { spawnImpl = spawn }: { spawnImpl?: (command: string, args: string[], options: { detached: boolean; stdio: "ignore"; windowsHide: boolean }) => Pick<ChildProcess, "pid" | "unref"> } = {}): { started: boolean; pid: number | undefined } {
-  const marker = pullMarker(home, image);
+/**
+ * Start the backend's download detached (survives this run); one at a time
+ * per image. A backend without a detached command (the WSL distro, whose
+ * download imports the distro first) downloads in this process instead.
+ */
+export function pullInBackground(runtime: BoxRuntime, image: BoxImage, home: string, { spawnImpl = spawn, env = process.env, log = () => {} }: { spawnImpl?: (command: string, args: string[], options: { detached: boolean; stdio: "ignore"; windowsHide: boolean }) => Pick<ChildProcess, "pid" | "unref">; env?: NodeJS.ProcessEnv; log?: BoxLog } = {}): { started: boolean; pid: number | undefined } {
+  const marker = pullMarker(home, runtime, image.pull);
+  if (inProcess.has(marker)) return { started: false, pid: process.pid };
   try {
     const pid = Number(readFileSync(marker, "utf8"));
     if (pid) { process.kill(pid, 0); return { started: false, pid }; }
   } catch { /* none running */ }
   mkdirSync(path.dirname(marker), { recursive: true });
-  const child = spawnImpl(runtime.bin, [...(runtime.prefix ?? []), "pull", image], { detached: true, stdio: "ignore", windowsHide: true });
+  const driver = driverFor(runtime);
+  const cmd = driver.pullCommand(runtime, image, home);
+  if (!cmd) {
+    inProcess.add(marker);
+    void driver.pull(runtime, image, { home, env, log })
+      .then((res) => { if (!res.ok) log("warn", "box download failed", { backend: runtime.backend, error: res.error }); })
+      .catch((error) => log("warn", "box download failed", { backend: runtime.backend, error: String(error?.message || error) }))
+      .finally(() => inProcess.delete(marker));
+    return { started: true, pid: process.pid };
+  }
+  const child = spawnImpl(cmd.bin, cmd.args, { detached: true, stdio: "ignore", windowsHide: true });
   child.unref?.();
   try { writeFileSync(marker, String(child.pid ?? "")); } catch { /* best effort */ }
   return { started: true, pid: child.pid };
@@ -123,10 +204,10 @@ export type BoxPlan = ReadyPlan | NativePlan;
  * { box: null, notice } when its chats run on this machine for now (no
  * runtime, no helpers, the image still downloading), else a ready plan.
  */
-export async function planBox({ env = process.env, home, root, log = () => {}, run = runCommand, probeMs = 4_000, shims = null }: { env?: NodeJS.ProcessEnv; home: string; root: string; log?: BoxLog; run?: RunCommand; probeMs?: number; shims?: string | null }): Promise<BoxPlan> {
+export async function planBox({ env = process.env, home, root, log = () => {}, run = runCommand, probeMs = 4_000, shims = null, asked = null, allow = null }: { env?: NodeJS.ProcessEnv; home: string; root: string; log?: BoxLog; run?: RunCommand; probeMs?: number; shims?: string | null; asked?: string | null; allow?: string[] | null }): Promise<BoxPlan> {
   const key = boxKey(root);
   const bounded = <T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> => Promise.race([promise, new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms))]);
-  const runtime = await bounded<RuntimeResult>(detectRuntime({ boxHome: home, env, run }), probeMs, { ok: false, reason: "the container runtime did not answer in time" });
+  const runtime = await bounded<RuntimeResult>(detectRuntime({ boxHome: home, env, run, ...(asked ? { asked } : {}), allow }), probeMs, { ok: false, reason: "the sandbox backend did not answer in time" });
   if (!runtime.ok) {
     log("info", "box unavailable", { reason: runtime.reason });
     return { box: null, notice: `Sandbox off for now: ${runtime.reason}.`, runtime };
@@ -138,13 +219,14 @@ export async function planBox({ env = process.env, home, root, log = () => {}, r
     return { box: null, notice: `Sandbox off for now: ${error instanceof Error ? error.message : String(error)}.`, runtime };
   }
   // A box already made keeps its image (and its installs); a new one needs the image here.
-  const existing = await bounded(rt(runtime, run)(["container", "inspect", containerName(key, env), "--format", "{{.Id}}"], { timeoutMs: probeMs }), probeMs, { code: -1, stdout: "", stderr: "" });
-  if (existing.code !== 0) {
+  const driver = driverFor(runtime);
+  const existing = await bounded(driver.exists(runtime, key, { run, home, env, timeoutMs: probeMs }), probeMs, false);
+  if (!existing) {
     const image = imageFor(detectStack(root), { env });
-    const present = await bounded(inspectImage(runtime, image.pull, { run }), probeMs, null);
+    const present = await bounded(driver.imagePresent(runtime, image, { run, home, env }), probeMs, null);
     if (!present) {
-      pullInBackground(runtime, image.pull, home);
-      return { box: null, notice: `Sandbox is downloading (${image.approxMb ? `about ${image.approxMb} MB, ` : ""}once); chats here run on this machine until it is ready.`, runtime, image, downloading: true };
+      pullInBackground(runtime, image, home, { env, log });
+      return { box: null, notice: `Sandbox is downloading (${image.approxMb ? `about ${image.approxMb} MB, ` : ""}once${runtime.backend === "wsl" && !runtime.installed ? ", with the OmniRush WSL distro" : ""}); chats here run on this machine until it is ready.`, runtime, image, downloading: true };
     }
   }
   if (env.OMNIRUSH_BOX_GC !== "off") setTimeout(() => gcInBackground(runtime, home, { log }), 30_000).unref?.();
@@ -220,6 +302,10 @@ export type BoxRun = {
   runtimeBin: string;
   /** Arguments before the runtime's own (`-e docker` for a WSL engine). */
   runtimeArgs: string[];
+  /** The backend id (backends/index.ts). */
+  backend: string;
+  /** How to run a program in the box with stdin open when it is not `docker exec` (files-used reads); null for container engines. */
+  exec: BoxExec | null;
   root: string;
   readonly native: boolean;
   readonly box: Box | null;
@@ -264,6 +350,8 @@ export function boxRun(plan: ReadyPlan, { log = () => {}, readyWaitMs = 30_000, 
     container: containerName(key),
     runtimeBin: runtime.bin,
     runtimeArgs: runtime.prefix ?? [],
+    backend: runtime.backend ?? runtime.name,
+    exec: driverFor(runtime).kind === "container" ? null : driverFor(runtime).execCommand(runtime, { key, home }),
     root,
     get native() { return native; },
     get box() { return box; },

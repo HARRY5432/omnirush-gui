@@ -439,6 +439,18 @@ export type OmniRushWorkspaceBox = {
   offer: boolean;
   state: "off" | "unavailable" | "downloading" | "starting" | "ready" | "failed";
   runtime: { ok: boolean; name: string | null; flavor: string | null; version: string | null; reason: string | null } | null;
+  /** What runs the sandbox on this computer: the chosen backend, why, and the others (each with why not). */
+  backend: {
+    id: string | null;
+    label: string | null;
+    version: string | null;
+    flavor: string | null;
+    why: string | null;
+    alternatives: Array<{ id: string; label: string; ok: boolean; reason: string | null }>;
+    allowed: string[] | null;
+  } | null;
+  /** The computer's backend setting: "auto", one backend id, or "native"; and the values it takes here. */
+  backendSetting: { value: string; source: "env" | "setting" | "auto"; choices: Array<{ id: string; label: string }> };
   image: { ref: string; stack: string; present: boolean | null; downloading: boolean } | null;
   container: { name: string; exists: boolean; running: boolean } | null;
   notice: string | null;
@@ -1956,6 +1968,10 @@ export function createOmniRushServerClient(options: { baseUrl: string; token?: s
     setWorkspaceBox: (workspaceId: string, mode: "on" | "off" | null) =>
       requestJson<OmniRushWorkspaceBoxChange>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/box`, {
         token, hostToken, method: "PUT", body: { mode }, timeoutMs: ENGINE_RELOAD_TIMEOUT_MS,
+      }),
+    setWorkspaceBoxBackend: (workspaceId: string, backend: string) =>
+      requestJson<OmniRushWorkspaceBoxChange>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/box`, {
+        token, hostToken, method: "PUT", body: { backend }, timeoutMs: ENGINE_RELOAD_TIMEOUT_MS,
       }),
     resetWorkspaceBox: (workspaceId: string) =>
       requestJson<{ removed: boolean }>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/box/reset`, {

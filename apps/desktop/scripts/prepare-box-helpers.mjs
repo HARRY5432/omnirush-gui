@@ -1,12 +1,17 @@
 #!/usr/bin/env node
 // The Linux sandbox's helpers (apps/server/src/box), next to the engine in
 // the sidecars folder: box/<goos>-<goarch>/boxsh[.exe] (the shell the engine
-// runs its shell tool with) and box/linux-<arch>/boxd (copied into each
-// project's container). Built from box/go, a copy of the CLI's box/go
-// (omnirush-cli feat/local-box), with Go >= 1.22 (GO=/path/to/go), or copied
-// from OMNIRUSH_BOX_PREBUILT_DIR (a folder with the same layout). Without
-// either the app ships without them and the sandbox reports itself
-// unavailable; nothing else changes.
+// runs its shell tool with), box/linux-<arch>/boxd (run inside each
+// project's box) and, for Linux and Windows builds, box/linux-<arch>/boxrun
+// (the bubblewrap backend on Linux; copied into the OmniRush WSL distro on
+// Windows). Built from box/go, a copy of the CLI's box/go (omnirush-cli
+// feat/local-box-backends), with Go >= 1.22 (GO=/path/to/go), or copied from
+// OMNIRUSH_BOX_PREBUILT_DIR (a folder with the same layout). Linux builds also
+// ship box/linux-<arch>/bwrap when the prebuilt folder has one (an optional
+// static bubblewrap for systems without it; never built here). Without the
+// helpers the app ships without them and the sandbox reports itself
+// unavailable (boxrun alone missing: the bubblewrap and WSL distro backends
+// are); nothing else changes.
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -36,6 +41,8 @@ const { goos, goarch } = target();
 const files = [
   { cmd: "boxsh", goos, goarch, name: goos === "windows" ? "boxsh.exe" : "boxsh" },
   { cmd: "boxd", goos: "linux", goarch, name: "boxd" },
+  // The bubblewrap backend (Linux) and the OmniRush WSL distro's runner (Windows copies it in).
+  ...(goos === "linux" || goos === "windows" ? [{ cmd: "boxrun", goos: "linux", goarch, name: "boxrun", optional: true }] : []),
 ];
 
 const go = process.env.GO?.trim() || "go";
@@ -57,12 +64,21 @@ for (const file of files) {
   } else if (prebuilt && existsSync(join(prebuilt, `${file.goos}-${file.goarch}`, file.name))) {
     copyFileSync(join(prebuilt, `${file.goos}-${file.goarch}`, file.name), dest);
   } else {
-    missing += 1;
+    if (file.optional) console.warn(`Sandbox helper linux-${file.goarch}/${file.name} missing: the bubblewrap / WSL distro backends are unavailable in this build.`);
+    else missing += 1;
     continue;
   }
   chmodSync(dest, 0o755);
   // A runnable local build on macOS (release builds are signed with the app).
   if (process.platform === "darwin" && file.goos === "darwin") spawnSync("codesign", ["--force", "--sign", "-", dest], { stdio: "ignore" });
   console.log(`Sandbox helper ${file.goos}-${file.goarch}/${file.name} ready.`);
+}
+// An optional static bubblewrap for Linux systems without one (prebuilt only).
+if (goos === "linux" && prebuilt && existsSync(join(prebuilt, `linux-${goarch}`, "bwrap"))) {
+  const dest = join(out, `linux-${goarch}`, "bwrap");
+  mkdirSync(dirname(dest), { recursive: true });
+  copyFileSync(join(prebuilt, `linux-${goarch}`, "bwrap"), dest);
+  chmodSync(dest, 0o755);
+  console.log(`Sandbox helper linux-${goarch}/bwrap ready.`);
 }
 if (missing) console.warn("Sandbox helpers missing (no Go and no OMNIRUSH_BOX_PREBUILT_DIR): the Linux sandbox will report itself unavailable.");

@@ -133,7 +133,7 @@ describe("Linux sandbox through the server", () => {
     expect(names).toEqual(expect.arrayContaining(["app.py", `__sandbox__/${sessionId}/record.json`, `__sandbox__/${sessionId}/turn-1.json`, `__sandbox__/${sessionId}/turn-1.tar`]));
     expect(names).not.toContain(`__sandbox__/${sessionId}/.chain.json`);
 
-    const label: BoxLabel = { kind: "omnirush-box", box_id: "box_abc", runtime: { name: "docker", flavor: "desktop", version: "27", rootless: false }, image: { ref: "r", digest: null, stack: "base" }, host_os: "darwin", host_arch: "arm64" };
+    const label: BoxLabel = { kind: "omnirush-box", box_id: "box_abc", backend: "docker-desktop", runtime: { name: "docker", flavor: "desktop", version: "27", rootless: false }, image: { ref: "r", digest: null, stack: "base" }, host_os: "darwin", host_arch: "arm64" };
     const environment: UploadEnvironment = { os: "darwin", os_version: "24.0.0", arch: "arm64", app_version: "1", engine_version: "e", harness: { ...BUNDLED_HARNESS }, node_version: "24", shell: "zsh", locale: null, timezone: null, git_version: null };
     expect(boxEnvironment(environment, label)).toEqual({ os: "linux", host_os: "darwin", host_arch: "arm64", host_os_version: "24.0.0", shell: "bash" });
     expect(boxEnvironment(environment, null)).toEqual({});
