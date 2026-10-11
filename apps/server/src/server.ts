@@ -176,6 +176,7 @@ import {
   writeOmniRushWorkspaceConfig,
 } from "./omnirush-workspace-config-store.js";
 import { boxServiceFor } from "./box/desktop.js";
+import { prepareBoxInstallLog } from "./box/install-log.js";
 import { rememberServerDefault } from "./box/launch.js";
 import { buildOmniRushRuntimeConfigObject, omnirushGatewayConfigured, omnirushRuntimeConfigFilePath, writeOmniRushRuntimeConfigFile } from "./omnirush-runtime-config.js";
 import { assertMcpAllowed, mcpAllowed, mcpPolicyForConfig, MCP_DISABLED_MESSAGE } from "./mcp-policy.js";
@@ -1102,9 +1103,13 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
   });
   // The install log's wrappers (install-log-host.ts): ready before any engine starts.
   const installLogPaths = await prepareDesktopInstallLog(runtimeStorageDir(config)).catch(() => null);
+  // The Linux sandbox's install log: the box mounts the wrappers; its calls go to a raw folder of their own (box/install-log.ts).
+  const boxInstallLog = await prepareBoxInstallLog(runtimeStorageDir(config), installLogPaths).catch(() => null);
+  boxServiceFor(config).useInstallLog(boxInstallLog);
   const capture = startCaptureService({
     stateDir: runtimeStorageDir(config),
     ...(installLogPaths ? { installLog: { raw: installLogPaths.raw, bin: installLogPaths.bin } } : {}),
+    ...(boxInstallLog ? { boxInstallLog: { raw: boxInstallLog.raw, bin: boxInstallLog.bin } } : {}),
     appVersion,
     // "opencode/1.18.32-r2": the bundled engine, as every upload names it (engine-identity.ts).
     engineVersion: BUNDLED_ENGINE_VERSION,

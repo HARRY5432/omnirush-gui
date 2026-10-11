@@ -38,6 +38,8 @@ type Record struct {
 	CRoot     string `json:"croot"`
 	Container string `json:"container"`
 	Runtime   string `json:"runtime"`
+	// RuntimeArgs come before the runtime's own (`-e docker` through wsl.exe).
+	RuntimeArgs []string `json:"runtime_args"`
 	Host      string `json:"host"`
 	Port      int    `json:"port"`
 	Token     string `json:"token"`
@@ -226,6 +228,15 @@ func mapPath(p string, rec *Record) string {
 	return p
 }
 
+// windowsToBox: C:\x\y -> /c/x/y (how the launcher mounts a Windows folder in the box).
+func windowsToBox(p string) string {
+	if len(p) >= 2 && p[1] == ':' {
+		rest := strings.ReplaceAll(p[2:], `\`, "/")
+		return "/" + strings.ToLower(p[:1]) + "/" + strings.TrimPrefix(rest, "/")
+	}
+	return strings.ReplaceAll(p, `\`, "/")
+}
+
 // unmapPath maps a path inside the box back to the host (Windows cygpath).
 func unmapPath(p string, rec *Record) string {
 	croot := strings.TrimSuffix(rec.CRoot, "/")
@@ -255,7 +266,7 @@ var passExact = map[string]bool{
 	"TERM": true, "COLORTERM": true, "NO_COLOR": true, "FORCE_COLOR": true, "CLICOLOR": true, "CLICOLOR_FORCE": true,
 	"TZ": true, "CI": true, "HTTP_PROXY": true, "HTTPS_PROXY": true, "NO_PROXY": true, "http_proxy": true,
 	"https_proxy": true, "no_proxy": true, "OMNIRUSH_TURN": true, "OMNIRUSH_CALL": true, "OMNIRUSH_SESSION": true,
-	"OMNIRUSH_LEDGER_OFF": true, "PAGER": true, "GIT_PAGER": true, "GIT_TERMINAL_PROMPT": true, "DEBIAN_FRONTEND": true,
+	"OMNIRUSH_LEDGER_OFF": true, "OMNIRUSH_PKGLOG_DIR": true, "PAGER": true, "GIT_PAGER": true, "GIT_TERMINAL_PROMPT": true, "DEBIAN_FRONTEND": true,
 }
 
 // forwardEnv keeps only what describes the terminal and the turn: the host's
@@ -275,6 +286,9 @@ func forwardEnv(environ []string) map[string]string {
 		}
 		k, v := kv[:i], kv[i+1:]
 		if passExact[k] || extra[k] {
+			if k == "OMNIRUSH_PKGLOG_DIR" && runtime.GOOS == "windows" {
+				v = windowsToBox(v)
+			}
 			out[k] = v
 		}
 	}
@@ -407,7 +421,7 @@ func runtimeExec(rec *Record, req proto.Request) int {
 	if bin == "" {
 		bin = "docker"
 	}
-	args := []string{"exec", "-i", "-w", req.Cwd}
+	args := append(append([]string(nil), rec.RuntimeArgs...), "exec", "-i", "-w", req.Cwd)
 	if rec.UID != 0 {
 		args = append(args, "-u", fmt.Sprintf("%d:%d", rec.UID, rec.GID))
 	}
@@ -452,7 +466,7 @@ func native(args []string) {
 		fmt.Fprintf(os.Stderr, "omnirush: could not run %s: %v\n", shell, err)
 		os.Exit(127)
 	}
-	cmd := exec.Command(shell, args...)
+	cmd := exec.Command(shell, windowsArgs(shell, args)...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
 		var ee *exec.ExitError
@@ -465,17 +479,28 @@ func native(args []string) {
 	os.Exit(0)
 }
 
+// windowsArgs: cmd.exe takes /c, the others (Git Bash, pwsh, powershell) take -c.
+func windowsArgs(shell string, args []string) []string {
+	base := shell[strings.LastIndexAny(shell, `\/`)+1:]
+	if strings.EqualFold(base, "cmd.exe") || strings.EqualFold(base, "cmd") {
+		out := append([]string(nil), args...)
+		for i, a := range out {
+			if a == "-c" || a == "-lc" {
+				out[i] = "/c"
+			}
+		}
+		return out
+	}
+	return args
+}
+
 func realShell() string {
 	if v := os.Getenv("OMNIRUSH_BOX_REAL_SHELL"); v != "" {
 		return v
 	}
 	self, _ := os.Executable()
 	selfDir := filepath.Dir(self)
-	names := []string{"bash", "sh"}
-	if runtime.GOOS == "windows" {
-		names = []string{"bash.exe", "pwsh.exe", "powershell.exe", "cmd.exe"}
-	}
-	for _, name := range names {
+	find := func(name string) string {
 		for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
 			if dir == "" || filepath.Clean(dir) == filepath.Clean(selfDir) {
 				continue
@@ -485,10 +510,31 @@ func realShell() string {
 				return cand
 			}
 		}
+		return ""
 	}
-	if runtime.GOOS == "windows" {
-		return "cmd.exe"
+	if runtime.GOOS != "windows" {
+		for _, name := range []string{"bash", "sh"} {
+			if p := find(name); p != "" {
+				return p
+			}
+		}
+		return "/bin/sh"
 	}
-	return "/bin/sh"
+	// The engine's own order on Windows: Git Bash (next to git.exe), then
+	// PowerShell, then cmd. Never System32\bash.exe: that is the WSL launcher.
+	if git := find("git.exe"); git != "" {
+		gitBash := filepath.Join(filepath.Dir(git), "..", "bin", "bash.exe")
+		if st, err := os.Stat(gitBash); err == nil && !st.IsDir() {
+			return filepath.Clean(gitBash)
+		}
+	}
+	for _, name := range []string{"pwsh.exe", "powershell.exe"} {
+		if p := find(name); p != "" {
+			return p
+		}
+	}
+	if sys := os.Getenv("ComSpec"); sys != "" {
+		return sys
+	}
+	return "cmd.exe"
 }
-

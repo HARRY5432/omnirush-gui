@@ -246,7 +246,7 @@ func prepareUser(cfg config, first bool) {
 		})
 	}
 	if _, err := os.Stat("/etc/sudoers.d"); err == nil {
-		rule := "omnirush ALL=(ALL) NOPASSWD:ALL\nDefaults:omnirush !secure_path\nDefaults:omnirush !requiretty\nDefaults:omnirush env_keep += \"PATH PYTHONPATH NODE_OPTIONS HOME OMNIRUSH_HOOKS OMNIRUSH_LEDGER OMNIRUSH_STATE_DIR OMNIRUSH_TURN OMNIRUSH_CALL\"\n"
+		rule := "omnirush ALL=(ALL) NOPASSWD:ALL\nDefaults:omnirush !secure_path\nDefaults:omnirush !requiretty\nDefaults:omnirush env_keep += \"PATH PYTHONPATH NODE_OPTIONS HOME OMNIRUSH_*\"\n"
 		_ = os.WriteFile("/etc/sudoers.d/omnirush", []byte(rule), 0o440)
 	}
 }

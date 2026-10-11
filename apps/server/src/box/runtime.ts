@@ -38,6 +38,9 @@ export type RuntimeInfo = {
   rootless: boolean;
   flavor: string;
   vm: boolean;
+  /** A WSL engine: arguments before the runtime's own (["-e", "docker"] through wsl.exe). */
+  prefix?: string[];
+  wsl?: boolean;
   cached?: boolean;
 };
 export type RuntimeFailure = { ok: false; name?: string; bin?: string; reason: string; tried?: Array<{ name?: string; bin?: string; reason: string }>; cached?: boolean };
@@ -251,6 +254,45 @@ export async function probe(candidate: RuntimeCandidate, { run = runCommand, env
   };
 }
 
+/** wsl.exe, when Windows has it (System32). */
+export function wslLauncher({ env = process.env, exists = existsSync }: { env?: Env; exists?: (file: string) => boolean } = {}): string | null {
+  const root = env.SystemRoot || env.SYSTEMROOT || "C:\\Windows";
+  const file = path.win32.join(root, "System32", "wsl.exe");
+  return exists(file) ? file : null;
+}
+
+/**
+ * Docker (then Podman) in the default WSL 2 distro: { ok, name, bin: wsl.exe,
+ * prefix: ["-e", name], flavor: "wsl", wsl: true } or { ok: false, reason }.
+ * No distro, no engine in it, or a distro without networking (nested
+ * virtualization often has none) is a reason, never an install.
+ */
+export async function probeWsl(wslExe: string, { run = runCommand, env = process.env, timeoutMs = 12_000 }: { run?: RunCommand; env?: Env; timeoutMs?: number } = {}): Promise<RuntimeResult> {
+  for (const name of ["docker", "podman"]) {
+    const args = name === "podman" ? ["-e", "podman", "info", "--format", "json"] : ["-e", "docker", "info", "--format", "{{json .}}"];
+    const res = await run(wslExe, args, { env, timeoutMs });
+    const said = String(res.stderr || res.stdout || "").replace(/\u0000/g, "");
+    if (res.code !== 0) {
+      if (/no installed distributions|has no installed distributions|WSL_E_DEFAULT_DISTRO_NOT_FOUND|not installed/i.test(said)) {
+        return { ok: false, name: "wsl", bin: wslExe, reason: "WSL has no Linux distribution (install one with Docker or Podman in it, or install Docker Desktop)" };
+      }
+      continue;
+    }
+    let info: Info;
+    try { info = JSON.parse(res.stdout); } catch { continue; }
+    if (name === "docker" && String(info.OSType ?? "linux") !== "linux") continue;
+    return {
+      ok: true, name, bin: wslExe, prefix: ["-e", name], wsl: true, flavor: "wsl",
+      version: String(name === "podman" ? info.version?.Version ?? "" : info.ServerVersion ?? ""),
+      os: "linux",
+      arch: String(name === "podman" ? info.host?.arch ?? "" : info.Architecture ?? ""),
+      rootless: name === "podman" ? Boolean(info.host?.security?.rootless) : /rootless/.test((Array.isArray(info.SecurityOptions) ? info.SecurityOptions : []).join(",")),
+      vm: true,
+    };
+  }
+  return { ok: false, name: "wsl", bin: wslExe, reason: "no Docker or Podman engine answers in the default WSL distribution" };
+}
+
 function cacheFile(boxHome: string): string {
   return path.join(boxHome, "runtime.json");
 }
@@ -294,6 +336,16 @@ export async function detectRuntime({ boxHome, env = process.env, platform = pro
     const probed = await probe(candidate, { run, env, platform, wsl, ...(timeoutMs ? { timeoutMs } : {}) });
     if (probed.ok) { result = probed; break; }
     tried.push(probed);
+  }
+  // Windows: a Docker or Podman engine inside an existing WSL 2 distro, used
+  // through wsl.exe (never installed or started for the user).
+  if (!result && platform === "win32" && env.OMNIRUSH_BOX_WSL !== "0") {
+    const wslExe = wslLauncher({ env, exists });
+    if (wslExe) {
+      const probed = await probeWsl(wslExe, { run, env, ...(timeoutMs ? { timeoutMs } : {}) });
+      if (probed.ok) result = probed;
+      else tried.push(probed);
+    }
   }
   if (!result) {
     const reason = tried.length

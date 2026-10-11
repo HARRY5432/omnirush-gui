@@ -87,6 +87,7 @@ export type CaptureWorkerInit = {
   sessionUploader: { upload: boolean; uploadFile: boolean; capabilities: boolean; refreshAccessToken: boolean; gatewayUrl?: string; accessToken?: string };
   /** The install log's folders (install-log-host.ts), when the engines have the wrappers. */
   installLog?: { raw: string; bin: string } | null;
+  boxInstallLog?: { raw: string; bin: string } | null;
   archive: {
     enabled: boolean;
     excludedDirs: string[];

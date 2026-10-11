@@ -14,7 +14,7 @@ export const PROTO_VERSION = 1;
 const T = { stdout: 0x6f, stderr: 0x65, exit: 0x78, data: 0x64, fail: 0x45, stdinEof: 0x63, signal: 0x73 };
 
 export type BoxEndpoint = { host?: string; port: number; token: string };
-export type BoxRequest = { op: string; argv?: string[]; cwd?: string; env?: Record<string, string>; paths?: string[]; wait?: number };
+export type BoxRequest = { op: string; argv?: string[]; cwd?: string; env?: Record<string, string>; paths?: string[]; wait?: number; root?: boolean };
 export type BoxExit = { code: number; ms?: number };
 export type BoxReply = { exit: BoxExit; stdout: string; stderr: string; data: Buffer };
 export type BoxStat = { path: string; type: string; mode?: number; size?: number; uid?: number; gid?: number; link?: string; mtime_ns?: number | string; ctime_ns?: number | string };
@@ -100,8 +100,8 @@ export async function ping(box: BoxEndpoint, { timeoutMs = 2_000 }: { timeoutMs?
 export type ExecResult = { code: number; stdout: string; stderr: string; ms?: number };
 
 /** Run a command in the box: { code, stdout, stderr, ms }. */
-export async function exec(box: BoxEndpoint, argv: string[], { cwd, env, timeoutMs = 60_000 }: { cwd?: string; env?: Record<string, string>; timeoutMs?: number } = {}): Promise<ExecResult> {
-  const result = await request(box, { op: "exec", argv, ...(cwd ? { cwd } : {}), ...(env ? { env } : {}) }, { timeoutMs });
+export async function exec(box: BoxEndpoint, argv: string[], { cwd, env, root = false, timeoutMs = 60_000 }: { cwd?: string; env?: Record<string, string>; root?: boolean; timeoutMs?: number } = {}): Promise<ExecResult> {
+  const result = await request(box, { op: "exec", argv, ...(cwd ? { cwd } : {}), ...(env ? { env } : {}), ...(root ? { root: true } : {}) }, { timeoutMs });
   return { code: result.exit.code, stdout: result.stdout, stderr: result.stderr, ms: result.exit.ms };
 }
 

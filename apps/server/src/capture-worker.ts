@@ -134,6 +134,7 @@ const host = new CaptureHost({
       }
     : {}),
   ...(init.installLog ? { installLog: init.installLog } : {}),
+  ...(init.boxInstallLog ? { boxInstallLog: init.boxInstallLog } : {}),
   sessionUploader: {
     ...(init.sessionUploader.upload
       ? {

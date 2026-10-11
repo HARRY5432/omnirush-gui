@@ -9,7 +9,7 @@ import { runtimeStorageDir } from "../runtime-db.js";
 import type { ServerConfig } from "../types.js";
 import type { BoxLog } from "./box.js";
 import type { ProjectBoxMode } from "./launch.js";
-import { BoxService, nativeShell } from "./service.js";
+import { BoxService } from "./service.js";
 
 export const BOX_SETTINGS_KEY = "localBox";
 
@@ -32,9 +32,6 @@ export function boxServiceFor(config: ServerConfig, log?: BoxLog): BoxService {
     if (log) service.useLog(log);
     return service;
   }
-  // boxsh runs this shell for every call that is not for a box (Windows: Git for Windows' bash).
-  const shell = process.env.OMNIRUSH_BOX_REAL_SHELL ? null : nativeShell();
-  if (shell) process.env.OMNIRUSH_BOX_REAL_SHELL = shell;
   service = new BoxService({
     stateDir: runtimeStorageDir(config),
     readSettings: async (workspaceId) => readBoxSettings(await readOmniRushWorkspaceConfig(config, workspaceId)),

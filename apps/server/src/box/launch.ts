@@ -17,8 +17,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { boxKey, containerName, inspectImage, installShell, openBox, recordFile, savedTurns, type Box, type BoxLabel, type BoxLog, type BoxRuntime, type CheckpointSummary } from "./box.js";
-import { detectStack, imageFor, type BoxImage } from "./images.js";
+import { boxKey, containerName, gcBoxes, inspectImage, installShell, openBox, recordFile, rt, savedTurns, type Box, type BoxInstallLog, type BoxLabel, type BoxLog, type BoxRuntime, type CheckpointSummary } from "./box.js";
+import { detectStack, imageFor, loadPins, type BoxImage } from "./images.js";
 import { detectRuntime, runCommand, type RunCommand, type RuntimeResult } from "./runtime.js";
 
 export const MODES = ["off", "offer", "on"] as const;
@@ -96,7 +96,7 @@ export function pullInBackground(runtime: BoxRuntime, image: string, home: strin
     if (pid) { process.kill(pid, 0); return { started: false, pid }; }
   } catch { /* none running */ }
   mkdirSync(path.dirname(marker), { recursive: true });
-  const child = spawnImpl(runtime.bin, ["pull", image], { detached: true, stdio: "ignore", windowsHide: true });
+  const child = spawnImpl(runtime.bin, [...(runtime.prefix ?? []), "pull", image], { detached: true, stdio: "ignore", windowsHide: true });
   child.unref?.();
   try { writeFileSync(marker, String(child.pid ?? "")); } catch { /* best effort */ }
   return { started: true, pid: child.pid };
@@ -108,8 +108,12 @@ export type ReadyPlan = {
   box: { key: string; home: string; root: string; runtime: BoxRuntime };
   notice: null;
   shell: string;
-  /** Open the box (once); resolves the Box (state "ready" or "failed"). */
-  start: () => Promise<Box>;
+  /**
+   * Open the box (once); resolves the Box (state "ready" or "failed").
+   * `pkglog`: the install log's folder (phase 1: { root, bin, py } with
+   * POSIX wrappers), mounted into a new box and put on its PATH.
+   */
+  start: (options?: { pkglog?: BoxInstallLog | null }) => Promise<Box>;
 };
 export type NativePlan = { box: null; notice: string | null; runtime: RuntimeResult | null; image?: BoxImage; downloading?: boolean };
 export type BoxPlan = ReadyPlan | NativePlan;
@@ -134,7 +138,7 @@ export async function planBox({ env = process.env, home, root, log = () => {}, r
     return { box: null, notice: `Sandbox off for now: ${error instanceof Error ? error.message : String(error)}.`, runtime };
   }
   // A box already made keeps its image (and its installs); a new one needs the image here.
-  const existing = await bounded(run(runtime.bin, ["container", "inspect", containerName(key, env), "--format", "{{.Id}}"], { timeoutMs: probeMs }), probeMs, { code: -1, stdout: "", stderr: "" });
+  const existing = await bounded(rt(runtime, run)(["container", "inspect", containerName(key, env), "--format", "{{.Id}}"], { timeoutMs: probeMs }), probeMs, { code: -1, stdout: "", stderr: "" });
   if (existing.code !== 0) {
     const image = imageFor(detectStack(root), { env });
     const present = await bounded(inspectImage(runtime, image.pull, { run }), probeMs, null);
@@ -143,16 +147,33 @@ export async function planBox({ env = process.env, home, root, log = () => {}, r
       return { box: null, notice: `Sandbox is downloading (${image.approxMb ? `about ${image.approxMb} MB, ` : ""}once); chats here run on this machine until it is ready.`, runtime, image, downloading: true };
     }
   }
+  if (env.OMNIRUSH_BOX_GC !== "off") setTimeout(() => gcInBackground(runtime, home, { log }), 30_000).unref?.();
   let opening: Promise<Box> | null = null;
   return {
     box: { key, home, root, runtime },
     notice: null,
     shell,
-    start: () => {
-      opening ??= openBox({ root, runtime, env, home, log, pull: false, shims });
+    start: ({ pkglog = null } = {}) => {
+      opening ??= openBox({ root, runtime, env, home, log, pull: false, shims, pkglog });
       return opening;
     },
   };
+}
+
+/**
+ * Old boxes and images, at most once a day, in the background (never on the
+ * start path): containers of folders that are gone or unused for 30 days,
+ * box images that are neither current nor used. Labelled/named ones only.
+ */
+export function gcInBackground(runtime: BoxRuntime, home: string, { log = () => {}, now = Date.now(), everyMs = 24 * 3_600_000, gc = gcBoxes }: { log?: BoxLog; now?: number; everyMs?: number; gc?: typeof gcBoxes } = {}): Promise<Array<{ kind: string; name: string; reason: string }>> | null {
+  const marker = path.join(home, "gc.json");
+  try {
+    if (now - Number(JSON.parse(readFileSync(marker, "utf8")).at) < everyMs) return null;
+  } catch { /* never ran */ }
+  try { mkdirSync(home, { recursive: true }); writeFileSync(marker, JSON.stringify({ at: now })); } catch { return null; }
+  return gc(runtime, { home, pins: loadPins() })
+    .then((removed) => { if (removed.length) log("info", "box gc", { removed: removed.map((item) => `${item.kind}:${item.name}`) }); return removed; })
+    .catch((error) => { log("warn", "box gc failed", { error: String(error?.message || error) }); return []; });
 }
 
 /** The package-manager wrappers' source folder (phase 1), mounted read-only when present. */
@@ -197,6 +218,8 @@ export type BoxRun = {
   key: string;
   container: string;
   runtimeBin: string;
+  /** Arguments before the runtime's own (`-e docker` for a WSL engine). */
+  runtimeArgs: string[];
   root: string;
   readonly native: boolean;
   readonly box: Box | null;
@@ -215,12 +238,12 @@ export type BoxRun = {
  * "off"; the shell runs on this machine, its chats are not labelled); later
  * failures are logged and that turn has no checkpoint.
  */
-export function boxRun(plan: ReadyPlan, { log = () => {}, readyWaitMs = 30_000, onNative = () => {}, tmpRoot }: { log?: BoxLog; readyWaitMs?: number; onNative?: (reason: string) => void; tmpRoot?: string } = {}): BoxRun {
+export function boxRun(plan: ReadyPlan, { log = () => {}, readyWaitMs = 30_000, onNative = () => {}, tmpRoot, pkglog = null }: { log?: BoxLog; readyWaitMs?: number; onNative?: (reason: string) => void; tmpRoot?: string; pkglog?: BoxInstallLog | null } = {}): BoxRun {
   const { key, home, runtime, root } = plan.box;
   let box: Box | null = null;
   let native = false;
   const checkpoints = new Map<string, number>();
-  const opening = plan.start().then((opened) => { box = opened; return opened; });
+  const opening = plan.start({ pkglog }).then((opened) => { box = opened; return opened; });
   const goNative = (reason: string) => {
     if (native) return;
     native = true;
@@ -240,6 +263,7 @@ export function boxRun(plan: ReadyPlan, { log = () => {}, readyWaitMs = 30_000, 
     key,
     container: containerName(key),
     runtimeBin: runtime.bin,
+    runtimeArgs: runtime.prefix ?? [],
     root,
     get native() { return native; },
     get box() { return box; },

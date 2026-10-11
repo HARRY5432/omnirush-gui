@@ -102,7 +102,7 @@ function readJson<T = Record<string, unknown>>(file: string): T | null {
 
 /** The record boxsh reads (boxes/<key>.json). */
 export type BoxRecord = {
-  v: 1; key: string; root: string; croot: string; container: string; runtime: string;
+  v: 1; key: string; root: string; croot: string; container: string; runtime: string; runtime_args: string[];
   host: string; port: number; token: string; state: string; error: string; uid: number; gid: number;
   home: string; shell: string; path_prefix: string; env_file: string; updated: number; pid: number;
 };
@@ -203,10 +203,24 @@ export function singleFileTar(name: string, data: Buffer, mode = 0o755): Buffer 
 
 // --- the runtime CLI ------------------------------------------------------------
 
-export type BoxRuntime = Pick<RuntimeInfo, "name" | "bin"> & Partial<Pick<RuntimeInfo, "version" | "flavor" | "rootless" | "arch" | "vm">>;
+export type BoxRuntime = Pick<RuntimeInfo, "name" | "bin"> & Partial<Pick<RuntimeInfo, "version" | "flavor" | "rootless" | "arch" | "vm" | "prefix" | "wsl">>;
 
-function rt(runtime: BoxRuntime, run: RunCommand = runCommand) {
-  return (args: string[], opts: RunOptions = {}) => run(runtime.bin, args, { timeoutMs: 60_000, ...opts });
+/** Runs the runtime's CLI (`wsl.exe -e docker ...` for a WSL engine). */
+export function rt(runtime: BoxRuntime, run: RunCommand = runCommand) {
+  const prefix = Array.isArray(runtime.prefix) ? runtime.prefix : [];
+  return (args: string[], opts: RunOptions = {}) => run(runtime.bin, [...prefix, ...args], { timeoutMs: 60_000, ...opts });
+}
+
+/** A Windows path as a WSL engine mounts it: C:\x\y -> /mnt/c/x/y. */
+export function wslPath(p: string): string {
+  const match = /^([a-zA-Z]):[\\/]?(.*)$/.exec(String(p));
+  if (!match) return String(p).replace(/\\/g, "/");
+  return `/mnt/${match[1]!.toLowerCase()}/${match[2]!.replace(/\\/g, "/")}`.replace(/\/+$/, "");
+}
+
+/** Where the runtime finds a folder of this machine (a WSL engine sees Windows drives under /mnt). */
+function source(runtime: BoxRuntime, p: string): string {
+  return runtime.wsl ? wslPath(p) : p;
 }
 
 /** Whether `image` is present locally; its id and repo digest when it is. */
@@ -235,7 +249,7 @@ export async function pullImage(runtime: BoxRuntime, image: string, { run = runC
   return { ok: false, error: said.slice(0, 300) };
 }
 
-type ContainerInfo = { id: string; running: boolean; image: string; labels: Record<string, string>; env: string[] };
+type ContainerInfo = { id: string; running: boolean; image: string; labels: Record<string, string>; env: string[]; mounts: string[] };
 
 async function inspectContainer(runtime: BoxRuntime, name: string, run: RunCommand): Promise<ContainerInfo | null> {
   const res = await rt(runtime, run)(["container", "inspect", name, "--format", "{{json .}}"], { timeoutMs: 20_000 });
@@ -248,6 +262,7 @@ async function inspectContainer(runtime: BoxRuntime, name: string, run: RunComma
       image: String(info.Image || ""),
       labels: info.Config?.Labels ?? {},
       env: Array.isArray(info.Config?.Env) ? info.Config.Env : [],
+      mounts: Array.isArray(info.Mounts) ? info.Mounts.map((mount: { Destination?: unknown }) => String(mount.Destination ?? "")) : [],
     };
   } catch {
     return null;
@@ -293,13 +308,19 @@ export function commandUser(runtime: BoxRuntime, { platform = process.platform, 
  * Nothing else of this machine goes in: no home folder, no credentials, no
  * docker socket.
  */
-export function createArgs({ name, key, root, croot, image, runtime, run: runFolder, shims, token, user, env = process.env }: { name: string; key: string; root: string; croot: string; image: string; runtime: BoxRuntime; run: string; shims: string | null; token: string; user: { uid: number; gid: number }; env?: Env; platform?: NodeJS.Platform }): string[] {
+/** The install log (phase 1): its folder, the wrappers' folder and the pip hook's, all on this machine. */
+export type BoxInstallLog = { root: string; bin: string; py: string };
+
+export function createArgs({ name, key, root, croot, image, runtime, run: runFolder, shims, pkglog = null, token, user, env = process.env, platform = process.platform }: { name: string; key: string; root: string; croot: string; image: string; runtime: BoxRuntime; run: string; shims: string | null; pkglog?: BoxInstallLog | null; token: string; user: { uid: number; gid: number }; env?: Env; platform?: NodeJS.Platform }): string[] {
   return [
     "create", "--name", name, "--hostname", "omnirush-box", "--init",
     "--label", `${LABEL}=1`, "--label", `${LABEL}.key=${key}`, "--label", `${LABEL}.root=${root}`, "--label", `${LABEL}.version=1`,
-    "--mount", `type=bind,source=${root},target=${croot}`,
-    "--mount", `type=bind,source=${runFolder},target=${RUN_DIR}`,
-    ...(shims ? ["--mount", `type=bind,source=${shims},target=${SHIMS_DIR}-src,readonly`] : []),
+    "--mount", `type=bind,source=${source(runtime, root)},target=${croot}`,
+    "--mount", `type=bind,source=${source(runtime, runFolder)},target=${RUN_DIR}`,
+    ...(shims ? ["--mount", `type=bind,source=${source(runtime, shims)},target=${SHIMS_DIR}-src,readonly`] : []),
+    // The install log's folder (phase 1: its wrappers, pip hook and the per-run folders the
+    // wrappers note calls in), at the path the launcher reads it at.
+    ...(pkglog ? ["--mount", `type=bind,source=${source(runtime, pkglog.root)},target=${containerRoot(pkglog.root, platform)}`] : []),
     "-p", `127.0.0.1::${BOX_PORT}`,
     "-e", `BOXD_TOKEN=${token}`, "-e", `BOXD_UID=${user.uid}`, "-e", `BOXD_GID=${user.gid}`,
     "-e", `BOXD_HOME=${HOME_IN_BOX}`, "-e", `BOXD_ROOT=${croot}`, "-e", `BOXD_ENV_FILE=${RUN_DIR}/env`,
@@ -344,15 +365,18 @@ function within(child: string, parent: string): boolean {
   return child === parent || child.startsWith(parent.endsWith("/") ? parent : `${parent}/`);
 }
 
+/** Package trees: their .pem/.key files are package data (certifi's cacert.pem), never a user's key. */
+const PACKAGE_SEGMENT = /(?:^|\/)(?:site-packages|dist-packages|node_modules|gems|pkg\/mod|\.rustup|\.cargo|\.m2|\.gradle|\.npm|\.cache|\.local\/lib|\.local\/share|go|\.bun|\.pyenv|\.nvm|\.venv|venv)(?:\/|$)/;
+
 /** A credential under a home folder (the box's own, or a user's). */
 export function credentialPath(entry: string): boolean {
   const home = /^(?:\/root|\/home\/[^/]+)\/(.*)$/.exec(entry);
-  if (!home) return CREDENTIAL_FILE.test(entry) && /^\/(?:root|home)\//.test(entry);
+  if (!home) return false;
   const rel = home[1]!;
   const first = rel.split("/")[0]!;
   if (CREDENTIAL_NAMES.has(first)) return true;
   if (CREDENTIAL_SUBPATHS.some((prefix) => within(rel, prefix))) return true;
-  return CREDENTIAL_FILE.test(rel);
+  return CREDENTIAL_FILE.test(rel) && !PACKAGE_SEGMENT.test(path.posix.dirname(rel));
 }
 
 export type DiffEntry = { kind: string; path: string };
@@ -459,7 +483,7 @@ type OnState = (state: BoxState, error: string | null) => void;
  * same). Throws only for programming errors; a box that cannot start is a
  * Box with state "failed" and `error`.
  */
-export async function openBox({ root, runtime, env = process.env, platform = process.platform, home = boxHome(env), run = runCommand, log = () => {}, shims = null, pull = true, image: asked = null, onState = () => {} }: { root: string; runtime: BoxRuntime; env?: Env; platform?: NodeJS.Platform; home?: string; run?: RunCommand; log?: BoxLog; shims?: string | null; pull?: boolean; image?: BoxImage | null; onState?: OnState }): Promise<Box> {
+export async function openBox({ root, runtime, env = process.env, platform = process.platform, home = boxHome(env), run = runCommand, log = () => {}, shims = null, pkglog = null, pull = true, image: asked = null, onState = () => {} }: { root: string; runtime: BoxRuntime; env?: Env; platform?: NodeJS.Platform; home?: string; run?: RunCommand; log?: BoxLog; shims?: string | null; pkglog?: BoxInstallLog | null; pull?: boolean; image?: BoxImage | null; onState?: OnState }): Promise<Box> {
   const projectRoot = path.resolve(root);
   const key = boxKey(projectRoot, { platform });
   const name = containerName(key, env);
@@ -490,7 +514,7 @@ export async function openBox({ root, runtime, env = process.env, platform = pro
       if (!boxd) return box.fail(`the sandbox helper is missing (linux-${goarch}/boxd)`, onState);
       const token = randomBytes(24).toString("hex");
       const user = commandUser(runtime, { platform });
-      const created = await rt(runtime, run)(createArgs({ name, key, root: projectRoot, croot, image: chosen.pull, runtime, run: runFolder, shims, token, user, env, platform }), { timeoutMs: 120_000 });
+      const created = await rt(runtime, run)(createArgs({ name, key, root: projectRoot, croot, image: chosen.pull, runtime, run: runFolder, shims, pkglog, token, user, env, platform }), { timeoutMs: 120_000 });
       if (created.code !== 0) return box.fail(`could not create the sandbox: ${firstLine(created.stderr)}`, onState);
       const copied = await rt(runtime, run)(["cp", "-", `${name}:/`], { timeoutMs: 60_000, input: singleFileTar("opt/omnirush/bin/boxd", readFileSync(boxd)) });
       if (copied.code !== 0) {
@@ -522,6 +546,10 @@ export async function openBox({ root, runtime, env = process.env, platform = pro
     if (!identity) return box.fail("the sandbox helper did not answer", onState);
     box.identity = identity;
     if (shims) await box.installShims().catch((error) => log("warn", "box wrappers not installed", { error: String(error?.message || error) }));
+    else if (pkglog) {
+      if (info.mounts.includes(containerRoot(pkglog.root, platform))) box.useInstallLog(pkglog);
+      else log("info", "box made before the install log: its wrappers are not in this box (Reset sandbox adds them)", { key });
+    }
     box.setState("ready", null, onState);
     return box;
   } catch (error) {
@@ -645,7 +673,7 @@ export class Box {
   /** The record boxsh reads (boxes/<key>.json). */
   writeRecord(): void {
     const record: BoxRecord = {
-      v: 1, key: this.key, root: this.root, croot: this.croot, container: this.name, runtime: this.runtime?.bin ?? "",
+      v: 1, key: this.key, root: this.root, croot: this.croot, container: this.name, runtime: this.runtime?.bin ?? "", runtime_args: this.runtime?.prefix ?? [],
       host: this.endpoint?.host ?? "127.0.0.1", port: this.endpoint?.port ?? 0, token: this.endpoint?.token ?? "",
       state: this.state, error: this.error ?? "", uid: this.uid ?? 0, gid: this.gid ?? 0, home: HOME_IN_BOX, shell: "/bin/bash",
       path_prefix: this.pathPrefix, env_file: `${RUN_DIR}/env`, updated: Date.now(), pid: process.pid,
@@ -677,7 +705,7 @@ export class Box {
 
   /** The package-manager wrappers, installed inside (their install.sh), and the env they need. */
   async installShims(): Promise<void> {
-    const res = await client.exec(this.endpoint!, ["/bin/sh", `${SHIMS_DIR}-src/install.sh`, SHIMS_DIR, `${RUN_DIR}/ledger.jsonl`, `${RUN_DIR}/state`], { timeoutMs: 30_000 });
+    const res = await client.exec(this.endpoint!, ["/bin/sh", `${SHIMS_DIR}-src/install.sh`, SHIMS_DIR, `${RUN_DIR}/ledger.jsonl`, `${RUN_DIR}/state`], { timeoutMs: 30_000, root: true });
     if (res.code !== 0) throw new Error(firstLine(res.stderr) || `install.sh exited ${res.code}`);
     const lines: string[] = [];
     for (const raw of res.stdout.split("\n")) {
@@ -691,6 +719,19 @@ export class Box {
     }
     // boxd puts BOXD_PATH_PREFIX in front of the image's own PATH.
     if (this.pathPrefix) lines.push(`BOXD_PATH_PREFIX=${this.pathPrefix}`);
+    writeFileSync(path.join(this.runFolder, "env"), `${lines.join("\n")}\n`, { mode: 0o644 });
+    this.writeRecord();
+  }
+
+  /**
+   * The install log's wrappers (phase 1) in front of the box's PATH and its
+   * pip hook on PYTHONPATH; the per-run folder they note calls in comes with
+   * each call (OMNIRUSH_PKGLOG_DIR, forwarded by boxsh).
+   */
+  useInstallLog(pkglog: BoxInstallLog): void {
+    const inBox = (p: string) => containerRoot(p, this.platform);
+    this.pathPrefix = inBox(pkglog.bin);
+    const lines = [`BOXD_PATH_PREFIX=${this.pathPrefix}`, `PYTHONPATH=${inBox(pkglog.py)}`];
     writeFileSync(path.join(this.runFolder, "env"), `${lines.join("\n")}\n`, { mode: 0o644 });
     this.writeRecord();
   }
@@ -798,8 +839,21 @@ export class Box {
     }
     const before = chain.signatures ?? {};
     const isDep = (p: string) => p.startsWith(`${this.croot}/`);
+    // In the parent but not changed now: really gone (removed), or back at
+    // the image's state, which the rebuild only has if this layer carries it.
+    const left = Object.keys(before).filter((p) => !(p in now));
+    const gone: string[] = [];
+    if (left.length) {
+      for (const entry of await client.stat(endpoint, left)) {
+        if (entry.type === "missing") gone.push(entry.path);
+        else if (entry.type !== "other") {
+          now[entry.path] = signature(entry);
+          sized.set(entry.path, entry);
+        }
+      }
+    }
     const candidates = Object.keys(now).filter((p) => before[p] !== now[p]).sort();
-    const removed = topmost(Object.keys(before).filter((p) => !(p in now)));
+    const removed = topmost(gone);
     // Caps: whole files past FILE_MAX left out; dependency folders up to depsMax; the tar up to tarMax.
     const skipped: Array<{ path: string; size: number; reason: string }> = [];
     let depBytes = 0;

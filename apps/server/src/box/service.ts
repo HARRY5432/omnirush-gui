@@ -18,13 +18,13 @@
  *
  * Not to be confused with the OpenWork worker sandbox (`sandboxBackend`).
  */
-import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { delimiter, dirname, join } from "node:path";
+import { join } from "node:path";
 
 import { boxHome, boxKey, boxSnapshotsDir, containerName, inspectImage, installShell, listBoxes, readRecord, resetBox, savedTurns, type BoxLabel, type BoxLog } from "./box.js";
 import { detectStack, imageFor } from "./images.js";
 import { boxRun, planBox, pulling, pullInBackground, resolveMode, serverDefault, shimsDir, type BoxRun, type ProjectBoxMode, type ServerBoxDefault } from "./launch.js";
+import type { BoxInstallLogPaths } from "./install-log.js";
 import { DESKTOP_PROJECTS_FILE } from "./plugin-lib.js";
 import { detectRuntime, type RuntimeResult } from "./runtime.js";
 
@@ -35,6 +35,8 @@ export type BoxCaptureInfo = {
   croot: string;
   container: string;
   runtimeBin: string;
+  /** Arguments before the runtime's own (`-e docker` for a WSL engine). */
+  runtimeArgs: string[];
   /** environment.sandbox of the chat's uploads. */
   label: BoxLabel;
 };
@@ -82,17 +84,6 @@ export function boxRoot(workspace: BoxWorkspace): string {
   return workspace.directory?.trim() || workspace.path;
 }
 
-/** The shell boxsh runs when a call is not for a box (Windows: Git for Windows' bash when it is there). */
-export function nativeShell(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string | null {
-  if (platform !== "win32") return null;
-  for (const dir of String(env.PATH || env.Path || "").split(delimiter)) {
-    if (!dir || !existsSync(join(dir, "git.exe"))) continue;
-    const bash = join(dirname(dirname(dir)), "bin", "bash.exe");
-    if (existsSync(bash)) return bash;
-  }
-  return null;
-}
-
 export class BoxService {
   private readonly projects = new Map<string, Project>();
   private readonly turns = new Map<string, number>();
@@ -100,11 +91,21 @@ export class BoxService {
   private readonly env: NodeJS.ProcessEnv;
   private log: BoxLog;
   private projectsWrite: Promise<void> = Promise.resolve();
+  private installLog: BoxInstallLogPaths | null = null;
 
   constructor(private readonly options: BoxServiceOptions) {
     this.env = options.env ?? process.env;
     this.home = boxHome(this.env);
     this.log = options.log ?? (() => {});
+  }
+
+  /**
+   * The install log of box chats (install-log.ts): new boxes mount its
+   * folder and put its wrappers on PATH; the plugin points their calls at its
+   * raw folder. Set at server start, before any box is planned.
+   */
+  useInstallLog(paths: BoxInstallLogPaths | null): void {
+    this.installLog = paths;
   }
 
   /** Logs go here from now on (the server's logger, once it exists). */
@@ -179,6 +180,7 @@ export class BoxService {
       project.notice = null;
       project.run = boxRun(plan, {
         log: this.log,
+        pkglog: this.installLog ? { root: this.installLog.root, bin: this.installLog.bin, py: this.installLog.py } : null,
         tmpRoot: join(this.home, "pending"),
         onNative: (reason) => {
           project.notice = `Sandbox off for now: ${reason}.`;
@@ -204,7 +206,7 @@ export class BoxService {
     const keys = [...this.projects.entries()].filter(([, project]) => project.run && !project.run.native).map(([key]) => key).sort();
     const file = join(this.home, DESKTOP_PROJECTS_FILE);
     const write = async () => {
-      const content = `${JSON.stringify({ keys, updated: Date.now() })}\n`;
+      const content = `${JSON.stringify({ keys, ...(this.installLog ? { pkglog_dir: this.installLog.raw } : {}), updated: Date.now() })}\n`;
       await mkdir(this.home, { recursive: true });
       const tmp = `${file}.${process.pid}.tmp`;
       await writeFile(tmp, content, { mode: 0o600 });
@@ -238,6 +240,8 @@ export class BoxService {
 
   async status(workspace: BoxWorkspace, { fresh = false }: { fresh?: boolean } = {}): Promise<BoxStatus> {
     const { settings, server, on, source, offer } = await this.mode(workspace);
+    // The server's "offer": shown once per folder (CLI: the tip, once per folder).
+    if (offer && workspace.workspaceType === "local") await this.options.writeSettings(workspace.id, { offered: true }).catch(() => undefined);
     const root = boxRoot(workspace);
     const key = boxKey(root);
     const project = this.projects.get(key);
@@ -340,7 +344,7 @@ export class BoxService {
     const label = run.label(sessionId);
     const box = run.box;
     if (!label || !box) return null;
-    return { key: run.key, root: run.root, croot: box.croot, container: box.container, runtimeBin: run.runtimeBin, label };
+    return { key: run.key, root: run.root, croot: box.croot, container: box.container, runtimeBin: run.runtimeBin, runtimeArgs: run.runtimeArgs, label };
   }
 
   /** Whether chats ran in a box during this run (they get a `final` checkpoint at quit). */

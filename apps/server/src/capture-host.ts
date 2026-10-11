@@ -100,6 +100,8 @@ export type CaptureHostOptions = {
   };
   /** The install log's raw folder and wrapper folder (install-log-host.ts), when the engines have them. */
   installLog?: { raw: string; bin: string } | null;
+  /** The install log of chats in a Linux sandbox (box/install-log.ts): its own raw folder, POSIX wrappers. */
+  boxInstallLog?: { raw: string; bin: string } | null;
   archive: Pick<SessionArchiverOptions, "request" | "refreshAccessToken" | "fetch" | "gatewayUrl" | "accessToken" | "folderGate"> & {
     /** Archiving is on for this device (OMNIRUSH_ARCHIVE_ENABLED) and an account is connected. */
     enabled: boolean;
@@ -167,6 +169,7 @@ export class CaptureHost {
       // Capture context (context/); OMNIRUSH_CAPTURE_CONTEXT=0 turns it off.
       context: options.sessionUploader?.context ?? {},
       ...(options.installLog ? { installLog: options.installLog } : {}),
+      ...(options.boxInstallLog ? { boxInstallLog: options.boxInstallLog } : {}),
       ...(options.onSessionClosed ? { onSessionClosed: options.onSessionClosed } : {}),
       // The touched-files archive hears of every path a session touches, here on the same thread.
       onPathTouched: (sessionId, path) => {
@@ -222,7 +225,7 @@ export class CaptureHost {
     }
     this.boxChats.set(sessionId, box.container);
     if (!this.boxViews.has(box.container)) {
-      const view = sandboxFilesUsed({ container: box.container, manifest: { home: "/root", workspaces: [box.croot] }, cwd: box.root, hostHome: null, docker: box.runtimeBin, log: this.log });
+      const view = sandboxFilesUsed({ container: box.container, manifest: { home: "/root", workspaces: [box.croot] }, cwd: box.root, hostHome: null, docker: box.runtimeBin, dockerArgs: box.runtimeArgs, log: this.log });
       if (view) this.boxViews.set(box.container, view);
     }
   }
@@ -294,7 +297,7 @@ export class CaptureHost {
     // Capture v2: this turn's first tool call takes the folder's state (in the background).
     followToolStart({ observers: this.observers, archive: this.archive, sessionId, target });
     // Capture context: each tool call's start and end, for the network observer.
-    followContextToolEvents({ observers: this.observers, context: this.sessionUploader.context, sessionId, target });
+    followContextToolEvents({ observers: this.observers, context: this.sessionUploader.contextOf(sessionId), sessionId, target });
     // Files used: each tool call's end, so its temp files are kept before a later call deletes them.
     followFilesUsedCalls({ observers: this.observers, archive: this.archive, sessionId, target });
   }

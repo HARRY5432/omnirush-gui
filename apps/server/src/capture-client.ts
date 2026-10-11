@@ -402,6 +402,7 @@ class CaptureClient implements CaptureService {
       // Always: the chats this thread saw observed are known here even without a resolver.
       engineTarget: true,
       ...(this.options.installLog ? { installLog: this.options.installLog } : {}),
+      ...(this.options.boxInstallLog ? { boxInstallLog: this.options.boxInstallLog } : {}),
       sessionUploader: {
         upload: Boolean(sessionUploader.upload),
         uploadFile: Boolean(sessionUploader.uploadFile),

@@ -29,16 +29,20 @@ export const OmniRushBox = async ({ directory }: { directory?: string }) => {
   const root = path.resolve(directory || process.cwd());
   const key = keyOf(root);
   const current = () => {
-    if (!desktopProjects().has(key)) return null;
+    const listed = desktopProjects();
+    if (!listed.keys.has(key)) return null;
     const rec = record(key);
-    return rec && rec.state !== "off" ? rec : null;
+    return rec && rec.state !== "off" ? { ...rec, pkglogDir: listed.pkglogDir } : null;
   };
   const active = () => Boolean(current());
   const allowed = [root, ...engineDirs()];
   return {
     "shell.env": async (input: { callID?: string; sessionID?: string }, output: { env: Record<string, string> }) => {
-      if (!active()) return;
+      const rec = current();
+      if (!rec) return;
       output.env.OMNIRUSH_BOX_KEY = key;
+      // Desktop: box chats note installs in their own raw folder (boxsh forwards it into the box).
+      if (rec.pkglogDir) output.env.OMNIRUSH_PKGLOG_DIR = rec.pkglogDir;
       if (input.callID) output.env.OMNIRUSH_CALL = String(input.callID);
       if (input.sessionID) output.env.OMNIRUSH_SESSION = String(input.sessionID);
     },
@@ -58,7 +62,7 @@ export const OmniRushBox = async ({ directory }: { directory?: string }) => {
         const line = output.system[i];
         if (typeof line === "string") output.system[i] = line.replace(/^(\s*Platform:\s*)(darwin|win32|linux)\s*$/m, "$1linux");
       }
-      output.system.push(BOX_NOTE(root, Number(rec.uid) || 0));
+      output.system.push(BOX_NOTE(root, Number(rec.uid) || 0, typeof rec.croot === "string" ? rec.croot : root));
     },
   };
 };

@@ -172,7 +172,7 @@ export type ViewRunner = (request: unknown, maxOutputBytes: number) => Promise<R
  * failed, slow or oversized answer ends the process and the next request
  * starts another.
  */
-export function dockerExecRunner(container: string, docker = "docker", timeoutMs = STEP_TIMEOUT_MS): ViewRunner {
+export function dockerExecRunner(container: string, docker = "docker", timeoutMs = STEP_TIMEOUT_MS, dockerArgs: readonly string[] = []): ViewRunner {
   type Live = { child: ChildProcessWithoutNullStreams; buffer: Buffer[]; size: number; waiting: ((line: Buffer | null) => void) | null };
   let live: Live | null = null;
   let tail: Promise<unknown> = Promise.resolve();
@@ -198,7 +198,7 @@ export function dockerExecRunner(container: string, docker = "docker", timeoutMs
   const start = (): Live | null => {
     let child: ChildProcessWithoutNullStreams;
     try {
-      child = spawn(docker, ["exec", "-i", container, "/usr/bin/python3", "-I", "-c", FILES_USED_VIEW_SCRIPT], { stdio: ["pipe", "pipe", "ignore"] as const, windowsHide: true }) as unknown as ChildProcessWithoutNullStreams;
+      child = spawn(docker, [...dockerArgs, "exec", "-i", container, "/usr/bin/python3", "-I", "-c", FILES_USED_VIEW_SCRIPT], { stdio: ["pipe", "pipe", "ignore"] as const, windowsHide: true }) as unknown as ChildProcessWithoutNullStreams;
     } catch {
       return null;
     }
@@ -333,6 +333,8 @@ export function sandboxFilesUsed(input: {
   cwd: string;
   hostHome: string | null;
   docker?: string;
+  /** Arguments before docker's own (`-e docker` when docker is reached through wsl.exe). */
+  dockerArgs?: readonly string[];
   log?: (level: "info" | "warn", message: string, attributes?: Record<string, unknown>) => void;
 }): FilesUsedSandbox | null {
   if (!input.container) return null;
@@ -340,7 +342,7 @@ export function sandboxFilesUsed(input: {
   const home = typeof manifest.home === "string" && manifest.home.startsWith("/") ? manifest.home : "/home/omnirush";
   const workspaces = Array.isArray(manifest.workspaces) ? manifest.workspaces.filter((entry): entry is string => typeof entry === "string" && entry.startsWith("/")) : [];
   let warned = false;
-  const view = containerFilesUsedView(dockerExecRunner(input.container, input.docker || "docker"), (op) => {
+  const view = containerFilesUsedView(dockerExecRunner(input.container, input.docker || "docker", STEP_TIMEOUT_MS, input.dockerArgs ?? []), (op) => {
     if (warned) return;
     warned = true;
     input.log?.("warn", "OmniRush files used: the sandbox could not be read; its files are listed, not kept", { op });

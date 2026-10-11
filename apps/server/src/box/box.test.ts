@@ -3,12 +3,12 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { boxKey, containerName, containerRoot, createArgs, credentialPath, filterChanges, helperPath, installShell, parseDiff, parseSize, setToolsRoot, singleFileTar } from "./box.js";
+import { boxKey, containerName, containerRoot, createArgs, credentialPath, filterChanges, helperPath, installShell, parseDiff, parseSize, rt, setToolsRoot, singleFileTar, wslPath } from "./box.js";
 import { readBoxSettings } from "./desktop.js";
 import { detectStack, imageFor } from "./images.js";
-import { engineConfig, mapToBox, rememberServerDefault, resolveMode, serverDefault } from "./launch.js";
+import { engineConfig, gcInBackground, mapToBox, rememberServerDefault, resolveMode, serverDefault } from "./launch.js";
 import { DESKTOP_PROJECTS_FILE } from "./plugin-lib.js";
-import { candidates, detectRuntime, explainFailure, probe, type RunCommand } from "./runtime.js";
+import { candidates, detectRuntime, explainFailure, probe, probeWsl, wslLauncher, type RunCommand } from "./runtime.js";
 import { BoxService, type BoxWorkspace } from "./service.js";
 import { OmniRushBox } from "../opencode-plugins/omnirush-box.js";
 
@@ -106,6 +106,11 @@ describe("box core", () => {
     expect(kept.map((entry) => entry.path)).toEqual(["/usr", "/usr/local/bin/tool", "/root/.cache/ms-playwright/chromium"]);
     expect(credentialPath("/home/u/.aws/credentials")).toBe(true);
     expect(credentialPath("/usr/lib/x.so")).toBe(false);
+    // Package data, not a key: certifi's bundle has to survive a rebuild (`import requests`).
+    expect(credentialPath("/root/.local/lib/python3.11/site-packages/certifi/cacert.pem")).toBe(false);
+    expect(credentialPath("/root/project/node_modules/x/test/key.pem")).toBe(false);
+    expect(credentialPath("/root/.ssh/id_ed25519")).toBe(true);
+    expect(credentialPath("/root/server.key")).toBe(true);
   });
 
   test("tar header and size parsing", () => {
@@ -257,5 +262,88 @@ describe("box service", () => {
     const boxes = service({ stateDir, workspaces: [workspace], settings, env: { OMNIRUSH_BOX_HOME: await temp("boxhome") } });
     expect(await boxes.ensure(workspace)).toBeNull();
     expect(await boxes.status(workspace)).toMatchObject({ on: false, state: "off" });
+  });
+});
+
+describe("box on Windows: a WSL engine (detected, never installed)", () => {
+  const WSL = "C:\\Windows\\System32\\wsl.exe";
+  const winEnv = { Path: "C:\\Windows\\System32", SystemRoot: "C:\\Windows", ProgramFiles: "C:\\Program Files", LOCALAPPDATA: "C:\\Users\\sam\\AppData\\Local" };
+  const has = (...files: string[]) => (file: string) => files.includes(file);
+
+  test("Docker Desktop is used when it is there (the WSL engine is not even asked)", async () => {
+    const asked: string[] = [];
+    const run: RunCommand = async (bin, args) => { asked.push([bin, ...args].join(" ")); return { code: 0, stdout: JSON.stringify({ ServerVersion: "27.3.1", OSType: "linux", Architecture: "x86_64", OperatingSystem: "Docker Desktop" }), stderr: "" }; };
+    const found = await detectRuntime({ platform: "win32", home: "C:\\Users\\sam", env: winEnv, exists: has("C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe", WSL), run, fresh: true });
+    expect(found).toMatchObject({ ok: true, flavor: "desktop" });
+    expect(asked.some((line) => line.startsWith(WSL))).toBe(false);
+  });
+
+  test("without Docker Desktop: Docker in the default WSL distro, through wsl.exe", async () => {
+    expect(wslLauncher({ env: winEnv, exists: has(WSL) })).toBe(WSL);
+    expect(wslLauncher({ env: winEnv, exists: () => false })).toBeNull();
+    const run: RunCommand = async (bin, args) => (bin === WSL && args.join(" ") === "-e docker info --format {{json .}}"
+      ? { code: 0, stdout: JSON.stringify({ ServerVersion: "28.1.1", OSType: "linux", Architecture: "x86_64", OperatingSystem: "Ubuntu 24.04.1 LTS", SecurityOptions: [] }), stderr: "" }
+      : { code: -1, stdout: "", stderr: "", error: "ENOENT" });
+    const found = await detectRuntime({ platform: "win32", home: "C:\\Users\\sam", env: winEnv, exists: has(WSL), run, fresh: true });
+    expect(found).toMatchObject({ ok: true, bin: WSL, prefix: ["-e", "docker"], flavor: "wsl", wsl: true, vm: true });
+  });
+
+  test("no distribution, or no engine in it, is a one-line reason; OMNIRUSH_BOX_WSL=0 never asks; Podman works too", async () => {
+    const noDistro = await probeWsl(WSL, { run: async () => ({ code: 1, stdout: "", stderr: "Windows Subsystem for Linux has no installed distributions.\u0000" }) });
+    expect(noDistro.ok).toBe(false);
+    if (!noDistro.ok) expect(noDistro.reason).toContain("no Linux distribution");
+    const noEngine = await probeWsl(WSL, { run: async () => ({ code: 127, stdout: "", stderr: "/bin/bash: line 1: docker: command not found" }) });
+    if (!noEngine.ok) expect(noEngine.reason).toContain("no Docker or Podman engine");
+    expect(noEngine.ok).toBe(false);
+    const off = await detectRuntime({ platform: "win32", home: "C:\\Users\\sam", env: { ...winEnv, OMNIRUSH_BOX_WSL: "0" }, exists: has(WSL), run: async () => { throw new Error("not asked"); }, fresh: true });
+    expect(off.ok).toBe(false);
+    const podman = await probeWsl(WSL, { run: async (_bin, args) => (args[1] === "podman" ? { code: 0, stdout: JSON.stringify({ host: { arch: "amd64", security: { rootless: true } }, version: { Version: "4.9.3" } }), stderr: "" } : { code: 127, stdout: "", stderr: "docker: not found" }) });
+    expect(podman).toMatchObject({ ok: true, name: "podman", prefix: ["-e", "podman"], rootless: true });
+  });
+
+  test("Windows folders mount through /mnt/<drive>; the prefix goes on every call", async () => {
+    expect(wslPath("C:\\Users\\Sam\\proj")).toBe("/mnt/c/Users/Sam/proj");
+    const args = createArgs({ name: "n", key: "k", root: "C:\\Users\\Sam\\proj", croot: "/c/Users/Sam/proj", image: "img", runtime: { name: "docker", bin: "wsl.exe", wsl: true, vm: true, prefix: ["-e", "docker"] }, run: "C:\\Users\\Sam\\.omnirush\\box\\projects\\k", shims: null, pkglog: { root: "C:\\Users\\Sam\\state\\pkglog", bin: "C:\\Users\\Sam\\state\\pkglog\\bin-1", py: "C:\\Users\\Sam\\state\\pkglog\\py-1" }, token: "t", user: { uid: 0, gid: 0 }, env: {}, platform: "win32" });
+    expect(args).toContain("type=bind,source=/mnt/c/Users/Sam/proj,target=/c/Users/Sam/proj");
+    expect(args).toContain("type=bind,source=/mnt/c/Users/Sam/.omnirush/box/projects/k,target=/run/omnirush");
+    expect(args).toContain("type=bind,source=/mnt/c/Users/Sam/state/pkglog,target=/c/Users/Sam/state/pkglog");
+    const calls: string[][] = [];
+    await rt({ name: "docker", bin: WSL, prefix: ["-e", "docker"] }, async (bin, a) => { calls.push([bin, ...a]); return { code: 0, stdout: "", stderr: "" }; })(["ps"]);
+    expect(calls).toEqual([[WSL, "-e", "docker", "ps"]]);
+  });
+});
+
+describe("box install log and upkeep", () => {
+  test("a new box mounts the install log's folder at the same path", () => {
+    const args = createArgs({ name: "n", key: "k", root: "/p", croot: "/p", image: "img", runtime: { name: "docker", bin: "docker", vm: false }, run: "/h/projects/k", shims: null, pkglog: { root: "/s/pkglog", bin: "/s/pkglog/bin-1", py: "/s/pkglog/py-1" }, token: "t", user: { uid: 0, gid: 0 }, env: {} });
+    expect(args).toContain("type=bind,source=/s/pkglog,target=/s/pkglog");
+  });
+
+  test("the daily cleanup runs at most once a day, in the background", async () => {
+    const home = await temp("gc");
+    let runs = 0;
+    const gc = async () => { runs += 1; return []; };
+    expect(gcInBackground({ name: "docker", bin: "docker" }, home, { now: 1_000_000_000, gc })).not.toBeNull();
+    expect(gcInBackground({ name: "docker", bin: "docker" }, home, { now: 1_000_000_000 + 3_600_000, gc })).toBeNull();
+    expect(gcInBackground({ name: "docker", bin: "docker" }, home, { now: 1_000_000_000 + 25 * 3_600_000, gc })).not.toBeNull();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(runs).toBe(2);
+  });
+
+  test("the plugin points box calls at the box's install log folder and names the folder inside on Windows-like roots", async () => {
+    const home = await temp("boxhome");
+    const root = await temp("project");
+    process.env.OMNIRUSH_BOX_HOME = home;
+    const key = boxKey(root);
+    await mkdir(join(home, "boxes"), { recursive: true });
+    await writeFile(join(home, "boxes", `${key}.json`), JSON.stringify({ state: "ready", uid: 0, croot: "/c/proj" }));
+    await writeFile(join(home, DESKTOP_PROJECTS_FILE), JSON.stringify({ keys: [key], pkglog_dir: "/state/pkglog/raw/1-box-ab" }));
+    const hooks = await OmniRushBox({ directory: root });
+    const env: Record<string, string> = {};
+    await hooks["shell.env"]({ callID: "c1" }, { env });
+    expect(env).toMatchObject({ OMNIRUSH_BOX_KEY: key, OMNIRUSH_PKGLOG_DIR: "/state/pkglog/raw/1-box-ab" });
+    const system: string[] = [];
+    await hooks["experimental.chat.system.transform"]({}, { system });
+    expect(system[0]).toContain(`${root} is /c/proj inside the container`);
   });
 });

@@ -57,3 +57,18 @@ func TestForwardEnv(t *testing.T) {
 		t.Fatalf("%v", got)
 	}
 }
+
+func TestWindowsArgs(t *testing.T) {
+	if got := windowsArgs(`C:\Windows\System32\cmd.exe`, []string{"-c", "dir"}); !reflect.DeepEqual(got, []string{"/c", "dir"}) {
+		t.Fatal(got)
+	}
+	if got := windowsArgs(`C:\Program Files\Git\bin\bash.exe`, []string{"-c", "ls"}); !reflect.DeepEqual(got, []string{"-c", "ls"}) {
+		t.Fatal(got)
+	}
+}
+
+func TestWindowsToBox(t *testing.T) {
+	if got := windowsToBox(`C:\Users\Sam\.omnirush\pkglog\raw\12-ab`); got != "/c/Users/Sam/.omnirush/pkglog/raw/12-ab" {
+		t.Fatal(got)
+	}
+}
