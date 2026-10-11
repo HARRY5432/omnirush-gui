@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { createReadStream } from "node:fs";
 
 import { SESSION_UPLOAD_BUDGET, SESSION_UPLOAD_ENDPOINT_PATH, sessionUploadTimeoutMs, type SessionUploadBudget } from "./session-upload-budget.js";
@@ -41,6 +41,7 @@ export type SubagentModelFallbackEvent = {
   status: number;
   /** Whether the main model answered. */
   ok: boolean;
+  clientRequestId?: string;
   at: number;
 };
 
@@ -133,14 +134,14 @@ export type StreamInterruption = "truncated" | "idle";
 const LF = 0x0a;
 const CR = 0x0d;
 
-function interruptedEvent(reason: StreamInterruption): Uint8Array {
+function interruptedEvent(reason: StreamInterruption, requestId?: string): Uint8Array {
   const message = reason === "idle"
     ? "omnirush.ai: the model stream stalled and was closed. Retry the request."
     : "omnirush.ai: the model stream ended before the response completed. Retry the request.";
   const payload = {
     type: "error",
     sequence_number: -1,
-    error: { type: "server_error", code: "upstream_stream_interrupted", message },
+    error: { type: "server_error", code: "upstream_stream_interrupted", message, ...(requestId ? { client_request_id: requestId } : {}) },
   };
   return new TextEncoder().encode(`event: error\ndata: ${JSON.stringify(payload)}\n\n`);
 }
@@ -460,14 +461,14 @@ class SseEventFramer {
 
 export function guardEventStream(
   body: ReadableStream<Uint8Array>,
-  options: { idleMs?: number; onInterrupted?: (reason: StreamInterruption) => void } = {},
+  options: { idleMs?: number; requestId?: string; onInterrupted?: (reason: StreamInterruption) => void } = {},
 ): ReadableStream<Uint8Array> {
   const reader = body.getReader();
   const idleMs = options.idleMs ?? STREAM_IDLE_TIMEOUT_MS;
   const events = new SseEventFramer();
   const interrupt = (controller: ReadableStreamDefaultController<Uint8Array>, reason: StreamInterruption) => {
     options.onInterrupted?.(reason);
-    controller.enqueue(interruptedEvent(reason));
+    controller.enqueue(interruptedEvent(reason, options.requestId));
     controller.close();
   };
   const read = async () => {
@@ -714,6 +715,13 @@ function bearerToken(request: Request): string {
   return authorization.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
 }
 
+function clientRequestId(request: Request): string {
+  const supplied = request.headers.get("x-omnirush-client-request-id")?.trim();
+  return supplied && /^[A-Za-z0-9._:-]{1,128}$/.test(supplied)
+    ? supplied
+    : randomUUID().replaceAll("-", "");
+}
+
 function secureEqual(left: string, right: string): boolean {
   const a = Buffer.from(left);
   const b = Buffer.from(right);
@@ -950,10 +958,11 @@ function fetchFailure(error: unknown): { name: string; message: string; code: st
   };
 }
 
-function unreachableResponse(code: string, message: string): Response {
-  return new Response(JSON.stringify({ error: { message, type: "omnirush_error", code } }), {
+function unreachableResponse(code: string, message: string, requestId: string): Response {
+  const body = message + " (request id: " + requestId + ")";
+  return new Response(JSON.stringify({ error: { message: body, type: "omnirush_error", code, client_request_id: requestId } }), {
     status: 503,
-    headers: { "content-type": "application/json", "retry-after": "2" },
+    headers: { "content-type": "application/json", "retry-after": "2", "x-omnirush-client-request-id": requestId },
   });
 }
 const SUBAGENT_RETRY_DELAY_MS = 1_500;
@@ -1024,7 +1033,7 @@ function pause(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-function responseHeaders(headers: Headers): Headers {
+function responseHeaders(headers: Headers, requestId?: string): Headers {
   const result = new Headers();
   for (const [name, value] of headers) {
     if (["content-type", "cache-control", "x-request-id", "openai-processing-ms", "retry-after"].includes(name)
@@ -1033,6 +1042,7 @@ function responseHeaders(headers: Headers): Headers {
       result.set(name, value);
     }
   }
+  if (requestId) result.set("x-omnirush-client-request-id", requestId);
   return result;
 }
 
@@ -1150,6 +1160,7 @@ export class OmniRushGatewayBroker {
     const allowed = (request.method === "GET" && (normalizedPath === "models" || normalizedPath === VOICE_TRANSCRIPTIONS_PATH))
       || (request.method === "POST" && (normalizedPath === "responses" || normalizedPath === "responses/compact" || normalizedPath === VOICE_TRANSCRIPTIONS_PATH));
     if (!allowed) return Response.json({ error: "unsupported_gateway_path" }, { status: 404 });
+    const requestId = clientRequestId(request);
 
     const requestBody = request.method === "GET"
       ? undefined
@@ -1161,7 +1172,7 @@ export class OmniRushGatewayBroker {
     const attachments = this.leaveOutRefusedAttachments(normalizedPath, body);
     if (attachments) body = attachments.body;
     let spent = this.state.accessToken;
-    let response = await this.forwardModelRequest(request, normalizedPath, body, spent);
+    let response = await this.forwardModelRequest(request, normalizedPath, body, spent, requestId);
     // Two rounds at most: the first may only adopt a pair the desktop rotated,
     // whose own access token can have expired while the app was idle.
     let refreshUnavailable = false;
@@ -1174,7 +1185,7 @@ export class OmniRushGatewayBroker {
       if (!this.state) break;
       await response.body?.cancel().catch(() => undefined);
       spent = this.state.accessToken;
-      response = await this.forwardModelRequest(request, normalizedPath, body, spent);
+      response = await this.forwardModelRequest(request, normalizedPath, body, spent, requestId);
     }
     if (response.status === 401 && refreshUnavailable) {
       // The session is intact but the refresh could not reach omnirush.ai:
@@ -1183,6 +1194,7 @@ export class OmniRushGatewayBroker {
       return unreachableResponse(
         "device_refresh_unavailable",
         "omnirush.ai: the session could not be renewed right now (the service did not answer). Retrying shortly.",
+        requestId
       );
     }
     if (response.status === 401 && !this.state) {
@@ -1201,9 +1213,9 @@ export class OmniRushGatewayBroker {
       body = retried.body;
     }
     if (skipped) {
-      this.reportSubagentFallback(request, { ...skipped.event, status: response.status, ok: response.ok });
+      this.reportSubagentFallback(request, { ...skipped.event, status: response.status, ok: response.ok, clientRequestId: requestId });
     } else if (!response.ok && response.status !== 401 && body !== undefined) {
-      response = await this.subagentFallback(request, normalizedPath, body, response);
+      response = await this.subagentFallback(request, normalizedPath, body, response, requestId);
     }
     await this.noteUpdateSignals(response, true);
     const contentType = response.headers.get("content-type") ?? "";
@@ -1221,13 +1233,16 @@ export class OmniRushGatewayBroker {
     }
     const responseBody = streamed && upstreamBody
       ? guardEventStream(upstreamBody, {
-          onInterrupted: (reason) => this.log?.("warn", "omnirush.ai model stream interrupted", { reason, path: normalizedPath }),
+          requestId,
+          onInterrupted: (reason) => this.log?.("warn", "omnirush.ai model stream interrupted", {
+            reason, path: normalizedPath, clientRequestId: requestId,
+          }),
         })
       : upstreamBody;
     return new Response(responseBody, {
       status: response.status,
       statusText: response.statusText,
-      headers: responseHeaders(response.headers),
+      headers: responseHeaders(response.headers, requestId),
     });
   }
 
@@ -1247,7 +1262,7 @@ export class OmniRushGatewayBroker {
     const prepared = this.rejectedAttachments.prepare(parsed);
     if (prepared.attachments.length === 0) return null;
     if (prepared.replaced.length > 0) {
-      this.log?.("info", "omnirush.ai: left out attachments the model refused earlier", { count: prepared.replaced.length });
+      this.log?.("info", "omnirush.ai: left out attachments the model refused earlier", { count: prepared.replaced.length, clientRequestId: requestId });
       return { parsed, attachments: prepared.attachments, body: JSON.stringify(prepared.body) };
     }
     return { parsed, attachments: prepared.attachments, body };
@@ -1276,8 +1291,8 @@ export class OmniRushGatewayBroker {
       const prepared = this.rejectedAttachments.prepare(state.parsed);
       attachments = prepared.attachments;
       body = JSON.stringify(prepared.body);
-      this.log?.("warn", "omnirush.ai: the model refused an attachment; sending the request again without it", { path, left_out: suspects.length });
-      response = await this.forwardModelRequest(request, path, body, this.state.accessToken);
+      this.log?.("warn", "omnirush.ai: the model refused an attachment; sending the request again without it", { path, left_out: suspects.length, clientRequestId: requestId });
+      response = await this.forwardModelRequest(request, path, body, this.state.accessToken, requestId);
     }
     if (response.ok) this.rejectedAttachments.accept(attachments.filter((item) => !this.rejectedAttachments.isBad(item.fingerprint)));
     return { response, body };
@@ -1587,7 +1602,7 @@ export class OmniRushGatewayBroker {
    * goes to the main model instead, so the sub-agent's task continues rather
    * than failing. Account-wide refusals and every other error pass through.
    */
-  private async subagentFallback(request: Request, path: string, body: ArrayBuffer | string, response: Response): Promise<Response> {
+  private async subagentFallback(request: Request, path: string, body: ArrayBuffer | string, response: Response, requestId: string): Promise<Response> {
     const fallback = request.headers.get(SUBAGENT_FALLBACK_MODEL_HEADER)?.trim() ?? "";
     if (!fallback || !FALLBACK_MODEL_ID.test(fallback) || (path !== "responses" && path !== "responses/compact")) return response;
     const requested = requestedModel(body);
@@ -1598,7 +1613,7 @@ export class OmniRushGatewayBroker {
       await response.body?.cancel().catch(() => undefined);
       await pause(this.subagentRetryDelayMs, request.signal);
       if (request.signal.aborted || !this.state) return response;
-      const again = await this.forwardModelRequest(request, path, body);
+      const again = await this.forwardModelRequest(request, path, body, undefined, requestId);
       if (again.ok || again.status === 401) return again;
       refusal = await subagentRefusal(again);
       if (refusal.move === "never") return again;
@@ -1609,14 +1624,15 @@ export class OmniRushGatewayBroker {
     const moved = withModel(body, fallback, effort);
     if (moved === null || !this.state) return response;
     await response.body?.cancel().catch(() => undefined);
-    const next = await this.forwardModelRequest(request, path, moved);
+    const next = await this.forwardModelRequest(request, path, moved, undefined, requestId);
     this.log?.("warn", "omnirush.ai sub-agent model refused; sent on the main model", {
       requested,
       used: fallback,
       reason: refusal.reason,
       status: next.status,
+      clientRequestId: requestId,
     });
-    this.reportSubagentFallback(request, { requested, used: fallback, effort, reason: refusal.reason, status: next.status, ok: next.ok });
+    this.reportSubagentFallback(request, { requested, used: fallback, effort, reason: refusal.reason, status: next.status, ok: next.ok, clientRequestId: requestId });
     return next;
   }
 
@@ -1638,7 +1654,7 @@ export class OmniRushGatewayBroker {
 
   private reportSubagentFallback(
     request: Request,
-    event: { requested: string; used: string; effort: string | null; reason: string; status: number; ok: boolean },
+    event: { requested: string; used: string; effort: string | null; reason: string; status: number; ok: boolean; clientRequestId?: string },
   ): void {
     try {
       this.onSubagentFallback?.({
@@ -1665,7 +1681,8 @@ export class OmniRushGatewayBroker {
     request: Request,
     path: string,
     body: ArrayBuffer | string | undefined,
-    accessToken?: string,
+    accessToken: string | undefined,
+    requestId: string,
   ): Promise<Response> {
     const forwardedBody = path === "responses" && body !== undefined
       ? await withReasoningSummary(body, this.reasoningSummaryFor)
@@ -1678,7 +1695,7 @@ export class OmniRushGatewayBroker {
       }
       if (!this.state) break;
       try {
-        return await this.forward(request, path, forwardedBody, attempt === 0 ? accessToken : this.state.accessToken);
+        return await this.forward(request, path, forwardedBody, attempt === 0 ? accessToken : this.state.accessToken, requestId);
       } catch (error) {
         if (request.signal.aborted) throw error;
         failure = fetchFailure(error);
@@ -1696,15 +1713,17 @@ export class OmniRushGatewayBroker {
     return unreachableResponse(
       "gateway_unreachable",
       `omnirush.ai: the model service could not be reached${failure?.code ? ` (${failure.code})` : ""}. Retrying shortly.`,
+      requestId
     );
   }
 
-  private forward(request: Request, path: string, body: ArrayBuffer | string | undefined, accessToken?: string): Promise<Response> {
+  private forward(request: Request, path: string, body: ArrayBuffer | string | undefined, accessToken: string | undefined, requestId: string): Promise<Response> {
     if (!this.state) throw new Error("OmniRush gateway credentials are unavailable");
     const headers = new Headers();
     headers.set("Authorization", `Bearer ${accessToken ?? this.state.accessToken}`);
     headers.set("Content-Type", request.headers.get("content-type") || "application/json");
     headers.set("Accept", request.headers.get("accept") || "application/json");
+    headers.set("x-omnirush-client-request-id", requestId);
     for (const name of ["x-omnirush-session-id", "x-omnirush-task-id", PARENT_SESSION_HEADER]) {
       const value = request.headers.get(name);
       if (value) headers.set(name, value);

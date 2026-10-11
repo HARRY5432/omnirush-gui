@@ -232,6 +232,21 @@ describe("OmniRush gateway broker", () => {
     expect(calls[0]?.headers.get("authorization")).toBe("Bearer access-token");
   });
 
+  test("forwards the client request id so edge failures can be correlated", async () => {
+    const calls: UpstreamCall[] = [];
+    const broker = capturingBroker(calls);
+    const response = await broker.handle(
+      gatewayRequest(
+        { model: "gpt-6-astra", input: "test" },
+        { "x-omnirush-client-request-id": "desktop-request-123" },
+      ),
+      "responses",
+    );
+
+    expect(response.status).toBe(200);
+    expect(calls[0]?.headers.get("x-omnirush-client-request-id")).toBe("desktop-request-123");
+  });
+
   test("requests GPT-6 summaries without an effort header and preserves explicit options", async () => {
     const calls: UpstreamCall[] = [];
     const broker = capturingBroker(calls);
@@ -343,7 +358,10 @@ describe("upstream stream guard", () => {
 
   test("appends an error event when the upstream closes before a terminal event", async () => {
     const partial = 'event: response.function_call_arguments.delta\ndata: {"type":"response.function_call_arguments.delta","delta":"{\\"patch"}\n\n';
-    const response = await sseBroker([created, partial]).handle(gatewayRequest({ model: "gpt-6-astra", input: "hi", stream: true }), "responses");
+    const response = await sseBroker([created, partial]).handle(gatewayRequest(
+      { model: "gpt-6-astra", input: "hi", stream: true },
+      { "x-omnirush-client-request-id": "stream-correlation-1" },
+    ), "responses");
     const text = await readAll(response);
     expect(text.startsWith(created + partial)).toBe(true);
     const tailEvent = text.slice((created + partial).length);
@@ -352,6 +370,8 @@ describe("upstream stream guard", () => {
     expect(payload.type).toBe("error");
     expect(payload.error.code).toBe("upstream_stream_interrupted");
     expect(payload.error.message).toContain("omnirush.ai");
+    expect((payload.error as { client_request_id?: string }).client_request_id).toBe("stream-correlation-1");
+    expect(response.headers.get("x-omnirush-client-request-id")).toBe("stream-correlation-1");
   });
 
   test("treats response.failed and response.incomplete as terminal", async () => {
@@ -1380,13 +1400,15 @@ describe("OmniRush gateway broker: connection failures never become a bare 500",
 
   test("a request whose connection fails before an answer is sent again, and answers when one lands", async () => {
     let calls = 0;
+    const requestIds: string[] = [];
     const logs: string[] = [];
     const broker = new OmniRushGatewayBroker({
       credentials,
       engineToken: "local-engine-token",
       log: (_level, message) => logs.push(message),
-      fetch: async () => {
+      fetch: async (_input, init) => {
         calls += 1;
+        requestIds.push(new Headers(init?.headers).get("x-omnirush-client-request-id") ?? "");
         if (calls < 3) throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNRESET", message: "socket hang up" } });
         return Response.json({ output: [] });
       },
@@ -1394,6 +1416,9 @@ describe("OmniRush gateway broker: connection failures never become a bare 500",
     const response = await broker.handle(request(), "responses");
     expect(response.status).toBe(200);
     expect(calls).toBe(3);
+    expect(requestIds).toHaveLength(3);
+    expect(new Set(requestIds).size).toBe(1);
+    expect(requestIds[0]).toMatch(/^[A-Za-z0-9]{32}$/);
     expect(logs.filter((line) => line.includes("failed before an answer"))).toHaveLength(2);
   });
 
@@ -1406,9 +1431,12 @@ describe("OmniRush gateway broker: connection failures never become a bare 500",
     const response = await broker.handle(request(), "responses");
     expect(response.status).toBe(503);
     expect(response.headers.get("retry-after")).toBe("2");
-    const body = (await response.json()) as { error: { code: string; message: string } };
+    const body = (await response.json()) as { error: { code: string; message: string; client_request_id: string } };
     expect(body.error.code).toBe("gateway_unreachable");
     expect(body.error.message).toContain("could not be reached (UND_ERR_SOCKET)");
+    expect(body.error.message).toContain("request id:");
+    expect(body.error.client_request_id).toMatch(/^[A-Za-z0-9]{32}$/);
+    expect(response.headers.get("x-omnirush-client-request-id")).toBe(body.error.client_request_id);
   });
 
   test("a refresh that cannot reach omnirush.ai keeps the session and answers every waiting request with a retryable 503", async () => {
