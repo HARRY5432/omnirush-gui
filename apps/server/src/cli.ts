@@ -68,6 +68,8 @@ if (!config.readOnly) {
 // to an OS-assigned port on EADDRINUSE, and the engine's spawn-time env
 // (OMNIRUSH_SERVER_URL) must point at the port that actually bound, not the
 // requested one.
+// The Linux sandbox's helpers ship beside the engine (sidecars/box/): known before the server plans any box.
+if (process.env.OMNIRUSH_OPENCODE_BIN?.trim()) setToolsRoot(dirname(process.env.OMNIRUSH_OPENCODE_BIN.trim()));
 const server = await startServer(config);
 config.port = server.port;
 const serverUrl = `http://${config.host === "0.0.0.0" ? "127.0.0.1" : config.host}:${server.port}`;
@@ -82,8 +84,6 @@ if (!config.opencodeBaseUrl && process.env.OMNIRUSH_MANAGE_OPENCODE === "1") {
     // Server-managed config file: the engine re-reads it from disk on every
     // instance rebuild, and keepOmniRushRuntimeConfigFileFresh synchronizes it
     // on every runtime-DB write — so disposes always pick up current state.
-    // The Linux sandbox's helpers ship beside the engine (sidecars/box/); the config names its shell.
-    if (process.env.OMNIRUSH_OPENCODE_BIN?.trim()) setToolsRoot(dirname(process.env.OMNIRUSH_OPENCODE_BIN.trim()));
     const { path: runtimeConfigPath } = await writeOmniRushRuntimeConfigFile(config);
     keepOmniRushRuntimeConfigFileFresh(config);
     const managedOpencodeCwd = process.env.OMNIRUSH_MANAGED_OPENCODE_CWD?.trim() || workspace.path;

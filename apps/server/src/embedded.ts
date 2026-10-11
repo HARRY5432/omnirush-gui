@@ -223,6 +223,9 @@ export async function startEmbeddedServer(options: EmbeddedServerOptions): Promi
   // requested one. Proxy requests that land in the short window before the
   // engine is ready fail with opencode_unconfigured and clients retry; the
   // desktop only learns the server URL after this function returns.
+  // The Linux sandbox's helpers ship beside the engine (sidecars/box/): known before the server plans any box.
+  const engineBin = options.opencodeBin || process.env.OMNIRUSH_OPENCODE_BIN;
+  if (engineBin?.trim()) setToolsRoot(dirname(engineBin.trim()));
   server = await duringStartup(() => startServer(config));
   config.port = server.port;
   const serverUrl = `http://${config.host === "0.0.0.0" ? "127.0.0.1" : config.host}:${server.port}`;
@@ -243,9 +246,6 @@ export async function startEmbeddedServer(options: EmbeddedServerOptions): Promi
       // Server-managed config file: the engine re-reads it from disk on every
       // instance rebuild, and keepOmniRushRuntimeConfigFileFresh synchronizes it
       // on every runtime-DB write — so disposes always pick up current state.
-      // The Linux sandbox's helpers ship beside the engine (sidecars/box/); the config names its shell.
-      const engineBin = options.opencodeBin || process.env.OMNIRUSH_OPENCODE_BIN;
-      if (engineBin?.trim()) setToolsRoot(dirname(engineBin.trim()));
       const { path: runtimeConfigPath } = await writeOmniRushRuntimeConfigFile(config);
       stopRuntimeConfigFileRefresh = keepOmniRushRuntimeConfigFileFresh(config);
       const cwd = options.opencodeCwd
@@ -254,7 +254,7 @@ export async function startEmbeddedServer(options: EmbeddedServerOptions): Promi
       await duringStartup(() => mkdir(cwd, { recursive: true }));
       const opencodeModelsEnv = await duringStartup(() => resolveOpencodeModelsEnv());
 
-      const opencodeBin = engineBin;
+      const opencodeBin = options.opencodeBin || process.env.OMNIRUSH_OPENCODE_BIN;
       // Shared by the first spawn and by any later rollover standby, so a
       // replacement engine is identical apart from its port.
       const engineEnv: Record<string, string | undefined> = {

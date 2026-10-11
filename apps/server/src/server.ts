@@ -3778,9 +3778,11 @@ function createRoutes(
       throw new ApiError(400, "invalid_payload", "mode must be \"on\", \"off\" or null and the only field");
     }
     if (workspace.workspaceType !== "local") throw new ApiError(400, "box_unsupported", "The sandbox is for folders on this computer");
-    const status = await boxServiceFor(config).setMode(workspace, mode);
-    // The engine gets the box shell and plugin when the first workspace turns its box on.
-    const engine = await applyBoxEngineConfig(config, "local_box");
+    const boxes = boxServiceFor(config);
+    const before = JSON.stringify(await boxes.engineBits());
+    const status = await boxes.setMode(workspace, mode);
+    // The engine gets the box shell and plugin when the first workspace turns its box on (and loses them with the last).
+    const engine = JSON.stringify(await boxes.engineBits()) === before ? { status: "unchanged" as const } : await applyBoxEngineConfig(config, "local_box");
     return jsonResponse({ ...status, engine });
   });
 
