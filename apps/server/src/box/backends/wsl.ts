@@ -119,7 +119,7 @@ function assetFor(pins: WslPins | null, arch: string): WslAsset | null {
   return asset?.url && /^[0-9a-f]{64}$/.test(String(asset.sha256 || "")) ? asset : null;
 }
 
-export async function probeWslDistro({ env = process.env, platform = process.platform, run = runCommand, exists = existsSync, timeoutMs = 15_000, arch = process.arch }: { env?: Env; platform?: NodeJS.Platform; run?: RunCommand; exists?: (file: string) => boolean; timeoutMs?: number; arch?: string } = {}): Promise<RuntimeResult> {
+export async function probeWslDistro({ env = process.env, platform = process.platform, run = runCommand, exists = existsSync, timeoutMs = 15_000, arch = process.arch, pins }: { env?: Env; platform?: NodeJS.Platform; run?: RunCommand; exists?: (file: string) => boolean; timeoutMs?: number; arch?: string; pins?: WslPins | null } = {}): Promise<RuntimeResult> {
   const base = { name: "wsl", backend: "wsl" };
   if (platform !== "win32") return { ...base, ok: false, reason: "the OmniRush WSL distro is for Windows" };
   if (env.OMNIRUSH_BOX_WSL === "0") return { ...base, ok: false, reason: "turned off (OMNIRUSH_BOX_WSL=0)" };
@@ -138,7 +138,7 @@ export async function probeWslDistro({ env = process.env, platform = process.pla
   const distro = distroName(env);
   const mine = rows.find((row) => row.name.toLowerCase() === distro.toLowerCase());
   if (mine && mine.version === "1") return { ...base, ok: false, bin, reason: `the ${distro} distro runs as WSL 1 (\`wsl --set-version ${distro} 2\`)` };
-  if (!mine && !String(env.OMNIRUSH_BOX_WSL_ROOTFS || "").trim() && !assetFor(loadWslPins(), arch)) {
+  if (!mine && !String(env.OMNIRUSH_BOX_WSL_ROOTFS || "").trim() && !assetFor(pins === undefined ? loadWslPins() : pins, arch)) {
     return { ...base, ok: false, bin, reason: "the OmniRush WSL image is not published yet (OMNIRUSH_BOX_WSL_ROOTFS=<built tar> to use one)" };
   }
   const ver = await wslCall(bin, ["--version"], { run, env, timeoutMs });

@@ -325,7 +325,9 @@ describe("box backends: Windows", () => {
     expect(reason(await probeWslDistro({ platform: "win32", env: winEnv, exists: () => false, run: wslRun() }))).toBe(ENABLE_HINT);
     const v1 = await probeWslDistro({ platform: "win32", env: { ...winEnv, OMNIRUSH_BOX_WSL_ROOTFS: "C:\\x.tar.gz" }, exists: set(WSL), run: wslRun({ list: ok("  NAME STATE VERSION\r\n  OmniRushBox  Stopped  1\r\n") }) });
     expect(reason(v1)).toMatch(/WSL 1/);
-    expect(reason(await probeWslDistro({ platform: "win32", env: winEnv, exists: set(WSL), run: wslRun() }))).toMatch(/not published yet/);
+    expect(reason(await probeWslDistro({ platform: "win32", env: winEnv, exists: set(WSL), run: wslRun(), pins: { version: "x", distro: "OmniRushBox", base: "x", assets: { amd64: { url: null, sha256: null, bytes: null } } } as never }))).toMatch(/not published yet/);
+    // The shipped wsl.json pins a published image.
+    expect((await probeWslDistro({ platform: "win32", arch: "x64", env: winEnv, exists: set(WSL), run: wslRun() })).ok).toBe(true);
     const ready = await probeWslDistro({ platform: "win32", env: { ...winEnv, OMNIRUSH_BOX_WSL_ROOTFS: "C:\\x.tar.gz" }, exists: set(WSL), run: wslRun() });
     expect(ready).toMatchObject({ ok: true, installed: false, distro: "OmniRushBox", version: "2.6.1.0" });
     const installed = await probeWslDistro({ platform: "win32", env: winEnv, exists: set(WSL), run: wslRun({ list: ok(utf16("  NAME  STATE  VERSION\r\n  OmniRushBox  Running  2\r\n").toString("latin1")) }) });
