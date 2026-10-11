@@ -13,7 +13,7 @@ import {
 } from "@/app/lib/voice-core";
 import { defaultHotkey, hotkeyDown, hotkeyUp, matchesHotkeyDown, matchesHotkeyUp, parseHotkey } from "./hotkey";
 import { MicrophoneSource, ensureMicrophonePermission, microphoneSettingsUrl, type MicPermission } from "./mic-source";
-import { useVoiceSettings, voicePrivacyNote } from "./voice-settings";
+import { useVoiceSettings } from "./voice-settings";
 import { peekVoiceStatus, refreshVoiceStatus, useVoiceStatus } from "./voice-status";
 
 export type VoiceClient = Pick<OmniRushServerClient, "baseUrl" | "getVoiceStatus" | "voiceTranscriptionEndpoint">;
@@ -113,10 +113,6 @@ export function useVoiceDictation(input: {
     const editor = editorRef.current;
     if (!editor) return;
     const current = useVoiceSettings.getState();
-    if (!current.disclosureSeen) {
-      toast.info(voicePrivacyNote(peekVoiceStatus(client, latest.current.workspaceId)?.providerRetentionDays), { duration: 10_000 });
-      current.update({ disclosureSeen: true });
-    }
     const permission = await ensureMicrophonePermission().catch((): MicPermission => "unknown");
     if (permission === "denied") {
       setPermissionDenied(true);
