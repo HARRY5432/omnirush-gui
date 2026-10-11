@@ -7,6 +7,7 @@
 // launcher: readiness, the snapshot's stat/walk/tar, and toolchain probes.
 
 import { createHash } from "node:crypto";
+import { once } from "node:events";
 import { createWriteStream } from "node:fs";
 import net from "node:net";
 
@@ -30,12 +31,13 @@ function frame(kind: number, payload = Buffer.alloc(0)): Buffer {
 /**
  * One operation: resolves { exit, stdout, stderr, data } where data is the
  * concatenated Data frames (unless onData takes them). Rejects when the box
- * cannot be reached or closes early.
+ * cannot be reached or closes early. An onData that returns a promise holds
+ * the connection (backpressure) until it settles; a rejection fails the call.
  */
 export function request(
   box: BoxEndpoint,
   req: BoxRequest,
-  { onData, onStdout, onStderr, timeoutMs = 30_000, signal }: { onData?: (chunk: Buffer) => void; onStdout?: (chunk: Buffer) => void; onStderr?: (chunk: Buffer) => void; timeoutMs?: number; signal?: AbortSignal } = {},
+  { onData, onStdout, onStderr, timeoutMs = 30_000, signal }: { onData?: (chunk: Buffer) => Promise<unknown> | null | void; onStdout?: (chunk: Buffer) => void; onStderr?: (chunk: Buffer) => void; timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<BoxReply> {
   return new Promise((resolve, reject) => {
     const socket = net.connect({ host: box.host || "127.0.0.1", port: box.port });
@@ -74,7 +76,12 @@ export function request(
         else if (kind === T.stderr || kind === T.fail) (onStderr ? onStderr(payload) : err.push(Buffer.from(payload)));
         else if (kind === T.data) {
           if (onData) {
-            try { onData(payload); } catch (error) { finish(reject, error); return; }
+            let wait: Promise<unknown> | null | void;
+            try { wait = onData(payload); } catch (error) { finish(reject, error); return; }
+            if (wait && typeof wait.then === "function" && !socket.isPaused()) {
+              socket.pause();
+              wait.then(() => { if (!settled) socket.resume(); }, (error: unknown) => finish(reject, error));
+            }
           } else data.push(Buffer.from(payload));
         } else if (kind === T.exit) {
           let exit: BoxExit = { code: 0 };
@@ -137,29 +144,45 @@ export async function walk(box: BoxEndpoint, roots: string[], { max = 400_000, t
   return JSON.parse(result.data.toString("utf8"));
 }
 
-/** Tar exactly these paths into `file`: { bytes, sha256, ms, warning }. */
+/**
+ * Tar exactly these paths into `file`: { bytes, sha256, ms, warning }. The
+ * tar streams to disk: the box's connection waits while the file catches up.
+ */
 export async function tarTo(box: BoxEndpoint, paths: string[], file: string, { timeoutMs = 15 * 60_000 }: { timeoutMs?: number } = {}): Promise<{ bytes: number; sha256: string; ms?: number; warning: string | null }> {
   const stream = createWriteStream(file, { mode: 0o600 });
   const hash = createHash("sha256");
+  const controller = new AbortController();
   let bytes = 0;
-  let pending: Promise<unknown> = Promise.resolve();
-  const opened = new Promise((resolve, reject) => { stream.once("open", resolve); stream.once("error", reject); });
-  await opened;
+  let draining: Promise<unknown> | null = null;
+  let failed: Error | null = null;
+  stream.on("error", (error) => {
+    failed ??= error;
+    controller.abort();
+  });
+  await once(stream, "open");
   let result: BoxReply;
   try {
     result = await request(box, { op: "tar", paths }, {
       timeoutMs,
+      signal: controller.signal,
       onData: (chunk) => {
         const copy = Buffer.from(chunk);
         hash.update(copy);
         bytes += copy.length;
-        if (!stream.write(copy)) pending = new Promise<void>((resolve) => stream.once("drain", () => resolve()));
+        // One drain wait at a time, however many frames arrive before it.
+        if (!stream.write(copy) && !draining) {
+          draining = once(stream, "drain").finally(() => { draining = null; });
+          draining.catch(() => undefined); // a write error is `failed`
+        }
+        return draining;
       },
     });
+  } catch (error) {
+    throw failed ?? error;
   } finally {
-    await pending;
     await new Promise<void>((resolve) => stream.end(() => resolve()));
   }
+  if (failed) throw failed;
   if (result.exit.code !== 0) throw new Error(`box tar failed: ${result.stderr.trim() || result.exit.code}`);
   return { bytes, sha256: hash.digest("hex"), ms: result.exit.ms, warning: result.stderr.trim() || null };
 }
