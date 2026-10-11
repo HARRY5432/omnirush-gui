@@ -789,7 +789,6 @@ export default {
   "settings.environment.loading": "Loading…",
   "settings.environment.override_hint": "Environment variables set before omnirush.ai starts take precedence over values saved here.",
   "settings.environment.remote_workspace_hint": "This workspace is remote. Local environment variables are hidden here; use cloud LLM Providers or configure the worker host directly.",
-  "settings.environment.restart_required": "Saved. Apply changes to make the update available.",
   "settings.environment.reveal": "Reveal",
   "settings.environment.reveal_value": "Reveal value for {key}",
   "settings.environment.save": "Save",

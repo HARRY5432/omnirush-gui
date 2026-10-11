@@ -1784,7 +1784,6 @@ export default {
   "settings.environment.apply_title": "Apply environment changes?",
   "settings.environment.apply_unavailable": "Apply changes is only available in the desktop app.",
   "settings.environment.applying": "Applying…",
-  "settings.environment.restart_required": "Saved. Apply changes to make the update available.",
   "settings.environment.reveal": "Reveal",
   "settings.environment.reveal_value": "Reveal value for {key}",
   "settings.environment.save": "Save",

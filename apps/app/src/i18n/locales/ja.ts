@@ -781,7 +781,6 @@ export default {
   "settings.environment.apply_title": "環境変数の変更を適用しますか？",
   "settings.environment.apply_unavailable": "変更の適用はデスクトップアプリでのみ利用できます。",
   "settings.environment.applying": "適用中…",
-  "settings.environment.restart_required": "保存しました。変更を適用すると有効になります。",
   "settings.environment.reveal": "表示",
   "settings.environment.reveal_value": "{key} の値を表示",
   "settings.environment.save": "保存",
