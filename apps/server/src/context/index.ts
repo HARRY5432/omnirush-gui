@@ -10,6 +10,12 @@
 //   turn messages  context.outside_folder / context.outside_file (#10,
 //                  #21) and context.ephemeral_tool (#22) from its tool calls
 //   turn end       context.network (#20) per shell call (or per turn)
+//   install log    context.install per package install the agent's shell
+//                  ran (install-log.ts: wrappers on the engine's PATH, exact
+//                  versions) and context.env_turn per turn (runtimes,
+//                  version managers, files written outside the project);
+//                  only when the host passes `installLog` and the server's
+//                  switch is on for the session
 //
 // Everything runs in the background with timeouts and never delays a turn
 // or an upload; every item is capped, has the home directory as `~`, and
@@ -21,13 +27,34 @@ import { toolCallsOf, commandEffects, toolKind, type ToolCall } from "./commands
 import { resolveEphemeral, type ResolveEphemeralOptions } from "./ephemeral.js";
 import { attributeConnections, defaultSampler, NetworkObserver, socketDiffConnections, socketPairs, type HostResolver, type Root, type Sampler } from "./network.js";
 import { OutsideTracker } from "./outside.js";
+import {
+  envFingerprint,
+  inInstallLogSample,
+  INSTALL_LOG_OFF,
+  InstallLogReader,
+  lineOf,
+  matchCall,
+  outsideWrites,
+  powershellDownloads,
+  setInstallLogActive,
+  sha256File,
+  ENV_TURN_SCHEMA,
+  INSTALL_LOG_SCHEMA,
+  relativeTo,
+  type CallWindow,
+  type InstallLine,
+  type InstallLogGate,
+  type InstallLogHost,
+} from "./install-log.js";
 import { collectPmConfig } from "./pm-config.js";
-import { currentPrivacy, type PrivacyContext, type Scrubber } from "./privacy.js";
+import { cleanUrl, currentPrivacy, tildeText, type PrivacyContext, type Scrubber } from "./privacy.js";
 import { processSnapshot, processTable, listeningPorts, type ProcessInfo, type ListeningPort, type SnapshotScope } from "./processes.js";
 import { collectServices } from "./services.js";
 import { collectSetup, type SetupFile, type SetupModel } from "./setup.js";
 import { collectShellAliases } from "./shell-aliases.js";
 import { systemPackages } from "./system-packages.js";
+import { runCommand, type Runner } from "./exec.js";
+import { arch as osArch, release as osRelease } from "node:os";
 
 export const CONTEXT_SCHEMA = 1;
 const SECTION_TIMEOUT_MS = 30_000;
@@ -42,7 +69,9 @@ export type ContextEventType =
   | "context.network"
   | "context.ephemeral_tool"
   | "context.outside_folder"
-  | "context.outside_file";
+  | "context.outside_file"
+  | "context.install"
+  | "context.env_turn";
 
 /** Whether capture context is on: OMNIRUSH_CAPTURE_CONTEXT=0 (or false/off/no) turns it off. */
 export function captureContextEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -90,7 +119,19 @@ export type ContextOptions = {
   /** Tests: skip the slow machine-wide sections. */
   sections?: Partial<Record<"system_packages" | "services" | "setup" | "pm_config" | "shell_aliases" | "processes", boolean>>;
   log?: (level: "info" | "warn", message: string, data?: Record<string, unknown>) => void;
+  /**
+   * The install log (install-log.ts): the raw folder the engine's wrappers
+   * write to and the server's switch. Absent: no install log.
+   */
+  installLog?: InstallLogHost | null;
+  /** Tests: the install log's command runner (version probes). */
+  installRun?: Runner;
 };
+
+/** Shell call windows kept per session for matching the install log's noted calls. */
+const MAX_CALL_WINDOWS = 400;
+/** A noted call no shell call window claims is given to the only active session after this long (else dropped). */
+const UNMATCHED_INSTALL_MS = 2 * 60_000;
 
 type SessionContext = {
   id: string;
@@ -113,6 +154,11 @@ type SessionContext = {
   ephemeral: number;
   pending: Set<Promise<unknown>>;
   ended: boolean;
+  /** Install log: shell call windows (all turns, newest last), the turn's start, installs noted this turn, in the server's sample. */
+  windows: CallWindow[];
+  turnStartedAt: number;
+  installs: number;
+  installSampled: boolean;
 };
 
 /** Overhead bookkeeping (milliseconds of wall time spent in each phase). */
@@ -157,6 +203,9 @@ export class ContextCapture {
   private readonly privacy: PrivacyContext;
   private readonly platform: NodeJS.Platform;
   private readonly env: NodeJS.ProcessEnv;
+  private readonly installReader: InstallLogReader | null;
+  private installGate: InstallLogGate = INSTALL_LOG_OFF;
+  private installDrainTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private readonly options: ContextOptions) {
     this.env = options.env ?? process.env;
@@ -164,6 +213,7 @@ export class ContextCapture {
     this.networkEnabled = this.enabled && (options.network ?? captureNetworkEnabled(this.env));
     this.privacy = options.privacy ?? currentPrivacy();
     this.platform = options.platform ?? process.platform;
+    this.installReader = this.enabled && options.installLog ? new InstallLogReader(options.installLog.raw) : null;
   }
 
   /** The session's processes: the app's process tree, and processes working in the project or its outside folders. */
@@ -219,15 +269,213 @@ export class ContextCapture {
       ephemeral: 0,
       pending: new Set(),
       ended: false,
+      windows: [],
+      turnStartedAt: Date.now(),
+      installs: 0,
+      installSampled: false,
     };
     if (this.networkEnabled) {
       const sampler = this.options.sampler === undefined ? defaultSampler(this.platform) : this.options.sampler;
       if (sampler) state.observer = new NetworkObserver({ sampler });
     }
     this.sessions.set(sessionId, state);
+    this.refreshInstallGate(state);
     this.track(state, (async () => {
       if (after) await withTimeout(after, SECTION_TIMEOUT_MS);
       await this.collectSessionStart(state);
+    })());
+  }
+
+  // --- install log (install-log.ts) -----------------------------------------------
+
+  /** Asks the server's switch (the host caches it) and turns the wrappers' noting on while any open session is in the sample. */
+  private refreshInstallGate(state: SessionContext): void {
+    const host = this.options.installLog;
+    if (!host || !this.installReader) return;
+    this.track(state, (async () => {
+      const gate = await withTimeout(host.gate(), 10_000);
+      this.installGate = "value" in gate ? gate.value : this.installGate;
+      state.installSampled = this.installGate.enabled && inInstallLogSample(state.id, this.installGate.samplePercent);
+      const any = [...this.sessions.values()].some((item) => !item.ended && item.installSampled);
+      await setInstallLogActive(host.raw, any);
+    })());
+  }
+
+  private noteWindow(state: SessionContext, window: Omit<CallWindow, "sessionId" | "turn">): void {
+    if (!this.installReader) return;
+    const known = window.callId ? state.windows.find((item) => item.callId === window.callId) : undefined;
+    if (known) {
+      known.end ??= window.end;
+      known.cwd ??= window.cwd;
+      known.command ??= window.command;
+      return;
+    }
+    state.windows.push({ ...window, sessionId: state.id, turn: state.turn });
+    if (state.windows.length > MAX_CALL_WINDOWS) state.windows.splice(0, state.windows.length - MAX_CALL_WINDOWS);
+  }
+
+  /** Reads the noted calls soon (a shell call just ended). */
+  private scheduleInstallDrain(): void {
+    if (!this.installReader || this.installDrainTimer) return;
+    this.installDrainTimer = setTimeout(() => {
+      this.installDrainTimer = null;
+      void this.drainInstalls(false).catch(() => undefined);
+    }, 750);
+    this.installDrainTimer.unref?.();
+  }
+
+  /** The noted calls: matched to their session and call, resolved, sent as `context.install`; then removed. */
+  private drainInstalls(final: boolean): Promise<void> {
+    const reader = this.installReader;
+    if (!reader) return Promise.resolve();
+    return reader.serial(async () => {
+      const now = Date.now();
+      const calls = await reader.pending(now);
+      if (calls.length === 0) return;
+      const windows = [...this.sessions.values()].flatMap((state) => state.windows);
+      const active = [...this.sessions.values()].filter((state) => !state.ended);
+      for (const call of calls) {
+        let match = matchCall(call, windows, now);
+        if (!match) {
+          if (!final && now - call.start < UNMATCHED_INSTALL_MS) continue;
+          match = active.length === 1 ? { sessionId: active[0]!.id, callId: null, start: call.start, end: null, cwd: null, command: null, turn: active[0]!.turn } : null;
+        }
+        const state = match ? this.sessions.get(match.sessionId) : undefined;
+        if (match && state && state.installSampled) {
+          const started = performance.now();
+          const line = await lineOf(call, {
+            root: state.root,
+            turn: match.turn || null,
+            callId: match.callId,
+            command: match.command,
+            privacy: this.privacy,
+            scrub: this.options.scrub,
+            platform: this.platform,
+            env: this.env,
+            run: this.options.installRun ?? runCommand,
+          }).catch(() => null);
+          if (line) {
+            state.installs += 1;
+            this.emit(state.id, "context.install", line);
+          }
+          this.timings.turn_messages.push(Math.round(performance.now() - started));
+        }
+        await reader.remove(call);
+      }
+    });
+  }
+
+  /** PowerShell downloads of the turn's calls (its download cmdlets are not programs: no PATH wrapper sees them). */
+  private async commandDownloads(state: SessionContext, calls: ToolCall[]): Promise<void> {
+    for (const call of calls) {
+      if (toolKind(call.tool) !== "shell" || !call.command) continue;
+      for (const found of powershellDownloads(call.command)) {
+        const cwd = call.cwd || state.root;
+        const file = found.out ? (/^[A-Za-z]:[\\/]|^[\\/]/.test(found.out) ? found.out : `${cwd}${this.platform === "win32" ? "\\" : "/"}${found.out}`) : null;
+        const hashed = file ? await sha256File(file) : null;
+        const tilde = (text: string) => this.options.scrub.text(tildeText(text, this.privacy));
+        const start = call.start ?? Date.now();
+        const line: InstallLine = {
+          v: 1,
+          schema: INSTALL_LOG_SCHEMA,
+          ts: new Date(start).toISOString(),
+          end: call.end ? new Date(call.end).toISOString() : null,
+          dur_ms: call.end ? Math.max(0, call.end - start) : null,
+          turn: state.turn,
+          call: call.callId,
+          tool: "powershell",
+          via: "command",
+          real: null,
+          argv: [],
+          cwd: tilde(cwd),
+          cwd_rel: relativeTo(state.root, cwd, this.platform),
+          exit: call.status === "completed" ? 0 : null,
+          os: this.platform === "win32" ? "windows" : this.platform === "darwin" ? "darwin" : "linux",
+          scope: "project",
+          ecosystem: "url",
+          target: null,
+          target_rel: null,
+          python: null,
+          requested: [],
+          resolved: [],
+          removed: [],
+          downloads: [{
+            url: cleanUrl(found.url),
+            path: file ? tilde(file) : "(piped)",
+            path_rel: file ? relativeTo(state.root, file, this.platform) : null,
+            ...(hashed?.sha256 ? { sha256: hashed.sha256 } : {}),
+            ...(hashed ? { size: hashed.size } : {}),
+          }],
+          lockfile: null,
+          lockfile_rel: null,
+          lockfile_sha256: null,
+        };
+        state.installs += 1;
+        this.emit(state.id, "context.install", line);
+      }
+    }
+  }
+
+  /** The turn's end: its noted calls, its PowerShell downloads, then `context.env_turn`. */
+  private installTurnEnded(state: SessionContext): void {
+    const host = this.options.installLog;
+    if (!host || !this.installReader || !state.installSampled) return;
+    const turn = state.turn;
+    const since = state.turnStartedAt;
+    const until = Date.now();
+    const finalMessages = state.finalMessages.promise;
+    this.track(state, (async () => {
+      await withTimeout(finalMessages, FINAL_MESSAGES_WAIT_MS);
+      await this.drainInstalls(false);
+      const started = performance.now();
+      const turnCalls = [...state.calls.values()].filter((call) => call.start === null || call.start >= since - 1_000);
+      await this.commandDownloads(state, turnCalls);
+      const timings: Record<string, number> = {};
+      let at = performance.now();
+      const pathKey = Object.keys(this.env).find((key) => key.toUpperCase() === "PATH") ?? "PATH";
+      const fingerprint = await envFingerprint({
+        root: state.root,
+        pathValue: this.env[pathKey] ?? "",
+        skipDir: host.bin ?? null,
+        env: this.env,
+        platform: this.platform,
+        arch: osArch(),
+        osVersion: (() => {
+          try {
+            return osRelease();
+          } catch {
+            return null;
+          }
+        })(),
+        privacy: this.privacy,
+        run: this.options.installRun ?? runCommand,
+      });
+      timings.fingerprint = Math.round(performance.now() - at);
+      at = performance.now();
+      const outside = await outsideWrites({
+        root: state.root,
+        since,
+        until: Date.now(),
+        home: this.privacy.home,
+        platform: this.platform,
+        env: this.env,
+        privacy: this.privacy,
+        scrub: this.options.scrub,
+        exclude: [host.raw, ...(host.bin ? [host.bin] : []), ...(host.appDirs ?? []), ...(this.options.cacheDir ? [this.options.cacheDir] : [])],
+      });
+      timings.outside = Math.round(performance.now() - at);
+      timings.outside_scanned = outside.scanned;
+      this.emit(state.id, "context.env_turn", {
+        schema: ENV_TURN_SCHEMA,
+        turn,
+        at: new Date(until).toISOString(),
+        ...fingerprint,
+        installs: state.installs,
+        outside_writes: outside.files,
+        outside_truncated: outside.truncated,
+        timings_ms: timings,
+      });
+      this.timings.turn_end.push(Math.round(performance.now() - started));
     })());
   }
 
@@ -327,6 +575,9 @@ export class ContextCapture {
     const state = this.sessions.get(sessionId);
     if (!state || state.ended) return;
     state.turn += 1;
+    state.turnStartedAt = Date.now();
+    state.installs = 0;
+    this.refreshInstallGate(state);
     state.calls = new Map();
     state.liveCalls = new Map();
     state.socketsAtStart = new Map();
@@ -359,6 +610,15 @@ export class ContextCapture {
     if (!state || state.ended || !event.callId || toolKind(event.tool) !== "shell") return;
     const at = event.at ?? Date.now();
     const known = state.liveCalls.get(event.callId);
+    if (this.installReader) {
+      const command = typeof event.command === "string" ? event.command : null;
+      const workdir = typeof event.workdir === "string" && event.workdir.trim() ? event.workdir.trim() : null;
+      if (event.status === "running") this.noteWindow(state, { callId: event.callId, start: at, end: null, cwd: workdir ?? state.root, command });
+      else {
+        this.noteWindow(state, { callId: event.callId, start: known?.start ?? at, end: at, cwd: workdir, command });
+        this.scheduleInstallDrain();
+      }
+    }
     if (event.status === "running") {
       if (known) return;
       const command = typeof event.command === "string" ? event.command : null;
@@ -394,6 +654,7 @@ export class ContextCapture {
     calls.forEach((call, index) => {
       const key = call.callId ?? `${state.turn}:${index}:${call.tool}:${call.start ?? ""}`;
       state.calls.set(key, call);
+      if (this.installReader && toolKind(call.tool) === "shell" && call.start !== null) this.noteWindow(state, { callId: call.callId, start: call.start, end: call.end, cwd: call.cwd, command: call.command });
       if (state.processedCalls.has(key) || (call.status !== null && call.status !== "completed" && call.status !== "error")) return;
       state.processedCalls.add(key);
       fresh.push(call);
@@ -423,7 +684,9 @@ export class ContextCapture {
 
   /** The turn ended: the network observer stops and its connections are attributed to the turn's calls. */
   turnEnded(sessionId: string): void {
-    const state = this.sessions.get(sessionId);
+    const found = this.sessions.get(sessionId);
+    if (found && !found.ended) this.installTurnEnded(found);
+    const state = found;
     if (!state || !state.observer) return;
     const observer = state.observer;
     const turn = state.turn;
@@ -477,6 +740,11 @@ export class ContextCapture {
     if (state.observer && activeTurns.has(sessionId)) this.turnEnded(sessionId);
     state.finalMessages.resolve();
     state.ended = true;
+    if (this.installReader) {
+      this.track(state, this.drainInstalls(true));
+      const host = this.options.installLog;
+      if (host && ![...this.sessions.values()].some((item) => !item.ended && item.installSampled)) this.track(state, setInstallLogActive(host.raw, false));
+    }
     void this.settled(sessionId, SETTLE_TIMEOUT_MS).finally(() => this.sessions.delete(sessionId));
   }
 }
