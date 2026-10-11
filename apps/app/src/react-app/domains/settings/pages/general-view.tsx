@@ -18,6 +18,7 @@ import {
 import type { OmniRushAccountSignOutReason } from "@omnirush/types/desktop-ipc";
 
 import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { t } from "../../../../i18n";
 import type { SettingsTab } from "../../../../app/types";
@@ -37,7 +38,7 @@ import {
 } from "../approval-mode";
 import { DiagnosticsSection } from "./diagnostics-section";
 import { BEST_PRACTICES_HELP, useBestPractices, type BestPracticesClient } from "../best-practices";
-import { LINUX_SANDBOX_HELP, linuxSandboxStatusLine, useLinuxSandbox, type LinuxSandboxClient } from "../linux-sandbox";
+import { LINUX_SANDBOX_HELP, linuxSandboxBackendLine, linuxSandboxOthersLine, linuxSandboxStatusLine, useLinuxSandbox, type LinuxSandboxClient } from "../linux-sandbox";
 
 export type GeneralSettingsViewProps = {
   onNavigateTab: (tab: SettingsTab) => void;
@@ -227,8 +228,11 @@ export function LinuxSandboxCard(props: {
   status: string;
   onToggle: (enabled: boolean) => void;
   onReset: () => void;
+  onBackend?: (backend: string) => void;
 }) {
   const box = props.box;
+  const backendItems = box?.backendSetting.choices.map((choice) => ({ value: choice.id, label: choice.label })) ?? [];
+  const others = box ? linuxSandboxOthersLine(box) : null;
   return (
     <div className="space-y-3">
       <div className="text-[11px] font-semibold uppercase tracking-[0.15em] text-dls-secondary">Linux sandbox</div>
@@ -244,10 +248,40 @@ export function LinuxSandboxCard(props: {
           {box ? (
             <div className="mt-0.5 text-[11px] text-dls-secondary" role="status" data-testid="linux-sandbox-state">{linuxSandboxStatusLine(box)}</div>
           ) : null}
+          {box ? (
+            <div className="mt-0.5 text-[11px] text-dls-secondary" data-testid="linux-sandbox-backend">
+              {linuxSandboxBackendLine(box)}
+              {box.backend?.why ? <span className="block">{box.backend.why}</span> : null}
+              {others ? <span className="block">{others}</span> : null}
+            </div>
+          ) : null}
           {props.status ? (
             <div className="mt-0.5 text-[11px] text-dls-secondary" data-testid="linux-sandbox-status">{props.status}</div>
           ) : null}
         </div>
+        {box && props.onBackend ? (
+          <div className="w-44 shrink-0">
+            <Select
+              value={box.backendSetting.value}
+              items={backendItems}
+              onValueChange={(value) => {
+                if (typeof value === "string") props.onBackend?.(value);
+              }}
+              disabled={props.busy || box.backendSetting.source === "env"}
+            >
+              <SelectTrigger className="w-full" aria-label="Sandbox backend">
+                <SelectValue placeholder="Automatic" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {backendItems.map((item) => (
+                    <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          </div>
+        ) : null}
         {box?.on && box.container?.exists ? (
           <Button variant="outline" size="xs" disabled={props.busy} onClick={props.onReset}>Reset sandbox</Button>
         ) : null}
@@ -436,6 +470,7 @@ export function GeneralSettingsView(props: GeneralSettingsViewProps) {
           status={linuxSandbox.status}
           onToggle={(enabled) => void linuxSandbox.setEnabled(enabled)}
           onReset={() => void linuxSandbox.reset()}
+          onBackend={(backend) => void linuxSandbox.setBackend(backend)}
         />
       ) : null}
 
