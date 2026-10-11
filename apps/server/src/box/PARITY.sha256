@@ -1,4 +1,4 @@
 # The sandbox image pins: the same files in omnirush-cli (src/box/) and omnirush-gui (apps/server/src/box/).
 # A change to one must be ported to the other and this list updated in both (scripts/box/pins.mjs refreshes the pins' list).
-bfeb941029a3f956690d777dd9bdee8634ed58efb574adc2ac213dbe47e7a81e  images.json
-f8876b786122b231fd4e97994a0142f26bd07e21944d6ecfeb4c9a89548e18c4  wsl.json
+f4cf889b29e169592863020c6ac2b02c69d8887a8df1502dd01c7939805a9b8a  images.json
+fd7531323e200f2133cdf66ed8608d04af3a38049cfeb01a0a285cbd72813c4d  wsl.json
