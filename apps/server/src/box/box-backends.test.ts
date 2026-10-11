@@ -12,7 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 
-import { BACKENDS, backendsFor, detectBackend, driverFor, normalizeBackend, ORDER } from "./backends/index.js";
+import { OPT_IN, BACKENDS, backendsFor, detectBackend, driverFor, normalizeBackend, ORDER } from "./backends/index.js";
 import { apparmorProfile, boxdEnv, boxrunPath, explainProbe, parseOut, probeBwrap, upArgs } from "./backends/bwrap.js";
 import { createAppleArgs, findDigest, macosMajor, parseVersions, probeApple, snapshotInfo, SUPPORTED as APPLE } from "./backends/apple.js";
 import { versionAtLeast } from "./backends/shared.js";
@@ -54,11 +54,14 @@ function helperBin(): string {
 describe("box backends: ranking and overrides", () => {
   test("the ranked order per OS", () => {
     expect(ORDER.linux).toEqual(["bwrap", "podman", "docker"]);
-    expect(ORDER.darwin).toEqual(["apple", "orbstack", "colima", "docker-desktop", "rancher", "podman", "docker"]);
+    expect(ORDER.darwin).toEqual(["orbstack", "colima", "docker-desktop", "rancher", "podman", "docker"]);
+    expect(OPT_IN.darwin).toEqual(["apple"]);
     expect(ORDER.win32).toEqual(["wslc", "wsl", "docker-desktop", "podman", "docker", "wsl-engine"]);
     for (const list of Object.values(ORDER)) for (const id of list) expect(BACKENDS.some((b) => b === id)).toBe(true);
     expect(backendsFor("linux")).toEqual(ORDER.linux);
     expect(backendChoices("win32").map((c) => c.id)).toEqual(["auto", ...ORDER.win32, "native"]);
+    expect(backendChoices("darwin").map((c) => c.id)).toEqual(["auto", ...ORDER.darwin, "apple", "native"]);
+    expect(backendChoices("darwin").find((c) => c.id === "apple")?.label).toBe("Apple container (opt-in)");
   });
 
   test("setting values: ids, aliases, auto, native; anything else is refused", () => {
@@ -221,7 +224,7 @@ describe("box backends: macOS", () => {
     expect(findDigest({ variants: [{ config: { digest: `sha256:${"d".repeat(64)}` } }] })).toBe(`sha256:${"d".repeat(64)}`);
   });
 
-  test("ranking: Apple container first, then OrbStack, colima, Docker Desktop through docker contexts", async () => {
+  test("ranking: OrbStack, colima, Docker Desktop through docker contexts; Apple container never probed unasked", async () => {
     const docker = "/usr/local/bin/docker";
     const infos: Record<string, unknown> = { orbstack: { OperatingSystem: "OrbStack", Name: "orbstack", ServerVersion: "27.0", OSType: "linux", Architecture: "aarch64" }, colima: { OperatingSystem: "Ubuntu 24.04", Name: "colima", ServerVersion: "27.1", OSType: "linux" }, "desktop-linux": { OperatingSystem: "Docker Desktop", ServerVersion: "28.0", OSType: "linux" } };
     const contexts = ["desktop-linux", "colima", "default"].map((Name) => JSON.stringify({ Name, DockerEndpoint: `unix:///x/${Name}.sock` })).join("\n");
@@ -234,10 +237,28 @@ describe("box backends: macOS", () => {
     const home = tmp();
     const found = await detectBackend({ boxHome: home, platform: "darwin", arch: "arm64", release: "24.0.0", home: "/Users/sam", env: { PATH: "/usr/local/bin" }, exists: set(docker), run, fresh: true, all: true });
     expect(found).toMatchObject({ ok: true, backend: "colima", prefix: ["--context", "colima"] });
-    expect(found.alternatives?.find((a) => a.backend === "apple")?.reason).toMatch(/macOS 26/);
+    expect(found.alternatives?.find((a) => a.backend === "apple")?.reason).toMatch(/opt-in only/);
     expect(found.alternatives?.some((a) => a.backend === "docker-desktop" && a.ok)).toBe(true);
     const none = await detectBackend({ boxHome: home, platform: "darwin", home: "/Users/sam", env: { PATH: "/usr/bin" }, exists: () => false, run, fresh: true });
     expect(none).toMatchObject({ ok: false, hint: "colima" });
+  });
+
+  test("Apple container: opt-in only, used when chosen, never started", async () => {
+    const calls: string[][] = [];
+    const run: RunCommand = async (bin, args) => {
+      calls.push([bin, ...args]);
+      if (bin === APPLE_BIN) return args[1] === "version" ? ok(appleVersions) : ok("apiserver is running");
+      return fail("Cannot connect to the Docker daemon");
+    };
+    const base = { boxHome: tmp(), platform: "darwin" as const, arch: "arm64", release: "26.0.0", home: "/Users/sam", env: { PATH: "/usr/local/bin" }, exists: set(APPLE_BIN), run, fresh: true };
+    const auto = await detectBackend(base);
+    expect(auto.ok).toBe(false);
+    expect(calls.some(([bin]) => bin === APPLE_BIN)).toBe(false);
+    const asked = await detectBackend({ ...base, asked: "apple-container" });
+    expect(asked).toMatchObject({ ok: true, backend: "apple" });
+    expect(calls.some((c) => c.slice(1).join(" ") === "system start")).toBe(false);
+    const stopped = await probeApple({ ...base, run: async (_b, args) => (args[1] === "version" ? ok(appleVersions) : fail("apiserver is not running")) });
+    expect(stopped.ok ? "" : stopped.reason).toMatch(/never starts it/);
   });
 });
 

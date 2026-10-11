@@ -10,7 +10,8 @@
 // `__sandbox__` format, so the converter and the rebuild do not change.
 //
 //   Linux:   bwrap (no daemon, no root) > rootless Podman > Docker
-//   macOS:   Apple container (macOS 26+) > OrbStack > colima > Docker Desktop > Rancher > Podman machine
+//   macOS:   OrbStack > colima > Docker Desktop > Rancher > Podman machine
+//            (Apple container is opt-in only: never picked on its own, never started unasked)
 //   Windows: WSL containers (wslc, WSL 3.0.1+) > OmniRush's WSL distro > Docker Desktop > Podman machine
 //            > Docker in the default WSL distro
 //
@@ -34,9 +35,18 @@ type Env = NodeJS.ProcessEnv;
 
 export const ORDER: Record<"linux" | "darwin" | "win32", string[]> = {
   linux: ["bwrap", "podman", "docker"],
-  darwin: ["apple", "orbstack", "colima", "docker-desktop", "rancher", "podman", "docker"],
+  darwin: ["orbstack", "colima", "docker-desktop", "rancher", "podman", "docker"],
   win32: ["wslc", "wsl", "docker-desktop", "podman", "docker", "wsl-engine"],
 };
+
+/**
+ * Backends used only when chosen by name (the sandbox backend setting,
+ * OMNIRUSH_BOX_BACKEND), never in the automatic order. Apple container: on
+ * macOS 27 `container system start` can hang and leave the Mac's network
+ * sharing stuck until a reboot (apple/container#2275), and it turns the
+ * packet filter on for all host traffic (#2335).
+ */
+export const OPT_IN: Partial<Record<NodeJS.Platform, string[]>> = { darwin: ["apple"] };
 
 /** What the backend setting takes (and what uploads record as sandbox.backend). */
 export const BACKENDS = ["bwrap", "apple", "wslc", "wsl", "orbstack", "colima", "docker-desktop", "rancher", "docker", "podman", "wsl-engine"] as const;
@@ -183,7 +193,7 @@ function writeCache(boxHome: string, key: string, result: RuntimeResult, now: nu
 /** One line when nothing works, with the free option to install. */
 export function noneReason(platform: NodeJS.Platform): string {
   if (platform === "linux") return "no sandbox backend works here (install bubblewrap, Podman or Docker)";
-  if (platform === "darwin") return "no container runtime found (free: `brew install colima docker && colima start`; also Apple container on macOS 26, OrbStack, Docker Desktop, Podman)";
+  if (platform === "darwin") return "no container runtime found (free: `brew install colima docker && colima start`; also OrbStack, Docker Desktop, Podman; Apple container only when chosen in Settings)";
   return "no sandbox backend found (turn on WSL 2: `wsl --install --no-distribution` as administrator, then `wsl --update` for WSL containers; or Docker Desktop, Podman)";
 }
 
@@ -263,6 +273,8 @@ export async function detectBackend({ boxHome, env = process.env, platform = pro
     if (chosen && !all) break;
   }
   if (all && containers === null) await containerList();
+  // Opt-in backends are listed for the status, never probed or started unless chosen.
+  if (all && wanted === "auto") for (const id of OPT_IN[platform] ?? []) if (!results.some((r) => r.backend === id)) results.push({ backend: id, name: id, ok: false, reason: "opt-in only: choose it in Settings (sandbox backend)" });
   const probedContainers: Probed[] = containers ?? [];
   if (all) for (const r of probedContainers) if (!results.some((x) => "bin" in x && x.bin === r.bin && ("context" in x ? x.context : undefined) === r.context && x.name === r.name)) results.push(r);
   const failed = [...skipped, ...results.filter((r) => !r.ok)];

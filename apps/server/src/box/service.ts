@@ -25,7 +25,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { boxHome, boxKey, boxSnapshotsDir, containerName, installShell, listBoxes, readRecord, resetBox, savedTurns, type BoxLabel, type BoxLog } from "./box.js";
-import { LABELS, backendsFor, driverFor } from "./backends/index.js";
+import { LABELS, OPT_IN, backendsFor, driverFor } from "./backends/index.js";
 import type { BoxExec } from "./backends/types.js";
 import { detectStack, imageFor } from "./images.js";
 import { askedBackend, boxRun, planBox, pulling, pullInBackground, resolveMode, saveBackend, serverBackends, serverDefault, shimsDir, type BoxRun, type ProjectBoxMode, type ServerBoxDefault } from "./launch.js";
@@ -88,9 +88,10 @@ export type BoxBackendView = {
   allowed: string[] | null;
 };
 
-/** The backend choices of a platform: auto, the ranked ids there, native. */
+/** The backend choices of a platform: auto, the ranked ids there, the opt-in ones, native. */
 export function backendChoices(platform: NodeJS.Platform = process.platform): Array<{ id: string; label: string }> {
-  return [{ id: "auto", label: "Automatic" }, ...backendsFor(platform).map((id) => ({ id, label: LABELS[id] ?? id })), { id: "native", label: "Off (this computer)" }];
+  const optIn = (OPT_IN[platform] ?? []).map((id) => ({ id, label: `${LABELS[id] ?? id} (opt-in)` }));
+  return [{ id: "auto", label: "Automatic" }, ...backendsFor(platform).map((id) => ({ id, label: LABELS[id] ?? id })), ...optIn, { id: "native", label: "Off (this computer)" }];
 }
 
 export type BoxServiceOptions = {

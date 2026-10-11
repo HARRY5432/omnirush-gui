@@ -100,7 +100,7 @@ export async function probeApple({ env = process.env, platform = process.platfor
   const status = await run(bin, ["system", "status"], { env, timeoutMs });
   const said = `${status.stdout}\n${status.stderr}`;
   if (status.code !== 0 || /not running|not registered|unavailable/i.test(said) || versions.server === null) {
-    return { ...base, ok: false, bin, version, reason: "Apple container is installed but not started (run `container system start` once)" };
+    return { ...base, ok: false, bin, version, reason: "Apple container is installed but not running (OmniRush never starts it; `container system start` is known to hang on macOS 27)" };
   }
   return { ...base, ok: true, bin, version, os: "linux", arch: "arm64", flavor: "apple-container", rootless: true, vm: true };
 }
