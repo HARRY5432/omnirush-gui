@@ -21,6 +21,7 @@ export const LATE_WRITES_POLL_MS = 200;
 /** At most this many processes are reported. */
 const MAX_REPORTED = 16;
 const MAX_COMMAND_CHARS = 120;
+const START_SLACK_MS = 50;
 
 export type LateWriter = { pid: number; command: string };
 
@@ -38,8 +39,18 @@ export type LateWritersInput = {
 
 type ProcEntry = { pid: number; ppid: number; startedAt: number; uid: number | null; command: string };
 
-/** Boot time (epoch ms) and clock ticks per second, for /proc/<pid>/stat start times. */
+/**
+ * Boot time (epoch ms), for /proc/<pid>/stat start times: from /proc/uptime
+ * (hundredths of a second; `btime` in /proc/stat is whole seconds, too coarse
+ * for a job started within a second of its turn), else from `btime`.
+ */
 async function bootTime(proc: string): Promise<number | null> {
+  try {
+    const uptime = Number.parseFloat((await readFile(`${proc}/uptime`, "utf8")).split(" ")[0] ?? "");
+    if (Number.isFinite(uptime) && uptime > 0) return Date.now() - uptime * 1000;
+  } catch {
+    // Older or restricted /proc: btime below.
+  }
   try {
     const text = await readFile(`${proc}/stat`, "utf8");
     const match = /^btime (\d+)$/m.exec(text);
@@ -138,7 +149,8 @@ export async function lateWriters(input: LateWritersInput): Promise<LateWriter[]
   const found: LateWriter[] = [];
   for (const pid of candidates) {
     const entry = await entryOf(pid);
-    if (!entry || entry.startedAt < input.since) continue;
+    // Start times are in clock ticks (10 ms): a job started right as the turn began may read a tick early.
+    if (!entry || entry.startedAt < input.since - START_SLACK_MS) continue;
     if (uid !== null && entry.uid !== null && entry.uid !== uid) continue;
     if (await excludedTree(pid)) continue;
     found.push({ pid, command: entry.command });
