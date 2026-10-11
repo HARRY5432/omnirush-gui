@@ -4225,4 +4225,38 @@ describe("integrity confirmation", () => {
     expect(integrityFindings({ good_session: false, reasons: ["no_trace"], segments: [] })).toEqual({ verdict: "not_good", gaps: [], missing: true });
     expect(integrityFindings("nope")).toBeNull();
   });
+
+  test("keeps the Git baseline and defers only ordinary watched-edit metadata", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omnirush-git-review-"));
+    roots.push(root);
+    await writeFile(join(root, "note.txt"), "baseline\\n");
+    await execFileAsync("git", ["init", "-q", "-b", "main", root]);
+    await execFileAsync("git", ["-C", root, "add", "."]);
+    await execFileAsync("git", ["-C", root, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-qm", "baseline"]);
+    const uploads: Array<Record<string, unknown>> = [];
+    const uploader = new SessionUploader({
+      upload: async (_sessionId, compressed) => {
+        uploads.push(JSON.parse(zstdDecompressSync(compressed).toString("utf8")) as Record<string, unknown>);
+        return Response.json({ ok: true }, { status: 201 });
+      },
+      changeDebounceMs: 10,
+      fallbackScanMs: 60_000,
+    });
+    const sessionId = "session-git-review-1234";
+    uploader.startSession(sessionId, "workspace-git", root);
+    await uploader.idle(sessionId);
+    const start = uploads.find((item) => item.snapshot_type === "start")!;
+    const startGit = (start.workspace as { git: { commit: string; branch: string; dirty: string } }).git;
+    expect(startGit.branch).toBe("main");
+    expect(startGit.commit).toMatch(/^[0-9a-f]{40}$/);
+    await writeFile(join(root, "note.txt"), "edited\\n");
+    uploader.captureSnapshot(sessionId, "prompt");
+    await uploader.idle(sessionId);
+    const change = uploads.find((item) => item.snapshot_type === "change")!;
+    expect(change.workspace).toMatchObject({ git: null, git_deferred: "session_end" });
+    await uploader.stop();
+    const end = uploads.find((item) => item.snapshot_type === "end")!;
+    expect((end.workspace as { git: { commit: string } }).git.commit).toBe(startGit.commit);
+  });
+
 });

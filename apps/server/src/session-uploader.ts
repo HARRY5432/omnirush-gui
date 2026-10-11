@@ -576,6 +576,8 @@ type SessionState = {
   /** The dirty set cannot be trusted; the next capture scans the whole tree. */
   dirtyOverflow: boolean;
   lastHead: string | null;
+  lastBranch: string | null;
+  hasGitSample: boolean;
   lastChangeAt: number;
   /** Untracked-but-not-ignored files as they stood when the current turn began. */
   artifactBaseline: Promise<Map<string, ArtifactStat>> | null;
@@ -3103,20 +3105,6 @@ export async function collectGitBlock(root: string): Promise<UploadGitBlock | nu
   };
 }
 
-/** Cheap pre-scan git evidence used before the listing/file-count cap. */
-async function gitPriorityPaths(root: string): Promise<Set<string>> {
-  if (await gitText(root, ["rev-parse", "--is-inside-work-tree"]) !== "true") return new Set();
-  const prefixResult = await runGit(root, ["rev-parse", "--show-prefix"], { maxBytes: 64 * 1024, timeoutMs: 5_000 });
-  if (!prefixResult.ok || prefixResult.truncated) return new Set();
-  const prefix = prefixResult.stdout.toString("utf8").trim().replaceAll("\\", "/");
-  const status = await runGit(root, ["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=normal", "--", "."], {
-    maxBytes: 2 * 1024 * 1024,
-    timeoutMs: 15_000,
-  });
-  if (!status.ok) return new Set();
-  return new Set(parseGitStatus(status.stdout.toString("utf8"), prefix).entries.map((entry) => entry.path));
-}
-
 /**
  * Folders whose content is reinstalled or rebuilt from the lockfiles (the
  * reproducible-task rule's "not needed"): a touched or locked path in one is
@@ -4993,6 +4981,8 @@ export class SessionUploader {
       // Nothing is known about the tree yet: the first change capture rescans it.
       dirtyOverflow: true,
       lastHead: null,
+      lastBranch: null,
+      hasGitSample: false,
       lastChangeAt: 0,
       artifactBaseline: null,
       model: null,
@@ -6001,7 +5991,16 @@ export class SessionUploader {
   /** Whether anything could have moved since the last accepted snapshot; one `git rev-parse` at most. */
   private async hasPendingChanges(state: SessionState): Promise<boolean> {
     if (state.dirtyOverflow || state.watchMode !== "watching" || state.dirty.size > 0 || this.journalHasChanges(state)) return true;
-    return (await gitHead(state.root)) !== state.lastHead;
+    return this.headMoved(state);
+  }
+
+  /** Detect commit-only and same-tree branch changes without status/log/diff. */
+  private async headMoved(state: SessionState): Promise<boolean> {
+    const [head, rawBranch] = await Promise.all([
+      gitHead(state.root), gitText(state.root, ["branch", "--show-current"]),
+    ]);
+    const branch = rawBranch ? clampUploadText(portablePathForUpload(rawBranch), MAX_GIT_REF_CHARS) : null;
+    return head !== state.lastHead || branch !== state.lastBranch;
   }
 
   private deferChange(state: SessionState, trigger: ChangeTrigger, wait: number): void {
@@ -6188,7 +6187,13 @@ export class SessionUploader {
       // Collect the cheap relevance evidence before the listing cap. A late
       // alphabetical path named by a tool or git status must not disappear
       // merely because the workspace has many files.
-      const preGitPaths = targeted ? new Set<string>() : await gitPriorityPaths(state.root);
+      // Keep start/end and full-scan evidence. Only ordinary watched edits
+      // defer full Git; ref-only turns still record their commit and branch.
+      const refsMoved = targeted && previous !== null && await this.headMoved(state);
+      const gitDeferred = targeted && previous !== null && state.hasGitSample && !refsMoved;
+      const git = gitDeferred ? null : await collectGitBlock(state.root);
+      const gitChanged = git ? git.commit !== state.lastHead || git.branch !== state.lastBranch : refsMoved;
+      const preGitPaths = snapshotPriorityPaths([], git);
       const preScanPaths = new Set<string>([
         ...state.relevance.keys(),
         ...state.touchedPaths,
@@ -6228,16 +6233,12 @@ export class SessionUploader {
       // (a commit changes history without touching a file); the full git block
       // with its status, log and diff is read only for a snapshot that goes out.
       if (type === "change" && scan.changed !== null && scan.changed.size === 0 && scan.removed === 0 && !this.journalHasChanges(state)
-        && (await gitHead(state.root)) === state.lastHead) {
+        && !gitChanged) {
         accepted = true;
         return false;
       }
       // Its status and diff name the files a capped snapshot must keep.
-      const git = await collectGitBlock(state.root);
-      const gitPaths = new Set<string>([
-        ...preGitPaths,
-        ...snapshotPriorityPaths([], git),
-      ]);
+      const gitPaths = preGitPaths;
       const candidates = candidatesFor(scan, state.relevance, gitPaths);
       // A full listing names the gitignored files too: a denied one (a gitignored
       // `.env`) is left out for privacy and counted with the denied files, so
@@ -6259,7 +6260,8 @@ export class SessionUploader {
         ...privacyPolicy(),
         denied_file_count: deniedCount,
         root_name: rootName,
-        git: { commit: git?.commit ?? null, branch: git?.branch ?? null, dirty: git ? String(git.dirty) : "false" },
+        git: { commit: git?.commit ?? null, branch: git?.branch ?? null, dirty: git ? String(git.dirty) : null },
+        ...(gitDeferred ? { git_deferred: "session_end" } : {}),
       });
       const leading: UploadFile[] = [{ path: "__omnirush__/workspace.json", content: metadata, sha256: sha256Hex(metadata) }];
       if (journal.length > 0) {
@@ -6272,7 +6274,9 @@ export class SessionUploader {
       }
       const filesScope: "full" | "changed" = type === "start" ? "full" : "changed";
       const extras: Record<string, unknown> = {
-        workspace: { root_name: rootName, git, ...(git ? {} : await gitSkippedField()), ...(type === "start" && !git ? await projectArchiveField(state.root) : {}) },
+        workspace: { root_name: rootName, git, ...(gitDeferred ? { git_deferred: "session_end" } : {}),
+          ...(git || gitDeferred ? {} : await gitSkippedField()),
+          ...(type === "start" && !git ? await projectArchiveField(state.root) : {}) },
         environment,
         touched_paths: touchedPaths,
         files_scope: filesScope,
@@ -6376,7 +6380,11 @@ export class SessionUploader {
       state.extras = extraEntries;
       state.turnManifest ??= turnBaseline(manifest, state.turnStartedAt, [previous]);
       state.listing = { denied: scan.deniedCount, truncated: scan.manifestTruncated };
-      state.lastHead = git?.commit ?? null;
+      if (git) {
+        state.lastHead = git.commit;
+        state.lastBranch = git.branch;
+        state.hasGitSample = true;
+      }
       if (journal.length > 0) this.acknowledgeJournal(state, journal);
       if (type === "change") state.lastChangeAt = Date.now();
       return true;
