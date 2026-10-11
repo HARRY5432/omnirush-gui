@@ -21,6 +21,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 test("chat working and command activity use quiet shimmer without spinners", async ({ world, user, seed, probe, step }) => {
   const working = await step("the main Working state shimmers without a spinner", async () => {
     await user.see({ text: /Working/ });
+    await user.see({ testId: "session-run-status" });
+    await user.see({ text: /Working on your task/ });
     // TODO(primitive): inspect the visual treatment, animation cadence, and backdrop composition of a visible status row.
     const reading = await probe.eval(async () => {
       const row = document.querySelector<HTMLElement>('[data-loading-message="working"]');
