@@ -227,7 +227,7 @@ export type UploadTrigger =
   | "trace_flush";
 
 /** How a turn ended, when not as answered: "aborted" is a turn the user stopped (Esc, Stop). */
-export type TurnEndOutcome = "aborted";
+export type TurnEndOutcome = "aborted" | "error" | "incomplete";
 type ChangeTrigger = Extract<UploadTrigger, "prompt" | "turn_completed" | "fs_change" | "periodic">;
 
 type UploadFile = {
@@ -434,6 +434,23 @@ type SessionLedgerRecord = {
   endedAt?: string;
   /** The server's word on the chat (GET /me/sessions/{id}/integrity). */
   confirmation?: SessionConfirmation;
+  /** A logical turn left open by a pause, error, or process restart. */
+  replayGroup?: ReplayGroupRecord;
+};
+
+type ReplayGroupPhase = "active" | "paused" | "incomplete";
+
+type ReplayGroupRecord = {
+  id: string;
+  phase: ReplayGroupPhase;
+  promptCount: number;
+  startedAt: number;
+  messageIds?: string[];
+  baselineSnapshot?: { segment: number; sequence: number };
+};
+
+type ReplayGroupState = ReplayGroupRecord & {
+  baselineUnavailable: boolean;
 };
 
 /** The integrity check's state for one chat: final once the server says good or not good. */
@@ -553,6 +570,12 @@ type SessionState = {
   turnStartedAt: number | null;
   /** A prompt was dispatched and its turn has not completed (its turn_completed milestone ends it). */
   turnInProgress: boolean;
+  replayGroup: ReplayGroupState | null;
+  replayFailure: string | null;
+  replayTail: Promise<void>;
+  startingReplayGroup: boolean;
+  captureVerified: boolean;
+  lastWorkspaceCapture: { segment: number; sequence: number } | null;
   /**
    * Edits were made on this session's root while it had no turn in progress
    * and another session on the root had one: they are that turn's, and this
@@ -630,6 +653,7 @@ type JournalMeta = {
   segment: number;
   /** A prompt went out and its turn has not ended. */
   turn_open: boolean;
+  replay_group?: ReplayGroupRecord;
   at: string;
 };
 
@@ -637,6 +661,7 @@ function parseJournalMeta(value: unknown): JournalMeta | null {
   if (!isRecord(value) || value.v !== 1 || typeof value.session_id !== "string" || typeof value.workspace_id !== "string"
     || typeof value.root !== "string" || !Number.isSafeInteger(value.segment) || typeof value.turn_open !== "boolean"
     || typeof value.at !== "string") return null;
+  const replayGroup = replayGroupRecord(value.replay_group);
   return {
     v: 1,
     session_id: value.session_id,
@@ -644,6 +669,7 @@ function parseJournalMeta(value: unknown): JournalMeta | null {
     root: value.root,
     segment: Number(value.segment),
     turn_open: value.turn_open,
+    ...(replayGroup ? { replay_group: replayGroup } : {}),
     at: value.at,
   };
 }
@@ -2474,6 +2500,60 @@ function ledgerModel(value: unknown): UploadSessionModel | undefined {
   return model.provider_id || model.model_id ? model : undefined;
 }
 
+
+function savedPathTimes(value: unknown): Map<string, number> {
+  const result = new Map<string, number>();
+  if (!Array.isArray(value)) return result;
+  for (const entry of value) {
+    if (Array.isArray(entry) && typeof entry[0] === "string" && typeof entry[1] === "number") result.set(entry[0], entry[1]);
+  }
+  return result;
+}
+
+function savedTurnBaseline(value: unknown): TurnBaseline | null {
+  if (!Array.isArray(value)) return null;
+  const result = new Map<string, HashCacheEntry | null>();
+  for (const entry of value) {
+    if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string" ||
+        nodePath.isAbsolute(entry[0]) || entry[0].split(/[\\/]/).includes("..")) return null;
+    const item = entry[1];
+    if (item === null) { result.set(entry[0], null); continue; }
+    if (!isRecord(item) || typeof item.size !== "number" || typeof item.mtimeMs !== "number" ||
+        typeof item.ctimeMs !== "number" || typeof item.ino !== "number" || typeof item.dev !== "number" ||
+        typeof item.binary !== "boolean" || typeof item.sha256 !== "string" || !SHA256_HEX.test(item.sha256) ||
+        typeof item.bytes !== "number" || typeof item.json !== "number" || typeof item.clean !== "boolean" ||
+        typeof item.uploadPath !== "string") return null;
+    result.set(entry[0], {
+      size: item.size, mtimeMs: item.mtimeMs, ctimeMs: item.ctimeMs, ino: item.ino, dev: item.dev,
+      binary: item.binary, sha256: item.sha256, bytes: item.bytes, json: item.json, clean: item.clean,
+      uploadPath: item.uploadPath, ...(typeof item.mode === "number" ? { mode: item.mode } : {}),
+    });
+  }
+  return result;
+}
+
+function replayGroupRecord(value: unknown): ReplayGroupRecord | undefined {
+  if (!isRecord(value)
+    || typeof value.id !== "string"
+    || (value.phase !== "active" && value.phase !== "paused" && value.phase !== "incomplete")
+    || typeof value.promptCount !== "number"
+    || !Number.isSafeInteger(value.promptCount)
+    || value.promptCount < 1
+    || typeof value.startedAt !== "number"
+    || !Number.isSafeInteger(value.startedAt)
+    || value.startedAt < 0) return undefined;
+  return {
+    id: value.id,
+    phase: value.phase,
+    promptCount: value.promptCount,
+    startedAt: value.startedAt,
+    ...(Array.isArray(value.messageIds) ? { messageIds: value.messageIds.filter((id): id is string => typeof id === "string") } : {}),
+    ...(isRecord(value.baselineSnapshot) && typeof value.baselineSnapshot.segment === "number" && typeof value.baselineSnapshot.sequence === "number" ? {
+      baselineSnapshot: { segment: value.baselineSnapshot.segment, sequence: value.baselineSnapshot.sequence },
+    } : {}),
+  };
+}
+
 async function readSessionLedger(path: string | null): Promise<SessionLedger> {
   if (!path) return { version: 1, sessions: {} };
   try {
@@ -2490,6 +2570,7 @@ async function readSessionLedger(path: string | null): Promise<SessionLedger> {
           || (record.sentBytes !== undefined && (!Number.isSafeInteger(record.sentBytes) || record.sentBytes < 0))
           || typeof record.lastSeenAt !== "string") return [];
         const model = ledgerModel(record.model);
+        const replayGroup = replayGroupRecord(record.replayGroup);
         const childSessionIds = Array.isArray(record.childSessionIds)
           ? record.childSessionIds.filter((id): id is string => typeof id === "string" && id.length > 0).slice(0, MAX_CHILD_SESSIONS)
           : [];
@@ -2515,6 +2596,7 @@ async function readSessionLedger(path: string | null): Promise<SessionLedger> {
           ...(Array.isArray(record.refused) ? { refused: record.refused.filter((item): item is string => typeof item === "string").slice(-MAX_REFUSED_SEQUENCES) } : {}),
           ...(optionalString(record.endedAt) ? { endedAt: record.endedAt } : {}),
           ...(parseConfirmation(record.confirmation) ? { confirmation: parseConfirmation(record.confirmation)! } : {}),
+          ...(replayGroup ? { replayGroup } : {}),
         };
         return [[sessionId, cleaned] as const];
       }),
@@ -4694,6 +4776,14 @@ export class SessionUploader {
       ...(state.refused.length > 0 ? { refused: state.refused.slice(-MAX_REFUSED_SEQUENCES) } : {}),
       // A new segment is judged again once it ends.
       ...(state.endedAt ? { endedAt: state.endedAt } : {}),
+      ...(state.replayGroup ? {
+        replayGroup: {
+          id: state.replayGroup.id,
+          phase: state.replayGroup.phase,
+          promptCount: state.replayGroup.promptCount,
+          startedAt: state.replayGroup.startedAt,
+        },
+      } : {}),
     };
   }
 
@@ -4725,6 +4815,11 @@ export class SessionUploader {
     state.model = state.model ?? previous?.model ?? null;
     state.childSessionIds = [...new Set([...(previous?.childSessionIds ?? []), ...state.childSessionIds])];
     state.childCheckpoints = new Map([...Object.entries(previous?.childCheckpoints ?? {}), ...state.childCheckpoints]);
+    const replayGroup = replayGroupRecord(previous?.replayGroup);
+    if (replayGroup) {
+      state.replayGroup = { ...replayGroup, baselineUnavailable: true, phase: "incomplete" };
+      state.turnStartedAt = replayGroup.startedAt;
+    }
     state.resumed = Boolean(previous);
     if (state.resumed) {
       this.appendTrace(state, "session.resumed", {
@@ -4926,7 +5021,7 @@ export class SessionUploader {
     if (!this.enabled || this.sessions.has(sessionId) || !/^[A-Za-z0-9._:-]{8,128}$/.test(sessionId)) return;
     void this.toolchains?.get(root).catch(() => null); // toolchain.ts: collected in the background
     const state = this.newSessionState(sessionId, workspaceId, root, this.acquireCache(root));
-    state.ready = this.prepareSession(state);
+    state.ready = this.prepareSession(state).then(() => this.restoreReplayGroup(state));
     this.sessions.set(sessionId, state);
     this.journalMeta(state);
     // Capture context collects once the start snapshot is out.
@@ -4934,8 +5029,8 @@ export class SessionUploader {
     const startSnapshot = new Promise<void>((resolveStart) => (startSnapshotDone = resolveStart));
     this.context?.sessionStarted(sessionId, root, startSnapshot);
     this.enqueue(state, async () => {
-      await state.ready;
       try {
+        await state.ready;
         // The watchers go up as soon as the start snapshot's listing is in,
         // before any file is read: an edit made during the scan is either
         // seen by the scan or reported by a watcher.
@@ -4983,6 +5078,8 @@ export class SessionUploader {
       turnManifest: null,
       turnStartedAt: null,
       turnInProgress: false,
+      replayGroup: null, replayFailure: null, replayTail: Promise.resolve(),
+      startingReplayGroup: false, captureVerified: false, lastWorkspaceCapture: null,
       changesHeld: false,
       turnSkipped: new Map(),
       turnWrittenPaths: new Map(),
@@ -5641,6 +5738,130 @@ export class SessionUploader {
     }
   }
 
+
+  isTurnPaused(sessionId: string): boolean {
+    const group = this.sessions.get(sessionId)?.replayGroup;
+    return Boolean(group && group.phase !== "active");
+  }
+
+  hasOpenTurn(sessionId: string): boolean {
+    return Boolean(this.sessions.get(sessionId)?.replayGroup);
+  }
+
+  async beginTurn(sessionId: string): Promise<boolean> {
+    const state = this.sessions.get(sessionId);
+    if (!state || state.finished) return !this.enabled;
+    await state.ready;
+    await this.idle(sessionId);
+    if (state.replayFailure || state.replayGroup?.baselineUnavailable) {
+      this.recordReplayGroup(state, "incomplete", "baseline_restore_failed");
+      return false;
+    }
+    if (state.replayGroup) {
+      if (!state.turnManifest) return false;
+      state.replayGroup.phase = "active";
+      state.replayGroup.promptCount += 1;
+      state.turnInProgress = true;
+      this.recordReplayGroup(state, "resumed");
+      await this.saveReplayGroup(state);
+      return true;
+    }
+    state.replayGroup = {
+      id: "rg_" + randomBytes(16).toString("hex"), phase: "active",
+      promptCount: 1, startedAt: Date.now() + 1, baselineUnavailable: false,
+      messageIds: [],
+    };
+    state.startingReplayGroup = true;
+    this.captureSnapshot(sessionId, "prompt");
+    await this.idle(sessionId);
+    state.startingReplayGroup = false;
+    if (state.replayFailure || !state.turnManifest) return false;
+    if (state.replayGroup.phase !== "active") { await this.saveReplayGroup(state); return false; }
+    if (state.lastWorkspaceCapture) state.replayGroup.baselineSnapshot = { ...state.lastWorkspaceCapture };
+    this.recordReplayGroup(state, "start");
+    await this.saveReplayGroup(state);
+    return true;
+  }
+
+  async pauseTurn(sessionId: string, reason = "interrupted"): Promise<void> {
+    const state = this.sessions.get(sessionId);
+    if (!state?.replayGroup) return;
+    if (state.replayGroup.phase !== "paused") {
+      state.replayGroup.phase = "paused";
+      this.recordReplayGroup(state, "paused", reason);
+    }
+    await this.saveReplayGroup(state);
+  }
+
+  private replayFile(state: SessionState): string | null {
+    return this.stateDir ? join(this.stateDir, "capture-turns", createHash("sha256").update(state.id).digest("hex") + ".json") : null;
+  }
+
+  private async saveReplayGroup(state: SessionState): Promise<void> {
+    const file = this.replayFile(state);
+    if (!file) return;
+    const account = await this.currentAccount();
+    const content = state.replayGroup ? JSON.stringify({
+      schema: 1, session_id: state.id, root: resolve(state.root), account,
+      group: state.replayGroup, started_at: state.turnStartedAt,
+      baseline: state.turnManifest ? [...state.turnManifest] : null,
+      skipped: [...state.turnSkipped], written: [...state.turnWrittenPaths],
+    }) : null;
+    const write = state.replayTail.then(async () => {
+      await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+      if (content === null) await rm(file, { force: true });
+      else await writePrivateFileAtomic(file, content);
+    });
+    state.replayTail = write.catch(() => undefined);
+    await write;
+    await this.persistSession(state);
+  }
+
+  private async restoreReplayGroup(state: SessionState): Promise<void> {
+    const file = this.replayFile(state);
+    if (!file) return;
+    try {
+      const fileStat = await stat(file).catch((error: unknown) => {
+        if (isRecord(error) && error.code === "ENOENT") return null;
+        throw error;
+      });
+      if (!fileStat) return;
+      if (fileStat.size > 64 * 1024 * 1024) throw new Error("saved baseline exceeds metadata budget");
+      const value: unknown = JSON.parse(await readFile(file, "utf8"));
+      if (!isRecord(value) || value.schema !== 1 || value.session_id !== state.id ||
+          value.root !== resolve(state.root) || value.account !== await this.currentAccount()) throw new Error("saved baseline belongs to another project or account");
+      const group = replayGroupRecord(value.group);
+      const baseline = savedTurnBaseline(value.baseline);
+      if (!group || !baseline || (state.replayGroup && state.replayGroup.id !== group.id)) throw new Error("saved baseline is invalid");
+      state.replayGroup = { ...group, phase: "paused", baselineUnavailable: false };
+      state.turnManifest = baseline;
+      state.turnStartedAt = group.startedAt;
+      state.turnSkipped = savedPathTimes(value.skipped);
+      state.turnWrittenPaths = savedPathTimes(value.written);
+    } catch {
+      state.replayFailure = "The interrupted turn's original snapshot cannot be restored. Start a new session.";
+      if (state.replayGroup) state.replayGroup.baselineUnavailable = true;
+      this.appendTrace(state, "collector.replay_group", { schema: 1, phase: "incomplete", reason: "baseline_restore_failed" });
+    }
+  }
+
+  private recordReplayGroup(state: SessionState, phase: "start" | "paused" | "resumed" | "completed" | "incomplete", reason?: string): void {
+    const group = state.replayGroup;
+    if (!group) return;
+    this.appendTrace(state, "collector.replay_group", {
+      schema: 1, group_id: group.id,
+      phase,
+      baseline_at: new Date(group.startedAt).toISOString(),
+      ...(group.baselineSnapshot ? { baseline_snapshot: group.baselineSnapshot } : {}),
+      message_ids: group.messageIds ?? [],
+      prompt_count: group.promptCount,
+      ...(group.baselineUnavailable ? { baseline_unavailable: true } : {}),
+      ...(reason ? { reason } : {}),
+    });
+    this.journalMeta(state, true);
+    void this.persistSession(state).catch(() => undefined);
+  }
+
   /**
    * Captures a change snapshot for an engine milestone: right as a prompt is
    * dispatched, or once a turn completes. When nothing changed since the last
@@ -5650,30 +5871,27 @@ export class SessionUploader {
    * MessageAbortedError), recorded on its collector.trigger event (the
    * snapshot's own trigger stays turn_completed, which every backend takes).
    */
+
   captureSnapshot(sessionId: string, trigger: "prompt" | "turn_completed", outcome?: TurnEndOutcome): void {
     const state = this.sessions.get(sessionId);
     if (!state || state.finished) return;
+    if (trigger === "prompt" && state.replayGroup && !state.startingReplayGroup) return;
+    if (outcome && state.replayGroup) {
+      state.replayGroup.phase = outcome === "aborted" ? "paused" : "incomplete";
+      this.recordReplayGroup(state, outcome === "aborted" ? "paused" : "incomplete", outcome);
+    }
     if (trigger === "prompt") {
       state.relevance.clear();
       state.turnWrittenPaths.clear();
-      // After the turn's artifact baseline (set just below) is listed.
       this.context?.turnStarted(sessionId, Promise.resolve().then(() => state.artifactBaseline));
+      state.artifactBaseline = artifactStats(state.root);
+      state.turnStartedAt = state.replayGroup?.startedAt ?? Date.now() + 1;
     } else {
       this.context?.turnEnded(sessionId);
     }
-    // The artifact baseline must reflect the workspace as the turn begins, not
-    // once the queued start snapshot has finished uploading.
-    if (trigger === "prompt") state.artifactBaseline = artifactStats(state.root);
-    // So must the turn's start: what the agent writes while an earlier upload
-    // still holds the queue belongs to this turn. It is the first whole
-    // millisecond after the prompt: Date.now() rounds down, and a file written
-    // just before may carry a later fraction of the same millisecond.
-    if (trigger === "prompt") state.turnStartedAt = Date.now() + 1;
     const startedAt = state.turnStartedAt;
     state.turnInProgress = trigger === "prompt";
-    // A crash from here on leaves the turn open in the journal (or no longer).
     this.journalMeta(state, true);
-    // The milestone carries whatever edits were held back for another session's turn.
     state.changesHeld = false;
     if (state.changeTimer) {
       clearTimeout(state.changeTimer);
@@ -5682,22 +5900,34 @@ export class SessionUploader {
     }
     this.enqueue(state, async () => {
       const previous = state.manifest;
-      await this.captureChange(state, trigger, false, trigger === "turn_completed" && outcome === "aborted" ? outcome : undefined);
+      const captured = await this.captureChange(state, trigger, false, trigger === "turn_completed" ? outcome : undefined);
       const current = state.manifest;
+      if (trigger === "prompt" && state.replayGroup && !captured) {
+        state.replayFailure = "The starting snapshot could not be captured or queued.";
+        this.recordReplayGroup(state, "incomplete", "snapshot_failed");
+        return;
+      }
+      if (trigger === "turn_completed" && state.replayGroup) {
+        const complete = !outcome && state.replayGroup.phase === "active" && captured;
+        if (!complete) {
+          if (!captured) state.replayGroup.phase = "incomplete";
+          this.recordReplayGroup(state, state.replayGroup.phase === "paused" ? "paused" : "incomplete", outcome ?? "capture_not_complete");
+        }
+        await this.recordTurnDiff(state, current, null, complete);
+        if (complete) { this.recordReplayGroup(state, "completed"); state.replayGroup = null; state.turnStartedAt = null; }
+        await this.saveReplayGroup(state);
+        return;
+      }
       if (trigger === "turn_completed") {
-        // A prompt sent since the turn ended (this job waited behind an
-        // upload) began the next turn: what it wrote belongs to that one.
         const next = state.turnStartedAt !== startedAt ? state.turnStartedAt : null;
         if (!current || next === null) return this.recordTurnDiff(state, current, null);
         const taken = turnBaseline(current, next, [previous, state.turnManifest]);
-        // A file nothing saw from before the next turn keeps its entry here.
         return this.recordTurnDiff(state, new Map([...taken].map(([path, entry]) => [path, entry ?? current.get(path)!])), next);
       }
-      // The turn is measured from the workspace as its prompt found it.
       const forcePaths = new Set(
         [...state.turnWrittenPaths].filter(([, at]) => startedAt === null || at >= startedAt).map(([path]) => path),
       );
-      state.turnManifest = current && turnBaseline(current, startedAt, [previous, state.turnManifest], forcePaths);
+      state.turnManifest = current && (state.replayGroup ? new Map(current) : turnBaseline(current, startedAt, [previous, state.turnManifest], forcePaths));
       for (const [path, at] of state.turnSkipped) if (startedAt !== null && at < startedAt) state.turnSkipped.delete(path);
     });
   }
@@ -5712,12 +5942,14 @@ export class SessionUploader {
    * skipped files of a next turn already under way (written since `next`,
    * its prompt) are left to it.
    */
-  private async recordTurnDiff(state: SessionState, after: Manifest | null, next: number | null): Promise<void> {
+  private async recordTurnDiff(state: SessionState, after: Manifest | null, next: number | null, advance = true): Promise<void> {
     const before = state.turnManifest;
     const skipped = state.turnSkipped;
-    state.turnManifest = after;
-    state.turnSkipped = new Map(next === null ? [] : [...skipped].filter(([, at]) => at >= next));
-    state.turnWrittenPaths = new Map(next === null ? [] : [...state.turnWrittenPaths].filter(([, at]) => at >= next));
+    if (advance) {
+      state.turnManifest = after;
+      state.turnSkipped = new Map(next === null ? [] : [...skipped].filter(([, at]) => at >= next));
+      state.turnWrittenPaths = new Map(next === null ? [] : [...state.turnWrittenPaths].filter(([, at]) => at >= next));
+    }
     if (state.finished || !before || !after) return;
     const changes: TurnChange[] = [];
     if (before !== after) {
@@ -5742,7 +5974,7 @@ export class SessionUploader {
       if (input) builder.add(input);
       await yielder.pause();
     }
-    this.appendTrace(state, "turn.diff", builder.finish());
+    this.appendTrace(state, "turn.diff", { ...builder.finish(), ...(state.replayGroup ? { replay_group_id: state.replayGroup.id } : {}) });
   }
 
   /** The entry `change` makes, with its texts when `texts` is set (without, it only needs a status). */
@@ -5793,6 +6025,11 @@ export class SessionUploader {
   finishSession(sessionId: string, finalTrace?: unknown): void {
     const state = this.sessions.get(sessionId);
     if (!state || state.finished) return;
+    if (state.replayGroup) {
+      state.replayGroup.phase = "paused";
+      this.recordReplayGroup(state, "paused", "session_closed");
+      this.enqueue(state, () => this.saveReplayGroup(state));
+    }
     const pendingTrace = state.trace.splice(0);
     if (finalTrace !== undefined) {
       for (const evidence of knownToolPathEvidence("session.completed", finalTrace)) {
@@ -5844,7 +6081,17 @@ export class SessionUploader {
       }
       // Capture context: the turn's last messages (its tool calls) arrive here, not as turn.messages.
       if (isRecord(finalTrace)) this.context?.turnMessages(sessionId, finalTrace.messages, true);
-      pendingTrace.push({ at: new Date().toISOString(), type: "turn.completed", data: finalTrace });
+      if (state.replayGroup && isRecord(finalTrace) && Array.isArray(finalTrace.messages)) {
+        const ids = new Set(state.replayGroup.messageIds ?? []);
+        for (const message of finalTrace.messages) {
+          if (!isRecord(message)) continue;
+          const info = isRecord(message.info) ? message.info : message;
+          if (info.role === "user" && typeof info.id === "string") ids.add(info.id);
+        }
+        state.replayGroup.messageIds = [...ids];
+      }
+      const data = state.replayGroup && isRecord(finalTrace) ? { ...finalTrace, replay_group_id: state.replayGroup.id } : finalTrace;
+      pendingTrace.push({ at: new Date().toISOString(), type: "turn.completed", data });
     }
     if (pendingTrace.length === 0) return;
     this.enqueue(state, async () => {
@@ -5883,6 +6130,7 @@ export class SessionUploader {
     }
     // A spooled upload in flight stays spooled for the next start.
     this.draining?.controller.abort();
+    await this.idleAll();
     for (const sessionId of [...this.sessions.keys()]) this.finishSession(sessionId);
     await Promise.allSettled([...this.sessions.values()].map((state) => state.tail));
     await this.draining?.run.catch(() => undefined);
@@ -5928,7 +6176,7 @@ export class SessionUploader {
    * interval since the last change snapshot is deferred and merged with
    * whatever else arrives before the interval elapses.
    */
-  private async captureChange(state: SessionState, trigger: ChangeTrigger, deferred = false, outcome?: TurnEndOutcome): Promise<void> {
+  private async captureChange(state: SessionState, trigger: ChangeTrigger, deferred = false, outcome?: TurnEndOutcome): Promise<boolean> {
     await state.ready;
     const milestone = trigger === "prompt" || trigger === "turn_completed";
     if (milestone && state.watchMode === "watching") await new Promise((resolvePromise) => setTimeout(resolvePromise, MILESTONE_SETTLE_MS));
@@ -5937,10 +6185,10 @@ export class SessionUploader {
     await state.changeCaptureTail;
     // A finished session is about to upload its end snapshot, which already
     // carries everything a queued change capture would.
-    if (state.finished) return;
+    if (state.finished) return false;
     if (!milestone && this.changesLeftToOthers(state)) {
       this.metrics.capturesHeld += 1;
-      return;
+      return false;
     }
     if (trigger === "turn_completed") {
       await this.captureArtifacts(state).catch((error: unknown) => {
@@ -5953,15 +6201,16 @@ export class SessionUploader {
     if (!(await this.hasPendingChanges(state))) {
       this.metrics.capturesSkipped += 1;
       if (milestone) this.appendTrace(state, "collector.trigger", { trigger, captured: false, ...(outcome ? { outcome } : {}) });
-      return;
+      return state.manifest !== null;
     }
     const wait = !milestone && !deferred && state.lastChangeAt > 0 ? this.minChangeIntervalMs - (Date.now() - state.lastChangeAt) : 0;
     if (wait > 0) {
       this.deferChange(state, trigger, wait);
-      return;
+      return false;
     }
     const captured = await this.uploadWorkspace(state, "change", trigger);
     if (milestone) this.appendTrace(state, "collector.trigger", { trigger, captured, ...(outcome ? { outcome } : {}) });
+    return captured || state.captureVerified;
   }
 
   /** Whether another live session on `state`'s root has a turn in progress. */
@@ -6137,8 +6386,9 @@ export class SessionUploader {
     }
   }
 
-  private enqueue(state: SessionState, operation: () => Promise<void>): void {
-    state.tail = state.tail.then(operation).catch((error: unknown) => {
+  private enqueue(state: SessionState, operation: () => Promise<unknown>): void {
+    state.tail = state.tail.then(operation).then(() => undefined).catch((error: unknown) => {
+      if (state.startingReplayGroup) state.replayFailure = "The starting snapshot failed.";
       this.log("warn", "OmniRush session upload operation failed", {
         sessionId: state.id,
         error: error instanceof Error ? error.message : "unknown",
@@ -6162,6 +6412,7 @@ export class SessionUploader {
    * out.
    */
   private async uploadWorkspace(state: SessionState, type: Exclude<SnapshotType, "trace">, trigger: UploadTrigger): Promise<boolean> {
+    state.captureVerified = false;
     const cache = state.cache;
     // Paths reported from here on belong to the next capture.
     const dirty = state.dirty;
@@ -6230,6 +6481,7 @@ export class SessionUploader {
       if (type === "change" && scan.changed !== null && scan.changed.size === 0 && scan.removed === 0 && !this.journalHasChanges(state)
         && (await gitHead(state.root)) === state.lastHead) {
         accepted = true;
+        state.captureVerified = previous !== null;
         return false;
       }
       // Its status and diff name the files a capped snapshot must keep.
@@ -6372,9 +6624,13 @@ export class SessionUploader {
       // The baseline is the last *accepted* manifest (uploaded or spooled): the
       // next change snapshot reports exactly what moved since this one.
       accepted = true;
+      state.captureVerified = true;
+      state.lastWorkspaceCapture = { segment: state.segment, sequence: state.sequence };
       state.manifest = manifest;
       state.extras = extraEntries;
-      state.turnManifest ??= turnBaseline(manifest, state.turnStartedAt, [previous]);
+      if (!state.replayGroup?.baselineUnavailable) {
+        state.turnManifest ??= turnBaseline(manifest, state.turnStartedAt, [previous]);
+      }
       state.listing = { denied: scan.deniedCount, truncated: scan.manifestTruncated };
       state.lastHead = git?.commit ?? null;
       if (journal.length > 0) this.acknowledgeJournal(state, journal);
@@ -6932,6 +7188,14 @@ export class SessionUploader {
       root: state.root,
       segment: state.segment,
       turn_open: state.turnInProgress,
+      ...(state.replayGroup ? {
+        replay_group: {
+          id: state.replayGroup.id,
+          phase: state.replayGroup.phase,
+          promptCount: state.replayGroup.promptCount,
+          startedAt: state.replayGroup.startedAt,
+        },
+      } : {}),
       at: new Date().toISOString(),
     };
     return JSON.stringify({ m: meta });
@@ -7087,6 +7351,7 @@ export class SessionUploader {
   private async recoverJournal(journal: { path: string; meta: JournalMeta; events: TraceEvent[] }): Promise<void> {
     const { meta, events } = journal;
     const record = this.ledger.sessions[meta.session_id];
+    const replayGroup = replayGroupRecord(meta.replay_group) ?? replayGroupRecord(record?.replayGroup);
     if (events.length > 0) {
       // The segment the events were recorded in, numbered after what it already sent.
       const state = this.newSessionState(meta.session_id, meta.workspace_id, meta.root, new FileHashCache());
@@ -7104,6 +7369,10 @@ export class SessionUploader {
       state.refused = [...(record?.refused ?? [])];
       state.endedAt = record?.endedAt;
       state.resumed = state.segment > 1;
+      if (replayGroup) {
+        state.replayGroup = { ...replayGroup, phase: "incomplete", baselineUnavailable: true };
+        state.turnStartedAt = replayGroup.startedAt;
+      }
       for (const event of events) {
         for (const evidence of knownToolPathEvidence(event.type, event.data)) {
           const path = workspaceRelativePath(state.root, evidence.path.replaceAll("\\", "/"));
@@ -7115,6 +7384,18 @@ export class SessionUploader {
         type: "collector.recovered",
         data: { reason: "restart", turn_open: meta.turn_open, events: events.length, journal_at: meta.at, session_segment: state.segment },
       };
+      if (replayGroup) {
+        events.unshift({
+          at: marker.at,
+          type: "collector.replay_group",
+          data: {
+            group_id: replayGroup.id,
+            phase: "paused",
+            prompt_count: replayGroup.promptCount,
+            reason: "process_restarted",
+          },
+        });
+      }
       try {
         await this.uploadTrace(state, [marker, ...events]);
       } catch (error) {
@@ -7122,7 +7403,16 @@ export class SessionUploader {
         this.log("warn", "OmniRush session journal upload refused; kept for the next start", { sessionId: meta.session_id, error: error instanceof Error ? error.message : "unknown" });
         return;
       }
+      await this.persistSession(state).catch(() => undefined);
       this.log("info", "OmniRush session journal recovered", { sessionId: meta.session_id, events: events.length, turnOpen: meta.turn_open });
+    }
+    if (events.length === 0 && replayGroup && record) {
+      this.ledger.sessions[meta.session_id] = {
+        ...record,
+        replayGroup: { ...replayGroup, phase: "incomplete" },
+        lastSeenAt: new Date().toISOString(),
+      };
+      await this.saveLedger().catch(() => undefined);
     }
     await rm(journal.path, { force: true });
     // The open turn's messages are still in the engine: the host settles it once this chat's recovery is done.

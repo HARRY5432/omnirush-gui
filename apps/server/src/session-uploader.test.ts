@@ -4226,3 +4226,83 @@ describe("integrity confirmation", () => {
     expect(integrityFindings("nope")).toBeNull();
   });
 });
+
+describe("serialized logical turns", () => {
+  type ProofEvent = { type: string; data: {
+    group_id?: string; phase?: string; prompt_count?: number; baseline_snapshot?: { segment: number; sequence: number };
+    trigger?: string; files?: Array<{ path: string; status: string; diff?: string }>;
+    messages?: Array<{ info: { id: string; role: string } }>;
+  } };
+  for (const restart of [false, true]) test("preserves the original baseline after Stop" + (restart ? " and restart" : ""), async () => {
+    const root = await mkdtemp(join(tmpdir(), "serialized-gui-project-")); roots.push(root);
+    const stateDir = await mkdtemp(join(tmpdir(), "serialized-gui-state-")); roots.push(stateDir);
+    await writeFile(join(root, "a.txt"), "original\n");
+    const events: ProofEvent[] = [];
+    const options: ConstructorParameters<typeof SessionUploader>[0] = {
+      stateDir, toolchain: false, context: false, confirm: false,
+      upload: async (_id: string, compressed: Uint8Array) => {
+        const envelope: { snapshot_type: string; trace?: ProofEvent[]; files?: Array<{ path: string; content: string }> } =
+          JSON.parse(zstdDecompressSync(Buffer.from(compressed)).toString("utf8"));
+        if (envelope.snapshot_type === "trace") {
+          const trace: { events?: ProofEvent[] } = JSON.parse(envelope.files?.find(file => file.path === "__omnirush__/trace.json")?.content ?? "{}");
+          events.push(...(envelope.trace ?? trace.events ?? []));
+        }
+        return Response.json({}, { status: 201 });
+      },
+    };
+    const id = "ses_serialized_gui_fixture";
+    let uploader = new SessionUploader(options);
+    try {
+      uploader.startSession(id, "workspace", root);
+      expect(await uploader.beginTurn(id)).toBe(true);
+      await writeFile(join(root, "a.txt"), "partial\n");
+      await writeFile(join(root, "cli.py"), "child created this\n");
+      await uploader.pauseTurn(id);
+      uploader.captureSnapshot(id, "turn_completed", "aborted");
+      uploader.flushTrace(id, { messages: [{ info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "original task" }] }] });
+      await uploader.idle(id);
+      if (restart) {
+        await uploader.stop();
+        uploader = new SessionUploader(options);
+        uploader.startSession(id, "workspace", root);
+      }
+      expect(await uploader.beginTurn(id)).toBe(true);
+      await writeFile(join(root, "a.txt"), "finished\n");
+      uploader.captureSnapshot(id, "turn_completed");
+      uploader.flushTrace(id, { messages: [{ info: { id: "u2", role: "user" }, parts: [{ type: "text", text: "correction" }] }] });
+      await uploader.idle(id);
+      const groups = events.filter(event => event.type === "collector.replay_group").map(event => event.data);
+      expect(new Set(groups.map(group => group.group_id)).size).toBe(1);
+      expect(groups.some(group => group.phase === "resumed" && group.prompt_count === 2)).toBe(true);
+      expect(groups.at(-1)?.phase).toBe("completed");
+      expect(groups[0]?.baseline_snapshot?.sequence).toBeGreaterThan(0);
+      expect(groups.at(-1)?.baseline_snapshot).toEqual(groups[0]?.baseline_snapshot);
+      const diff = events.filter(event => event.type === "turn.diff").at(-1)?.data.files;
+      expect(diff?.find(file => file.path === "a.txt")?.diff).toContain("-original");
+      expect(diff?.find(file => file.path === "a.txt")?.diff).toContain("+finished");
+      expect(diff?.find(file => file.path === "cli.py")?.status).toBe("added");
+      expect(events.filter(event => event.type === "collector.trigger" && event.data.trigger === "prompt").length).toBe(1);
+      expect(events.filter(event => event.type === "turn.completed").flatMap(event => event.data.messages ?? []).map(message => message.info.id)).toEqual(["u1", "u2"]);
+      expect(await uploader.beginTurn(id)).toBe(true);
+      uploader.flushTrace(id); await uploader.idle(id);
+      expect(new Set(events.filter(event => event.type === "collector.replay_group").map(event => event.data.group_id)).size).toBe(2);
+    } finally { await uploader.stop(); }
+  });
+
+  test("does not reuse an old accepted snapshot when the new one is refused", async () => {
+    const root = await mkdtemp(join(tmpdir(), "serialized-gui-refused-")); roots.push(root);
+    await writeFile(join(root, "a.txt"), "old");
+    let refuse = false;
+    const uploader = new SessionUploader({
+      toolchain: false, context: false,
+      upload: async () => Response.json({}, { status: refuse ? 400 : 201 }),
+    });
+    const id = "ses_serialized_gui_failure";
+    try {
+      uploader.startSession(id, "workspace", root); await uploader.idle(id);
+      await writeFile(join(root, "a.txt"), "changed before prompt");
+      refuse = true;
+      expect(await uploader.beginTurn(id)).toBe(false);
+    } finally { await uploader.stop(); }
+  });
+});

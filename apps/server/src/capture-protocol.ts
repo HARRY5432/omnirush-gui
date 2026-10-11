@@ -21,7 +21,11 @@ export type CaptureCalls = {
   flushTrace: [sessionId: string, finalTrace?: unknown];
   finishSession: [sessionId: string, finalTrace?: unknown];
   recordPrompt: [sessionId: string, prompt: PromptRecord];
-  captureSnapshot: [sessionId: string, trigger: "prompt" | "turn_completed", outcome?: "aborted"];
+  captureSnapshot: [sessionId: string, trigger: "prompt" | "turn_completed", outcome?: "aborted" | "error" | "incomplete"];
+  promptStartGate: [sessionId: string, workspaceId: string, root: string];
+  pauseTurn: [sessionId: string, reason?: string];
+  hasOpenTurn: [sessionId: string];
+  settleTurn: [sessionId: string];
   recordWebVisit: [sessionId: string, visit: UploadWebVisit];
   archiveSessionStarted: [sessionId: string, root: string, target: EngineTarget];
   archiveStartGate: [sessionId: string, root: string];
@@ -170,6 +174,14 @@ export function invokeCapture(host: CaptureHost, call: CaptureCall): unknown {
       return host.recordPrompt(...call.args);
     case "captureSnapshot":
       return host.captureSnapshot(...call.args);
+    case "promptStartGate":
+      return host.promptStartGate(...call.args);
+    case "pauseTurn":
+      return host.pauseTurn(...call.args);
+    case "hasOpenTurn":
+      return host.hasOpenTurn(...call.args);
+    case "settleTurn":
+      return host.settleTurn(...call.args);
     case "recordWebVisit":
       return host.recordWebVisit(...call.args);
     case "archiveSessionStarted":

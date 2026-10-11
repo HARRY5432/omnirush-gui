@@ -83,7 +83,12 @@ export type CaptureService = {
   finishSession(sessionId: string, finalTrace?: unknown): void;
   /** The "engine.request" event of a captured request (its body parsed off the main thread), plus a prompt's attachments. */
   recordPrompt(sessionId: string, prompt: Omit<PromptRecord, "body"> & { body: ArrayBuffer | undefined }): void;
-  captureSnapshot(sessionId: string, trigger: "prompt" | "turn_completed", outcome?: "aborted"): void;
+  captureSnapshot(sessionId: string, trigger: "prompt" | "turn_completed", outcome?: "aborted" | "error" | "incomplete"): void;
+  /** Resolves true only after the session's original start baseline was accepted or spooled. */
+  promptStartGate(sessionId: string, workspaceId: string, root: string): Promise<boolean>;
+  pauseTurn(sessionId: string, reason?: string): Promise<void>;
+  hasOpenTurn(sessionId: string): Promise<boolean>;
+  settleTurn(sessionId: string): Promise<void>;
   /** Whether the visit is recorded (a tracked session and an uploadable URL). */
   recordWebVisit(sessionId: string, visit: UploadWebVisit): boolean;
   archiveSessionStarted(sessionId: string, root: string, target: EngineTarget): void;
@@ -209,8 +214,31 @@ class CaptureClient implements CaptureService {
     this.send({ kind: "call", id: null, method: "recordPrompt", args: [sessionId, { ...prompt, body }] }, body ? [body.buffer] : []);
   }
 
-  captureSnapshot(sessionId: string, trigger: "prompt" | "turn_completed", outcome?: "aborted"): void {
+  captureSnapshot(sessionId: string, trigger: "prompt" | "turn_completed", outcome?: "aborted" | "error" | "incomplete"): void {
     this.send({ kind: "call", id: null, method: "captureSnapshot", args: outcome ? [sessionId, trigger, outcome] : [sessionId, trigger] });
+  }
+
+  async promptStartGate(sessionId: string, workspaceId: string, root: string): Promise<boolean> {
+    if (!this.hasSession(sessionId)) this.startSession(sessionId, workspaceId, root);
+    return (await this.query({ kind: "call", id: null, method: "promptStartGate", args: [sessionId, workspaceId, root] })) === true;
+  }
+
+  async pauseTurn(sessionId: string, reason?: string): Promise<void> {
+    if (await this.query({ kind: "call", id: null, method: "pauseTurn", args: [sessionId, reason] }) !== true) {
+      throw new Error("Capture did not acknowledge the interrupted turn.");
+    }
+  }
+
+  async hasOpenTurn(sessionId: string): Promise<boolean> {
+    const value = await this.query({ kind: "call", id: null, method: "hasOpenTurn", args: [sessionId] });
+    if (typeof value !== "boolean") throw new Error("Capture turn status is unavailable.");
+    return value;
+  }
+
+  async settleTurn(sessionId: string): Promise<void> {
+    if (await this.query({ kind: "call", id: null, method: "settleTurn", args: [sessionId] }) !== true) {
+      throw new Error("Capture did not acknowledge the completed turn.");
+    }
   }
 
   recordWebVisit(sessionId: string, visit: UploadWebVisit): boolean {
