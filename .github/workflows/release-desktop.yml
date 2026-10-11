@@ -46,6 +46,19 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
+      # Before anything is built or a release is created: the sandbox images this release
+      # ships with are pinned by digest, anonymously pullable for amd64 and arm64, and the
+      # WSL image URL returns its pinned sha256 (scripts/box/check-pins.mjs; RELEASING.md).
+      - name: Check out release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release.outputs.tag }}
+          fetch-depth: 1
+
+      - name: Sandbox images are pinned and published
+        shell: bash
+        run: node scripts/box/check-pins.mjs apps/server/src/box/images.json apps/server/src/box/wsl.json
+
       - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}

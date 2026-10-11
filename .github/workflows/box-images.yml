@@ -1,26 +1,70 @@
-# Builds and pushes the OmniRush box images (apps/desktop/box/images/<stack>/Dockerfile,
-# the same files as omnirush-cli box/images) for linux/amd64 and linux/arm64: base first,
-# the stacks FROM base@digest. Manual only. Published from this public repository, the
-# packages are public and linked to it. The refs are the ones the CLI and the app pin
-# (src/box/images.json); the job prints each digest.
+# Publishes one box version (apps/desktop/box/VERSION): the sandbox images
+# ghcr.io/omnirush-ai/box-{base,go,rust,java,ruby}:<version> for linux/amd64 and
+# linux/arm64, and the OmniRush WSL image (omnirush-wsl-<version>-<arch>.tar.gz) on the
+# `box-<version>` release of this repository, with box-pins.json beside it.
+#
+# Published from this public repository with GITHUB_TOKEN, the packages are public and
+# linked here. Each image and WSL asset carries a hash of its sources: a version that
+# already exists with the same sources is reused as it is, so a run is safe to repeat; one
+# that exists with other sources fails (bump apps/desktop/box/VERSION).
+#
+# Afterwards both repositories take the pins with `node scripts/box/pins.mjs <version>`
+# (images.json and wsl.json, byte-identical) and commit them. The release guard
+# (scripts/box/check-pins.mjs) refuses an app release without them. See RELEASING.md.
 name: box-images
 on:
+  push:
+    branches: [main]
+    paths:
+      - apps/desktop/box/VERSION
+      - apps/desktop/box/images/**
+      - apps/desktop/box/wsl/**
   workflow_dispatch:
     inputs:
-      version:
-        description: "image tag, e.g. 2026.10.1"
-        required: true
-      stacks:
-        description: "stacks after base (space separated)"
-        default: "go rust java ruby"
+      adopt_existing:
+        description: "Reuse images of this version published before source hashes were recorded"
+        type: boolean
+        default: false
 permissions:
-  contents: read
+  contents: write
   packages: write
+concurrency:
+  group: box-images
+  cancel-in-progress: false
+env:
+  BOX_DIR: apps/desktop/box
 jobs:
-  build:
+  prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          set -euo pipefail
+          version=$(tr -d ' \n' < "$BOX_DIR/VERSION")
+          [[ "$version" =~ ^[0-9]{4}\.[0-9]{1,2}\.[0-9]+$ ]] || { echo "::error::bad box version '$version'"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Release box-${{ steps.v.outputs.version }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "box-$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "box-$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false \
+              --title "Sandbox images $VERSION" \
+              --notes "Sandbox images for box version $VERSION: the OmniRush WSL image for Windows, and box-pins.json with the pinned image digests. The Linux images are ghcr.io/omnirush-ai/box-{base,go,rust,java,ruby}:$VERSION."
+          fi
+
+  images:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
     env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      ADOPT: ${{ inputs.adopt_existing || false }}
       SOURCE: https://github.com/${{ github.repository }}
     steps:
       - uses: actions/checkout@v4
@@ -31,26 +75,133 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: base
-        id: base
+      - name: Build or reuse each image
         run: |
           set -euo pipefail
-          ref=ghcr.io/omnirush-ai/box-base:${{ inputs.version }}
-          docker buildx build --platform linux/amd64,linux/arm64 --provenance=false --push \
-            --label "org.opencontainers.image.source=$SOURCE" -t "$ref" --metadata-file base.json apps/desktop/box/images/base
-          digest=$(jq -r '."containerimage.digest"' base.json)
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
-          echo "base $ref@$digest" >> pins.txt
-      - name: stacks
-        run: |
-          set -euo pipefail
-          for stack in ${{ inputs.stacks }}; do
-            ref=ghcr.io/omnirush-ai/box-$stack:${{ inputs.version }}
-            docker buildx build --platform linux/amd64,linux/arm64 --provenance=false --push \
-              --label "org.opencontainers.image.source=$SOURCE" \
-              --build-arg BASE=ghcr.io/omnirush-ai/box-base@${{ steps.base.outputs.digest }} \
-              -t "$ref" --metadata-file "$stack.json" "apps/desktop/box/images/$stack"
-            echo "$stack $ref@$(jq -r '."containerimage.digest"' "$stack.json")" >> pins.txt
+          tree_hash() { (cd "$1" && find . -type f -print0 | sort -z | xargs -0 sha256sum) | sha256sum | cut -c1-64; }
+          base_src=$(tree_hash "$BOX_DIR/images/base")
+          base_digest=""
+          echo '{}' > digests.json
+          for stack in base go rust java ruby; do
+            ref="ghcr.io/omnirush-ai/box-$stack:$VERSION"
+            if [ "$stack" = base ]; then src=$base_src; else src=$(printf '%s %s' "$(tree_hash "$BOX_DIR/images/$stack")" "$base_src" | sha256sum | cut -c1-64); fi
+            if docker buildx imagetools inspect "$ref" >/dev/null 2>&1; then
+              digest=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' | jq -r .digest)
+              label=$(docker buildx imagetools inspect "$ref" --format '{{json .Image}}' | jq -r '."linux/amd64".config.Labels["ai.omnirush.box.source"] // empty')
+              if [ "$label" = "$src" ]; then echo "box-$stack:$VERSION exists with these sources: reused"
+              elif [ -z "$label" ] && [ "$ADOPT" = true ]; then echo "::warning::box-$stack:$VERSION has no source hash: adopted as published"
+              else echo "::error::box-$stack:$VERSION exists with other sources: bump $BOX_DIR/VERSION"; exit 1; fi
+            else
+              args=(--platform linux/amd64,linux/arm64 --provenance=false --push -t "$ref" --metadata-file "$stack.meta.json"
+                    --label "org.opencontainers.image.source=$SOURCE" --label "ai.omnirush.box.source=$src")
+              [ "$stack" = base ] || args+=(--build-arg "BASE=ghcr.io/omnirush-ai/box-base@$base_digest")
+              docker buildx build "${args[@]}" "$BOX_DIR/images/$stack"
+              digest=$(jq -r '."containerimage.digest"' "$stack.meta.json")
+            fi
+            [ "$stack" = base ] && base_digest=$digest
+            jq --arg s "$stack" --arg d "$digest" '.[$s] = $d' digests.json > d.tmp && mv d.tmp digests.json
+            echo "$stack $ref@$digest"
           done
-          cat pins.txt
-          cat pins.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: images.json
+        run: |
+          set -euo pipefail
+          node --input-type=module -e '
+            import { readFileSync, writeFileSync } from "node:fs";
+            const version = process.env.VERSION, digests = JSON.parse(readFileSync("digests.json", "utf8"));
+            const ACCEPT = "application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json";
+            const images = {};
+            for (const stack of ["base", "go", "rust", "java", "ruby"]) {
+              const repo = `omnirush-ai/box-${stack}`;
+              const { token } = await (await fetch(`https://ghcr.io/token?scope=repository:${repo}:pull`)).json();
+              const get = async (ref) => (await fetch(`https://ghcr.io/v2/${repo}/manifests/${ref}`, { headers: { Authorization: `Bearer ${token}`, Accept: ACCEPT } })).json();
+              const index = await get(digests[stack]);
+              const amd64 = index.manifests.find((m) => m.platform?.architecture === "amd64");
+              const bytes = (await get(amd64.digest)).layers.reduce((n, l) => n + l.size, 0);
+              images[stack] = { ref: `ghcr.io/omnirush-ai/box-${stack}:${version}`, digest: digests[stack], approx_mb: Math.round(bytes / 1e7) * 10 };
+            }
+            writeFileSync("images.json", JSON.stringify({ version, registry: "ghcr.io/omnirush-ai", images }));'
+          cat images.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: box-images-json
+          path: images.json
+
+  wsl:
+    needs: prepare
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      ARCH: ${{ matrix.arch }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: apps/desktop/box/go/go.mod
+          cache: false
+      - name: Build or reuse the WSL image
+        run: |
+          set -euo pipefail
+          tag="box-$VERSION"; name="omnirush-wsl-$VERSION-$ARCH"
+          src=$( (cd "$BOX_DIR/wsl" && find . -type f -print0 | sort -z | xargs -0 sha256sum) | sha256sum | cut -c1-64)
+          mkdir -p dist
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' | grep -qx "$name.tar.gz"; then
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" -p "$name.tar.gz" -p "$name.source" -D dist
+            [ "$(cat "dist/$name.source")" = "$src" ] || { echo "::error::$name exists with other sources: bump $BOX_DIR/VERSION"; exit 1; }
+            echo "$name exists with these sources: reused"
+          else
+            for cmd in boxrun boxd; do
+              (cd "$BOX_DIR/go" && CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpath -buildvcs=false \
+                -ldflags "-s -w -X main.version=box-$VERSION" -o "../bin/linux-$ARCH/$cmd" "./cmd/$cmd")
+            done
+            bash "$BOX_DIR/wsl/build-rootfs.sh" "$VERSION" "$ARCH" dist
+            printf '%s\n' "$src" > "dist/$name.source"
+            gh release upload "$tag" --repo "$GITHUB_REPOSITORY" "dist/$name.tar.gz" "dist/$name.source"
+          fi
+          sha=$(sha256sum "dist/$name.tar.gz" | cut -d' ' -f1); bytes=$(stat -c %s "dist/$name.tar.gz")
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/$name.tar.gz"
+          jq -n --arg url "$url" --arg sha "$sha" --argjson bytes "$bytes" '{url: $url, sha256: $sha, bytes: $bytes}' > "wsl-$ARCH.json"
+          cat "wsl-$ARCH.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: box-wsl-${{ matrix.arch }}
+          path: wsl-${{ matrix.arch }}.json
+
+  pins:
+    needs: [prepare, images, wsl]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: parts
+          merge-multiple: true
+      - name: box-pins.json
+        run: |
+          set -euo pipefail
+          base=$(sed -n 's/^FROM \(debian:[^ ]*\).*/\1/p' "$BOX_DIR/wsl/Dockerfile" | head -1)
+          jq -n --slurpfile images parts/images.json --slurpfile a parts/wsl-amd64.json --slurpfile b parts/wsl-arm64.json \
+            --arg version "$VERSION" --arg base "$base" \
+            '{images: $images[0], wsl: {version: $version, distro: "OmniRushBox", base: $base, assets: {amd64: $a[0], arm64: $b[0]}}}' > box-pins.json
+          gh release upload "box-$VERSION" --repo "$GITHUB_REPOSITORY" --clobber box-pins.json
+      - name: Check the pins and show them
+        run: |
+          set -euo pipefail
+          node scripts/box/pins.mjs --file box-pins.json
+          node scripts/box/check-pins.mjs
+          {
+            echo "### Box $VERSION pins"
+            echo 'In each repository: `node scripts/box/pins.mjs '"$VERSION"'`, then commit `images.json` and `wsl.json` (CLI: src/box/, desktop: apps/server/src/box/).'
+            echo '```diff'; git diff -- apps/server/src/box/images.json apps/server/src/box/wsl.json; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
