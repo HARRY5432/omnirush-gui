@@ -175,6 +175,8 @@ import {
   seedOmniRushWorkspaceConfigIfEmpty,
   writeOmniRushWorkspaceConfig,
 } from "./omnirush-workspace-config-store.js";
+import { boxServiceFor } from "./box/desktop.js";
+import { rememberServerDefault } from "./box/launch.js";
 import { buildOmniRushRuntimeConfigObject, omnirushGatewayConfigured, omnirushRuntimeConfigFilePath, writeOmniRushRuntimeConfigFile } from "./omnirush-runtime-config.js";
 import { assertMcpAllowed, mcpAllowed, mcpPolicyForConfig, MCP_DISABLED_MESSAGE } from "./mcp-policy.js";
 import { omnirushModelWantsReasoningSummary, readOmniRushModelCatalog } from "./omnirush-model-catalog.js";
@@ -1137,6 +1139,17 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
     },
   });
   captureServicesByServer.set(config, capture);
+  // The Linux sandbox (box/): every workspace whose box is on is planned in the background (a missing
+  // image starts downloading), and the server's default (local_box) is read for the engine config.
+  const boxes = boxServiceFor(config, (level, message, attributes) => logger.log(level, message, attributes));
+  void boxes.ensureAll();
+  if (gatewayBroker.enabled) {
+    void gatewayBroker.sessionUploadCapabilities().then(async (capabilities) => {
+      if (!rememberServerDefault(runtimeStorageDir(config), capabilities)) return;
+      await applyBoxEngineConfig(config, "local_box_default");
+      await boxes.ensureAll();
+    }).catch(() => undefined);
+  }
   if (config.clearUploadQueue) {
     // The user signed out: what the last account queued is deleted before anything else runs.
     await Promise.race([capture.signOut(), new Promise((resolvePromise) => setTimeout(resolvePromise, 10_000).unref?.())]);
@@ -1584,7 +1597,13 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
       // archive part uploads in flight are aborted before anything else runs.
       // The project archive packs its final archives only while the account
       // is still stored (an app quit, a restart), never after a sign-out.
-      const captureStopped = capture.stop({ archiveFinals: accountStillStored() });
+      // Before them, each chat in a box gets its last checkpoint (bounded; only when chats ran in a
+      // box this run, and the account answers it is still stored within a second).
+      const archiveFinals = accountStillStored();
+      if (boxes.hasChats() && await Promise.race([archiveFinals.catch(() => false), new Promise<false>((resolvePromise) => setTimeout(() => resolvePromise(false), 1_000).unref?.())])) {
+        await boxes.finals({ budgetMs: 10_000 }).catch(() => []);
+      }
+      const captureStopped = capture.stop({ archiveFinals });
       bestPracticesReloads.stop();
       let recoveryError: unknown;
       try { await taskRecovery?.stop(); } catch (error) { recoveryError = error; }
@@ -1779,10 +1798,15 @@ export async function proxyOpencodeV2Request(input: {
     ? sessionId
     : null;
   const engine = capture && uploadedSessionId ? engineTarget(input.connection.url, headers, target.search, "v2") : null;
+  // The Linux sandbox (box/): a prompt of a workspace whose box is on starts the box, and takes the turn's checkpoint when it is captured.
+  const boxInfo = promptDispatch && sessionId
+    ? await boxServiceFor(input.config).beforePrompt(sessionId, input.workspace, { capture: Boolean(uploadedSessionId && engine) })
+    : null;
   if (capture && uploadedSessionId && engine) {
     // The turn before's background processes finish writing (at most 10 s after it ended), then
     // capture v2's session-start manifest is taken before the prompt reaches the engine (at most about 3 s).
     await capture.archiveStartGate(uploadedSessionId, input.workspace.path, lateWritesGate(input.workspace));
+    capture.boxSession(uploadedSessionId, boxInfo);
     capture.startSession(uploadedSessionId, input.workspace.id, input.workspace.path);
     capture.recordPrompt(uploadedSessionId, { method, path: routePath, body: requestBody, engine: "v2", root: input.workspace.path, attachments: true, dispatchedAt: Date.now() });
     capture.captureSnapshot(uploadedSessionId, "prompt");
@@ -2145,12 +2169,18 @@ export async function proxyOpencodeRequest(input: {
   // A chat the engine does not have (a stale tab, a deleted chat) is not
   // started: its prompt is refused, and it would only leave an empty start
   // and end snapshot behind.
-  if (capture?.uploadEnabled && uploadedSessionId && workspace && workspace.workspaceType !== "remote"
-    && (capture.hasSession(uploadedSessionId) || await engineHasSession(baseUrl, auth, directory, uploadedSessionId))) {
+  const captured = Boolean(capture?.uploadEnabled && uploadedSessionId && workspace && workspace.workspaceType !== "remote"
+    && (capture.hasSession(uploadedSessionId) || await engineHasSession(baseUrl, auth, directory, uploadedSessionId)));
+  // The Linux sandbox (box/): a prompt of a workspace whose box is on starts the box, and takes the turn's checkpoint when it is captured.
+  const boxInfo = workspace && uploadedSessionId && isUploadPromptDispatch(method, proxyPath)
+    ? await boxServiceFor(input.config).beforePrompt(uploadedSessionId, workspace, { capture: captured })
+    : null;
+  if (capture && captured && uploadedSessionId && workspace) {
     const promptDispatch = isUploadPromptDispatch(method, proxyPath);
     // The turn before's background processes finish writing (at most 10 s after it ended), then
     // capture v2's session-start manifest is taken before the prompt reaches the engine (at most about 3 s).
     if (promptDispatch) await capture.archiveStartGate(uploadedSessionId, workspace.path, lateWritesGate(workspace, pool?.snapshot().generations.map((generation) => generation.pid) ?? []));
+    if (promptDispatch) capture.boxSession(uploadedSessionId, boxInfo);
     capture.startSession(uploadedSessionId, workspace.id, workspace.path);
     capture.recordPrompt(uploadedSessionId, {
       method,
@@ -2710,6 +2740,26 @@ function sanitizeProxyResponse(response: Response): Response {
     statusText: response.statusText,
     headers,
   });
+}
+
+/**
+ * The Linux sandbox's engine bits (box/service.ts engineBits) may have
+ * changed: the engine config file is written again and, when it changed,
+ * the managed engine rolls over to it (as for a best-practices change).
+ */
+async function applyBoxEngineConfig(config: ServerConfig, reason: string): Promise<{ status: "unchanged" | "applied" | "deferred" | "failed" | "unmanaged" }> {
+  try {
+    const written = await writeOmniRushRuntimeConfigFile(config);
+    if (!written.changed) return { status: "unchanged" };
+    const pool = enginePoolForConfig(config);
+    const workspaces = config.workspaces.filter((workspace) => resolveWorkspaceOpencodeConnection(config, workspace).baseUrl?.trim());
+    const workspace = findManagedEngineWorkspace(workspaces) ?? workspaces[0];
+    if (!pool || !workspace) return { status: "unmanaged" };
+    const outcome = await pool.requestRollover({ reason, workspace, manual: true });
+    return { status: outcome.action === "coalesced" ? "deferred" : outcome.action === "skipped" ? "failed" : "applied" };
+  } catch {
+    return { status: "failed" };
+  }
 }
 
 function jsonResponse(data: unknown, status = 200) {
@@ -3710,6 +3760,35 @@ function createRoutes(
     // client's engine reload re-reads it.
     await writeOmniRushRuntimeConfigFile(config);
     return jsonResponse({ ok: true, changed: result.changed, ...resolveApprovalMode(result.config) });
+  });
+
+  // The Linux sandbox (box/): a workspace's choice, its status, and its reset.
+  addRoute(routes, "GET", "/workspace/:id/box", "client", async (ctx) => {
+    const workspace = await resolveWorkspace(config, ctx.params.id);
+    return jsonResponse(await boxServiceFor(config).status(workspace, { fresh: ctx.url.searchParams.get("fresh") === "1" }));
+  });
+
+  addRoute(routes, "PUT", "/workspace/:id/box", "client", async (ctx) => {
+    ensureWritable(config);
+    requireClientScope(ctx, "collaborator");
+    const workspace = await resolveWorkspace(config, ctx.params.id);
+    const body = await readJsonBody(ctx.request);
+    const mode = body.mode;
+    if ((mode !== "on" && mode !== "off" && mode !== null) || Object.keys(body).some((key) => key !== "mode")) {
+      throw new ApiError(400, "invalid_payload", "mode must be \"on\", \"off\" or null and the only field");
+    }
+    if (workspace.workspaceType !== "local") throw new ApiError(400, "box_unsupported", "The sandbox is for folders on this computer");
+    const status = await boxServiceFor(config).setMode(workspace, mode);
+    // The engine gets the box shell and plugin when the first workspace turns its box on.
+    const engine = await applyBoxEngineConfig(config, "local_box");
+    return jsonResponse({ ...status, engine });
+  });
+
+  addRoute(routes, "POST", "/workspace/:id/box/reset", "client", async (ctx) => {
+    ensureWritable(config);
+    requireClientScope(ctx, "collaborator");
+    const workspace = await resolveWorkspace(config, ctx.params.id);
+    return jsonResponse(await boxServiceFor(config).reset(workspace));
   });
 
   // Files used (session-archive/files-used.ts): what omnirush.ai says, for the app's one-time notice of its line.

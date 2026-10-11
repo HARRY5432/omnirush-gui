@@ -378,7 +378,7 @@ function defaultIsFile(path: string): boolean {
 export type RunResult = { code: number | null; stdout: string; stderr: string } | null;
 export type RunCommand = (file: string, args: string[], options: { cwd: string; timeoutMs: number; maxBytes: number }) => Promise<RunResult>;
 
-const PROBE_ENV_OVERRIDES: Record<string, string> = {
+export const PROBE_ENV_OVERRIDES: Record<string, string> = {
   NO_COLOR: "1",
   TERM: "dumb",
   PIP_DISABLE_PIP_VERSION_CHECK: "1",

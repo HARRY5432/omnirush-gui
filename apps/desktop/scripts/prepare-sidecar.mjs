@@ -417,3 +417,10 @@ try {
   console.error(`Failed to write versions.json: ${error}`);
   process.exit(1);
 }
+
+// The Linux sandbox's helpers (boxsh, boxd) beside the engine: optional, never fatal.
+try {
+  await import("./prepare-box-helpers.mjs");
+} catch (error) {
+  console.warn(`Sandbox helpers not prepared: ${error instanceof Error ? error.message : String(error)}`);
+}

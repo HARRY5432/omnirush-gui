@@ -28,6 +28,10 @@ import type { CaptureStopOptions } from "./capture-protocol.js";
 import { SessionArchiver, type FilesUsedStatus, type SessionArchiverOptions } from "./session-archive/index.js";
 import { ProjectArchiveLifecycle, type ArchiveLifecycleLog, type LateWrites } from "./session-archive/lifecycle.js";
 import { settleLateWriters, type SettleResult } from "./session-archive/late-writes.js";
+import { isAbsolute, relative, sep } from "node:path";
+import { boxSnapshotsDir } from "./box/box.js";
+import type { BoxCaptureInfo } from "./box/service.js";
+import { sandboxFilesUsed, type FilesUsedSandbox } from "./session-archive/files-used-sandbox.js";
 import { SessionUploader, type RecoveredTurn, type TraceCapabilities, type UploadMetrics, type UploadRequestOptions, type UploadWebVisit } from "./session-uploader.js";
 
 export type { EngineReplacement, EngineTarget } from "./session-upload-observer.js";
@@ -113,6 +117,11 @@ export type CaptureDiagnostics = {
   cache: { roots: number; entries: number };
 };
 
+function outsideRoot(root: string, path: string): boolean {
+  const rel = relative(root, path);
+  return rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
+}
+
 function requestPayload(body: Uint8Array | null): unknown {
   if (!body || body.byteLength > MAX_TRACED_REQUEST_BYTES) return undefined;
   try {
@@ -135,9 +144,14 @@ export class CaptureHost {
   private readonly promptAt = new Map<string, number>();
   /** The latest prompt's wait for the turn before's background processes, when it found any ("turn.late"). */
   private readonly lateSettles = new Map<string, SettleResult>();
+  /** Chats in a Linux sandbox: their files used outside the project are read in the container (one view per container). */
+  private readonly boxViews = new Map<string, FilesUsedSandbox>();
+  private readonly boxChats = new Map<string, string>();
+  private readonly log: CaptureLog;
 
   constructor(options: CaptureHostOptions) {
     this.engineTarget = options.engineTarget;
+    this.log = options.log;
     this.sessionUploader = new SessionUploader({
       ...options.sessionUploader,
       stateDir: options.stateDir,
@@ -155,7 +169,13 @@ export class CaptureHost {
       ...(options.installLog ? { installLog: options.installLog } : {}),
       ...(options.onSessionClosed ? { onSessionClosed: options.onSessionClosed } : {}),
       // The touched-files archive hears of every path a session touches, here on the same thread.
-      onPathTouched: (sessionId, path) => this.archive.pathTouched(sessionId, path),
+      onPathTouched: (sessionId, path) => {
+        // A chat in a box: a path outside the project names a file in the container, not on this
+        // machine; the box's turn checkpoints carry those.
+        const root = this.sessionRoots.get(sessionId);
+        if (root && this.sessionUploader.inBox(sessionId) && isAbsolute(path) && outsideRoot(root, path)) return;
+        this.archive.pathTouched(sessionId, path);
+      },
       // Capture v2: a binary file is never sent as text; the project archive keeps it byte for byte.
       onBinaryFile: (sessionId, path) => this.archive.binaryFile(sessionId, path),
     });
@@ -165,6 +185,12 @@ export class CaptureHost {
       archiver: new SessionArchiver({
         stateDir: options.stateDir,
         excludedDirs,
+        // The Linux sandbox's turn checkpoints (box/service.ts saves them there).
+        sandboxSnapshotsDir: boxSnapshotsDir(options.stateDir),
+        filesUsedSandbox: (sessionId) => {
+          const container = this.boxChats.get(sessionId);
+          return container ? this.boxViews.get(container) ?? null : null;
+        },
         folderGate,
         log: options.log,
         ...auth,
@@ -185,6 +211,20 @@ export class CaptureHost {
   startSession(sessionId: string, workspaceId: string, root: string): void {
     this.sessionRoots.set(sessionId, root);
     this.sessionUploader.startSession(sessionId, workspaceId, root);
+  }
+
+  /** The chat's prompts run in its project's box (or no longer: null); sent before its startSession. */
+  boxSession(sessionId: string, box: BoxCaptureInfo | null): void {
+    this.sessionUploader.setBox(sessionId, box);
+    if (!box) {
+      this.boxChats.delete(sessionId);
+      return;
+    }
+    this.boxChats.set(sessionId, box.container);
+    if (!this.boxViews.has(box.container)) {
+      const view = sandboxFilesUsed({ container: box.container, manifest: { home: "/root", workspaces: [box.croot] }, cwd: box.root, hostHome: null, docker: box.runtimeBin, log: this.log });
+      if (view) this.boxViews.set(box.container, view);
+    }
   }
 
   recordTrace(sessionId: string, type: string, data?: unknown): void {

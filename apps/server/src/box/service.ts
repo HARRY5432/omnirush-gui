@@ -1,0 +1,372 @@
+/**
+ * The desktop's Linux sandbox ("box", ported from the CLI: see launch.ts):
+ * one per server, for every local workspace whose box is on. It keeps
+ *
+ * - the per-workspace choice in the workspace's OmniRush settings
+ *   (`localBox: { mode: "on" | "off", offered }`; no mode: the server's
+ *   default from /collect/capabilities -> local_box.default);
+ * - the engine bits (the shell, named bash, and the box plugin) that go
+ *   into the one engine config when any workspace may use a box;
+ * - <box home>/desktop-projects.json, the projects the plugin routes to
+ *   their box (everything else runs natively through the same shell);
+ * - each project's run: the per-turn checkpoints and the label its chats'
+ *   uploads carry.
+ *
+ * Nothing here blocks opening a project: probes are bounded, a missing image
+ * downloads in the background, a box that cannot start leaves its project
+ * on this machine.
+ *
+ * Not to be confused with the OpenWork worker sandbox (`sandboxBackend`).
+ */
+import { existsSync } from "node:fs";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { delimiter, dirname, join } from "node:path";
+
+import { boxHome, boxKey, boxSnapshotsDir, containerName, inspectImage, installShell, listBoxes, readRecord, resetBox, savedTurns, type BoxLabel, type BoxLog } from "./box.js";
+import { detectStack, imageFor } from "./images.js";
+import { boxRun, planBox, pulling, pullInBackground, resolveMode, serverDefault, shimsDir, type BoxRun, type ProjectBoxMode, type ServerBoxDefault } from "./launch.js";
+import { DESKTOP_PROJECTS_FILE } from "./plugin-lib.js";
+import { detectRuntime, type RuntimeResult } from "./runtime.js";
+
+/** What the capture side needs of a chat's box (plain data: it crosses to the capture worker). */
+export type BoxCaptureInfo = {
+  key: string;
+  root: string;
+  croot: string;
+  container: string;
+  runtimeBin: string;
+  /** environment.sandbox of the chat's uploads. */
+  label: BoxLabel;
+};
+
+export type BoxWorkspace = { id: string; path: string; directory?: string; workspaceType: string };
+
+export type BoxStatus = {
+  /** The project's own choice (null: the server's default). */
+  mode: ProjectBoxMode;
+  serverDefault: ServerBoxDefault;
+  /** Whether the project's chats should run in its box. */
+  on: boolean;
+  source: "env" | "project" | "server" | "default";
+  /** The server offers the box and this project was not offered it yet. */
+  offer: boolean;
+  state: "off" | "unavailable" | "downloading" | "starting" | "ready" | "failed";
+  runtime: { ok: boolean; name: string | null; flavor: string | null; version: string | null; reason: string | null } | null;
+  image: { ref: string; stack: string; present: boolean | null; downloading: boolean } | null;
+  container: { name: string; exists: boolean; running: boolean } | null;
+  /** One line for the user (why it is off, that it is downloading). */
+  notice: string | null;
+  error: string | null;
+};
+
+export type BoxServiceOptions = {
+  /** The capture state dir: the server default is remembered here, snapshots go under sandbox/snapshots. */
+  stateDir: string;
+  readSettings: (workspaceId: string) => Promise<{ mode: ProjectBoxMode; offered: boolean }>;
+  writeSettings: (workspaceId: string, update: { mode?: ProjectBoxMode; offered?: boolean }) => Promise<void>;
+  workspaces: () => BoxWorkspace[];
+  /** The engine plugin file (opencode-plugins/omnirush-box). */
+  pluginPath: () => string;
+  log?: BoxLog;
+  env?: NodeJS.ProcessEnv;
+};
+
+type Project = { run: BoxRun | null; notice: string | null; planning: Promise<BoxRun | null> | null; nextPlanAt: number };
+
+/** A project whose image is downloading is planned again at most this often. */
+const REPLAN_MS = 15_000;
+/** A prompt waits at most this long for its turn's checkpoint. */
+const FREEZE_WAIT_MS = 90_000;
+
+export function boxRoot(workspace: BoxWorkspace): string {
+  return workspace.directory?.trim() || workspace.path;
+}
+
+/** The shell boxsh runs when a call is not for a box (Windows: Git for Windows' bash when it is there). */
+export function nativeShell(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string | null {
+  if (platform !== "win32") return null;
+  for (const dir of String(env.PATH || env.Path || "").split(delimiter)) {
+    if (!dir || !existsSync(join(dir, "git.exe"))) continue;
+    const bash = join(dirname(dirname(dir)), "bin", "bash.exe");
+    if (existsSync(bash)) return bash;
+  }
+  return null;
+}
+
+export class BoxService {
+  private readonly projects = new Map<string, Project>();
+  private readonly turns = new Map<string, number>();
+  private readonly home: string;
+  private readonly env: NodeJS.ProcessEnv;
+  private log: BoxLog;
+  private projectsWrite: Promise<void> = Promise.resolve();
+
+  constructor(private readonly options: BoxServiceOptions) {
+    this.env = options.env ?? process.env;
+    this.home = boxHome(this.env);
+    this.log = options.log ?? (() => {});
+  }
+
+  /** Logs go here from now on (the server's logger, once it exists). */
+  useLog(log: BoxLog): void {
+    this.log = log;
+  }
+
+  get snapshotsDir(): string {
+    return boxSnapshotsDir(this.options.stateDir);
+  }
+
+  serverDefault(): ServerBoxDefault {
+    return serverDefault(this.options.stateDir);
+  }
+
+  private async mode(workspace: BoxWorkspace) {
+    const settings = await this.options.readSettings(workspace.id).catch(() => ({ mode: null, offered: false }));
+    const server = this.serverDefault();
+    return { settings, server, ...resolveMode({ env: this.env, project: settings.mode, server, offered: settings.offered }) };
+  }
+
+  /**
+   * The engine config additions (`shell` and the plugin), or null: only when
+   * some local workspace has its box on or the server's default is on or
+   * offer, and the helpers for this machine are installed.
+   */
+  async engineBits(): Promise<{ shell: string; plugin: string } | null> {
+    let wanted = this.serverDefault() !== "off" || ["1", "on", "true"].includes(String(this.env.OMNIRUSH_BOX ?? "").trim().toLowerCase());
+    for (const workspace of this.options.workspaces()) {
+      if (wanted) break;
+      if (workspace.workspaceType !== "local") continue;
+      wanted = (await this.mode(workspace)).on;
+    }
+    if (!wanted) return null;
+    try {
+      return { shell: installShell(this.home, { env: this.env }), plugin: this.options.pluginPath() };
+    } catch (error) {
+      this.log("info", "box engine bits unavailable", { error: error instanceof Error ? error.message : String(error) });
+      return null;
+    }
+  }
+
+  /**
+   * The project's run when its box is on and can start (planned once, in
+   * the background; a downloading image is looked at again later), else null.
+   */
+  ensure(workspace: BoxWorkspace): Promise<BoxRun | null> {
+    if (workspace.workspaceType !== "local") return Promise.resolve(null);
+    const root = boxRoot(workspace);
+    const key = boxKey(root);
+    const project = this.projects.get(key) ?? { run: null, notice: null, planning: null, nextPlanAt: 0 };
+    this.projects.set(key, project);
+    if (project.planning) return project.planning;
+    project.planning = (async () => {
+      const { on } = await this.mode(workspace);
+      if (!on) {
+        project.run = null;
+        project.notice = null;
+        await this.writeProjects();
+        return null;
+      }
+      if (project.run && !project.run.native) return project.run;
+      if (Date.now() < project.nextPlanAt) return null;
+      const plan = await planBox({ env: this.env, home: this.home, root, log: this.log, shims: shimsDir(this.env) });
+      if (!plan.box) {
+        project.run = null;
+        project.notice = plan.notice;
+        project.nextPlanAt = Date.now() + REPLAN_MS;
+        await this.writeProjects();
+        return null;
+      }
+      project.notice = null;
+      project.run = boxRun(plan, {
+        log: this.log,
+        tmpRoot: join(this.home, "pending"),
+        onNative: (reason) => {
+          project.notice = `Sandbox off for now: ${reason}.`;
+          project.nextPlanAt = Date.now() + REPLAN_MS;
+          void this.writeProjects();
+        },
+      });
+      await this.writeProjects();
+      return project.run;
+    })().finally(() => {
+      project.planning = null;
+    });
+    return project.planning;
+  }
+
+  /** Plans every local workspace whose box is on (server start, a changed default); never throws. */
+  async ensureAll(): Promise<void> {
+    await Promise.allSettled(this.options.workspaces().map((workspace) => this.ensure(workspace)));
+  }
+
+  /** The projects the plugin routes to their box: on, planned, not gone native. */
+  private writeProjects(): Promise<void> {
+    const keys = [...this.projects.entries()].filter(([, project]) => project.run && !project.run.native).map(([key]) => key).sort();
+    const file = join(this.home, DESKTOP_PROJECTS_FILE);
+    const write = async () => {
+      const content = `${JSON.stringify({ keys, updated: Date.now() })}\n`;
+      await mkdir(this.home, { recursive: true });
+      const tmp = `${file}.${process.pid}.tmp`;
+      await writeFile(tmp, content, { mode: 0o600 });
+      await rename(tmp, file);
+    };
+    this.projectsWrite = this.projectsWrite.then(write, write).catch((error) => {
+      this.log("warn", "box projects file not written", { error: error instanceof Error ? error.message : String(error) });
+    });
+    return this.projectsWrite;
+  }
+
+  /** The keys the plugin reads now (tests). */
+  async listedProjects(): Promise<string[]> {
+    await this.projectsWrite;
+    try {
+      const value = JSON.parse(await readFile(join(this.home, DESKTOP_PROJECTS_FILE), "utf8"));
+      return Array.isArray(value?.keys) ? value.keys : [];
+    } catch {
+      return [];
+    }
+  }
+
+  async setMode(workspace: BoxWorkspace, mode: ProjectBoxMode): Promise<BoxStatus> {
+    await this.options.writeSettings(workspace.id, { mode, offered: true });
+    const project = this.projects.get(boxKey(boxRoot(workspace)));
+    if (project) project.nextPlanAt = 0;
+    // Planned in the background: a missing image starts downloading now.
+    void this.ensure(workspace).catch(() => null);
+    return this.status(workspace);
+  }
+
+  async status(workspace: BoxWorkspace, { fresh = false }: { fresh?: boolean } = {}): Promise<BoxStatus> {
+    const { settings, server, on, source, offer } = await this.mode(workspace);
+    const root = boxRoot(workspace);
+    const key = boxKey(root);
+    const project = this.projects.get(key);
+    const base = { mode: settings.mode, serverDefault: server, on, source, offer, error: null };
+    if (workspace.workspaceType !== "local") return { ...base, on: false, offer: false, state: "off", runtime: null, image: null, container: null, notice: "The sandbox is for folders on this computer." };
+    const runtime = await Promise.race([
+      detectRuntime({ boxHome: this.home, env: this.env, fresh }),
+      new Promise<RuntimeResult>((resolve) => setTimeout(() => resolve({ ok: false, reason: "the container runtime did not answer in time" }), 4_000)),
+    ]);
+    const runtimeView = runtime.ok
+      ? { ok: true, name: runtime.name, flavor: runtime.flavor, version: runtime.version, reason: null }
+      : { ok: false, name: null, flavor: null, version: null, reason: runtime.reason };
+    const image = imageFor(detectStack(root), { env: this.env });
+    const name = containerName(key, this.env);
+    let present: boolean | null = null;
+    let container: BoxStatus["container"] = null;
+    if (runtime.ok) {
+      present = Boolean(await inspectImage(runtime, image.pull).catch(() => null));
+      const mine = (await listBoxes(runtime).catch(() => [])).find((box) => box.key === key && box.name === name);
+      container = { name, exists: Boolean(mine), running: Boolean(mine?.running) };
+    }
+    const downloading = runtime.ok && pulling(this.home, image.pull);
+    const record = readRecord(this.home, key);
+    const run = project?.run ?? null;
+    const state: BoxStatus["state"] = !on ? "off"
+      : !runtime.ok ? "unavailable"
+      : run && !run.native ? (run.box?.ready ? "ready" : run.box?.state === "failed" ? "failed" : "starting")
+      : downloading || (!present && !container?.exists) ? "downloading"
+      : project?.notice ? "unavailable" : "starting";
+    return {
+      ...base,
+      state,
+      runtime: runtimeView,
+      image: { ref: image.pull, stack: image.stack, present, downloading },
+      container,
+      notice: on ? project?.notice ?? (runtime.ok ? null : `Sandbox off for now: ${runtime.reason}.`) : null,
+      error: run?.box?.error ?? (record?.state === "off" || record?.state === "failed" ? record.error || null : null),
+    };
+  }
+
+  /** Remove the project's container (installs gone); the next chat starts a fresh one. */
+  async reset(workspace: BoxWorkspace): Promise<{ removed: boolean }> {
+    const root = boxRoot(workspace);
+    const key = boxKey(root);
+    const runtime = await detectRuntime({ boxHome: this.home, env: this.env });
+    const project = this.projects.get(key);
+    if (project) {
+      project.run = null;
+      project.nextPlanAt = 0;
+    }
+    await this.writeProjects();
+    if (!runtime.ok) return { removed: false };
+    const result = await resetBox(runtime, root, { env: this.env, home: this.home });
+    void this.ensure(workspace).catch(() => null);
+    return { removed: result.removed };
+  }
+
+  /** Download the project's image now (the toggle turned on with no image here). */
+  async pull(workspace: BoxWorkspace): Promise<boolean> {
+    const runtime = await detectRuntime({ boxHome: this.home, env: this.env });
+    if (!runtime.ok) return false;
+    const image = imageFor(detectStack(boxRoot(workspace)), { env: this.env });
+    if (await inspectImage(runtime, image.pull)) return false;
+    pullInBackground(runtime, image.pull, this.home);
+    return true;
+  }
+
+  private snapshotDir(sessionId: string): string {
+    return join(this.snapshotsDir, sessionId);
+  }
+
+  /**
+   * A prompt of `sessionId` is about to reach the engine: the turn's
+   * checkpoint (what the box changed since the chat's previous one) is
+   * taken and saved where the project archive reads it, and the chat's box
+   * label returned for its uploads. Null when the chat runs natively. Never
+   * throws; waits at most FREEZE_WAIT_MS.
+   */
+  async beforePrompt(sessionId: string, workspace: BoxWorkspace, { capture = true }: { capture?: boolean } = {}): Promise<BoxCaptureInfo | null> {
+    if (!/^[A-Za-z0-9._:-]{8,128}$/.test(sessionId)) return null;
+    const run = await this.ensure(workspace).catch(() => null);
+    if (!run || run.native) return null;
+    if (!capture) return null;
+    const turn = (this.turns.get(sessionId) ?? savedTurns(this.snapshotDir(sessionId))) + 1;
+    const started = Date.now();
+    try {
+      const frozen = await Promise.race([
+        run.freeze(`turn-${turn}`, { sessionId, turn, chain: this.snapshotDir(sessionId) }),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), FREEZE_WAIT_MS)),
+      ]);
+      if (frozen) {
+        const saved = await frozen.save(this.snapshotDir(sessionId));
+        this.turns.set(sessionId, turn);
+        run.setTurn(turn);
+        this.log("info", "box checkpoint saved", { sessionId, turn, changed: saved.changed, bytes: saved.bytes, ms: Date.now() - started });
+      }
+    } catch (error) {
+      this.log("warn", "box checkpoint failed", { sessionId, turn, error: error instanceof Error ? error.message : String(error) });
+    }
+    const label = run.label(sessionId);
+    const box = run.box;
+    if (!label || !box) return null;
+    return { key: run.key, root: run.root, croot: box.croot, container: box.container, runtimeBin: run.runtimeBin, label };
+  }
+
+  /** Whether chats ran in a box during this run (they get a `final` checkpoint at quit). */
+  hasChats(): boolean {
+    return this.turns.size > 0;
+  }
+
+  /** At quit: every chat with checkpoints gets its `final` leaf (bounded); the sessions that got one. */
+  async finals({ budgetMs = 20_000 }: { budgetMs?: number } = {}): Promise<string[]> {
+    const done: string[] = [];
+    const work = (async () => {
+      for (const sessionId of this.turns.keys()) {
+        const run = [...this.projects.values()].map((project) => project.run).find((candidate) => candidate?.label(sessionId));
+        if (!run) continue;
+        try {
+          const frozen = await run.freeze("final", { sessionId, chain: this.snapshotDir(sessionId) });
+          if (frozen) {
+            await frozen.save(this.snapshotDir(sessionId));
+            done.push(sessionId);
+          }
+        } catch (error) {
+          this.log("warn", "box final checkpoint failed", { sessionId, error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+    })();
+    await Promise.race([work, new Promise((resolve) => setTimeout(resolve, budgetMs).unref?.())]);
+    return done;
+  }
+}

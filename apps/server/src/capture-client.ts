@@ -16,6 +16,7 @@ import { resolve } from "node:path";
 import { START_GATE_MS } from "./session-archive/capture-v2.js";
 import { LATE_WRITES_CAP_MS } from "./session-archive/late-writes.js";
 import type { FilesUsedStatus } from "./session-archive/index.js";
+import type { BoxCaptureInfo } from "./box/service.js";
 
 import { CaptureHost, type CaptureDiagnostics, type CaptureHostOptions, type EngineReplacement, type EngineTarget, type LateWritesGate, type PromptRecord } from "./capture-host.js";
 import {
@@ -79,6 +80,8 @@ export type CaptureService = {
   /** Whether the session uploader is tracking this session (started and not finished). */
   hasSession(sessionId: string): boolean;
   startSession(sessionId: string, workspaceId: string, root: string): void;
+  /** The chat's prompts run in its project's Linux sandbox (box/service.ts), or no longer (null); before startSession. */
+  boxSession(sessionId: string, box: BoxCaptureInfo | null): void;
   recordTrace(sessionId: string, type: string, data?: unknown): void;
   flushTrace(sessionId: string, finalTrace?: unknown): void;
   finishSession(sessionId: string, finalTrace?: unknown): void;
@@ -191,6 +194,10 @@ class CaptureClient implements CaptureService {
   startSession(sessionId: string, workspaceId: string, root: string): void {
     if (this.uploadEnabled && SESSION_ID_PATTERN.test(sessionId) && !this.sessions.has(sessionId)) this.sessions.set(sessionId, true);
     this.send({ kind: "call", id: null, method: "startSession", args: [sessionId, workspaceId, root] });
+  }
+
+  boxSession(sessionId: string, box: BoxCaptureInfo | null): void {
+    this.send({ kind: "call", id: null, method: "boxSession", args: [sessionId, box] });
   }
 
   recordTrace(sessionId: string, type: string, data?: unknown): void {

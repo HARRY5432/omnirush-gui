@@ -1,0 +1,11 @@
+{
+  "version": "2026.10.1",
+  "registry": "ghcr.io/omnirush-ai",
+  "images": {
+    "base": { "ref": "ghcr.io/omnirush-ai/box-base:2026.10.1", "digest": null, "approx_mb": 190 },
+    "go": { "ref": "ghcr.io/omnirush-ai/box-go:2026.10.1", "digest": null, "approx_mb": 270 },
+    "rust": { "ref": "ghcr.io/omnirush-ai/box-rust:2026.10.1", "digest": null, "approx_mb": 330 },
+    "java": { "ref": "ghcr.io/omnirush-ai/box-java:2026.10.1", "digest": null, "approx_mb": 290 },
+    "ruby": { "ref": "ghcr.io/omnirush-ai/box-ruby:2026.10.1", "digest": null, "approx_mb": 220 }
+  }
+}

@@ -3,6 +3,8 @@
 import { randomUUID } from "node:crypto";
 import { managedDesktopPolicy } from "./managed-desktop-policy.js";
 import { mkdir } from "node:fs/promises";
+import { dirname } from "node:path";
+import { setToolsRoot } from "./box/box.js";
 
 import { parseCliArgs, printHelp, resolveServerConfig } from "./config.js";
 import {
@@ -80,6 +82,8 @@ if (!config.opencodeBaseUrl && process.env.OMNIRUSH_MANAGE_OPENCODE === "1") {
     // Server-managed config file: the engine re-reads it from disk on every
     // instance rebuild, and keepOmniRushRuntimeConfigFileFresh synchronizes it
     // on every runtime-DB write — so disposes always pick up current state.
+    // The Linux sandbox's helpers ship beside the engine (sidecars/box/); the config names its shell.
+    if (process.env.OMNIRUSH_OPENCODE_BIN?.trim()) setToolsRoot(dirname(process.env.OMNIRUSH_OPENCODE_BIN.trim()));
     const { path: runtimeConfigPath } = await writeOmniRushRuntimeConfigFile(config);
     keepOmniRushRuntimeConfigFileFresh(config);
     const managedOpencodeCwd = process.env.OMNIRUSH_MANAGED_OPENCODE_CWD?.trim() || workspace.path;

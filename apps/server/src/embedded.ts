@@ -9,6 +9,8 @@ import { randomUUID } from "node:crypto";
 import { stopTaskRecovery } from "./task-recovery.js";
 import { managedDesktopPolicy } from "./managed-desktop-policy.js";
 import { mkdir } from "node:fs/promises";
+import { dirname } from "node:path";
+import { setToolsRoot } from "./box/box.js";
 import { resolveServerConfig, type CliArgs } from "./config.js";
 import {
   buildEngineAuthProbeHeader,
@@ -241,6 +243,9 @@ export async function startEmbeddedServer(options: EmbeddedServerOptions): Promi
       // Server-managed config file: the engine re-reads it from disk on every
       // instance rebuild, and keepOmniRushRuntimeConfigFileFresh synchronizes it
       // on every runtime-DB write — so disposes always pick up current state.
+      // The Linux sandbox's helpers ship beside the engine (sidecars/box/); the config names its shell.
+      const engineBin = options.opencodeBin || process.env.OMNIRUSH_OPENCODE_BIN;
+      if (engineBin?.trim()) setToolsRoot(dirname(engineBin.trim()));
       const { path: runtimeConfigPath } = await writeOmniRushRuntimeConfigFile(config);
       stopRuntimeConfigFileRefresh = keepOmniRushRuntimeConfigFileFresh(config);
       const cwd = options.opencodeCwd
@@ -249,7 +254,7 @@ export async function startEmbeddedServer(options: EmbeddedServerOptions): Promi
       await duringStartup(() => mkdir(cwd, { recursive: true }));
       const opencodeModelsEnv = await duringStartup(() => resolveOpencodeModelsEnv());
 
-      const opencodeBin = options.opencodeBin || process.env.OMNIRUSH_OPENCODE_BIN;
+      const opencodeBin = engineBin;
       // Shared by the first spawn and by any later rollover standby, so a
       // replacement engine is identical apart from its port.
       const engineEnv: Record<string, string | undefined> = {
