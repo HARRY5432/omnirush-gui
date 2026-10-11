@@ -60,6 +60,8 @@ export type ProjectArchiveLifecycleOptions = {
   quitBudgetMs?: number;
   /** Tests. */
   now?: () => number;
+  /** A pre_tool state took files written after the turn before ended (the session uploader records them). */
+  onLateWrites?: (late: LateWrites) => void;
 };
 
 const DEFAULT_CONSENT_RECHECK_MS = 10 * 60_000;
@@ -141,6 +143,36 @@ export function completedTurnCount(messages: unknown): number | null {
   return turns;
 }
 
+function createdAtMs(message: Record<string, unknown>): number | null {
+  const info = messageInfo(message);
+  const time = isRecord(info.time) ? info.time.created : info.createdAt ?? info.created_at;
+  if (typeof time === "number" && Number.isFinite(time)) return time;
+  if (typeof time === "string") {
+    const parsed = Date.parse(time);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+/**
+ * The turn a tool call that started at `at` belongs to: the number of prompts
+ * sent up to then (the first prompt is turn 1), counting a prompt without a
+ * creation time as sent. A prompt sent before the previous turn settled (a
+ * quick follow-up, or one typed into a running turn) is its own turn, as the
+ * converter numbers them. Null when the list could not be read or holds no
+ * prompt.
+ */
+export function promptTurnAt(messages: unknown, at: number): number | null {
+  if (!Array.isArray(messages)) return null;
+  let turns = 0;
+  for (const message of messages) {
+    if (!isRecord(message) || !isPromptMessage(message)) continue;
+    const created = createdAtMs(message);
+    if (created === null || created <= at) turns += 1;
+  }
+  return turns > 0 ? turns : null;
+}
+
 /** The parent of a session record: a string for a child (sub-agent) session, null for a root one, undefined when unreadable. */
 function parentSessionId(session: unknown): string | null | undefined {
   if (!isRecord(session)) return undefined;
@@ -179,6 +211,23 @@ type SessionRecord = {
   turns?: number;
   /** Capture v2: a prompt went out and this turn's first tool call has not been seen yet. */
   awaitingTool?: boolean;
+  /** When the latest prompt, and the one before it, were dispatched. */
+  promptedAt?: number;
+  previousPromptAt?: number;
+  /** When a turn of the session last settled (turnCompleted / turnIncomplete). */
+  endedAt?: number;
+};
+
+/** A pre_tool state that took late writes of the turn before (lifecycle onLateWrites). */
+export type LateWrites = {
+  sessionId: string;
+  /** The turn in progress, whose start the files are part of; the turn before wrote them. */
+  turn: number;
+  /** When the turn before ended (or, for a prompt sent into a running turn, when that prompt went out). */
+  after: number;
+  /** When this turn's first tool call started. */
+  toolStartAt: number;
+  paths: string[];
 };
 
 /** An unresolved session start reads the engine again after these waits, then only at its next prompt or turn. */
@@ -194,6 +243,7 @@ export class ProjectArchiveLifecycle {
   private readonly finalIdleMs: number;
   private readonly quitBudgetMs: number;
   private readonly now: () => number;
+  private readonly onLateWrites: ((late: LateWrites) => void) | undefined;
   private readonly enabled: boolean;
   private readonly accountMissing: boolean;
   private signedOut = false;
@@ -226,6 +276,7 @@ export class ProjectArchiveLifecycle {
     this.finalIdleMs = Math.max(0, options.finalIdleMs ?? FINAL_IDLE_MS);
     this.quitBudgetMs = Math.max(0, options.quitBudgetMs ?? QUIT_FINAL_BUDGET_MS);
     this.now = options.now ?? Date.now;
+    this.onLateWrites = options.onLateWrites;
   }
 
   private get active(): boolean {
@@ -274,11 +325,13 @@ export class ProjectArchiveLifecycle {
       known.engine = input.engine;
       known.activeAt = promptedAt;
       known.awaitingTool = true;
+      known.previousPromptAt = known.promptedAt;
+      known.promptedAt = promptedAt;
     }
     // Resolved, or its start step is still queued: nothing to add.
     if (known && (!known.start || known.starting)) return;
     // New, or unresolved because the engine could not be read: (re)try with this prompt's reads.
-    const record: SessionRecord = known ?? { root: null, start: null, starting: false, engine: input.engine, activeAt: promptedAt, idleTimer: null, idleFinal: null, awaitingTool: true };
+    const record: SessionRecord = known ?? { root: null, start: null, starting: false, engine: input.engine, activeAt: promptedAt, idleTimer: null, idleFinal: null, awaitingTool: true, promptedAt };
     record.start = { root: input.root, engine: input.engine };
     record.starting = true;
     this.sessions.set(input.sessionId, record);
@@ -312,18 +365,40 @@ export class ProjectArchiveLifecycle {
   }
 
   /**
-   * Capture v2, #9: a tool call of the session started (tool-start.ts). The
-   * first one of each turn queues a pre_tool state, captured when anything
-   * changed since the chain's last state; the tool itself is never held.
+   * Capture v2, #9: a tool call of the session started (tool-start.ts) at
+   * `at` (the engine's event time when it has one). The first one of each
+   * turn queues a pre_tool state, captured when anything changed since the
+   * chain's last state; the tool itself is never held, so a file changed at
+   * or after `at` (the tool's own writes) is left out of it and goes to the
+   * turn's delta. What changed between the chain's last state and `at`
+   * (a background process of the turn before still writing, the user's own
+   * edits) is in it, marked `late_writes` when the turn before had ended.
+   * The state is numbered with the prompt the tool answers, read from the
+   * engine: a prompt sent before the previous turn settled is a turn of its
+   * own.
    */
-  toolStarted(sessionId: string): void {
+  toolStarted(sessionId: string, at: number = this.now()): void {
     const record = this.sessions.get(sessionId);
     if (!this.active || this.consentOff || !record || !record.awaitingTool || !this.archiver.captureState) return;
     record.awaitingTool = false;
+    // Late: written after the turn before ended; for a prompt sent into a running turn (no end in between), after that prompt.
+    const ended = record.endedAt !== undefined && (record.previousPromptAt === undefined || record.endedAt >= record.previousPromptAt) ? record.endedAt : undefined;
+    // A turn this prompt cut settles after the prompt went out (the observer reads it then): it ended at the prompt at the latest.
+    const lateAfter = ended !== undefined
+      ? (record.promptedAt !== undefined ? Math.min(ended, record.promptedAt) : ended)
+      : record.previousPromptAt !== undefined ? record.promptedAt : undefined;
     const capture = this.archiver.captureState.bind(this.archiver);
     this.schedule(sessionId, "pre_tool", async () => {
       if (this.sessions.get(sessionId) !== record || !record.root) return;
-      const result = await capture(sessionId, (record.turns ?? 0) + 1);
+      const turn = promptTurnAt(await record.engine.messages().catch(() => null), at) ?? (record.turns ?? 0) + 1;
+      const result = await capture(sessionId, turn, { before: at, ...(lateAfter !== undefined ? { lateAfter } : {}) });
+      if (result.status === "queued" && result.late && result.late.length > 0 && lateAfter !== undefined) {
+        try {
+          this.onLateWrites?.({ sessionId, turn, after: lateAfter, toolStartAt: at, paths: result.late });
+        } catch {
+          // Bookkeeping only.
+        }
+      }
       if (result.status === "skipped" && result.reason === "stopped") record.root = null;
       this.settle(result);
     });
@@ -360,6 +435,7 @@ export class ProjectArchiveLifecycle {
     if (!this.active || this.consentOff || !record) return;
     const turns = completedTurnCount(messages);
     if (turns !== null) record.turns = turns;
+    record.endedAt = this.now();
     this.schedule(sessionId, "delta", async () => {
       if (this.sessions.get(sessionId) !== record) return;
       if (record.start && !(await this.resolve(sessionId, record, turns))) return;
@@ -456,6 +532,7 @@ export class ProjectArchiveLifecycle {
   turnIncomplete(sessionId: string): void {
     const record = this.sessions.get(sessionId);
     if (!this.active || this.consentOff || !record) return;
+    record.endedAt = this.now();
     this.schedule(sessionId, "turn", async () => {
       if (this.sessions.get(sessionId) !== record) return;
       if (record.start && !(await this.resolve(sessionId, record, null))) return;

@@ -7,7 +7,7 @@
  * logs and closed sessions. Everything is plain data; request and response
  * bodies travel as transferred buffers.
  */
-import type { CaptureHost, EngineReplacement, EngineTarget, PromptRecord } from "./capture-host.js";
+import type { CaptureHost, EngineReplacement, EngineTarget, LateWritesGate, PromptRecord } from "./capture-host.js";
 import type { FolderGateOptions } from "./session-archive/detect.js";
 import type { TraceCapabilities, UploadRequestOptions, UploadWebVisit } from "./session-uploader.js";
 
@@ -24,7 +24,7 @@ export type CaptureCalls = {
   captureSnapshot: [sessionId: string, trigger: "prompt" | "turn_completed", outcome?: "aborted"];
   recordWebVisit: [sessionId: string, visit: UploadWebVisit];
   archiveSessionStarted: [sessionId: string, root: string, target: EngineTarget];
-  archiveStartGate: [sessionId: string, root: string];
+  archiveStartGate: [sessionId: string, root: string, lateWrites?: LateWritesGate | null];
   observeSession: [sessionId: string, target: EngineTarget];
   engineReplaced: [closedBaseUrl: string, replacement: EngineReplacement];
   sessionDeleted: [sessionId: string];

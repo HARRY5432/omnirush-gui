@@ -57,6 +57,13 @@ export type ArchiveTrigger = "turn" | "final" | "pre_tool";
 /** What prompted a final archive (manifest.json `reason`). */
 export type FinalReason = "idle" | "turn_incomplete" | "session_deleted" | "app_quit" | "app_start";
 /**
+ * manifest.json `reason`: a final archive's, or "late_writes" on a pre_tool
+ * state holding files written after the turn before ended (a background
+ * process of that turn still writing): they belong to that turn's outcome
+ * and to this turn's start.
+ */
+export type ArchiveReason = FinalReason | "late_writes";
+/**
  * manifest.json `scope` of a touched-files archive: its `files` are only the
  * files the agent touched, and a path it does not list is not deleted (only
  * `deleted` deletes). The whole-folder archives have no `scope`.
@@ -130,7 +137,7 @@ export type ArchiveManifest = {
   created_at: string;
   parent_archive_id: string | null;
   trigger?: ArchiveTrigger;
-  reason?: FinalReason;
+  reason?: ArchiveReason;
   scope?: ArchiveScope;
   workspace: { label: string; marker: string; git: ArchiveGit | null };
   files: ArchiveEntry[];
@@ -809,7 +816,7 @@ export type ManifestInput = {
   parentArchiveId: string | null;
   /** Deltas only: a completed turn, or a final archive (then with its reason). */
   trigger?: ArchiveTrigger;
-  reason?: FinalReason;
+  reason?: ArchiveReason;
   /** Touched-files archives only. */
   scope?: ArchiveScope;
   label: string;

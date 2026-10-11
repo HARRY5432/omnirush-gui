@@ -14,9 +14,10 @@ import { Worker } from "node:worker_threads";
 import { lstat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { START_GATE_MS } from "./session-archive/capture-v2.js";
+import { LATE_WRITES_CAP_MS } from "./session-archive/late-writes.js";
 import type { FilesUsedStatus } from "./session-archive/index.js";
 
-import { CaptureHost, type CaptureDiagnostics, type CaptureHostOptions, type EngineReplacement, type EngineTarget, type PromptRecord } from "./capture-host.js";
+import { CaptureHost, type CaptureDiagnostics, type CaptureHostOptions, type EngineReplacement, type EngineTarget, type LateWritesGate, type PromptRecord } from "./capture-host.js";
 import {
   invokeCapture,
   serializeResponse,
@@ -88,11 +89,13 @@ export type CaptureService = {
   recordWebVisit(sessionId: string, visit: UploadWebVisit): boolean;
   archiveSessionStarted(sessionId: string, root: string, target: EngineTarget): void;
   /**
-   * Capture v2: resolves once the project archive took the session-start
+   * Resolves once the turn before's background processes finished writing
+   * (with `lateWrites`, when that turn ended: LATE_WRITES_CAP_MS after its
+   * end at most) and capture v2's project archive took the session-start
    * manifest (hash and stat only, START_GATE_MS at most); the prompt goes to
    * the engine after it. Never rejects.
    */
-  archiveStartGate(sessionId: string, root: string): Promise<void>;
+  archiveStartGate(sessionId: string, root: string, lateWrites?: LateWritesGate | null): Promise<void>;
   observeSession(sessionId: string, target: EngineTarget): void;
   /** An engine was closed and another took over its sessions: turn observers reading it move there. */
   engineReplaced(closedBaseUrl: string, replacement: EngineReplacement): void;
@@ -224,13 +227,13 @@ class CaptureClient implements CaptureService {
     this.send({ kind: "call", id: null, method: "archiveSessionStarted", args: [sessionId, root, target] });
   }
 
-  async archiveStartGate(sessionId: string, root: string): Promise<void> {
-    // The worker answers within the gate's cap; a busy or stuck worker never holds a prompt longer.
+  async archiveStartGate(sessionId: string, root: string, lateWrites?: LateWritesGate | null): Promise<void> {
+    // The worker answers within the gate's cap (plus the late-writes cap); a busy or stuck worker never holds a prompt longer.
     let timer: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([
-      this.query({ kind: "call", id: null, method: "archiveStartGate", args: [sessionId, root] }).catch(() => undefined),
+      this.query({ kind: "call", id: null, method: "archiveStartGate", args: lateWrites ? [sessionId, root, lateWrites] : [sessionId, root] }).catch(() => undefined),
       new Promise<void>((resolvePromise) => {
-        timer = setTimeout(resolvePromise, START_GATE_MS + START_GATE_SLACK_MS);
+        timer = setTimeout(resolvePromise, START_GATE_MS + START_GATE_SLACK_MS + (lateWrites ? LATE_WRITES_CAP_MS : 0));
         timer.unref?.();
       }),
     ]);
