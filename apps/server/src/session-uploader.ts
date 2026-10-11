@@ -27,7 +27,10 @@ import { SUBAGENT_MODEL_FALLBACK_TRACE } from "./omnirush-swarm.js";
 import { writeFileAtomic } from "./atomic-write.js";
 import { XCODE_CLT_MISSING, gitSkipReason } from "./command-guard.js";
 import { ExcludedFiles, listGitIgnored, type HashCache } from "./excluded-files.js";
-import { ToolchainCache, type CollectOptions as ToolchainOptions, type UploadToolchain } from "./toolchain.js";
+import { PROBE_ENV_OVERRIDES, ToolchainCache, type CollectOptions as ToolchainOptions, type UploadToolchain } from "./toolchain.js";
+import { boxProbeRunner } from "./box/capture.js";
+import type { BoxLabel } from "./box/box.js";
+import type { BoxCaptureInfo } from "./box/service.js";
 import { engine2ImportedFrom } from "./engine2/imported.js";
 import { ContextCapture, captureContextEnabled, type ContextOptions } from "./context/index.js";
 import { INSTALL_LOG_OFF, installLogGate, type InstallLogGate } from "./context/install-log.js";
@@ -277,7 +280,38 @@ export type UploadEnvironment = {
    * here: its earlier turns are the 2.x engine's ("opencode 2.0.18").
    */
   imported_from?: string;
+  /** A chat in the project's Linux sandbox (box/): the machine it ran on; `os` is then linux. */
+  host_os?: string;
+  host_arch?: string;
+  host_os_version?: string;
+  /** The box the chat's commands ran in (box/box.ts label()); absent when they ran on this machine. */
+  sandbox?: BoxLabel;
 };
+
+/** A box chat's toolchain without this machine's `system` and `shell` blocks. */
+function withoutHostBlocks(toolchain: UploadToolchain): UploadToolchain {
+  const { system: _system, shell: _shell, ...rest } = toolchain;
+  return rest;
+}
+
+/**
+ * A chat in a box (an OmniRush box label, `kind: "omnirush-box"`): it ran
+ * its commands on Linux in a container, so `os` is linux and the machine it
+ * ran on is `host_os` / `host_arch` / `host_os_version`. Pipelines route
+ * these to the Linux environment set, never the native Windows/macOS one.
+ * The same as the CLI's workspace-sync.ts boxEnvironment.
+ */
+export function boxEnvironment(environment: UploadEnvironment, sandbox: BoxLabel | null): Partial<UploadEnvironment> {
+  if (!sandbox || sandbox.kind !== "omnirush-box") return {};
+  return {
+    os: "linux",
+    host_os: sandbox.host_os || environment.os,
+    host_arch: sandbox.host_arch || environment.arch,
+    host_os_version: environment.os_version,
+    // The shell the agent's commands ran in.
+    shell: "bash",
+  };
+}
 
 type TraceEvent = {
   at: string;
@@ -768,6 +802,8 @@ type SessionUploaderOptions = {
    * (sampled per session). Absent: none.
    */
   installLog?: { raw: string; bin?: string | null } | null;
+  /** The install log of chats in a Linux sandbox (box/install-log.ts): the wrappers there note calls in this raw folder. */
+  boxInstallLog?: { raw: string; bin?: string | null } | null;
 };
 
 export type TraceCapabilities = {
@@ -783,6 +819,8 @@ export type TraceCapabilities = {
   triggers?: string[];
   /** The install log switch (context/install-log.ts): absent is off. */
   install_log?: { enabled: boolean; sample_percent: number };
+  /** The Linux sandbox's server default (box/launch.ts serverDefault): "off" | "offer" | "on". */
+  local_box?: { default: string; max_turn_bytes?: number | null };
 };
 
 
@@ -4476,6 +4514,9 @@ export class SessionUploader {
   private readonly snapshotMaxBytes: number;
   private environmentCache: Promise<UploadEnvironment> | null = null;
   private readonly toolchains: ToolchainCache | null;
+  /** Chats in their project's Linux sandbox (box/), and the toolchain probed in those boxes. */
+  private readonly boxes = new Map<string, BoxCaptureInfo>();
+  private readonly boxToolchains: ToolchainCache | null;
   private readonly excludedHashes: HashCache = new Map();
   private spoolCounter = 0;
   private spoolTail: Promise<void> = Promise.resolve();
@@ -4524,6 +4565,12 @@ export class SessionUploader {
   readonly metrics: UploadMetrics = freshMetrics();
   /** Capture context (context/), null when off. */
   readonly context: ContextCapture | null;
+  /**
+   * Capture context of chats in a Linux sandbox (box/): this machine's packages, services,
+   * processes, network and package-manager config are not theirs; the install log (its
+   * wrappers run in the box) and the rest are (CLI: the same sections for box runs).
+   */
+  readonly boxContext: ContextCapture | null;
 
   constructor(options: SessionUploaderOptions = {}) {
     this.uploadUrl = resolveUploadUrl(options.gatewayUrl ?? process.env.OMNIRUSH_GATEWAY_URL);
@@ -4574,6 +4621,18 @@ export class SessionUploader {
         ...(options.toolchain ?? {}),
         scrub: (toolchain) => redactUploadJson(toolchain).value as UploadToolchain,
       });
+    // A box's packages and toolchain are the chat's (probed inside, no downloads); this machine's are not.
+    this.boxToolchains = options.toolchain === false
+      ? null
+      : new ToolchainCache({
+        checks: { isSecretName: isSecretAssignmentKey, scrubText: (text) => redactUploadText(text).text, isDenied: isUploadPathDenied },
+        run: boxProbeRunner((cwd) => this.boxForPath(cwd), PROBE_ENV_OVERRIDES),
+        resolve: (command) => command,
+        env: {},
+        probeTimeoutMs: 20_000,
+        freezeTimeoutMs: 90_000,
+        scrub: (toolchain) => redactUploadJson(toolchain).value as UploadToolchain,
+      });
     this.onSessionClosed = options.onSessionClosed;
     this.onPathTouched = options.onPathTouched;
     this.onBinaryFile = options.onBinaryFile;
@@ -4585,6 +4644,11 @@ export class SessionUploader {
     );
     void this.stateMigrated.then(() => this.cleanTempDir(60 * 60_000)).catch(() => undefined);
     this.context = !options.context || !this.enabled ? null : this.createContext(stateDir, options.context);
+    this.boxContext = !options.context || !this.enabled ? null : this.createContext(stateDir, {
+      ...options.context,
+      sections: { ...options.context.sections, system_packages: false, services: false, pm_config: false, shell_aliases: false, processes: false },
+      network: false,
+    }, options.boxInstallLog ?? null);
     // Uploads spooled by a previous process are retried once this one is up.
     // Without an account they wait (up to the spool's age limit) for the
     // account to come back: only a user sign-out clears them (clearSpool()).
@@ -4596,7 +4660,12 @@ export class SessionUploader {
   }
 
   /** Capture context wired to this uploader: its trace, its scrub, the project archive and the archive's exclusions. */
-  private createContext(stateDir: string | null, overrides: Partial<ContextOptions>): ContextCapture | null {
+  /** The capture context a chat's events go to (a box chat's own, else this machine's). */
+  contextOf(sessionId: string): ContextCapture | null {
+    return this.boxes.has(sessionId) ? this.boxContext : this.context;
+  }
+
+  private createContext(stateDir: string | null, overrides: Partial<ContextOptions>, installLog: { raw: string; bin?: string | null } | null = this.installLogPaths): ContextCapture | null {
     // Off (OMNIRUSH_CAPTURE_CONTEXT=0): nothing is loaded or read.
     if (overrides.enabled === false || (overrides.enabled === undefined && !captureContextEnabled(overrides.env ?? process.env))) return null;
     let exclusion: ((absolute: string) => string | null) | null = null;
@@ -4639,7 +4708,7 @@ export class SessionUploader {
       bundledSkillDirs: stateDir ? [join(stateDir, "skills")] : [],
       configFiles: stateDir ? [join(stateDir, "runtime-opencode-config.json")] : [],
       log: this.log,
-      ...(this.installLogPaths ? { installLog: { ...this.installLogPaths, gate: () => this.installLogGate(), appDirs: stateDir ? [stateDir] : [] } } : {}),
+      ...(installLog ? { installLog: { ...installLog, gate: () => this.installLogGate(), appDirs: stateDir ? [stateDir] : [] } } : {}),
       ...overrides,
     });
     return capture.enabled ? capture : null;
@@ -4879,9 +4948,36 @@ export class SessionUploader {
    */
   private async sessionEnvironment(root: string, sessionId: string, waitMs?: number): Promise<UploadEnvironment> {
     const environment = await this.environment();
-    const toolchain = this.toolchains ? await this.toolchains.get(root, waitMs).catch(() => null) : null;
+    const box = this.boxes.get(sessionId) ?? null;
+    const toolchains = box ? this.boxToolchains : this.toolchains;
+    const probed = toolchains ? await toolchains.get(root, waitMs).catch(() => null) : null;
+    // A box chat: the toolchain was probed in the box, but its `system` and `shell`
+    // blocks are this machine's; the box's are its image (sandbox.image). CLI: the same.
+    const toolchain = probed && box ? withoutHostBlocks(probed) : probed;
     const importedFrom = engine2ImportedFrom(sessionId);
-    return { ...environment, ...(toolchain ? { toolchain } : {}), ...(importedFrom ? { imported_from: importedFrom } : {}) };
+    return { ...environment, ...boxEnvironment(environment, box?.label ?? null), ...(toolchain ? { toolchain } : {}), ...(box ? { sandbox: box.label } : {}), ...(importedFrom ? { imported_from: importedFrom } : {}) };
+  }
+
+  /**
+   * The chat's prompts run in its project's box (box/service.ts beforePrompt),
+   * or no longer (null). Set before startSession for a new chat.
+   */
+  setBox(sessionId: string, box: BoxCaptureInfo | null): void {
+    if (box) this.boxes.set(sessionId, box);
+    else this.boxes.delete(sessionId);
+  }
+
+  /** Whether the chat's commands run in a box (its paths outside the project are the box's). */
+  inBox(sessionId: string): boolean {
+    return this.boxes.has(sessionId);
+  }
+
+  private boxForPath(path: string): BoxCaptureInfo | null {
+    for (const box of this.boxes.values()) {
+      const rel = relative(box.root, path);
+      if (rel === "" || (!rel.startsWith("..") && !nodePath.isAbsolute(rel))) return box;
+    }
+    return null;
   }
 
   private negotiatedTraceSchema(force = false): Promise<2 | 3> {
@@ -4954,7 +5050,8 @@ export class SessionUploader {
 
   startSession(sessionId: string, workspaceId: string, root: string): void {
     if (!this.enabled || this.sessions.has(sessionId) || !/^[A-Za-z0-9._:-]{8,128}$/.test(sessionId)) return;
-    void this.toolchains?.get(root).catch(() => null); // toolchain.ts: collected in the background
+    // toolchain.ts: collected in the background (a box chat's in its box).
+    void (this.boxes.has(sessionId) ? this.boxToolchains : this.toolchains)?.get(root).catch(() => null);
     const state = this.newSessionState(sessionId, workspaceId, root, this.acquireCache(root));
     state.ready = this.prepareSession(state);
     this.sessions.set(sessionId, state);
@@ -4962,7 +5059,8 @@ export class SessionUploader {
     // Capture context collects once the start snapshot is out.
     let startSnapshotDone: () => void = () => undefined;
     const startSnapshot = new Promise<void>((resolveStart) => (startSnapshotDone = resolveStart));
-    this.context?.sessionStarted(sessionId, root, startSnapshot);
+    // A box chat: its own context (this machine's packages, services, processes and network are not the chat's).
+    this.contextOf(sessionId)?.sessionStarted(sessionId, root, startSnapshot);
     this.enqueue(state, async () => {
       await state.ready;
       try {
@@ -5468,7 +5566,7 @@ export class SessionUploader {
       this.appendTrace(state, "client.launch", clientLaunchData());
     }
     this.appendTrace(state, type, data);
-    if (type === "turn.messages" && isRecord(data)) this.context?.turnMessages(sessionId, data.messages);
+    if (type === "turn.messages" && isRecord(data)) this.contextOf(sessionId)?.turnMessages(sessionId, data.messages);
   }
 
   /** Appends one trace event, keeping only the newest MAX_UPLOAD_TRACE_EVENTS. */
@@ -5689,9 +5787,9 @@ export class SessionUploader {
       state.relevance.clear();
       state.turnWrittenPaths.clear();
       // After the turn's artifact baseline (set just below) is listed.
-      this.context?.turnStarted(sessionId, Promise.resolve().then(() => state.artifactBaseline));
+      this.contextOf(sessionId)?.turnStarted(sessionId, Promise.resolve().then(() => state.artifactBaseline));
     } else {
-      this.context?.turnEnded(sessionId);
+      this.contextOf(sessionId)?.turnEnded(sessionId);
     }
     // The artifact baseline must reflect the workspace as the turn begins, not
     // once the queued start snapshot has finished uploading.
@@ -5831,10 +5929,10 @@ export class SessionUploader {
         this.recordTouchedPath(state, evidence.path, evidence.relevance);
       }
       // Capture context: the turn's last messages (its tool calls) arrive here, not as turn.messages.
-      if (isRecord(finalTrace)) this.context?.turnMessages(sessionId, finalTrace.messages, true);
+      if (isRecord(finalTrace)) this.contextOf(sessionId)?.turnMessages(sessionId, finalTrace.messages, true);
     }
     state.finished = true;
-    this.context?.sessionEnded(sessionId);
+    this.contextOf(sessionId)?.sessionEnded(sessionId);
     if (state.changeTimer) clearTimeout(state.changeTimer);
     if (state.deferTimer) clearTimeout(state.deferTimer);
     state.changeTimer = null;
@@ -5846,7 +5944,7 @@ export class SessionUploader {
     this.enqueue(state, async () => {
       await state.ready;
       // Capture context still collecting (bounded wait) rides along with the last trace.
-      await this.context?.settled(sessionId);
+      await this.contextOf(sessionId)?.settled(sessionId);
       if (state.trace.length > 0) pendingTrace.push(...state.trace.splice(0));
       await state.changeCaptureTail;
       if (finalTrace !== undefined) pendingTrace.push({ at: new Date().toISOString(), type: "session.completed", data: finalTrace });
@@ -5875,7 +5973,7 @@ export class SessionUploader {
         this.recordTouchedPath(state, evidence.path, evidence.relevance);
       }
       // Capture context: the turn's last messages (its tool calls) arrive here, not as turn.messages.
-      if (isRecord(finalTrace)) this.context?.turnMessages(sessionId, finalTrace.messages, true);
+      if (isRecord(finalTrace)) this.contextOf(sessionId)?.turnMessages(sessionId, finalTrace.messages, true);
       pendingTrace.push({ at: new Date().toISOString(), type: "turn.completed", data: finalTrace });
     }
     if (pendingTrace.length === 0) return;

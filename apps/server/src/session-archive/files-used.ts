@@ -13,7 +13,7 @@
 import { createHash } from "node:crypto";
 import { lstat, mkdir, open, readFile, readdir, realpath, rm, writeFile, rename } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { stateKey } from "./files.js";
 import { HASH_READ_BYTES, OPEN_ENTRY_FLAGS, isArchiveCredentialPath, statFields, type ScannedEntry } from "./manifest.js";
@@ -28,12 +28,51 @@ import {
   type FilesUsedLimits,
   type FilesUsedOp,
   type PendingUse,
+  type UseClass,
   type UseContext,
 } from "./files-used-policy.js";
 import { shellCommandUses } from "./files-used-shell.js";
 import { sseFrames } from "./tool-start.js";
 import { lockfileEcosystem, MANIFEST_NAMES, MAX_LOCKFILE_BYTES, MAX_TOOLCHAIN_PROJECTS, sortToolchainProjects, toolchainProject, type ToolchainProject } from "./deps.js";
 import { redactUploadContent } from "../session-uploader.js";
+import type { FilesUsedSandbox, ViewFacts } from "./files-used-sandbox.js";
+
+export { containerFilesUsedView, dockerExecRunner, sandboxFilesUsed, type FilesUsedSandbox, type FilesUsedView } from "./files-used-sandbox.js";
+
+/** A regular file's bytes (never a link followed): `too_large` past `maxBytes`, null when it is not there or unreadable. */
+async function readLocalFile(absolute: string, maxBytes: number): Promise<Buffer | "too_large" | null> {
+  let stats;
+  try {
+    stats = await lstat(absolute);
+  } catch {
+    return null;
+  }
+  if (!stats.isFile()) return null;
+  if (stats.size > maxBytes) return "too_large";
+  try {
+    const handle = await open(absolute, OPEN_ENTRY_FLAGS);
+    try {
+      return await handle.readFile();
+    } finally {
+      await handle.close().catch(() => undefined);
+    }
+  } catch {
+    return null;
+  }
+}
+
+/** A container path's facts as fileFacts gives them (`unreadable`: the sandbox could not be asked). */
+function viewFacts(facts: ViewFacts | undefined): FileFacts | "missing" | "not_file" | "unreadable" {
+  if (!facts || facts.kind === "unreadable") return "unreadable";
+  if (facts.kind === "missing") return "missing";
+  if (facts.kind !== "file") return "not_file";
+  return { size: facts.size, sha256: facts.sha256, mtimeMs: facts.mtimeMs, dev: 0, ino: 0 };
+}
+
+function inside(parent: string, child: string): boolean {
+  const rel = relative(resolve(parent), resolve(child));
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
 
 export * from "./files-used-policy.js";
 
@@ -516,7 +555,19 @@ export type FilesUsedTrackerOptions = {
   now?: () => number;
   /** Tests: the temp folders (tempRoots() by default). */
   temps?: readonly string[];
+  /**
+   * A chat in the Linux sandbox (box/; CLI: `sandbox`, files-used-sandbox.ts):
+   * `~` is the container's HOME, the temp folders are the container's, and
+   * every path outside the mounted project is read in the container, never here.
+   */
+  sandboxFor?: (sessionId: string) => FilesUsedSandbox | null;
 };
+
+/** The sandbox's temp folders when the launcher names none. */
+const SANDBOX_TEMPS = ["/tmp", "/var/tmp"];
+
+/** A path the tracker looked at: where it really is, whether it is read on this machine, and (in the container) what is there. */
+type Resolved = { absolute: string; local: boolean; facts?: ViewFacts };
 
 type TrackedSession = {
   /** Calls whose files were kept at their end, by call id. */
@@ -566,7 +617,7 @@ export class FilesUsedTracker {
     return run;
   }
 
-  private async useContext(root: string): Promise<UseContext> {
+  private async useContext(root: string, sandbox: FilesUsedSandbox | null = null): Promise<UseContext> {
     this.context ??= (async () => ({
       roots: [],
       home: this.home,
@@ -576,7 +627,12 @@ export class FilesUsedTracker {
       isCredentialPath: isArchiveCredentialPath,
     }))();
     const base = await this.context;
+    if (sandbox) return { ...base, home: sandbox.home, temps: [...(sandbox.temps ?? SANDBOX_TEMPS)], roots: await pathForms(root) };
     return { ...base, roots: await pathForms(root) };
+  }
+
+  private sandbox(sessionId: string): FilesUsedSandbox | null {
+    return this.options.sandboxFor?.(sessionId) ?? null;
   }
 
   /** Asked at every step (cheap): the user's switch takes effect at the next tool call. */
@@ -603,26 +659,87 @@ export class FilesUsedTracker {
     const key = call.callId ?? `${call.tool}:${call.start ?? ""}:${JSON.stringify(call.input).slice(0, 200)}`;
     if (state.done.has(key)) return 0;
     state.done.add(key);
-    const context = await this.useContext(root);
-    let staged = 0;
-    for (const use of await this.callFiles(call, root, context)) {
-      const absolute = (await canonicalFile(use.path)) ?? use.path;
-      if (call.callId && !state.firstCall.has(absolute)) state.firstCall.set(absolute, call.callId);
-      const kind = classifyUse(absolute, context);
-      if (kind?.plan === "stage" && (await this.stageFile(sessionId, absolute, kind.archivePath!, kind.scrub)) !== null) staged += 1;
+    const sandbox = this.sandbox(sessionId);
+    const context = await this.useContext(root, sandbox);
+    const uses = await this.callFiles(call, root, context, sandbox);
+    const resolved = await this.resolvePaths(uses.map((use) => use.path), sandbox);
+    const toStage: Array<{ where: Resolved; kind: UseClass }> = [];
+    for (const use of uses) {
+      const where = resolved.get(use.path)!;
+      if (call.callId && !state.firstCall.has(where.absolute)) state.firstCall.set(where.absolute, call.callId);
+      const kind = this.classify(where, context, sandbox);
+      if (kind?.plan === "stage") toStage.push({ where, kind });
     }
+    let staged = 0;
+    for (const result of await this.stageFiles(sessionId, toStage, sandbox)) if (result !== null) staged += 1;
     return staged;
   }
 
+  /** Whether a path is read on this machine: always without the sandbox; in it, only inside a folder mounted at the same path. */
+  private isLocal(absolute: string, sandbox: FilesUsedSandbox | null): boolean {
+    return !sandbox || sandbox.mounted.some((dir) => inside(dir, absolute));
+  }
+
+  /**
+   * Where each path really is (its folder as a real path, the file never
+   * followed). In the sandbox a path outside the mounted project, or one
+   * whose real folder leaves it, is resolved and inspected in the container.
+   */
+  private async resolvePaths(paths: readonly string[], sandbox: FilesUsedSandbox | null): Promise<Map<string, Resolved>> {
+    const out = new Map<string, Resolved>();
+    const remote: string[] = [];
+    for (const path of new Set(paths)) {
+      if (!this.isLocal(path, sandbox)) {
+        remote.push(path);
+        continue;
+      }
+      const absolute = (await canonicalFile(path)) ?? resolve(path);
+      if (this.isLocal(absolute, sandbox)) out.set(path, { absolute, local: true });
+      else remote.push(path);
+    }
+    if (remote.length > 0 && sandbox) {
+      const store = this.options.archive.filesUsed;
+      const facts = await sandbox.view.inspect(remote, store?.currentLimits.maxFileBytes ?? DEFAULT_FILES_USED_LIMITS.maxFileBytes);
+      for (const path of remote) {
+        const found = facts.get(path) ?? { canonical: path, kind: "unreadable" as const };
+        // A container path whose real folder is the mounted project is that project file (the same bytes here).
+        out.set(path, this.isLocal(found.canonical, sandbox) ? { absolute: found.canonical, local: true } : { absolute: found.canonical, local: false, facts: found });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Where a file is and what may happen to its bytes (files-used-policy.ts).
+   * In the sandbox the agent's home is the container's; a container file
+   * outside the project is never scanned here: its bytes are kept from the
+   * container (staged), like a temp file.
+   */
+  private classify(where: Resolved, context: UseContext, sandbox: FilesUsedSandbox | null): UseClass | null {
+    let kind = classifyUse(where.absolute, context);
+    if (!sandbox || where.local || !kind) return kind;
+    if (kind.scope === "outside" && sandbox.hostHome) kind = classifyUse(where.absolute, { ...context, home: sandbox.hostHome }) ?? kind;
+    if (kind.plan === "scan") kind = { ...kind, plan: "stage" };
+    return kind;
+  }
+
   /** A call's files: what it names, and the files changed during it in a temp folder it names. */
-  private async callFiles(call: UsedToolCall, root: string, context: UseContext): Promise<Array<{ path: string; op: FilesUsedOp; implicit?: true }>> {
-    const uses = toolCallUses(call, root, this.home);
+  private async callFiles(call: UsedToolCall, root: string, context: UseContext, sandbox: FilesUsedSandbox | null = null): Promise<Array<{ path: string; op: FilesUsedOp; implicit?: true }>> {
+    const uses = toolCallUses(call, root, context.home);
     if (!SHELL_TOOLS.has(call.tool) || call.start === null) return uses;
     const out = [...uses];
     const seen = new Set(uses.map((use) => use.path));
+    const end = call.end ?? this.now();
+    const inTemp = (path: string) => context.temps.some((temp) => path !== temp && path.startsWith(`${temp}/`));
+    const containerDirs: string[] = [];
     for (const use of uses) {
+      if (!this.isLocal(use.path, sandbox)) {
+        // The container's temp folders: walked there, in one step for the call.
+        if (inTemp(use.path)) containerDirs.push(use.path);
+        continue;
+      }
       const real = (await canonicalFile(use.path)) ?? use.path;
-      if (!context.temps.some((temp) => real !== temp && real.startsWith(`${temp}/`))) continue;
+      if (!inTemp(real) || !this.isLocal(real, sandbox)) continue;
       let stats;
       try {
         stats = await lstat(real);
@@ -630,7 +747,15 @@ export class FilesUsedTracker {
         continue;
       }
       if (!stats.isDirectory()) continue;
-      for (const file of await changedInFolder(real, call.start, call.end ?? this.now())) {
+      for (const file of await changedInFolder(real, call.start, end)) {
+        if (!seen.has(file)) {
+          seen.add(file);
+          out.push({ path: file, op: "write" });
+        }
+      }
+    }
+    if (containerDirs.length > 0 && sandbox) {
+      for (const file of await sandbox.view.changed(containerDirs, call.start - CALL_WINDOW_SLACK_MS, end + CALL_WINDOW_SLACK_MS)) {
         if (!seen.has(file)) {
           seen.add(file);
           out.push({ path: file, op: "write" });
@@ -640,30 +765,24 @@ export class FilesUsedTracker {
     return out;
   }
 
-  /** Keeps a copy of a temp file, or the scrubbed copy of an allowlisted home config; null when nothing was kept. */
-  private async stageFile(sessionId: string, absolute: string, archivePath: string, scrub?: Parameters<typeof scrubHomeConfig>[0]): Promise<{ size: number; sha256: string } | "too_large" | null> {
+  /** Keeps a copy of each temp file or allowlisted home config (scrubbed); per file, what was kept, or null when nothing was. */
+  private async stageFiles(sessionId: string, files: ReadonlyArray<{ where: Resolved; kind: UseClass }>, sandbox: FilesUsedSandbox | null): Promise<Array<{ size: number; sha256: string } | "too_large" | null>> {
+    const store = this.options.archive.filesUsed;
+    if (!store || files.length === 0) return files.map(() => null);
+    const limits = store.currentLimits;
+    const remote = files.filter(({ where }) => !where.local && where.facts?.kind === "file").map(({ where }) => where.absolute);
+    const remoteBytes = remote.length > 0 && sandbox ? await sandbox.view.read(remote, limits.maxFileBytes) : new Map<string, Buffer | "too_large" | null>();
+    const out: Array<{ size: number; sha256: string } | "too_large" | null> = [];
+    for (const { where, kind } of files) {
+      const bytes = where.local ? await readLocalFile(where.absolute, limits.maxFileBytes) : remoteBytes.get(where.absolute) ?? null;
+      out.push(bytes === null || bytes === "too_large" ? bytes : await this.stageBytes(sessionId, where.absolute, kind.archivePath!, bytes, kind.scrub));
+    }
+    return out;
+  }
+
+  private async stageBytes(sessionId: string, absolute: string, archivePath: string, bytes: Buffer, scrub?: Parameters<typeof scrubHomeConfig>[0]): Promise<{ size: number; sha256: string } | "too_large" | null> {
     const store = this.options.archive.filesUsed;
     if (!store) return null;
-    const limits = store.currentLimits;
-    let stats;
-    try {
-      stats = await lstat(absolute);
-    } catch {
-      return null;
-    }
-    if (!stats.isFile()) return null;
-    if (stats.size > limits.maxFileBytes) return "too_large";
-    let bytes: Buffer;
-    try {
-      const handle = await open(absolute, OPEN_ENTRY_FLAGS);
-      try {
-        bytes = await handle.readFile();
-      } finally {
-        await handle.close().catch(() => undefined);
-      }
-    } catch {
-      return null;
-    }
     if (scrub) {
       const scrubbed = scrubHomeConfig(scrub, bytes.toString("utf8"));
       if (scrubbed === null) return null;
@@ -692,20 +811,24 @@ export class FilesUsedTracker {
       if (!(await this.active(sessionId))) return result;
       const store = this.options.archive.filesUsed!;
       state.turn += 1;
-      const context = await this.useContext(root);
+      const sandbox = this.sandbox(sessionId);
+      const context = await this.useContext(root, sandbox);
       const limits = store.currentLimits;
-      const uses = new Map<string, { op: FilesUsedOp; callId: string | null; implicit: boolean }>();
+      const uses = new Map<string, { op: FilesUsedOp; callId: string | null; implicit: boolean; where: Resolved }>();
       const calls = usedToolCalls(messages);
+      const named: Array<{ use: { path: string; op: FilesUsedOp; implicit?: true }; callId: string | null }> = [];
       for (const call of calls) {
         result.staged += await this.keepCall(sessionId, root, call);
-        for (const use of await this.callFiles(call, root, context)) {
-          const absolute = (await canonicalFile(use.path)) ?? resolve(use.path);
-          const known = uses.get(absolute);
-          if (known) {
-            known.op = strongerOp(known.op, use.op);
-            known.implicit &&= use.implicit === true;
-          } else if (uses.size < MAX_FILES_USED_ITEMS) uses.set(absolute, { op: use.op, callId: state.firstCall.get(absolute) ?? call.callId, implicit: use.implicit === true });
-        }
+        for (const use of await this.callFiles(call, root, context, sandbox)) named.push({ use, callId: call.callId });
+      }
+      const resolved = await this.resolvePaths(named.map(({ use }) => use.path), sandbox);
+      for (const { use, callId } of named) {
+        const where = resolved.get(use.path)!;
+        const known = uses.get(where.absolute);
+        if (known) {
+          known.op = strongerOp(known.op, use.op);
+          known.implicit &&= use.implicit === true;
+        } else if (uses.size < MAX_FILES_USED_ITEMS) uses.set(where.absolute, { op: use.op, callId: state.firstCall.get(where.absolute) ?? callId, implicit: use.implicit === true, where });
       }
       // The end-of-turn snapshot: files of the project created or changed during the turn (gitignored ones
       // too) that no call named. A stat walk, bounded by entries and by the turn-end budget.
@@ -714,26 +837,31 @@ export class FilesUsedTracker {
         const realRoot = (await pathForms(root)).at(-1) ?? root;
         for (const file of await changedSince(realRoot, since, Math.min(deadline, started + SNAPSHOT_BUDGET_MS))) {
           if (uses.has(file) || uses.size >= MAX_FILES_USED_ITEMS) continue;
-          uses.set(file, { op: "write", callId: null, implicit: false });
+          uses.set(file, { op: "write", callId: null, implicit: false, where: { absolute: file, local: true } });
           result.snapshot += 1;
         }
       }
       const items: PendingUse[] = [];
       for (const [absolute, use] of uses) {
-        const kind = classifyUse(absolute, context);
+        const kind = this.classify(use.where, context, sandbox);
         if (!kind) continue;
         // A file the chain will hold gets its hash from the chain's own scan (index.ts); a hash-only one is
-        // hashed here while the budget lasts; a denylisted one never is.
+        // hashed here while the budget lasts; a denylisted one never is. A container file: as the box answered.
         const hashBytes = kind.plan === "hold" && kind.reason !== "denylisted" && this.now() < deadline ? limits.maxFileBytes : -1;
-        const facts = await fileFacts(absolute, hashBytes);
+        const facts = use.where.local ? await fileFacts(absolute, hashBytes) : viewFacts(use.where.facts);
         // A config a program loads without naming it is listed only when it is there.
-        if (facts === "not_file" || (facts === "missing" && use.implicit)) continue;
+        if (facts === "not_file" || ((facts === "missing" || facts === "unreadable") && use.implicit)) continue;
+        if (facts === "unreadable") {
+          // The sandbox could not be asked: listed, never guessed from this machine.
+          items.push({ path: kind.path, scope: kind.scope, op: use.op, size: null, sha256: null, plan: "hold", reason: kind.plan === "hold" ? kind.reason : "missing", turn: state.turn, ...(kind.archivePath ? { archive_path: kind.archivePath } : {}), ...(use.callId ? { call_id: use.callId } : {}) });
+          continue;
+        }
         const present = facts !== "missing";
         let size = present ? facts.size : null;
         let sha256 = present ? facts.sha256 : null;
         let reason = kind.reason;
         if (kind.plan === "stage" && present) {
-          const staged = await this.stageFile(sessionId, absolute, kind.archivePath!, kind.scrub);
+          const staged = (await this.stageFiles(sessionId, [{ where: use.where, kind }], sandbox))[0] ?? null;
           if (staged === "too_large") reason = "too_large";
           else if (staged) {
             // The archived copy (for a home config, the scrubbed one): its size and hash.

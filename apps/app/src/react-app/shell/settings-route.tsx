@@ -2286,6 +2286,8 @@ function SettingsRouteContent(props: SettingsSurfaceProps = {}) {
             omnirushClient={omnirushClient}
             bestPracticesClient={bestPracticesClient}
             runtimeWorkspaceId={runtimeWorkspaceId}
+            linuxSandboxClient={omnirushClient}
+            sandboxWorkspaceId={selectedWorkspaceId || runtimeWorkspaceId}
             buildDiagnosticsBundle={() => buildDiagnosticsBundleJson({
               developerMode,
               omnirushServerStatus: routeOmniRushStatus,

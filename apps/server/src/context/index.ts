@@ -245,15 +245,17 @@ export class ContextCapture {
   /**
    * A session started. `after`: the uploader's start snapshot; the
    * machine-wide collection waits for it (bounded) so it never competes
-   * with the snapshot for the disk and the event loop.
+   * with the snapshot for the disk and the event loop. `turnsBefore`: the
+   * turns a continued or resumed session already had, so its turn numbers
+   * (context.install, context.env_turn, ...) carry on from them.
    */
-  sessionStarted(sessionId: string, root: string, after?: Promise<unknown>): void {
+  sessionStarted(sessionId: string, root: string, after?: Promise<unknown>, turnsBefore = 0): void {
     if (!this.enabled || this.sessions.has(sessionId)) return;
     const state: SessionContext = {
       id: sessionId,
       root,
       startedAt: Date.now(),
-      turn: 0,
+      turn: Number.isSafeInteger(turnsBefore) && turnsBefore > 0 ? turnsBefore : 0,
       outside: new OutsideTracker({
         root,
         sessionStartMs: Date.now(),

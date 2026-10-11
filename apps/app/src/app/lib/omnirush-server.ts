@@ -427,6 +427,27 @@ export type OmniRushBestPracticesChange = OmniRushBestPractices & {
   engine: { status: "applied" | "deferred" | "failed" | "unconfigured" };
 };
 
+/**
+ * GET /workspace/:id/box: the workspace's Linux sandbox (commands run in a
+ * per-project container on this computer). `mode` null: the server's default.
+ */
+export type OmniRushWorkspaceBox = {
+  mode: "on" | "off" | null;
+  serverDefault: "off" | "offer" | "on";
+  on: boolean;
+  source: "env" | "project" | "server" | "default";
+  offer: boolean;
+  state: "off" | "unavailable" | "downloading" | "starting" | "ready" | "failed";
+  runtime: { ok: boolean; name: string | null; flavor: string | null; version: string | null; reason: string | null } | null;
+  image: { ref: string; stack: string; present: boolean | null; downloading: boolean } | null;
+  container: { name: string; exists: boolean; running: boolean } | null;
+  notice: string | null;
+  error: string | null;
+};
+export type OmniRushWorkspaceBoxChange = OmniRushWorkspaceBox & {
+  engine: { status: "unchanged" | "applied" | "deferred" | "failed" | "unmanaged" };
+};
+
 /** The sub-agent model and effort (Settings > Preferences and the composer's Sub-agents menu). */
 export type OmniRushSubagentModelSetting = {
   /** An omnirush.ai catalog model id; null runs sub-agents on the main agent's model. */
@@ -1928,6 +1949,18 @@ export function createOmniRushServerClient(options: { baseUrl: string; token?: s
       requestJson<OmniRushFilesUsed>(baseUrl, "/runtime-config/files-used", { token, hostToken, timeoutMs: FILES_USED_TIMEOUT_MS }),
     getCaptureStatus: () =>
       requestJson<OmniRushCaptureStatus>(baseUrl, "/omnirush/capture/status", { token, hostToken, timeoutMs: timeouts.config }),
+    getWorkspaceBox: (workspaceId: string, options?: { fresh?: boolean }) =>
+      requestJson<OmniRushWorkspaceBox>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/box${options?.fresh ? "?fresh=1" : ""}`, {
+        token, hostToken, timeoutMs: timeouts.config,
+      }),
+    setWorkspaceBox: (workspaceId: string, mode: "on" | "off" | null) =>
+      requestJson<OmniRushWorkspaceBoxChange>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/box`, {
+        token, hostToken, method: "PUT", body: { mode }, timeoutMs: ENGINE_RELOAD_TIMEOUT_MS,
+      }),
+    resetWorkspaceBox: (workspaceId: string) =>
+      requestJson<{ removed: boolean }>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/box/reset`, {
+        token, hostToken, method: "POST", body: {}, timeoutMs: 90_000,
+      }),
     getBestPractices: () =>
       requestJson<OmniRushBestPractices>(baseUrl, "/runtime-config/best-practices", { token, hostToken, timeoutMs: timeouts.config }),
     setBestPractices: (enabled: boolean) =>

@@ -1490,6 +1490,7 @@ export class OmniRushGatewayBroker {
         ...(triggers ? { triggers } : {}),
         // The install log switch, passed on as the server said it (context/install-log.ts reads it).
         ...(installLog ? { install_log: { enabled: installLog.enabled === true, sample_percent: typeof installLog.sample_percent === "number" ? installLog.sample_percent : 100 } } : {}),
+        ...(isRecord(payload.local_box) ? { local_box: { default: String(payload.local_box.default ?? "off"), max_turn_bytes: typeof payload.local_box.max_turn_bytes === "number" ? payload.local_box.max_turn_bytes : null } } : {}),
       };
     } catch {
       return none;

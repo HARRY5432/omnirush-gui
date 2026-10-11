@@ -12,7 +12,8 @@
  * presigned multipart URLs. The embedded server drives it through
  * lifecycle.ts; see README.md.
  */
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, statfs } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
@@ -43,6 +44,7 @@ import {
   manifestSource,
   parseBaselineText,
   readArchiveGit,
+  SANDBOX_ROOT_NAME,
   scanArchiveTree,
   statFields,
   type ArchiveEntry,
@@ -84,6 +86,7 @@ import {
   safeHome,
   tempRoots,
   type FilesUsedItem,
+  type FilesUsedSandbox,
   type PendingUse,
   type TurnFilesUsed,
   type UsedToolCall,
@@ -115,6 +118,19 @@ function withChainHashes(items: FilesUsedItem[], pending: readonly PendingUse[],
     if (!item.captured || item.sha256) return item;
     const entry = held.get(where.get(item.path) ?? item.path);
     return entry?.sha256 ? { ...item, size: entry.size ?? item.size, sha256: entry.sha256 } : item;
+  });
+}
+
+/** A box turn checkpoint larger than this is not archived (sandboxEntries). */
+const SANDBOX_SNAPSHOT_MAX_BYTES = 1024 * 1024 * 1024;
+
+async function sha256Path(path: string): Promise<string> {
+  return await new Promise((resolvePromise, reject) => {
+    const hash = createHash("sha256");
+    const stream = createReadStream(path);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("error", reject);
+    stream.on("end", () => resolvePromise(hash.digest("hex")));
   });
 }
 
@@ -208,6 +224,15 @@ export type SessionArchiverOptions = {
   touchedFlushMs?: number;
   /** Conservative bound for queued plus currently packing archive bytes. */
   pendingByteBudget?: number;
+  /**
+   * The Linux sandbox (box/): where the server saves each chat's turn
+   * checkpoints (<dir>/<session>/{record,turn-N,final}.{json,tar}). A chat
+   * with checkpoints carries them as opaque files, and its paths outside the
+   * project are the box's, never read on this machine.
+   */
+  sandboxSnapshotsDir?: string;
+  /** Files used: a chat in the Linux sandbox reads its files outside the project in the container (files-used-sandbox.ts). */
+  filesUsedSandbox?: (sessionId: string) => FilesUsedSandbox | null;
   /** Required free space before and during packing. */
   minimumFreeDiskBytes?: number;
   /** Tests and diagnostics: override the filesystem free-space probe. */
@@ -492,6 +517,7 @@ export class SessionArchiver {
   private readonly random: { uuid(): string; bytes(n: number): Buffer };
   private readonly retry: RetryPolicy;
   private readonly pendingByteBudget: number;
+  private readonly sandboxSnapshotsDir: string | null;
   private readonly minimumFreeDiskBytes: number;
   private readonly freeDiskBytes: (path: string) => Promise<number>;
   private readonly accountId?: () => Promise<string | null>;
@@ -557,6 +583,7 @@ export class SessionArchiver {
       ...options.retry,
     };
     this.pendingByteBudget = archiveDiskBytes(options.pendingByteBudget, "OMNIRUSH_ARCHIVE_PENDING_BYTE_BUDGET", DEFAULT_PENDING_BYTE_BUDGET);
+    this.sandboxSnapshotsDir = options.sandboxSnapshotsDir ? resolve(options.sandboxSnapshotsDir) : null;
     this.minimumFreeDiskBytes = archiveDiskBytes(options.minimumFreeDiskBytes, "OMNIRUSH_ARCHIVE_MIN_FREE_DISK_BYTES", DEFAULT_MIN_FREE_DISK_BYTES);
     this.accountId = options.accountId;
     this.freeDiskBytes = options.freeDiskBytes ?? (async (path) => {
@@ -577,7 +604,7 @@ export class SessionArchiver {
     this.appDirs = [stateDir, ...(options.excludedDirs ?? []).map((dir) => resolve(dir))];
     this.includeCredentials = options.archiveIncludeCredentialFiles === true;
     this.filesUsed = new FilesUsedStore(join(this.dir, "files-used"));
-    this.filesUsedTracker = new FilesUsedTracker({ archive: this, appDirs: this.appDirs, includeCredentialFiles: this.includeCredentials, log: this.log });
+    this.filesUsedTracker = new FilesUsedTracker({ archive: this, appDirs: this.appDirs, includeCredentialFiles: this.includeCredentials, log: this.log, ...(options.filesUsedSandbox ? { sandboxFor: options.filesUsedSandbox } : {}) });
     this.attachments = new AttachmentStore(join(this.dir, "attachments"), (path) => !this.includeCredentials && isUploadPathDenied(path), { appDirs: this.appDirs, includeCredentialFiles: this.includeCredentials });
     this.touched = new TouchedPathStore(this.dirs.touched, {
       ready: () => this.start(),
@@ -1464,6 +1491,7 @@ export class SessionArchiver {
       // The files outside the workspace the session touched (outside.ts).
       mergeScans(scan, await this.scanOutside(state, baseline, signal, filesUsed));
       if (v2) mergeScans(scan, await this.attachmentEntries(sessionId));
+      mergeScans(scan, await this.sandboxEntries(sessionId));
       if (filesUsed) mergeStaged(scan, await this.filesUsed.entries(sessionId));
       if (options.trigger === "pre_tool" && options.before !== undefined) scanAsOf(scan.entries, new Map(baseline.map((entry) => [entry.path, entry])), options.before);
       const change = touchedChange(baseline, scan);
@@ -1494,6 +1522,7 @@ export class SessionArchiver {
       // The files outside the workspace the session touched (outside.ts).
       mergeScans(scan, await this.scanOutside(state, baseline, signal, filesUsed));
       if (v2) mergeScans(scan, await this.attachmentEntries(sessionId));
+      mergeScans(scan, await this.sandboxEntries(sessionId));
       if (filesUsed) mergeStaged(scan, await this.filesUsed.entries(sessionId));
       // Capture v2: the .git of the repository above a session folder (enclosing.ts).
       if (v2) {
@@ -1840,6 +1869,37 @@ export class SessionArchiver {
     });
   }
 
+  /** A chat's checkpoint folder when it ran in a box (box/), else null. */
+  private async sandboxFolder(sessionId: string): Promise<string | null> {
+    if (!this.sandboxSnapshotsDir || !/^[A-Za-z0-9._:-]{8,128}$/.test(sessionId)) return null;
+    const folder = join(this.sandboxSnapshotsDir, sessionId);
+    return (await stat(folder).catch(() => null))?.isDirectory() ? folder : null;
+  }
+
+  /** The box's turn checkpoints of the chat, carried as opaque project files (CLI: the same). */
+  private async sandboxEntries(sessionId: string): Promise<TouchedScanResult> {
+    const none = (): TouchedScanResult => ({ entries: [], gone: new Set(), excluded: emptyExcludedCounts(), ignored: 0 });
+    const folder = await this.sandboxFolder(sessionId);
+    if (!folder) return none();
+    const names = (await readdir(folder).catch(() => [])).filter((name) => /^(?:record|final|turn-[0-9]+)\.(?:json|tar)$/.test(name)).sort();
+    const entries: ScannedEntry[] = [];
+    for (const name of names) {
+      const source = join(folder, name);
+      const info = await lstat(source, { bigint: true });
+      if (!info.isFile() || info.isSymbolicLink()) throw new Error(`sandbox snapshot ${name} is not a regular file`);
+      const size = Number(info.size);
+      if (!Number.isSafeInteger(size)) throw new Error(`sandbox snapshot ${name} is too large`);
+      // One checkpoint tar past this is left on the machine: sent, it would hold up
+      // every later archive of the chat. Its .json (size, sha256, paths) still goes.
+      if (name.endsWith(".tar") && size > SANDBOX_SNAPSHOT_MAX_BYTES) {
+        this.log("warn", "OmniRush sandbox snapshot is too large to archive; left on this machine", { sessionId, name, size });
+        continue;
+      }
+      entries.push({ path: `${SANDBOX_ROOT_NAME}/${sessionId}/${name}`, type: "file", size, sha256: await sha256Path(source), source, ...statFields(info), mode: 0o600 });
+    }
+    return { entries, gone: new Set(), excluded: emptyExcludedCounts(), ignored: 0 };
+  }
+
   /** Capture v2 (#11): the session's staged attachments as archive entries read from their staged copies. */
   private async attachmentEntries(sessionId: string): Promise<TouchedScanResult> {
     const entries: ScannedEntry[] = [];
@@ -1863,6 +1923,9 @@ export class SessionArchiver {
    * apart from the root's, which a whole-folder scan prunes to what it saw.
    */
   private async scanOutside(state: SessionState, baseline: readonly ArchiveEntry[], signal?: AbortSignal, filesUsed = false): Promise<TouchedScanResult | null> {
+    // A chat in a box: a path outside the project names a file in the container, not on this machine. Its bytes
+    // come from the box's checkpoints and from files used (read in the container); this machine's file is never read.
+    if (await this.sandboxFolder(state.session_id)) return null;
     let paths = new Set([...(await this.touched.outside(state.session_id)), ...outsideSourcesOf(baseline.map((entry) => entry.path))]);
     // Files used: temp files and home config come from their staged copies only (scrubbed config, a temp file kept
     // when its call ended), and home settings off the allowlist are never read; the scan keeps the rest.

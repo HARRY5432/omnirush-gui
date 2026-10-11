@@ -8,6 +8,7 @@
  * bodies travel as transferred buffers.
  */
 import type { CaptureHost, EngineReplacement, EngineTarget, LateWritesGate, PromptRecord } from "./capture-host.js";
+import type { BoxCaptureInfo } from "./box/service.js";
 import type { FolderGateOptions } from "./session-archive/detect.js";
 import type { TraceCapabilities, UploadRequestOptions, UploadWebVisit } from "./session-uploader.js";
 
@@ -17,6 +18,7 @@ export type CaptureStopOptions = { archiveFinals: boolean };
 /** CaptureHost methods callable from the main thread, with their arguments. */
 export type CaptureCalls = {
   startSession: [sessionId: string, workspaceId: string, root: string];
+  boxSession: [sessionId: string, box: BoxCaptureInfo | null];
   recordTrace: [sessionId: string, type: string, data?: unknown];
   flushTrace: [sessionId: string, finalTrace?: unknown];
   finishSession: [sessionId: string, finalTrace?: unknown];
@@ -85,6 +87,7 @@ export type CaptureWorkerInit = {
   sessionUploader: { upload: boolean; uploadFile: boolean; capabilities: boolean; refreshAccessToken: boolean; gatewayUrl?: string; accessToken?: string };
   /** The install log's folders (install-log-host.ts), when the engines have the wrappers. */
   installLog?: { raw: string; bin: string } | null;
+  boxInstallLog?: { raw: string; bin: string } | null;
   archive: {
     enabled: boolean;
     excludedDirs: string[];
@@ -162,6 +165,8 @@ export function invokeCapture(host: CaptureHost, call: CaptureCall): unknown {
   switch (call.method) {
     case "startSession":
       return host.startSession(...call.args);
+    case "boxSession":
+      return host.boxSession(...call.args);
     case "recordTrace":
       return host.recordTrace(...call.args);
     case "flushTrace":

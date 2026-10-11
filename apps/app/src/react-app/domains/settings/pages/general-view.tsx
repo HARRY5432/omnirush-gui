@@ -10,12 +10,14 @@ import {
   ShieldCheck,
   Sparkles,
   Terminal,
+  Box,
   Wrench,
   UserRoundCheck,
 } from "lucide-react";
 
 import type { OmniRushAccountSignOutReason } from "@omnirush/types/desktop-ipc";
 
+import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { t } from "../../../../i18n";
 import type { SettingsTab } from "../../../../app/types";
@@ -24,7 +26,7 @@ import {
   omnirushAccountSignOut,
   omnirushAccountStatus,
 } from "../../../../app/lib/desktop";
-import type { OmniRushRuntimeApprovals } from "../../../../app/lib/omnirush-server";
+import type { OmniRushRuntimeApprovals, OmniRushWorkspaceBox } from "../../../../app/lib/omnirush-server";
 import { omnirushUsageSummary } from "../../../../app/lib/omnirush-usage";
 import { isElectronRuntime } from "../../../../app/utils";
 import {
@@ -35,6 +37,7 @@ import {
 } from "../approval-mode";
 import { DiagnosticsSection } from "./diagnostics-section";
 import { BEST_PRACTICES_HELP, useBestPractices, type BestPracticesClient } from "../best-practices";
+import { LINUX_SANDBOX_HELP, linuxSandboxStatusLine, useLinuxSandbox, type LinuxSandboxClient } from "../linux-sandbox";
 
 export type GeneralSettingsViewProps = {
   onNavigateTab: (tab: SettingsTab) => void;
@@ -45,6 +48,9 @@ export type GeneralSettingsViewProps = {
   bestPracticesClient?: BestPracticesClient | null;
   /** Workspace whose engine is reloaded after the approval mode changes. */
   runtimeWorkspaceId?: string | null;
+  /** The Linux sandbox card (per project); hidden without a client or a selected workspace. */
+  linuxSandboxClient?: LinuxSandboxClient | null;
+  sandboxWorkspaceId?: string | null;
   /** Builds the sanitized diagnostics bundle with the route's context. */
   buildDiagnosticsBundle?: () => Promise<string>;
 };
@@ -211,6 +217,52 @@ export function BestPracticesCard(props: {
   );
 }
 
+/**
+ * Settings > General > Linux sandbox (beta): the selected project's choice,
+ * what the sandbox is doing, and Reset (removes its container and installs).
+ */
+export function LinuxSandboxCard(props: {
+  box: OmniRushWorkspaceBox | null;
+  busy: boolean;
+  status: string;
+  onToggle: (enabled: boolean) => void;
+  onReset: () => void;
+}) {
+  const box = props.box;
+  return (
+    <div className="space-y-3">
+      <div className="text-[11px] font-semibold uppercase tracking-[0.15em] text-dls-secondary">Linux sandbox</div>
+      <div className="flex items-center gap-4 rounded-2xl border border-dls-border bg-dls-surface p-4">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-dls-border bg-dls-hover">
+          <Box size={17} className="text-dls-secondary" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-[13px] font-medium text-dls-text">Run commands in a Linux sandbox (beta)</div>
+          <div id="linux-sandbox-help" className="text-[11px] text-dls-secondary">{LINUX_SANDBOX_HELP}</div>
+          {/* TODO(Sam): data-collection wording for sandboxed chats goes here (what uploads record about the
+              sandbox: Linux as the OS, the container image, per-turn changes outside the project). No copy yet. */}
+          {box ? (
+            <div className="mt-0.5 text-[11px] text-dls-secondary" role="status" data-testid="linux-sandbox-state">{linuxSandboxStatusLine(box)}</div>
+          ) : null}
+          {props.status ? (
+            <div className="mt-0.5 text-[11px] text-dls-secondary" data-testid="linux-sandbox-status">{props.status}</div>
+          ) : null}
+        </div>
+        {box?.on && box.container?.exists ? (
+          <Button variant="outline" size="xs" disabled={props.busy} onClick={props.onReset}>Reset sandbox</Button>
+        ) : null}
+        <Switch
+          aria-label="Run commands in a Linux sandbox"
+          aria-describedby="linux-sandbox-help"
+          checked={box?.on === true}
+          disabled={props.busy || !box || box.source === "env"}
+          onCheckedChange={props.onToggle}
+        />
+      </div>
+    </div>
+  );
+}
+
 export function GeneralSettingsView(props: GeneralSettingsViewProps) {
   const [account, setAccount] = useState<NativeAccountStatus | null>(null);
   const [accountBusy, setAccountBusy] = useState(false);
@@ -219,6 +271,8 @@ export function GeneralSettingsView(props: GeneralSettingsViewProps) {
   const approvalMode = useApprovalMode(approvalsClient, props.runtimeWorkspaceId ?? null);
   const bestPracticesClient = props.bestPracticesClient ?? null;
   const bestPractices = useBestPractices(bestPracticesClient);
+  const linuxSandboxClient = props.linuxSandboxClient ?? null;
+  const linuxSandbox = useLinuxSandbox(linuxSandboxClient, props.sandboxWorkspaceId ?? null);
 
   useEffect(() => {
     if (!isElectronRuntime()) return;
@@ -372,6 +426,16 @@ export function GeneralSettingsView(props: GeneralSettingsViewProps) {
           busy={bestPractices.busy}
           status={bestPractices.status}
           onToggle={(enabled) => void bestPractices.setEnabled(enabled)}
+        />
+      ) : null}
+
+      {linuxSandboxClient && props.sandboxWorkspaceId ? (
+        <LinuxSandboxCard
+          box={linuxSandbox.box}
+          busy={linuxSandbox.busy}
+          status={linuxSandbox.status}
+          onToggle={(enabled) => void linuxSandbox.setEnabled(enabled)}
+          onReset={() => void linuxSandbox.reset()}
         />
       ) : null}
 

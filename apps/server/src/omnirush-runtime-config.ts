@@ -53,6 +53,8 @@ import {
   type OmniRushModelCatalog,
 } from "./omnirush-model-catalog.js";
 import { writeFileAtomic } from "./atomic-write.js";
+import { boxServiceFor } from "./box/desktop.js";
+import { engineConfig as withBoxEngineConfig } from "./box/launch.js";
 import {
   OMNIRUSH_BEST_PRACTICES,
   bestPracticesEnabled,
@@ -131,7 +133,7 @@ export async function buildOmniRushRuntimeConfigObject(
   // engine through the dynamic push path instead.
   const runtimeConfig = config ? await readGlobalRuntimeOpencodeConfig(config) : {};
   const internalGateway = resolveConfiguredInternalGatewayRuntime(config);
-  return buildOmniRushRuntimeConfigObjectFromSnapshot(
+  const built = buildOmniRushRuntimeConfigObjectFromSnapshot(
     runtimeConfig,
     internalGateway,
     process.env,
@@ -139,6 +141,10 @@ export async function buildOmniRushRuntimeConfigObject(
     config ? omnirushRuntimeSkillsDir(config) : undefined,
     config ? omnirushBestPracticesSkillsDir(config) : undefined,
   );
+  // The Linux sandbox (box/): the engine's shell is the box shell and the box plugin is
+  // loaded once any workspace may use a box; every other project's commands run natively
+  // through the same shell. The same bytes whichever workspace is active.
+  return config ? withBoxEngineConfig(await boxServiceFor(config).engineBits(), built) : built;
 }
 
 /**
