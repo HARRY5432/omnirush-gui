@@ -785,7 +785,6 @@ export default {
   "settings.environment.apply_title": "应用环境变量更改？",
   "settings.environment.apply_unavailable": "只有桌面应用可以直接应用更改。",
   "settings.environment.applying": "应用中……",
-  "settings.environment.restart_required": "已保存。应用更改后即可生效。",
   "settings.environment.reveal": "查看",
   "settings.environment.reveal_value": "查看 {key} 的值",
   "settings.environment.save": "保存",

@@ -40,7 +40,6 @@ function WorkspaceRunModePicker({ client, workspaceId, busy }: { client: OmniRus
       setConfirm(false);
       setOpen(false);
       if (result.refreshPending) toast.warning(result.reason ?? "Saved. Reload this workspace before relying on the new mode.");
-      else toast.success("Workspace run mode updated.");
     },
     onError: (error: Error) => {
       toast.error(error.message);

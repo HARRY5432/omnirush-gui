@@ -130,8 +130,6 @@ export function EnvironmentVariableProvider({ children, client, runtimeKey, onAp
     queryClient.setQueryData(["settings", "environment", "pending-changes", runtimeKey], true);
     resetApply();
     client?.setUserEnvPendingChanges(true, runtimeKey).catch(() => undefined);
-
-    toast.info(t("settings.environment.restart_required"));
   }, [client, resetApply, queryClient, runtimeKey]);
 
   const { mutate: modifyAsync, isPending: isModifying, reset: resetModify, error: modifyError } = useMutation({

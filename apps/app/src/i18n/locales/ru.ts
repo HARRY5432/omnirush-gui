@@ -1131,7 +1131,6 @@ export default {
   "settings.environment.apply_title": "Применить изменения окружения?",
   "settings.environment.apply_unavailable": "Применение изменений доступно только в настольном приложении.",
   "settings.environment.applying": "Применение…",
-  "settings.environment.restart_required": "Сохранено. Примените изменения, чтобы обновление стало доступно.",
   "settings.environment.reveal": "Показать",
   "settings.environment.reveal_value": "Показать значение для {key}",
   "settings.environment.save": "Сохранить",

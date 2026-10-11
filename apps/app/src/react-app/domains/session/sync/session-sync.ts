@@ -34,7 +34,7 @@ import {
 } from "../status/session-activity-store";
 import { useWorkbenchStore } from "../chat/workbench-store";
 import { notifyDesktopEvent } from "../../../shell/desktop-notifications";
-import { notifyAlert } from "../../../shell/notifications";
+import { notifyEvent } from "../../../shell/notifications";
 import { t } from "@/i18n";
 import {
   createSessionTitleRecovery,
@@ -1728,7 +1728,7 @@ export function ensureWorkspaceSessionSync(input: SyncOptions) {
       }
     },
     onFailure: (sessionId) => {
-      notifyAlert({
+      notifyEvent({
         kind: "system",
         severity: "warning",
         title: t("session.title_generation_failed_title"),
