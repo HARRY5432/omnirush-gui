@@ -369,6 +369,40 @@ func serve(cfg config, raw net.Conn) {
 	}
 }
 
+// handBack gives the command user back what root (sudo inside the box) made
+// in the folders the launcher reads and clears on this machine (the install
+// log's note folders), so they never pile up undeletable there. Listed by the
+// launcher as BOXD_CHOWN_DIRS in the env file.
+func handBack(cfg config) {
+	if cfg.uid == 0 || cfg.envFile == "" {
+		return
+	}
+	data, err := os.ReadFile(cfg.envFile)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "BOXD_CHOWN_DIRS=") {
+			continue
+		}
+		for _, dir := range strings.Split(strings.TrimPrefix(line, "BOXD_CHOWN_DIRS="), ":") {
+			if dir = strings.TrimSpace(dir); dir == "" {
+				continue
+			}
+			_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+				if err != nil {
+					return nil
+				}
+				var st syscall.Stat_t
+				if syscall.Lstat(p, &st) == nil && st.Uid == 0 {
+					_ = os.Lchown(p, cfg.uid, cfg.gid)
+				}
+				return nil
+			})
+		}
+	}
+}
+
 func commandEnv(cfg config, extra map[string]string) []string {
 	env := map[string]string{}
 	order := []string{}
@@ -409,6 +443,7 @@ func commandEnv(cfg config, extra map[string]string) []string {
 	for k, v := range extra {
 		set(k, v)
 	}
+	delete(env, "BOXD_CHOWN_DIRS")
 	// The package-manager wrappers' folder, written by the launcher after the start.
 	if pre, ok := env["BOXD_PATH_PREFIX"]; ok {
 		delete(env, "BOXD_PATH_PREFIX")
@@ -536,6 +571,7 @@ func runExec(cfg config, c *conn, req proto.Request, start time.Time) {
 
 	err := cmd.Wait()
 	close(done)
+	handBack(cfg)
 	// Output a background child still holds open is not waited for: the
 	// command is over when its shell exits (as on the host). What is in the
 	// pipes is drained until they close or go quiet.

@@ -731,7 +731,8 @@ export class Box {
   useInstallLog(pkglog: BoxInstallLog): void {
     const inBox = (p: string) => containerRoot(p, this.platform);
     this.pathPrefix = inBox(pkglog.bin);
-    const lines = [`BOXD_PATH_PREFIX=${this.pathPrefix}`, `PYTHONPATH=${inBox(pkglog.py)}`];
+    // What sudo (root) notes in the per-run folders goes back to the user, so this machine can clear it.
+    const lines = [`BOXD_PATH_PREFIX=${this.pathPrefix}`, `PYTHONPATH=${inBox(pkglog.py)}`, `BOXD_CHOWN_DIRS=${inBox(path.join(pkglog.root, "raw"))}`];
     writeFileSync(path.join(this.runFolder, "env"), `${lines.join("\n")}\n`, { mode: 0o644 });
     this.writeRecord();
   }
