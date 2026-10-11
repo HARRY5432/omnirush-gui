@@ -7,6 +7,7 @@
 // the service's status and setting, files-used through a non-container box.
 import { afterEach, describe, expect, test } from "bun:test";
 import { ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -16,7 +17,7 @@ import { OPT_IN, BACKENDS, backendsFor, detectBackend, driverFor, normalizeBacke
 import { apparmorProfile, boxdEnv, boxrunPath, explainProbe, parseOut, probeBwrap, upArgs } from "./backends/bwrap.js";
 import { createAppleArgs, findDigest, macosMajor, parseVersions, probeApple, snapshotInfo, SUPPORTED as APPLE } from "./backends/apple.js";
 import { versionAtLeast } from "./backends/shared.js";
-import { decodeWsl, ENABLE_HINT, inDistro, parseWslList, probeWslDistro, startKeeper } from "./backends/wsl.js";
+import { decodeWsl, download, ENABLE_HINT, inDistro, parseWslList, probeWslDistro, startKeeper } from "./backends/wsl.js";
 import { createWslcArgs, labelsOf, parseJsonRows, parseWslcVersion, probeWslc, UPDATE_HINT } from "./backends/wslc.js";
 import { Box, setToolsRoot } from "./box.js";
 import { askedBackend, readBackend, rememberServerDefault, saveBackend, serverBackends } from "./launch.js";
@@ -286,6 +287,24 @@ class FakeChild extends ChildProcess {
 const fakeChild = () => new FakeChild();
 
 describe("box backends: Windows", () => {
+  test("WSL rootfs download: through the app's fetch, https only, checked against its sha256", async () => {
+    const dir = tmp();
+    const body = Buffer.from("rootfs bytes");
+    const sum = createHash("sha256").update(body).digest("hex");
+    const asked: Array<[string, RequestInit | undefined]> = [];
+    const fetcher = async (url: string, init?: RequestInit) => {
+      asked.push([url, init]);
+      return Object.defineProperty(new Response(body, { status: 200 }), "url", { value: url });
+    };
+    const dest = path.join(dir, "rootfs.tar.gz");
+    expect(await download("https://example.invalid/r.tar.gz", dest, sum, { fetcher })).toBe(dest);
+    expect(readFileSync(dest, "utf8")).toBe("rootfs bytes");
+    expect(asked[0]?.[1]?.redirect).toBe("follow");
+    await expect(download("https://example.invalid/r.tar.gz", path.join(dir, "bad"), "0".repeat(64), { fetcher })).rejects.toThrow(/sha256 mismatch/);
+    await expect(download("http://example.invalid/r.tar.gz", path.join(dir, "plain"), null, { fetcher })).rejects.toThrow(/https only/);
+    await expect(download("https://example.invalid/missing", path.join(dir, "m"), null, { fetcher: async () => new Response("no", { status: 404 }) })).rejects.toThrow(/HTTP 404/);
+  });
+
   test("wsl.exe output: UTF-16LE with a BOM or UTF-8, the verbose list with its default marker", () => {
     const list = "  NAME            STATE           VERSION\r\n* Ubuntu-24.04    Running         2\r\n  OmniRushBox     Stopped         2\r\n  Legacy Distro   Stopped         1\r\n";
     expect(decodeWsl(utf16(list))).toBe(decodeWsl(Buffer.from(list)));

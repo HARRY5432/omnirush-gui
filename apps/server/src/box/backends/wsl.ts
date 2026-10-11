@@ -28,11 +28,14 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
-import https from "node:https";
 import path from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 
 import { GOARCH, containerName, containerRoot, firstLine, helperPath, readJson, writeJson, wslPath, type BoxLog, type BoxRuntime } from "../common.js";
 import { runCommand, type RunCommand, type RunResult } from "../run.js";
+import { externalFetch } from "../../server-fetch.js";
 import type { RuntimeResult } from "../runtime.js";
 import bundledPins from "../wsl.json" with { type: "json" };
 import { IDLE_MINUTES, newMeta, upArgs, type BoxMeta } from "./bwrap.js";
@@ -159,29 +162,23 @@ export function sha256File(file: string): Promise<string> {
   });
 }
 
-/** Download over https (redirects followed) to `dest`, checked against `sha256`. */
-export async function download(url: string, dest: string, sha256: string | null, { maxRedirects = 5 }: { maxRedirects?: number } = {}): Promise<string> {
+/** Download over https (redirects followed, through externalFetch: the app's proxy and CA settings) to `dest`, checked against `sha256`. */
+export async function download(url: string, dest: string, sha256: string | null, { fetcher = externalFetch }: { fetcher?: (input: string, init?: RequestInit) => Promise<Response> } = {}): Promise<string> {
+  if (!/^https:\/\//.test(url)) throw new Error("download: https only");
   mkdirSync(path.dirname(dest), { recursive: true });
   const tmp = `${dest}.${process.pid}.part`;
-  await new Promise<void>((resolve, reject) => {
-    const fetch = (u: string, left: number) => {
-      https.get(u, { headers: { "user-agent": "omnirush" } }, (res) => {
-        if ([301, 302, 303, 307, 308].includes(res.statusCode ?? 0) && res.headers.location && left > 0) {
-          res.resume();
-          fetch(new URL(res.headers.location, u).toString(), left - 1);
-          return;
-        }
-        if (res.statusCode !== 200) { res.resume(); reject(new Error(`download: HTTP ${res.statusCode}`)); return; }
-        const out = createWriteStream(tmp);
-        res.pipe(out);
-        out.on("finish", () => resolve());
-        out.on("error", reject);
-        res.on("error", reject);
-      }).on("error", reject);
-    };
-    if (!/^https:\/\//.test(url)) { reject(new Error("download: https only")); return; }
-    fetch(url, maxRedirects);
-  });
+  const res = await fetcher(url, { headers: { "user-agent": "omnirush" }, redirect: "follow" });
+  if (res.status !== 200 || !res.body) {
+    await res.body?.cancel().catch(() => undefined);
+    throw new Error(`download: HTTP ${res.status}`);
+  }
+  if (res.url && !res.url.startsWith("https://")) throw new Error("download: https only");
+  try {
+    await pipeline(Readable.fromWeb(res.body as unknown as NodeReadableStream<Uint8Array>), createWriteStream(tmp));
+  } catch (error) {
+    rmSync(tmp, { force: true });
+    throw error;
+  }
   const got = await sha256File(tmp);
   if (sha256 && got !== sha256) { rmSync(tmp, { force: true }); throw new Error(`download: sha256 mismatch (${got.slice(0, 12)}…)`); }
   renameSync(tmp, dest);
