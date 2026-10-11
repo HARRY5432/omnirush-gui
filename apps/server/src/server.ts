@@ -196,6 +196,7 @@ import { CloudProviderSync, parseCloudProviderDenSession } from "./cloud-provide
 import { createEngineV2Preview, type EngineV2Preview } from "./engine-v2-preview.js";
 import { sessionUploaderEnabled } from "./session-uploader.js";
 import { startCaptureService, type CaptureService } from "./capture-client.js";
+import type { LateWritesGate } from "./capture-host.js";
 import { buildOpencodeProxyUrl, engineTarget, type EngineTarget } from "./session-upload-observer.js";
 import { OmniRushGatewayBroker } from "./omnirush-gateway-broker.js";
 import { awaitOmniRushModelCatalogSettled, startOmniRushModelCatalogSync } from "./omnirush-model-catalog-sync.js";
@@ -1602,6 +1603,16 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
 }
 
 /**
+ * A prompt's wait for the turn before's background processes (capture-host.ts
+ * archiveStartGate): only for a local workspace outside a sandbox, whose
+ * processes run on this machine. The engines' processes are never waited for.
+ */
+function lateWritesGate(workspace: WorkspaceInfo, enginePids: ReadonlyArray<number | null> = []): LateWritesGate | null {
+  if (workspace.workspaceType === "remote" || workspace.sandboxBackend || workspace.sandboxRunId || workspace.sandboxContainerName) return null;
+  return { exclude: enginePids.filter((pid): pid is number => typeof pid === "number" && pid > 0) };
+}
+
+/**
  * The engine v2 preview mount. A prompt dispatch here is gated and captured
  * exactly like one on the v1 mount: refused without a connected account
  * (unless both development flags are set), otherwise the session uploader starts the
@@ -1765,8 +1776,9 @@ export async function proxyOpencodeV2Request(input: {
     : null;
   const engine = capture && uploadedSessionId ? engineTarget(input.connection.url, headers, target.search, "v2") : null;
   if (capture && uploadedSessionId && engine) {
-    // Capture v2: the session-start manifest is taken before the prompt reaches the engine (at most about 3 s).
-    await capture.archiveStartGate(uploadedSessionId, input.workspace.path);
+    // The turn before's background processes finish writing (at most 10 s after it ended), then
+    // capture v2's session-start manifest is taken before the prompt reaches the engine (at most about 3 s).
+    await capture.archiveStartGate(uploadedSessionId, input.workspace.path, lateWritesGate(input.workspace));
     capture.startSession(uploadedSessionId, input.workspace.id, input.workspace.path);
     capture.recordPrompt(uploadedSessionId, { method, path: routePath, body: requestBody, engine: "v2", root: input.workspace.path, attachments: true, dispatchedAt: Date.now() });
     capture.captureSnapshot(uploadedSessionId, "prompt");
@@ -2132,8 +2144,9 @@ export async function proxyOpencodeRequest(input: {
   if (capture?.uploadEnabled && uploadedSessionId && workspace && workspace.workspaceType !== "remote"
     && (capture.hasSession(uploadedSessionId) || await engineHasSession(baseUrl, auth, directory, uploadedSessionId))) {
     const promptDispatch = isUploadPromptDispatch(method, proxyPath);
-    // Capture v2: the session-start manifest is taken before the prompt reaches the engine (at most about 3 s).
-    if (promptDispatch) await capture.archiveStartGate(uploadedSessionId, workspace.path);
+    // The turn before's background processes finish writing (at most 10 s after it ended), then
+    // capture v2's session-start manifest is taken before the prompt reaches the engine (at most about 3 s).
+    if (promptDispatch) await capture.archiveStartGate(uploadedSessionId, workspace.path, lateWritesGate(workspace, pool?.snapshot().generations.map((generation) => generation.pid) ?? []));
     capture.startSession(uploadedSessionId, workspace.id, workspace.path);
     capture.recordPrompt(uploadedSessionId, {
       method,

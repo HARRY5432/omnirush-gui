@@ -50,6 +50,7 @@ import {
   type ArchiveKind,
   type ArchiveTrigger,
   type ExcludedCounts,
+  type ArchiveReason,
   type FinalReason,
   type ScannedEntry,
 } from "./manifest.js";
@@ -133,7 +134,7 @@ import {
 } from "./upload.js";
 
 export { gitMarkerDetector, gitParentDetector, isArchivableProject, type ArchivableProject, type ProjectMarkerDetector } from "./detect.js";
-export { isArchiveCredentialPath, type ArchiveTrigger, type FinalReason } from "./manifest.js";
+export { isArchiveCredentialPath, type ArchiveReason, type ArchiveTrigger, type FinalReason } from "./manifest.js";
 export type { ArchiveApiRequest } from "./upload.js";
 
 /** Subdirectory of the session uploader state dir that holds everything the archiver keeps. */
@@ -236,7 +237,7 @@ export type CaptureSkipReason =
   /** Packing paused before commit because the configured disk budget is full. */
 
 export type CaptureResult =
-  | { status: "queued"; archiveId: string; kind: ArchiveKind; sequence: number; size: number }
+  | { status: "queued"; archiveId: string; kind: ArchiveKind; sequence: number; size: number; late?: string[] }
   | { status: "paused"; reason: "disk_budget"; requiredBytes: number; pendingBytes: number; freeBytes: number | null }
   | { status: "skipped"; reason: CaptureSkipReason };
 
@@ -384,14 +385,64 @@ function markerAllowed(marker: string, policy: ArchivePolicy): boolean {
 type CaptureOptions = {
   /** Deltas: a completed turn, or a final archive with its reason (a touched-files base a final archive captures says "final" too, without it in its manifest). */
   trigger?: ArchiveTrigger;
-  reason?: FinalReason;
+  reason?: ArchiveReason;
   /** A final archive of a session deleted in the app: its record is marked ended. */
   ended?: boolean;
   /** Cancels the capture until its commit. */
   signal?: AbortSignal;
   /** Capture v2: the turn a pre_tool state belongs to (the turn in progress). */
   stateTurn?: number;
+  /**
+   * Capture v2, pre_tool: when the turn's first tool call started. A file
+   * changed at or after it is the tool's own write: the state keeps the
+   * chain's copy (none for a new file), and the turn's delta carries it.
+   */
+  before?: number;
+  /** Capture v2, pre_tool: a file changed after this is a late write of the turn before (manifest reason "late_writes"). */
+  lateAfter?: number;
 };
+
+/** Options of a pre_tool state (captureState). */
+export type StateCaptureOptions = { before?: number; lateAfter?: number };
+
+/** The modification time in milliseconds a scanned entry's stat key holds (`size:mtimeNs:ctimeNs:ino`), or null. */
+function entryMtimeMs(entry: ScannedEntry): number | null {
+  const parts = entry.statKey.split(":");
+  if (parts.length < 2 || !/^\d+$/.test(parts[1]!)) return null;
+  return Number(BigInt(parts[1]!) / 1_000_000n);
+}
+
+/**
+ * A pre_tool state's scan as of `before`: an entry changed at or after it
+ * (the first tool's own write, racing the scan) takes the chain's entry
+ * (`held`), or is left out when the chain has none. Returns the paths it
+ * reverted.
+ */
+function scanAsOf(entries: ScannedEntry[], held: ReadonlyMap<string, ArchiveEntry>, before: number): string[] {
+  const reverted: string[] = [];
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index]!;
+    if (entry.type !== "file" || entry.source !== undefined || entry.content !== undefined) continue;
+    const mtime = entryMtimeMs(entry);
+    if (mtime === null || mtime < before) continue;
+    const previous = held.get(entry.path);
+    if (previous && previous.sha256 === entry.sha256) continue;
+    reverted.push(entry.path);
+    // Not in the delta (it equals the chain's entry): nothing reads it; a blank stat key matches no file.
+    if (previous) entries[index] = { ...previous, mtime: entry.mtime, statKey: "", dev: entry.dev };
+    else entries.splice(index, 1);
+  }
+  return reverted;
+}
+
+/** The files of a delta changed after `after`: late writes of the turn before. */
+function lateFiles(files: readonly ScannedEntry[], after: number): string[] {
+  return files.filter((entry) => {
+    if (entry.type !== "file" || entry.source !== undefined) return false;
+    const mtime = entryMtimeMs(entry);
+    return mtime !== null && mtime > after;
+  }).map((entry) => entry.path);
+}
 
 /** Capture v2: the session-start scan taken before the first prompt reached the model (startManifest). */
 type Prescan = {
@@ -909,7 +960,7 @@ export class SessionArchiver {
    * turn (like a final archive), `trigger: "pre_tool"`; `stateTurn` is the
    * turn in progress. Only for a v2 chain with a base.
    */
-  captureState(sessionId: string, stateTurn: number): Promise<CaptureResult> {
+  captureState(sessionId: string, stateTurn: number, options: StateCaptureOptions = {}): Promise<CaptureResult> {
     return this.guard("delta", sessionId, stateTurn, async () => this.withSession(sessionId, async () => {
       const generation = this.generation;
       if (this.disabled || !this.uploader.configured) return { status: "skipped", reason: "disabled" };
@@ -921,7 +972,7 @@ export class SessionArchiver {
       const key = await this.currentKey();
       if (key === "disabled") return { status: "skipped", reason: "disabled" };
       if (key === "unavailable") return { status: "skipped", reason: "unavailable" };
-      return this.captureArchive(state, "delta", state.last_turn, key, generation, { trigger: "pre_tool", stateTurn });
+      return this.captureArchive(state, "delta", state.last_turn, key, generation, { trigger: "pre_tool", stateTurn, ...options });
     }));
   }
 
@@ -1414,6 +1465,7 @@ export class SessionArchiver {
       mergeScans(scan, await this.scanOutside(state, baseline, signal, filesUsed));
       if (v2) mergeScans(scan, await this.attachmentEntries(sessionId));
       if (filesUsed) mergeStaged(scan, await this.filesUsed.entries(sessionId));
+      if (options.trigger === "pre_tool" && options.before !== undefined) scanAsOf(scan.entries, new Map(baseline.map((entry) => [entry.path, entry])), options.before);
       const change = touchedChange(baseline, scan);
       if (change.files.length === 0 && change.deleted.length === 0 && !forced) {
         if (cache.changed) await this.saveHashCache(rootKey, cache);
@@ -1449,6 +1501,7 @@ export class SessionArchiver {
         enclosing = found.repo;
         mergeScans(scan, found);
       }
+      if (options.trigger === "pre_tool" && options.before !== undefined) scanAsOf(scan.entries, new Map(baseline.map((entry) => [entry.path, entry])), options.before);
       fullScan = scan.entries;
       files = scan.entries;
       excluded = scan.excluded;
@@ -1466,6 +1519,9 @@ export class SessionArchiver {
       }
       git = withGit ? await (gitReading ?? readArchiveGit(state.root)) : null;
     }
+    // A pre_tool state holding files written after the turn before ended: late writes of that turn.
+    const late = options.trigger === "pre_tool" && options.lateAfter !== undefined ? lateFiles(files, options.lateAfter) : [];
+    const reason = options.reason ?? (late.length > 0 ? "late_writes" as const : undefined);
     const archiveId = this.random.uuid();
     const sequence = state.next_sequence;
     const createdAt = this.now();
@@ -1509,7 +1565,7 @@ export class SessionArchiver {
       createdAt,
       parentArchiveId: kind === "base" ? null : state.last_archive_id,
       ...(kind === "delta" && options.trigger ? { trigger: options.trigger } : {}),
-      ...(kind === "delta" && options.reason ? { reason: options.reason } : {}),
+      ...(kind === "delta" && reason ? { reason } : {}),
       ...(touched ? { scope: "touched" as const } : {}),
       label: archiveLabel(state.root),
       marker: state.marker,
@@ -1648,7 +1704,7 @@ export class SessionArchiver {
         ...(ignored > 0 ? { gitignored: ignored } : {}),
         ...(unstable.size > 0 ? { unstable: unstable.size } : {}),
       });
-      return { status: "queued", archiveId, kind, sequence, size: sealed.size };
+      return { status: "queued", archiveId, kind, sequence, size: sealed.size, ...(late.length > 0 ? { late: late.slice(0, 500) } : {}) };
     } catch (error) {
       await rm(partial, { force: true });
       if (error instanceof DiskBudgetPause) return {

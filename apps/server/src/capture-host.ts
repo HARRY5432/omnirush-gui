@@ -19,13 +19,15 @@ import {
   followToolStart, followContextToolEvents, followFilesUsedCalls,
   projectArchiveEngineReads,
   promptDispatched,
+  turnEndedAt,
   type EngineReplacement,
   type EngineTarget,
   type SessionObservers,
 } from "./session-upload-observer.js";
 import type { CaptureStopOptions } from "./capture-protocol.js";
 import { SessionArchiver, type FilesUsedStatus, type SessionArchiverOptions } from "./session-archive/index.js";
-import { ProjectArchiveLifecycle, type ArchiveLifecycleLog } from "./session-archive/lifecycle.js";
+import { ProjectArchiveLifecycle, type ArchiveLifecycleLog, type LateWrites } from "./session-archive/lifecycle.js";
+import { settleLateWriters, type SettleResult } from "./session-archive/late-writes.js";
 import { SessionUploader, type RecoveredTurn, type TraceCapabilities, type UploadMetrics, type UploadRequestOptions, type UploadWebVisit } from "./session-uploader.js";
 
 export type { EngineReplacement, EngineTarget } from "./session-upload-observer.js";
@@ -38,6 +40,14 @@ const MAX_TRACED_REQUEST_BYTES = 4 * 1024 * 1024;
 const QUIT_SETTLE_BUDGET_MS = 5_000;
 /** A recovered turn asks for its engine again after these waits (the engine may still be starting). */
 const RECOVERY_TARGET_DELAYS_MS = [0, 2_000, 5_000, 15_000, 30_000, 60_000];
+
+/**
+ * A prompt's wait for the turn before's background processes (late-writes.ts):
+ * the engines' processes, never waited for (with this process, whose
+ * descendants they usually are). Left out (no wait) in a sandbox or a remote
+ * workspace, whose processes are not this machine's.
+ */
+export type LateWritesGate = { exclude: number[] };
 
 /** A captured engine request, as the "engine.request" trace event and the prompt's attachments are built from it. */
 export type PromptRecord = {
@@ -119,6 +129,10 @@ export class CaptureHost {
   /** The state dir and the app's data/config/cache dirs: never reported or recorded as a touched file. */
   private readonly appDirs: string[];
   private readonly engineTarget?: CaptureHostOptions["engineTarget"];
+  /** When each session's latest prompt was dispatched (archiveStartGate): the turn before's processes started since. */
+  private readonly promptAt = new Map<string, number>();
+  /** The latest prompt's wait for the turn before's background processes, when it found any ("turn.late"). */
+  private readonly lateSettles = new Map<string, SettleResult>();
 
   constructor(options: CaptureHostOptions) {
     this.engineTarget = options.engineTarget;
@@ -157,6 +171,8 @@ export class CaptureHost {
       enabled: enabled && this.sessionUploader.enabled,
       accountMissing: !this.sessionUploader.enabled,
       log: options.log,
+      // A turn's pre_tool state took what the turn before's background processes wrote after it ended.
+      onLateWrites: (late) => this.recordLateWrites(late),
       ...(baseIdleMs !== undefined ? { baseIdleMs } : {}),
       ...(baseMaxDeferMs !== undefined ? { baseMaxDeferMs } : {}),
     });
@@ -179,8 +195,30 @@ export class CaptureHost {
   finishSession(sessionId: string, finalTrace?: unknown): void {
     this.sessionUploader.finishSession(sessionId, finalTrace);
     this.archive.sessionEnded(sessionId);
+    this.forgetSession(sessionId);
+  }
+
+  private forgetSession(sessionId: string): void {
     this.observers.lastMessageIds.delete(sessionId);
+    this.observers.turnEnds?.delete(sessionId);
     this.sessionRoots.delete(sessionId);
+    this.promptAt.delete(sessionId);
+    this.lateSettles.delete(sessionId);
+  }
+
+  /** "turn.late": files the turn before's background processes wrote after it ended, taken into this turn's start. */
+  private recordLateWrites(late: LateWrites): void {
+    const settled = this.lateSettles.get(late.sessionId);
+    this.sessionUploader.recordTrace(late.sessionId, "turn.late", {
+      late_from_turn: late.turn > 1 ? late.turn - 1 : null,
+      turn: late.turn,
+      after_end_at: new Date(late.after).toISOString(),
+      tool_start_at: new Date(late.toolStartAt).toISOString(),
+      waited_ms: settled?.waitedMs ?? 0,
+      settled: settled?.settled ?? true,
+      paths: late.paths,
+      processes: settled?.processes ?? [],
+    });
   }
 
   /** The "engine.request" event of a captured request and, for a prompt dispatch, one "attachment" event per attached file. */
@@ -218,8 +256,28 @@ export class CaptureHost {
     followFilesUsedCalls({ observers: this.observers, archive: this.archive, sessionId, target });
   }
 
-  /** Capture v2: the session-start manifest, before the first prompt reaches the engine (lifecycle.ts startGate). */
-  async archiveStartGate(sessionId: string, root: string): Promise<void> {
+  /**
+   * Call while a prompt is held, before it reaches the engine. When the
+   * session's turn before has ended (the engine went idle), the background
+   * processes that turn left running in the workspace get to finish writing
+   * first, at most LATE_WRITES_CAP_MS after it ended (late-writes.ts), so the
+   * turn's end snapshot and archive delta, taken as this prompt cuts it, hold
+   * those writes. A prompt typed into a running turn waits for nothing.
+   * Then capture v2's session-start manifest, before the first prompt
+   * reaches the engine (lifecycle.ts startGate).
+   */
+  async archiveStartGate(sessionId: string, root: string, lateWrites?: LateWritesGate | null): Promise<void> {
+    const previousStart = this.promptAt.get(sessionId);
+    const endedAt = turnEndedAt(this.observers, sessionId);
+    this.lateSettles.delete(sessionId);
+    if (lateWrites && previousStart !== undefined && endedAt !== null && endedAt >= previousStart) {
+      const settled = await settleLateWriters({ root, since: previousStart, exclude: [process.pid, ...lateWrites.exclude], endedAt });
+      if (settled.processes.length > 0) {
+        this.lateSettles.set(sessionId, settled);
+        this.sessionUploader.recordTrace(sessionId, "turn.settle", { waited_ms: settled.waitedMs, settled: settled.settled, processes: settled.processes });
+      }
+    }
+    this.promptAt.set(sessionId, Date.now());
     await this.archive.startGate(sessionId, root);
   }
 
@@ -280,8 +338,7 @@ export class CaptureHost {
     this.sessionUploader.recordTrace(sessionId, "session.deleted");
     this.sessionUploader.finishSession(sessionId);
     this.archive.sessionEnded(sessionId);
-    this.observers.lastMessageIds.delete(sessionId);
-    this.sessionRoots.delete(sessionId);
+    this.forgetSession(sessionId);
   }
 
   /** The account is gone: queued archives and spooled uploads are deleted, nothing more is archived. */

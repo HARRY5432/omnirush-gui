@@ -3,7 +3,8 @@
  * follows a turn it listens to the engine's event stream (v1 `/event`, v2
  * `/api/event`) and calls `onToolStart` once, at the first tool part of that
  * session that is pending or running (v1 `message.part.updated` with a
- * `tool` part, v2 `session.tool.input.started` / `session.tool.called`).
+ * `tool` part, v2 `session.tool.input.started` / `session.tool.called`),
+ * with the time the call started (the files it writes are newer).
  * The capture it triggers runs in the background: the tool is never held.
  * Identical in the CLI and the desktop app.
  */
@@ -37,6 +38,34 @@ export function toolStartSession(payload: unknown): string | null {
   return null;
 }
 
+/**
+ * When the tool call of a tool-start event started, in epoch milliseconds:
+ * the event's own time (v1 `properties.time`, the part's `state.time.start`,
+ * v2 `time`/`timestamp`), or null when it carries none. The earliest one wins:
+ * a `pending` part has no start of its own yet, and its event is sent first.
+ */
+export function toolStartTime(payload: unknown): number | null {
+  if (!isRecord(payload)) return null;
+  if (isRecord(payload.payload) && typeof payload.payload.type === "string") return toolStartTime(payload.payload);
+  const times: unknown[] = [];
+  const properties = isRecord(payload.properties) ? payload.properties : null;
+  const data = isRecord(payload.data) ? payload.data : null;
+  for (const holder of [payload, properties, data]) {
+    if (!holder) continue;
+    times.push(holder.time, holder.timestamp);
+    const part = isRecord(holder.part) ? holder.part : null;
+    const state = part && isRecord(part.state) ? part.state : null;
+    if (state && isRecord(state.time)) times.push(state.time.start);
+  }
+  let earliest: number | null = null;
+  for (const time of times) {
+    const value = typeof time === "number" ? time : typeof time === "string" ? Date.parse(time) : NaN;
+    // Epoch milliseconds from this century only (not seconds, not a monotonic clock).
+    if (Number.isFinite(value) && value > 1_500_000_000_000 && value < 4_000_000_000_000 && (earliest === null || value < earliest)) earliest = value;
+  }
+  return earliest;
+}
+
 /** Splits SSE text into the `data:` payloads of complete frames; returns the unfinished rest. */
 export function sseFrames(buffer: string): { payloads: string[]; rest: string } {
   const payloads: string[] = [];
@@ -66,7 +95,8 @@ export async function watchToolStarts(input: {
   sessionId: string;
   signal: AbortSignal;
   fetch: ToolStartFetch;
-  onToolStart: () => void;
+  /** `at`: when the tool call started (toolStartTime, else when its event arrived). */
+  onToolStart: (at: number) => void;
 }): Promise<void> {
   const controller = new AbortController();
   const stop = () => controller.abort();
@@ -97,8 +127,11 @@ export async function watchToolStarts(input: {
           continue;
         }
         if (toolStartSession(payload) === input.sessionId) {
+          const received = Date.now();
+          const at = toolStartTime(payload);
           try {
-            input.onToolStart();
+            // An event time from a clock running ahead is no later than the event's arrival.
+            input.onToolStart(at === null ? received : Math.min(at, received));
           } finally {
             controller.abort();
           }

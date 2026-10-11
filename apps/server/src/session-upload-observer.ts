@@ -12,6 +12,7 @@ import { isFinishedAssistantMessage, isPromptMessage, type ArchiveEngineReads, t
 import { MAX_UPLOAD_CHILD_SESSION_DEPTH, type UploadSessionModel, type SessionUploader } from "./session-uploader.js";
 import { recordTurnFiles, type TurnFilesInput } from "./session-archive/turn-files.js";
 import { watchToolCallEnds } from "./session-archive/files-used.js";
+import { turnWriters, type WriterSessionMessages } from "./session-archive/turn-writers.js";
 import { watchToolStarts } from "./session-archive/tool-start.js";
 import { watchToolEvents } from "./context/tool-events.js";
 import type { ContextCapture } from "./context/index.js";
@@ -32,7 +33,13 @@ export type EngineTarget = {
  * snapshot is taken right as the prompt goes out, and its messages stop
  * before the prompt's own.
  */
-type FollowedTurn = { snapshotTaken: boolean; cutAt: number | null; settled?: boolean };
+type FollowedTurn = {
+  snapshotTaken: boolean;
+  cutAt: number | null;
+  settled?: boolean;
+  /** When a status read first found the session idle (null while it is busy): the turn's end, once it settles. */
+  idleAt?: number | null;
+};
 
 /**
  * A session being observed: the engine its latest captured request went to
@@ -64,10 +71,24 @@ export type SessionObservers = {
   lastMessageIds: Map<string, string>;
   replacedEngines: Map<string, EngineReplacement>;
   controller: AbortController;
+  /** When each session's last settled turn was seen to end (the engine went idle), for turnEndedAt(). */
+  turnEnds?: Map<string, number>;
 };
 
 export function createSessionObservers(): SessionObservers {
-  return { sessions: new Map(), lastMessageIds: new Map(), replacedEngines: new Map(), controller: new AbortController() };
+  return { sessions: new Map(), lastMessageIds: new Map(), replacedEngines: new Map(), controller: new AbortController(), turnEnds: new Map() };
+}
+
+/**
+ * When the session's latest turn ended, as the observer's status reads saw
+ * it (epoch ms): the engine is idle now and the turn has not settled yet, or
+ * the turn settled after the engine went idle. Null while the turn is still
+ * running (a prompt typed into it waits for nothing), or when no read saw it end.
+ */
+export function turnEndedAt(observers: SessionObservers, sessionId: string): number | null {
+  const turn = observers.sessions.get(sessionId)?.turn;
+  if (turn && !turn.settled) return turn.idleAt ?? null;
+  return observers.turnEnds?.get(sessionId) ?? null;
 }
 
 function originOf(url: string): string {
@@ -303,6 +324,8 @@ async function captureChildSessions(input: {
   known: Set<string>;
   visited: Set<string>;
   beforeRecord: (bytes: number) => void;
+  /** Each child's new messages, as recorded (turn-writers.ts). */
+  onChild?: (childId: string, depth: number, messages: readonly unknown[]) => void;
 }): Promise<void> {
   if (input.depth > MAX_UPLOAD_CHILD_SESSION_DEPTH) return;
   const children = await readEngineJson(input.fetchEngine, `/session/${encodeURIComponent(input.parentSessionId)}/children`, 1024 * 1024)
@@ -315,6 +338,7 @@ async function captureChildSessions(input: {
     const history = await readEngineHistory(engineMessages(input.fetchEngine, `/session/${encodeURIComponent(childId)}/message`, true), input.checkpoints[childId])
       .catch(nullOnErrorStatus);
     const newMessages = history?.delta ?? [];
+    if (newMessages.length > 0) input.onChild?.(childId, input.depth, newMessages);
     if (history && history.omitted > 0) {
       input.sessionUploader.recordTrace(input.rootSessionId, "session.messages_omitted", { child_session_id: childId, count: history.omitted });
     }
@@ -908,6 +932,8 @@ export function observeUploadedSession(input: {
     const turn = turnState();
     if (turn.settled) return;
     turn.settled = true;
+    // When the engine went idle (not a cut while it ran): the next prompt's late-writes settle measures from it.
+    if (typeof turn.idleAt === "number") observer.turnEnds?.set(sessionId, turn.idleAt);
     const recovered = recovering;
     recovering = false;
     let history: EngineHistory | null = read ?? null;
@@ -960,10 +986,12 @@ export function observeUploadedSession(input: {
       }
       pending += bytes;
     };
+    const children: WriterSessionMessages[] = [];
     // The v2 daemon has no subagent children route; only its root turn is captured.
     if (!v2) {
       try {
         await captureChildSessions({
+          onChild: (childId, depth, childMessages) => children.push({ sessionId: childId, role: "child", depth, messages: childMessages }),
           sessionUploader,
           rootSessionId: sessionId,
           parentSessionId: sessionId,
@@ -978,6 +1006,11 @@ export function observeUploadedSession(input: {
         if (stopped.aborted) throw error;
         sessionUploader.recordTrace(sessionId, "session.children_failed", { error: errorMessage(error) });
       }
+    }
+    // Sub-agents that wrote files in the workspace: who wrote what, and the files the root and a sub-agent (or two) both wrote.
+    if (history && children.length > 0 && input.turnFiles) {
+      const writers = turnWriters(input.turnFiles.root, [{ sessionId, role: "root", depth: 0, messages: history.delta }, ...children]);
+      if (writers) sessionUploader.recordTrace(sessionId, "turn.writers", writers);
     }
     room(newest.bytes);
     // How the turn ended, so a turn stopped with Esc reads as stopped, not as answered.
@@ -1092,6 +1125,7 @@ export function observeUploadedSession(input: {
       if (status !== "idle") {
         observedBusy = true;
         idleReads = 0;
+        turnState().idleAt = null;
         // The v2 daemon has no children route: nothing to list there.
         if (!v2 && timing.now() - childIdsAt >= CHILD_IDS_INTERVAL_MS) {
           childIdsAt = timing.now();
@@ -1106,6 +1140,7 @@ export function observeUploadedSession(input: {
       if (idleReads === 0) {
         idleSince = timing.now();
         requestsWhenIdle = session.requests;
+        turnState().idleAt = idleSince;
       }
       idleReads += 1;
       if (idleReads < 2 || reads < 4) continue;
@@ -1199,7 +1234,7 @@ export function followToolStart(input: {
     sessionId: input.sessionId,
     signal,
     fetch: (target, init) => loopbackFetch(target, init),
-    onToolStart: () => input.archive.toolStarted(input.sessionId),
+    onToolStart: (at) => input.archive.toolStarted(input.sessionId, at),
   }).finally(() => {
     if (map.get(input.sessionId) === controller) map.delete(input.sessionId);
   });
