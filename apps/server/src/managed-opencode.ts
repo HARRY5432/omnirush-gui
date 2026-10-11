@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { globalOpencodeConfigDir } from "@omnirush/paths";
 import { engineDataEnv } from "./engine-data-home.js";
 import { repairEngineStoreBeforeStart } from "./engine-store-repair.js";
+import { engineInstallLogEnv } from "./install-log-host.js";
 
 export type ManagedChildProcess = {
   exitCode: number | null;
@@ -174,6 +175,8 @@ async function startManagedOpencodeServer(
     ...engineEnvDefaults,
     ...options.env,
     ...dataEnv,
+    // The install log's wrappers, first on PATH for the engine's tool shells only (install-log-host.ts).
+    ...engineInstallLogEnv(baseEnv),
     OPENCODE_SERVER_USERNAME: username,
     OPENCODE_SERVER_PASSWORD: password,
   };

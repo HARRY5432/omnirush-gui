@@ -1482,11 +1482,14 @@ export class OmniRushGatewayBroker {
       if (!isRecord(payload)) return none;
       const v3 = payload.canonical_trace === true && Array.isArray(payload.schema_versions) && payload.schema_versions.some((version) => version === 3);
       const triggers = Array.isArray(payload.triggers) ? payload.triggers.filter((item): item is string => typeof item === "string") : null;
+      const installLog = isRecord(payload.install_log) ? payload.install_log : null;
       return {
         schema_versions: v3 ? [1, 2, 3] : [1, 2],
         canonical_trace: v3,
         ...uploadFeatureFlags(payload),
         ...(triggers ? { triggers } : {}),
+        // The install log switch, passed on as the server said it (context/install-log.ts reads it).
+        ...(installLog ? { install_log: { enabled: installLog.enabled === true, sample_percent: typeof installLog.sample_percent === "number" ? installLog.sample_percent : 100 } } : {}),
       };
     } catch {
       return none;

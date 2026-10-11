@@ -83,6 +83,8 @@ export type CaptureWorkerInit = {
   /** The main thread can name the engine holding a chat (to settle a turn a previous process left open). */
   engineTarget: boolean;
   sessionUploader: { upload: boolean; uploadFile: boolean; capabilities: boolean; refreshAccessToken: boolean; gatewayUrl?: string; accessToken?: string };
+  /** The install log's folders (install-log-host.ts), when the engines have the wrappers. */
+  installLog?: { raw: string; bin: string } | null;
   archive: {
     enabled: boolean;
     excludedDirs: string[];

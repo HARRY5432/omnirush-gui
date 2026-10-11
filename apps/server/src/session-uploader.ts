@@ -30,6 +30,7 @@ import { ExcludedFiles, listGitIgnored, type HashCache } from "./excluded-files.
 import { ToolchainCache, type CollectOptions as ToolchainOptions, type UploadToolchain } from "./toolchain.js";
 import { engine2ImportedFrom } from "./engine2/imported.js";
 import { ContextCapture, captureContextEnabled, type ContextOptions } from "./context/index.js";
+import { INSTALL_LOG_OFF, installLogGate, type InstallLogGate } from "./context/install-log.js";
 import { isOpaqueKey, isOpaqueString, isSecretKey, isSecretValue, redactCredentials, redactionPolicy, redactionV3 } from "./context/redact-policy.js";
 import { maskWindowsProfiles } from "./context/privacy.js";
 import bundledBestPractices from "./bundled-best-practices.json" with { type: "json" };
@@ -761,6 +762,12 @@ type SessionUploaderOptions = {
    * always passes one) and overrides its options; absent or false: off.
    */
   context?: false | Partial<ContextOptions>;
+  /**
+   * The install log (context/install-log.ts): the engines' wrappers write to
+   * `raw`; noting is on only while the capabilities say `install_log.enabled`
+   * (sampled per session). Absent: none.
+   */
+  installLog?: { raw: string; bin?: string | null } | null;
 };
 
 export type TraceCapabilities = {
@@ -774,6 +781,8 @@ export type TraceCapabilities = {
   recovered_segments?: boolean;
   /** The upload triggers the backend takes, when it lists them. */
   triggers?: string[];
+  /** The install log switch (context/install-log.ts): absent is off. */
+  install_log?: { enabled: boolean; sample_percent: number };
 };
 
 
@@ -4507,6 +4516,7 @@ export class SessionUploader {
   private readonly onBinaryFile?: (sessionId: string, path: string) => void;
   private readonly fileUploader?: SessionUploaderOptions["uploadFile"];
   private readonly capabilityProbe?: SessionUploaderOptions["capabilities"];
+  private readonly installLogPaths: { raw: string; bin?: string | null } | null;
   private traceSchemaCache: { version: 2 | 3; features: UploadFeatures; expiresAt: number } | null = null;
   private traceSchemaProbe: Promise<2 | 3> | null = null;
   /** Work counters for tests and profiling. */
@@ -4521,6 +4531,7 @@ export class SessionUploader {
     this.uploader = options.upload;
     this.fileUploader = options.uploadFile;
     this.capabilityProbe = options.capabilities;
+    this.installLogPaths = options.installLog ?? null;
     this.refreshAccessToken = options.refreshAccessToken;
     this.log = options.log ?? (() => undefined);
     const stateDir = options.stateDir ? resolve(options.stateDir) : null;
@@ -4627,6 +4638,7 @@ export class SessionUploader {
       bundledSkillDirs: stateDir ? [join(stateDir, "skills")] : [],
       configFiles: stateDir ? [join(stateDir, "runtime-opencode-config.json")] : [],
       log: this.log,
+      ...(this.installLogPaths ? { installLog: { ...this.installLogPaths, gate: () => this.installLogGate(), appDirs: stateDir ? [stateDir] : [] } } : {}),
       ...overrides,
     });
     return capture.enabled ? capture : null;
@@ -4898,6 +4910,16 @@ export class SessionUploader {
       this.traceSchemaProbe = null;
     });
     return this.traceSchemaProbe;
+  }
+
+  /** The install log's server switch (GET /collect/capabilities `install_log`); off when it cannot be asked. */
+  private async installLogGate(): Promise<InstallLogGate> {
+    if (!this.capabilityProbe) return INSTALL_LOG_OFF;
+    try {
+      return installLogGate(await this.capabilityProbe());
+    } catch {
+      return INSTALL_LOG_OFF;
+    }
   }
 
   private downgradeTraceSchema(): void {
