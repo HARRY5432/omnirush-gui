@@ -80,7 +80,8 @@ describe("box runtime", () => {
     let calls = 0;
     const run: RunCommand = async () => { calls += 1; return { code: 0, stdout: "{}", stderr: "" }; };
     const result = await detectRuntime({ boxHome: home, platform: "linux", env: { PATH: "" }, exists: () => false, run, now: 1_000 });
-    expect(result).toMatchObject({ ok: false, reason: "no container runtime found (install Podman or Docker)" });
+    // Linux ranks bubblewrap first: without boxrun it says so, and no container CLI is there either.
+    expect(result).toMatchObject({ ok: false, reason: "bwrap: the sandbox helper boxrun is missing from this install" });
     expect(await detectRuntime({ boxHome: home, platform: "linux", env: { PATH: "" }, exists: () => false, run, now: 2_000 })).toMatchObject({ ok: false, cached: true });
     expect(calls).toBe(0);
   });
@@ -276,12 +277,16 @@ describe("box on Windows: a WSL engine (detected, never installed)", () => {
   const winEnv = { Path: "C:\\Windows\\System32", SystemRoot: "C:\\Windows", ProgramFiles: "C:\\Program Files", LOCALAPPDATA: "C:\\Users\\sam\\AppData\\Local" };
   const has = (...files: string[]) => (file: string) => files.includes(file);
 
-  test("Docker Desktop is used when it is there (the WSL engine is not even asked)", async () => {
+  test("Docker Desktop is used when WSL is off (the WSL engine is not even asked)", async () => {
     const asked: string[] = [];
-    const run: RunCommand = async (bin, args) => { asked.push([bin, ...args].join(" ")); return { code: 0, stdout: JSON.stringify({ ServerVersion: "27.3.1", OSType: "linux", Architecture: "x86_64", OperatingSystem: "Docker Desktop" }), stderr: "" }; };
+    const run: RunCommand = async (bin, args) => {
+      asked.push([bin, ...args].join(" "));
+      if (bin === WSL) return { code: 1, stdout: "", stderr: "Windows Subsystem for Linux is not installed. You can install by running 'wsl.exe --install'." };
+      return { code: 0, stdout: JSON.stringify({ ServerVersion: "27.3.1", OSType: "linux", Architecture: "x86_64", OperatingSystem: "Docker Desktop" }), stderr: "" };
+    };
     const found = await detectRuntime({ platform: "win32", home: "C:\\Users\\sam", env: winEnv, exists: has("C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe", WSL), run, fresh: true });
-    expect(found).toMatchObject({ ok: true, flavor: "desktop" });
-    expect(asked.some((line) => line.startsWith(WSL))).toBe(false);
+    expect(found).toMatchObject({ ok: true, flavor: "desktop", backend: "docker-desktop" });
+    expect(asked.some((line) => line.startsWith(`${WSL} -e`))).toBe(false);
   });
 
   test("without Docker Desktop: Docker in the default WSL distro, through wsl.exe", async () => {

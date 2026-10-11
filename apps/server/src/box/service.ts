@@ -10,7 +10,10 @@
  * - <box home>/desktop-projects.json, the projects the plugin routes to
  *   their box (everything else runs natively through the same shell);
  * - each project's run: the per-turn checkpoints and the label its chats'
- *   uploads carry.
+ *   uploads carry;
+ * - the machine's backend setting (`auto`, one backend id, or `native`) in
+ *   <state>/box.json, and the server's allowlist of backends
+ *   (local_box.backends, remembered in <state>/box-server.json).
  *
  * Nothing here blocks opening a project: probes are bounded, a missing image
  * downloads in the background, a box that cannot start leaves its project
@@ -21,12 +24,14 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { boxHome, boxKey, boxSnapshotsDir, containerName, inspectImage, installShell, listBoxes, readRecord, resetBox, savedTurns, type BoxLabel, type BoxLog } from "./box.js";
+import { boxHome, boxKey, boxSnapshotsDir, containerName, installShell, listBoxes, readRecord, resetBox, savedTurns, type BoxLabel, type BoxLog } from "./box.js";
+import { LABELS, backendsFor, driverFor } from "./backends/index.js";
+import type { BoxExec } from "./backends/types.js";
 import { detectStack, imageFor } from "./images.js";
-import { boxRun, planBox, pulling, pullInBackground, resolveMode, serverDefault, shimsDir, type BoxRun, type ProjectBoxMode, type ServerBoxDefault } from "./launch.js";
+import { askedBackend, boxRun, planBox, pulling, pullInBackground, resolveMode, saveBackend, serverBackends, serverDefault, shimsDir, type BoxRun, type ProjectBoxMode, type ServerBoxDefault } from "./launch.js";
 import type { BoxInstallLogPaths } from "./install-log.js";
 import { DESKTOP_PROJECTS_FILE } from "./plugin-lib.js";
-import { detectRuntime, type RuntimeResult } from "./runtime.js";
+import { detectRuntime, type BackendAlternative, type DetectOptions, type RuntimeResult } from "./runtime.js";
 
 /** What the capture side needs of a chat's box (plain data: it crosses to the capture worker). */
 export type BoxCaptureInfo = {
@@ -37,6 +42,10 @@ export type BoxCaptureInfo = {
   runtimeBin: string;
   /** Arguments before the runtime's own (`-e docker` for a WSL engine). */
   runtimeArgs: string[];
+  /** The backend id (backends/index.ts). */
+  backend: string;
+  /** How files-used reads the box when it is not `docker exec` (bubblewrap, Apple container, the WSL distro). */
+  exec: BoxExec | null;
   /** environment.sandbox of the chat's uploads. */
   label: BoxLabel;
 };
@@ -54,12 +63,35 @@ export type BoxStatus = {
   offer: boolean;
   state: "off" | "unavailable" | "downloading" | "starting" | "ready" | "failed";
   runtime: { ok: boolean; name: string | null; flavor: string | null; version: string | null; reason: string | null } | null;
+  /** What runs the box on this machine: the chosen backend, why, and the others (each with why not). */
+  backend: BoxBackendView | null;
+  /** The machine's backend setting and the values it takes here. */
+  backendSetting: { value: string; source: "env" | "setting" | "auto"; choices: Array<{ id: string; label: string }> };
   image: { ref: string; stack: string; present: boolean | null; downloading: boolean } | null;
   container: { name: string; exists: boolean; running: boolean } | null;
   /** One line for the user (why it is off, that it is downloading). */
   notice: string | null;
   error: string | null;
 };
+
+export type BoxBackendView = {
+  /** The chosen backend's id (null when none works here). */
+  id: string | null;
+  label: string | null;
+  version: string | null;
+  flavor: string | null;
+  /** Why this one (the ranked order, the setting, the server's allowlist), or why none. */
+  why: string | null;
+  /** Every backend tried here: id, whether it works, one line why not. Empty until the first full check. */
+  alternatives: Array<{ id: string; label: string; ok: boolean; reason: string | null }>;
+  /** The server limits the backends (local_box.backends). */
+  allowed: string[] | null;
+};
+
+/** The backend choices of a platform: auto, the ranked ids there, native. */
+export function backendChoices(platform: NodeJS.Platform = process.platform): Array<{ id: string; label: string }> {
+  return [{ id: "auto", label: "Automatic" }, ...backendsFor(platform).map((id) => ({ id, label: LABELS[id] ?? id })), { id: "native", label: "Off (this computer)" }];
+}
 
 export type BoxServiceOptions = {
   /** The capture state dir: the server default is remembered here, snapshots go under sandbox/snapshots. */
@@ -79,6 +111,8 @@ type Project = { run: BoxRun | null; notice: string | null; planning: Promise<Bo
 const REPLAN_MS = 15_000;
 /** A prompt waits at most this long for its turn's checkpoint. */
 const FREEZE_WAIT_MS = 90_000;
+/** The full backend check (every backend, for the status card's "others") is reused this long. */
+const ALTERNATIVES_MS = 60_000;
 
 export function boxRoot(workspace: BoxWorkspace): string {
   return workspace.directory?.trim() || workspace.path;
@@ -92,6 +126,7 @@ export class BoxService {
   private log: BoxLog;
   private projectsWrite: Promise<void> = Promise.resolve();
   private installLog: BoxInstallLogPaths | null = null;
+  private alternatives: { at: number; key: string; list: BackendAlternative[] } | null = null;
 
   constructor(private readonly options: BoxServiceOptions) {
     this.env = options.env ?? process.env;
@@ -119,6 +154,36 @@ export class BoxService {
 
   serverDefault(): ServerBoxDefault {
     return serverDefault(this.options.stateDir);
+  }
+
+  /** The backend detection's inputs: the setting (or OMNIRUSH_BOX_BACKEND) and the server's allowlist. */
+  private detectOptions(): Pick<DetectOptions, "asked" | "allow"> {
+    return { asked: askedBackend({ env: this.env, stateDir: this.options.stateDir }).backend, allow: serverBackends(this.options.stateDir) };
+  }
+
+  private detect(extra: DetectOptions = {}): Promise<RuntimeResult> {
+    return detectRuntime({ boxHome: this.home, env: this.env, ...this.detectOptions(), ...extra });
+  }
+
+  /**
+   * Save the machine's backend ("auto", one backend id, "native"). Projects
+   * are planned again with it (a running box keeps going until its project
+   * is planned again). Throws for an unknown value.
+   */
+  async setBackend(value: unknown): Promise<string> {
+    const saved = saveBackend(this.options.stateDir, value);
+    this.alternatives = null;
+    const now = await this.detect({ fresh: true });
+    const chosen = now.ok ? now.backend ?? now.name : null;
+    for (const project of this.projects.values()) {
+      if (project.run && project.run.backend === chosen) continue;
+      project.run = null;
+      project.notice = null;
+      project.nextPlanAt = 0;
+    }
+    await this.writeProjects();
+    void this.ensureAll();
+    return saved;
   }
 
   private async mode(workspace: BoxWorkspace) {
@@ -169,7 +234,7 @@ export class BoxService {
       }
       if (project.run && !project.run.native) return project.run;
       if (Date.now() < project.nextPlanAt) return null;
-      const plan = await planBox({ env: this.env, home: this.home, root, log: this.log, shims: shimsDir(this.env) });
+      const plan = await planBox({ env: this.env, home: this.home, root, log: this.log, shims: shimsDir(this.env), ...this.detectOptions() });
       if (!plan.box) {
         project.run = null;
         project.notice = plan.notice;
@@ -246,24 +311,43 @@ export class BoxService {
     const key = boxKey(root);
     const project = this.projects.get(key);
     const base = { mode: settings.mode, serverDefault: server, on, source, offer, error: null };
-    if (workspace.workspaceType !== "local") return { ...base, on: false, offer: false, state: "off", runtime: null, image: null, container: null, notice: "The sandbox is for folders on this computer." };
+    const backendSetting = { ...askedBackend({ env: this.env, stateDir: this.options.stateDir }), choices: backendChoices() };
+    const setting = { value: backendSetting.backend, source: backendSetting.source, choices: backendSetting.choices };
+    if (workspace.workspaceType !== "local") return { ...base, on: false, offer: false, state: "off", runtime: null, backend: null, backendSetting: setting, image: null, container: null, notice: "The sandbox is for folders on this computer." };
+    // The full check (every backend) on a fresh look or once a minute; the cached choice otherwise.
+    const { asked, allow } = this.detectOptions();
+    const altKey = JSON.stringify([asked, allow]);
+    const full = fresh || !this.alternatives || this.alternatives.key !== altKey || Date.now() - this.alternatives.at > ALTERNATIVES_MS;
+    const timeout = full ? 10_000 : 4_000;
     const runtime = await Promise.race([
-      detectRuntime({ boxHome: this.home, env: this.env, fresh }),
-      new Promise<RuntimeResult>((resolve) => setTimeout(() => resolve({ ok: false, reason: "the container runtime did not answer in time" }), 4_000)),
+      this.detect(full ? { all: true } : {}),
+      new Promise<RuntimeResult>((resolve) => setTimeout(() => resolve({ ok: false, reason: "the sandbox backend did not answer in time" }), timeout)),
     ]);
+    if (full && runtime.alternatives) this.alternatives = { at: Date.now(), key: altKey, list: runtime.alternatives };
+    const alternatives = (runtime.alternatives ?? this.alternatives?.list ?? []).map((alt) => ({ id: alt.backend, label: LABELS[alt.backend] ?? alt.backend, ok: alt.ok, reason: alt.reason ? alt.reason.split("\n")[0]!.slice(0, 300) : null }));
     const runtimeView = runtime.ok
       ? { ok: true, name: runtime.name, flavor: runtime.flavor, version: runtime.version, reason: null }
       : { ok: false, name: null, flavor: null, version: null, reason: runtime.reason };
+    const backendId = runtime.ok ? runtime.backend ?? runtime.name : null;
+    const backend: BoxBackendView = {
+      id: backendId,
+      label: backendId ? LABELS[backendId] ?? backendId : null,
+      version: runtime.ok ? runtime.version || null : null,
+      flavor: runtime.ok ? runtime.flavor || null : null,
+      why: runtime.ok ? runtime.why ?? null : runtime.reason,
+      alternatives,
+      allowed: allow ?? null,
+    };
     const image = imageFor(detectStack(root), { env: this.env });
     const name = containerName(key, this.env);
     let present: boolean | null = null;
     let container: BoxStatus["container"] = null;
     if (runtime.ok) {
-      present = Boolean(await inspectImage(runtime, image.pull).catch(() => null));
-      const mine = (await listBoxes(runtime).catch(() => [])).find((box) => box.key === key && box.name === name);
+      present = Boolean(await driverFor(runtime).imagePresent(runtime, image, { home: this.home, env: this.env }).catch(() => null));
+      const mine = (await listBoxes(runtime, { env: this.env, home: this.home }).catch(() => [])).find((box) => box.key === key);
       container = { name, exists: Boolean(mine), running: Boolean(mine?.running) };
     }
-    const downloading = runtime.ok && pulling(this.home, image.pull);
+    const downloading = runtime.ok && pulling(this.home, runtime, image.pull);
     const record = readRecord(this.home, key);
     const run = project?.run ?? null;
     const state: BoxStatus["state"] = !on ? "off"
@@ -275,6 +359,8 @@ export class BoxService {
       ...base,
       state,
       runtime: runtimeView,
+      backend,
+      backendSetting: setting,
       image: { ref: image.pull, stack: image.stack, present, downloading },
       container,
       notice: on ? project?.notice ?? (runtime.ok ? null : `Sandbox off for now: ${runtime.reason}.`) : null,
@@ -286,7 +372,7 @@ export class BoxService {
   async reset(workspace: BoxWorkspace): Promise<{ removed: boolean }> {
     const root = boxRoot(workspace);
     const key = boxKey(root);
-    const runtime = await detectRuntime({ boxHome: this.home, env: this.env });
+    const runtime = await this.detect();
     const project = this.projects.get(key);
     if (project) {
       project.run = null;
@@ -301,11 +387,11 @@ export class BoxService {
 
   /** Download the project's image now (the toggle turned on with no image here). */
   async pull(workspace: BoxWorkspace): Promise<boolean> {
-    const runtime = await detectRuntime({ boxHome: this.home, env: this.env });
+    const runtime = await this.detect();
     if (!runtime.ok) return false;
     const image = imageFor(detectStack(boxRoot(workspace)), { env: this.env });
-    if (await inspectImage(runtime, image.pull)) return false;
-    pullInBackground(runtime, image.pull, this.home);
+    if (await driverFor(runtime).imagePresent(runtime, image, { home: this.home, env: this.env })) return false;
+    pullInBackground(runtime, image, this.home, { env: this.env, log: this.log });
     return true;
   }
 
@@ -344,7 +430,7 @@ export class BoxService {
     const label = run.label(sessionId);
     const box = run.box;
     if (!label || !box) return null;
-    return { key: run.key, root: run.root, croot: box.croot, container: box.container, runtimeBin: run.runtimeBin, runtimeArgs: run.runtimeArgs, label };
+    return { key: run.key, root: run.root, croot: box.croot, container: box.container, runtimeBin: run.runtimeBin, runtimeArgs: run.runtimeArgs, backend: run.backend, exec: run.exec, label };
   }
 
   /** Whether chats ran in a box during this run (they get a `final` checkpoint at quit). */

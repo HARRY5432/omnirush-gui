@@ -1,337 +1,51 @@
-// Ported from the CLI (omnirush-cli src/box/box.js, feat/local-box); keep the
-// two in step. Desktop differences, each marked "Desktop:": types; the
-// helpers' folder is the desktop's sidecars (setToolsRoot) and there is no
-// checkout box/bin fallback beyond OMNIRUSH_BOX_BIN_DIR; the shell link lives
-// in <home>/shell-desktop (the CLI's own is <home>/shell); a container-name
-// prefix override for test rigs (OMNIRUSH_BOX_CONTAINER_PREFIX).
+// Ported from the CLI (omnirush-cli src/box/box.js, feat/local-box-backends);
+// keep the two in step. Desktop differences, each marked "Desktop:": types;
+// what common.ts lists (the sidecars' helpers, the shell-desktop link, the
+// container-name prefix).
 //
-// OmniRush box: one persistent Linux container per project, opt-in. The
-// engine, the app and the model calls stay on this machine; the engine's
-// shell tool runs in the box (boxsh -> boxd). The project folder is
-// bind-mounted at the same path (Windows: /c/Users/...), so the user's
-// editor, git and files stay as they are, and chat history stays in the
-// engine's one store. Installs live in the container, which survives
-// resume, restarts and new sessions until the user resets it.
+// OmniRush box: one persistent Linux box per project, opt-in. The engine,
+// the app and the model calls stay on this machine; the engine's shell tool
+// runs in the box (boxsh -> boxd). The project folder is mounted at the same
+// path (Windows: /c/Users/...), so the user's editor, git and files stay as
+// they are, and chat history stays in the engine's one store. Installs live
+// in the box, which survives resume, restarts and new sessions until the
+// user resets it.
 //
-// Each turn's starting environment is a checkpoint of what the container
-// changed (`docker diff` against the image, then only what changed since
-// the session's previous checkpoint), written where the project archive
-// picks it up (<state>/sandbox/snapshots/<session>/turn-N.{json,tar}, the
-// same transport the 2.2.3 sandbox used; record schema 2).
+// What runs the box is a backend (backends/: bubblewrap, Apple container,
+// WSL containers, OmniRush's WSL distro, Docker, Podman and what speaks
+// their CLIs), chosen per machine by backends/index.ts. Every backend runs
+// the same boxd from the same pinned image, so a box is the same
+// environment everywhere.
+//
+// Each turn's starting environment is a checkpoint of what the box changed
+// (boxd's walk against the image index it took at the first start; a
+// container's `diff` as the fallback), then only what changed since the
+// session's previous checkpoint, written where the project archive picks it
+// up (<state>/sandbox/snapshots/<session>/turn-N.{json,tar}, the same
+// transport the 2.2.3 sandbox used; record schema 2).
 
 import { createHash, randomBytes } from "node:crypto";
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import * as client from "./client.js";
 import type { BoxEndpoint, BoxStat } from "./client.js";
+import { DEPS_MAX_BYTES, FILE_MAX_BYTES, HOME_IN_BOX, RECORD_SCHEMA, RUN_DIR, SHIMS_DIR, TAR_MAX_BYTES, boxHome, boxKey, containerName, containerRoot, firstLine, readJson, readRecord, recordFile, runDir, writeJson, type BoxInstallLog, type BoxLog, type BoxRecord, type BoxRuntime } from "./common.js";
+import { driverFor } from "./backends/index.js";
+import type { ListedBox, SpawnLike } from "./backends/types.js";
 import { detectStack, imageFor, type BoxImage, type ImagePins } from "./images.js";
-import { runCommand, type RunCommand, type RunOptions, type RuntimeInfo } from "./runtime.js";
+import { runCommand, type RunCommand } from "./run.js";
 
 type Env = NodeJS.ProcessEnv;
-export type BoxLog = (level: "info" | "warn" | "error", message: string, attributes?: Record<string, unknown>) => void;
 
-export const RECORD_SCHEMA = 2;
-export const LABEL = "ai.omnirush.box";
-export const BOX_PORT = 7777;
-export const RUN_DIR = "/run/omnirush";
-export const SHIMS_DIR = "/opt/omnirush/pkglog";
-export const HOME_IN_BOX = "/root";
-/** One snapshot tar past this is cut (system paths first, then dependency folders). */
-export const TAR_MAX_BYTES = 256 * 1024 * 1024;
-/** A single file past this is left out of a snapshot (listed with its size). */
-export const FILE_MAX_BYTES = 128 * 1024 * 1024;
-/** Project dependency folders (node_modules, .venv) go into a turn's snapshot up to this. */
-export const DEPS_MAX_BYTES = 128 * 1024 * 1024;
-
-// --- where things are ------------------------------------------------------
-
-export function boxHome(env: Env = process.env, home = os.homedir()): string {
-  return path.resolve(String(env.OMNIRUSH_BOX_HOME || "").trim() || path.join(home, ".omnirush", "box"));
-}
-
-/** The canonical form of a project folder (the box key hashes it). */
-export function canonicalRoot(root: string, { platform = process.platform, realpath = realpathSync.native }: { platform?: NodeJS.Platform; realpath?: (file: string) => string } = {}): string {
-  let resolved = path.resolve(root);
-  try { resolved = realpath(resolved); } catch { /* keep */ }
-  return platform === "win32" ? resolved.toLowerCase() : resolved;
-}
-
-export function boxKey(root: string, opts: { platform?: NodeJS.Platform; realpath?: (file: string) => string } = {}): string {
-  return createHash("sha256").update(canonicalRoot(root, opts)).digest("hex").slice(0, 12);
-}
-
-/** Desktop: OMNIRUSH_BOX_CONTAINER_PREFIX renames the containers (test rigs on shared machines). */
-export function containerName(key: string, env: Env = process.env): string {
-  const prefix = String(env.OMNIRUSH_BOX_CONTAINER_PREFIX || "").trim();
-  return `${/^[a-z0-9][a-z0-9_.-]*$/.test(prefix) ? prefix : "omnirush-box-"}${key}`;
-}
-
-/** Where the project folder is inside: the same path; on Windows C:\x\y -> /c/x/y. */
-export function containerRoot(root: string, platform: NodeJS.Platform = process.platform): string {
-  if (platform !== "win32") return root;
-  const match = /^([a-zA-Z]):[\\/]?(.*)$/.exec(root);
-  if (!match) return `/w/${root.replace(/[\\]+/g, "/").replace(/^\/+/, "")}`;
-  return `/${match[1]!.toLowerCase()}/${match[2]!.replace(/[\\]+/g, "/")}`.replace(/\/+$/, "") || "/";
-}
+export { BOX_PORT, DEPS_MAX_BYTES, FILE_MAX_BYTES, GOARCH, GOOS, HOME_IN_BOX, LABEL, RECORD_SCHEMA, RUN_DIR, SHIMS_DIR, TAR_MAX_BYTES, boxHome, boxKey, canonicalRoot, containerName, containerRoot, helperDirs, helperPath, installShell, readRecord, recordFile, runDir, setToolsRoot, wslPath, type BoxInstallLog, type BoxLog, type BoxRecord, type BoxRuntime } from "./common.js";
+export { commandUser, createArgs, inspectImage, parseSize, pullImage, resourceArgs, rt, singleFileTar } from "./backends/container.js";
+export type { ListedBox } from "./backends/types.js";
 
 /** Where the server saves each chat's turn checkpoints (the project archive carries them: session-archive/index.ts). */
 export function boxSnapshotsDir(stateDir: string): string {
   return path.join(stateDir, "sandbox", "snapshots");
-}
-
-export function recordFile(home: string, key: string): string {
-  return path.join(home, "boxes", `${key}.json`);
-}
-
-export function runDir(home: string, key: string): string {
-  return path.join(home, "projects", key);
-}
-
-function writeJson(file: string, value: unknown, mode = 0o600): void {
-  mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.${randomBytes(3).toString("hex")}.tmp`;
-  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode });
-  renameSync(tmp, file);
-}
-
-function readJson<T = Record<string, unknown>>(file: string): T | null {
-  try { return JSON.parse(readFileSync(file, "utf8")); } catch { return null; }
-}
-
-/** The record boxsh reads (boxes/<key>.json). */
-export type BoxRecord = {
-  v: 1; key: string; root: string; croot: string; container: string; runtime: string; runtime_args: string[];
-  host: string; port: number; token: string; state: string; error: string; uid: number; gid: number;
-  home: string; shell: string; path_prefix: string; env_file: string; updated: number; pid: number;
-};
-
-export function readRecord(home: string, key: string): BoxRecord | null {
-  return readJson<BoxRecord>(recordFile(home, key));
-}
-
-// --- helper binaries ---------------------------------------------------------
-
-export const GOOS: Partial<Record<string, string>> = { linux: "linux", darwin: "darwin", win32: "windows" };
-export const GOARCH: Partial<Record<string, string>> = { x64: "amd64", arm64: "arm64", amd64: "amd64", aarch64: "arm64" };
-
-/**
- * Folders holding the helpers, best first: OMNIRUSH_BOX_BIN_DIR, then the
- * desktop's sidecars folder's box/ (setToolsRoot). Each has
- * <goos>-<goarch>/boxsh and linux-<arch>/boxd.
- */
-export function helperDirs({ env = process.env, toolsRoot = null }: { env?: Env; toolsRoot?: string | null } = {}): string[] {
-  const asked = String(env.OMNIRUSH_BOX_BIN_DIR || "").trim();
-  return [...(asked ? [asked] : []), ...(toolsRoot ? [path.join(toolsRoot, "box")] : [])];
-}
-
-// Desktop: the sidecars folder (the engine binary's folder), set by the server at start.
-let platformTools: string | null = null;
-export function setToolsRoot(dir: string | null | undefined): void {
-  platformTools = dir || null;
-}
-
-/** The helper's file, or null when no folder has it (the box is then unavailable). */
-export function helperPath(name: string, { goos, goarch, env = process.env, toolsRoot = platformTools }: { goos: string | undefined; goarch: string | undefined; env?: Env; toolsRoot?: string | null }): string | null {
-  if (!goos || !goarch) return null;
-  const ext = goos === "windows" && name === "boxsh" ? ".exe" : "";
-  const rel = path.join(`${goos}-${goarch}`, name + ext);
-  return helperDirs({ env, toolsRoot }).map((dir) => path.join(dir, rel)).find((file) => existsSync(file)) ?? null;
-}
-
-/**
- * The shell file the engine is given: a link (Windows: a copy) named `bash`
- * to boxsh, so the engine describes its shell tool as bash.
- */
-export function installShell(home: string, { platform = process.platform, arch = process.arch, env = process.env }: { platform?: NodeJS.Platform; arch?: string; env?: Env } = {}): string {
-  const source = helperPath("boxsh", { goos: GOOS[platform], goarch: GOARCH[arch], env });
-  if (!source) throw new Error(`the sandbox shell helper is missing (${GOOS[platform] ?? platform}-${GOARCH[arch] ?? arch}/boxsh)`);
-  const dir = path.join(home, "shell-desktop");
-  mkdirSync(dir, { recursive: true });
-  const target = path.join(dir, platform === "win32" ? "bash.exe" : "bash");
-  if (platform === "win32") {
-    let same = false;
-    try { same = statSync(target).size === statSync(source).size && statSync(target).mtimeMs >= statSync(source).mtimeMs; } catch { /* missing */ }
-    if (!same) {
-      const tmp = `${target}.${process.pid}.tmp`;
-      copyFileSync(source, tmp);
-      try { renameSync(tmp, target); } catch { rmSync(tmp, { force: true }); }
-    }
-    return target;
-  }
-  let current: string | null = null;
-  try { current = lstatSync(target).isSymbolicLink() ? path.resolve(dir, readlinkSync(target)) : null; } catch { /* missing */ }
-  if (current !== source) {
-    const tmp = `${target}.${process.pid}.tmp`;
-    rmSync(tmp, { force: true });
-    symlinkSync(source, tmp);
-    renameSync(tmp, target);
-  }
-  return target;
-}
-
-/**
- * A tar with one executable file at `name` (and its folders), for `cp - <c>:/`:
- * `cp <file> <c>:<path>` needs the folder to exist in the image already.
- */
-export function singleFileTar(name: string, data: Buffer, mode = 0o755): Buffer {
-  const blocks: Buffer[] = [];
-  const header = (entry: string, type: string, size: number, entryMode: number) => {
-    const h = Buffer.alloc(512);
-    h.write(entry, 0, 100, "utf8");
-    h.write(`${entryMode.toString(8).padStart(7, "0")}\0`, 100);
-    h.write("0000000\0", 108);
-    h.write("0000000\0", 116);
-    h.write(`${size.toString(8).padStart(11, "0")}\0`, 124);
-    h.write(`${Math.floor(Date.now() / 1000).toString(8).padStart(11, "0")}\0`, 136);
-    h.write("        ", 148);
-    h.write(type, 156);
-    h.write("ustar\0", 257);
-    h.write("00", 263);
-    let sum = 0;
-    for (const byte of h) sum += byte;
-    h.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148);
-    return h;
-  };
-  const parts = name.split("/");
-  for (let i = 1; i < parts.length; i += 1) blocks.push(header(`${parts.slice(0, i).join("/")}/`, "5", 0, 0o755));
-  blocks.push(header(name, "0", data.length, mode));
-  blocks.push(data, Buffer.alloc((512 - (data.length % 512)) % 512), Buffer.alloc(1024));
-  return Buffer.concat(blocks);
-}
-
-// --- the runtime CLI ------------------------------------------------------------
-
-export type BoxRuntime = Pick<RuntimeInfo, "name" | "bin"> & Partial<Pick<RuntimeInfo, "version" | "flavor" | "rootless" | "arch" | "vm" | "prefix" | "wsl">>;
-
-/** Runs the runtime's CLI (`wsl.exe -e docker ...` for a WSL engine). */
-export function rt(runtime: BoxRuntime, run: RunCommand = runCommand) {
-  const prefix = Array.isArray(runtime.prefix) ? runtime.prefix : [];
-  return (args: string[], opts: RunOptions = {}) => run(runtime.bin, [...prefix, ...args], { timeoutMs: 60_000, ...opts });
-}
-
-/** A Windows path as a WSL engine mounts it: C:\x\y -> /mnt/c/x/y. */
-export function wslPath(p: string): string {
-  const match = /^([a-zA-Z]):[\\/]?(.*)$/.exec(String(p));
-  if (!match) return String(p).replace(/\\/g, "/");
-  return `/mnt/${match[1]!.toLowerCase()}/${match[2]!.replace(/\\/g, "/")}`.replace(/\/+$/, "");
-}
-
-/** Where the runtime finds a folder of this machine (a WSL engine sees Windows drives under /mnt). */
-function source(runtime: BoxRuntime, p: string): string {
-  return runtime.wsl ? wslPath(p) : p;
-}
-
-/** Whether `image` is present locally; its id and repo digest when it is. */
-export async function inspectImage(runtime: BoxRuntime, image: string, { run = runCommand }: { run?: RunCommand } = {}): Promise<{ id: string; digest: string | null; arch: string; size: number } | null> {
-  const res = await rt(runtime, run)(["image", "inspect", image, "--format", "{{json .}}"], { timeoutMs: 20_000 });
-  if (res.code !== 0) return null;
-  try {
-    const info = JSON.parse(res.stdout.trim().split("\n")[0] ?? "");
-    const digests: unknown[] = Array.isArray(info.RepoDigests) ? info.RepoDigests : [];
-    const digest = digests.map((entry) => String(entry).split("@")[1]).find((d) => /^sha256:[0-9a-f]{64}$/.test(d || "")) || null;
-    return { id: String(info.Id || ""), digest, arch: String(info.Architecture || ""), size: Number(info.Size || 0) };
-  } catch {
-    return null;
-  }
-}
-
-/** `pull` with retries (a flaky link picks up where it stopped). */
-export async function pullImage(runtime: BoxRuntime, image: string, { run = runCommand, pauses = [2_000, 8_000], timeoutMs = 60 * 60_000, sleep = (ms: number) => new Promise((r) => setTimeout(r, ms)) }: { run?: RunCommand; pauses?: number[]; timeoutMs?: number; sleep?: (ms: number) => Promise<unknown> } = {}): Promise<{ ok: true; attempts: number } | { ok: false; error: string }> {
-  let last = null;
-  for (let attempt = 0; attempt <= pauses.length; attempt += 1) {
-    last = await rt(runtime, run)(["pull", image], { timeoutMs });
-    if (last.code === 0) return { ok: true, attempts: attempt + 1 };
-    if (attempt < pauses.length) await sleep(pauses[attempt]!);
-  }
-  const said = String(last?.stderr || "").split(/\r?\n/).map((line) => line.trim()).find(Boolean) || `pull exited with ${last?.code}`;
-  return { ok: false, error: said.slice(0, 300) };
-}
-
-type ContainerInfo = { id: string; running: boolean; image: string; labels: Record<string, string>; env: string[]; mounts: string[] };
-
-async function inspectContainer(runtime: BoxRuntime, name: string, run: RunCommand): Promise<ContainerInfo | null> {
-  const res = await rt(runtime, run)(["container", "inspect", name, "--format", "{{json .}}"], { timeoutMs: 20_000 });
-  if (res.code !== 0) return null;
-  try {
-    const info = JSON.parse(res.stdout.trim().split("\n")[0] ?? "");
-    return {
-      id: String(info.Id || ""),
-      running: Boolean(info.State?.Running),
-      image: String(info.Image || ""),
-      labels: info.Config?.Labels ?? {},
-      env: Array.isArray(info.Config?.Env) ? info.Config.Env : [],
-      mounts: Array.isArray(info.Mounts) ? info.Mounts.map((mount: { Destination?: unknown }) => String(mount.Destination ?? "")) : [],
-    };
-  } catch {
-    return null;
-  }
-}
-
-/** The host port boxd is published on. */
-async function publishedPort(runtime: BoxRuntime, name: string, run: RunCommand): Promise<number | null> {
-  const res = await rt(runtime, run)(["port", name, `${BOX_PORT}/tcp`], { timeoutMs: 15_000 });
-  if (res.code !== 0) return null;
-  for (const line of res.stdout.split("\n")) {
-    const match = /:(\d+)\s*$/.exec(line.trim());
-    if (match) return Number(match[1]);
-  }
-  return null;
-}
-
-/** Resource limits a new box gets (a VM runtime has its own; only the process cap then). */
-export function resourceArgs({ runtime, env = process.env, cpus = os.cpus().length, memory = os.totalmem() }: { runtime: BoxRuntime; env?: Env; cpus?: number; memory?: number }): string[] {
-  const args = ["--pids-limit", String(Number(env.OMNIRUSH_BOX_PIDS) || 4096)];
-  const askedCpus = Number(env.OMNIRUSH_BOX_CPUS);
-  const askedMem = String(env.OMNIRUSH_BOX_MEMORY || "").trim();
-  if (askedCpus > 0) args.push("--cpus", String(askedCpus));
-  else if (!runtime.vm) args.push("--cpus", String(Math.max(1, Math.min(8, cpus - 1))));
-  if (askedMem) args.push("--memory", askedMem);
-  else if (!runtime.vm) {
-    const gib = Math.max(2, Math.min(8, Math.floor(memory / 2 / 1024 ** 3)));
-    args.push("--memory", `${gib}g`);
-  }
-  return args;
-}
-
-/** Who commands run as: root where root maps to the user (rootless, VMs), else the user's own uid. */
-export function commandUser(runtime: BoxRuntime, { platform = process.platform, uid = process.getuid?.(), gid = process.getgid?.() }: { platform?: NodeJS.Platform; uid?: number; gid?: number } = {}): { uid: number; gid: number } {
-  if (platform !== "linux" || runtime.rootless || runtime.vm || uid === undefined || gid === undefined || uid === 0) return { uid: 0, gid: 0 };
-  return { uid, gid };
-}
-
-/**
- * Create a box container (not started): the project folder at `croot`, the
- * launcher's run folder at /run/omnirush, the package-manager wrappers (when
- * there are) read-only, boxd published on this machine's loopback only.
- * Nothing else of this machine goes in: no home folder, no credentials, no
- * docker socket.
- */
-/** The install log (phase 1): its folder, the wrappers' folder and the pip hook's, all on this machine. */
-export type BoxInstallLog = { root: string; bin: string; py: string };
-
-export function createArgs({ name, key, root, croot, image, runtime, run: runFolder, shims, pkglog = null, token, user, env = process.env, platform = process.platform }: { name: string; key: string; root: string; croot: string; image: string; runtime: BoxRuntime; run: string; shims: string | null; pkglog?: BoxInstallLog | null; token: string; user: { uid: number; gid: number }; env?: Env; platform?: NodeJS.Platform }): string[] {
-  return [
-    "create", "--name", name, "--hostname", "omnirush-box", "--init",
-    "--label", `${LABEL}=1`, "--label", `${LABEL}.key=${key}`, "--label", `${LABEL}.root=${root}`, "--label", `${LABEL}.version=1`,
-    "--mount", `type=bind,source=${source(runtime, root)},target=${croot}`,
-    "--mount", `type=bind,source=${source(runtime, runFolder)},target=${RUN_DIR}`,
-    ...(shims ? ["--mount", `type=bind,source=${source(runtime, shims)},target=${SHIMS_DIR}-src,readonly`] : []),
-    // The install log's folder (phase 1: its wrappers, pip hook and the per-run folders the
-    // wrappers note calls in), at the path the launcher reads it at.
-    ...(pkglog ? ["--mount", `type=bind,source=${source(runtime, pkglog.root)},target=${containerRoot(pkglog.root, platform)}`] : []),
-    "-p", `127.0.0.1::${BOX_PORT}`,
-    "-e", `BOXD_TOKEN=${token}`, "-e", `BOXD_UID=${user.uid}`, "-e", `BOXD_GID=${user.gid}`,
-    "-e", `BOXD_HOME=${HOME_IN_BOX}`, "-e", `BOXD_ROOT=${croot}`, "-e", `BOXD_ENV_FILE=${RUN_DIR}/env`,
-    "-e", "LANG=C.UTF-8", "-e", "DEBIAN_FRONTEND=noninteractive",
-    "-w", croot,
-    ...resourceArgs({ runtime, env }),
-    ...(runtime.name === "podman" ? ["--security-opt", "label=disable"] : []),
-    ...(user.uid === 0 ? ["--security-opt", "no-new-privileges"] : []),
-    "--entrypoint", "/opt/omnirush/bin/boxd",
-    image,
-  ];
 }
 
 // --- snapshot rules -------------------------------------------------------------
@@ -478,12 +192,12 @@ export type BoxState = "starting" | "pulling" | "ready" | "failed";
 type OnState = (state: BoxState, error: string | null) => void;
 
 /**
- * Open (create or start) the project's box. Returns a Box. `onState` sees
- * "starting", "pulling", "ready", "failed" (the record boxsh reads says the
- * same). Throws only for programming errors; a box that cannot start is a
- * Box with state "failed" and `error`.
+ * Open (create or start) the project's box with the runtime's backend.
+ * Returns a Box. `onState` sees "starting", "pulling", "ready", "failed"
+ * (the record boxsh reads says the same). Throws only for programming
+ * errors; a box that cannot start is a Box with state "failed" and `error`.
  */
-export async function openBox({ root, runtime, env = process.env, platform = process.platform, home = boxHome(env), run = runCommand, log = () => {}, shims = null, pkglog = null, pull = true, image: asked = null, onState = () => {} }: { root: string; runtime: BoxRuntime; env?: Env; platform?: NodeJS.Platform; home?: string; run?: RunCommand; log?: BoxLog; shims?: string | null; pkglog?: BoxInstallLog | null; pull?: boolean; image?: BoxImage | null; onState?: OnState }): Promise<Box> {
+export async function openBox({ root, runtime, env = process.env, platform = process.platform, home = boxHome(env), run = runCommand, log = () => {}, shims = null, pkglog = null, pull = true, image: asked = null, onState = () => {}, spawnImpl, readyMs = 15_000 }: { root: string; runtime: BoxRuntime; env?: Env; platform?: NodeJS.Platform; home?: string; run?: RunCommand; log?: BoxLog; shims?: string | null; pkglog?: BoxInstallLog | null; pull?: boolean; image?: BoxImage | null; onState?: OnState; spawnImpl?: SpawnLike; readyMs?: number }): Promise<Box> {
   const projectRoot = path.resolve(root);
   const key = boxKey(projectRoot, { platform });
   const name = containerName(key, env);
@@ -491,63 +205,31 @@ export async function openBox({ root, runtime, env = process.env, platform = pro
   const runFolder = runDir(home, key);
   mkdirSync(path.join(runFolder, "state"), { recursive: true });
   const box = new Box({ key, name, root: projectRoot, croot, runtime, home, runFolder, run, log, platform, env });
+  const driver = driverFor(runtime);
   const lock = await acquireLock(home, key);
   try {
     box.setState("starting", null, onState);
-    let info = await inspectContainer(runtime, name, run);
-    if (info && info.labels?.[`${LABEL}.root`] && info.labels[`${LABEL}.root`] !== projectRoot) {
-      throw new Error(`container ${name} belongs to another folder`);
-    }
-    if (!info) {
-      const chosen = asked ?? imageFor(detectStack(projectRoot), { env });
-      let present = await inspectImage(runtime, chosen.pull, { run });
-      if (!present) {
-        if (!pull) return box.fail("the sandbox image is not downloaded yet", onState);
-        box.setState("pulling", null, onState);
-        const pulled = await pullImage(runtime, chosen.pull, { run });
-        if (!pulled.ok) return box.fail(`could not download the sandbox image: ${pulled.error}`, onState);
-        present = await inspectImage(runtime, chosen.pull, { run });
-        if (!present) return box.fail("the sandbox image is not there after the download", onState);
-      }
-      const goarch = GOARCH[present.arch] || GOARCH[runtime.arch ?? ""] || "amd64";
-      const boxd = helperPath("boxd", { goos: "linux", goarch, env });
-      if (!boxd) return box.fail(`the sandbox helper is missing (linux-${goarch}/boxd)`, onState);
-      const token = randomBytes(24).toString("hex");
-      const user = commandUser(runtime, { platform });
-      const created = await rt(runtime, run)(createArgs({ name, key, root: projectRoot, croot, image: chosen.pull, runtime, run: runFolder, shims, pkglog, token, user, env, platform }), { timeoutMs: 120_000 });
-      if (created.code !== 0) return box.fail(`could not create the sandbox: ${firstLine(created.stderr)}`, onState);
-      const copied = await rt(runtime, run)(["cp", "-", `${name}:/`], { timeoutMs: 60_000, input: singleFileTar("opt/omnirush/bin/boxd", readFileSync(boxd)) });
-      if (copied.code !== 0) {
-        await rt(runtime, run)(["rm", "-f", name], { timeoutMs: 30_000 });
-        return box.fail(`could not copy the sandbox helper in: ${firstLine(copied.stderr)}`, onState);
-      }
-      writeJson(path.join(home, "chains", key, "image.json"), { ref: chosen.ref, pull: chosen.pull, digest: chosen.digest || present.digest, id: present.id, stack: chosen.stack, created_at: new Date().toISOString() });
-      info = await inspectContainer(runtime, name, run);
-      if (!info) return box.fail("the sandbox was not there after it was created", onState);
-      log("info", "box created", { key, image: chosen.pull, stack: chosen.stack });
-    }
-    if (!info.running) {
-      const started = await rt(runtime, run)(["start", name], { timeoutMs: 60_000 });
-      if (started.code !== 0) return box.fail(`could not start the sandbox: ${firstLine(started.stderr)}`, onState);
-    }
-    const token = (info.env.find((kv) => kv.startsWith("BOXD_TOKEN=")) || "").slice("BOXD_TOKEN=".length);
-    const uid = Number((info.env.find((kv) => kv.startsWith("BOXD_UID=")) || "BOXD_UID=0").slice(9));
-    const gid = Number((info.env.find((kv) => kv.startsWith("BOXD_GID=")) || "BOXD_GID=0").slice(9));
-    const port = await publishedPort(runtime, name, run);
-    if (!port || !token) return box.fail("the sandbox started without its port", onState);
-    box.connect({ port, token, uid, gid, containerId: info.id, imageId: info.image });
-    const endpoint = box.endpoint!;
-    const deadline = Date.now() + 15_000;
+    const chosen = asked ?? imageFor(detectStack(projectRoot), { env });
+    const opened = await driver.open({ key, name, root: projectRoot, croot, runtime, run, home, runFolder, image: chosen, pull, shims, pkglog, env, platform, log, ...(spawnImpl ? { spawnImpl } : {}), onPulling: () => box.setState("pulling", null, onState) });
+    if (!opened.ok) return box.fail(opened.error, onState);
+    if (opened.created) writeJson(path.join(home, "chains", key, "image.json"), { ...opened.created, backend: runtime.backend ?? runtime.name, created_at: new Date().toISOString() });
+    // The first address that answers: the published/loopback one, then the box's own (Apple, WSL any).
+    const ways = [opened.endpoint, ...(opened.alternates ?? [])];
     let identity = null;
-    while (!identity && Date.now() < deadline) {
-      identity = await client.ping(endpoint, { timeoutMs: 1_000 });
-      if (!identity) await new Promise((resolve) => setTimeout(resolve, 100));
+    for (let i = 0; i < ways.length && !identity; i += 1) {
+      box.connect({ ...ways[i]!, uid: opened.uid, gid: opened.gid, containerId: opened.containerId, imageId: opened.imageId });
+      const endpoint = box.endpoint!;
+      const deadline = Date.now() + (i === ways.length - 1 ? readyMs : Math.min(readyMs, 5_000));
+      while (!identity && Date.now() < deadline) {
+        identity = await client.ping(endpoint, { timeoutMs: 1_000 });
+        if (!identity) await new Promise((resolve) => setTimeout(resolve, 50));
+      }
     }
     if (!identity) return box.fail("the sandbox helper did not answer", onState);
     box.identity = identity;
     if (shims) await box.installShims().catch((error) => log("warn", "box wrappers not installed", { error: String(error?.message || error) }));
     else if (pkglog) {
-      if (info.mounts.includes(containerRoot(pkglog.root, platform))) box.useInstallLog(pkglog);
+      if (opened.mounts.includes(containerRoot(pkglog.root, platform))) box.useInstallLog(pkglog);
       else log("info", "box made before the install log: its wrappers are not in this box (Reset sandbox adds them)", { key });
     }
     box.setState("ready", null, onState);
@@ -557,10 +239,6 @@ export async function openBox({ root, runtime, env = process.env, platform = pro
   } finally {
     lock.release();
   }
-}
-
-function firstLine(text: unknown): string {
-  return String(text ?? "").split(/\r?\n/).map((line) => line.trim()).find(Boolean)?.slice(0, 300) ?? "";
 }
 
 async function acquireLock(home: string, key: string, { waitMs = 60_000 }: { waitMs?: number } = {}): Promise<{ release: () => void }> {
@@ -615,6 +293,8 @@ type Chain = { container: string; last: string | null; signatures: Record<string
 export type BoxLabel = {
   kind: string;
   box_id: string;
+  /** The backend id (backends/index.ts BACKENDS). */
+  backend: string;
   runtime: { name: string; flavor: string; version: string | null; rootless: boolean };
   image: { ref: string | null; digest: string | null; stack: string | null };
   host_os: string;
@@ -662,8 +342,8 @@ export class Box {
     this.container = name;
   }
 
-  connect({ port, token, uid, gid, containerId, imageId }: { port: number; token: string; uid: number; gid: number; containerId: string; imageId: string }): void {
-    this.endpoint = { host: "127.0.0.1", port, token };
+  connect({ host = "127.0.0.1", port, token, uid, gid, containerId, imageId }: BoxEndpoint & { uid: number; gid: number; containerId: string; imageId: string }): void {
+    this.endpoint = { host, port, token };
     this.uid = uid;
     this.gid = gid;
     this.containerId = containerId;
@@ -672,8 +352,11 @@ export class Box {
 
   /** The record boxsh reads (boxes/<key>.json). */
   writeRecord(): void {
+    const fallback = driverFor(this.runtime).execFallback;
     const record: BoxRecord = {
-      v: 1, key: this.key, root: this.root, croot: this.croot, container: this.name, runtime: this.runtime?.bin ?? "", runtime_args: this.runtime?.prefix ?? [],
+      v: 1, key: this.key, root: this.root, croot: this.croot, container: this.name, backend: this.runtime.backend ?? this.runtime.name ?? "",
+      // boxsh's fallback when boxd does not answer: `<runtime> exec` (container engines and wslc only).
+      runtime: fallback ? this.runtime.bin ?? "" : "", runtime_args: fallback ? this.runtime.prefix ?? [] : [],
       host: this.endpoint?.host ?? "127.0.0.1", port: this.endpoint?.port ?? 0, token: this.endpoint?.token ?? "",
       state: this.state, error: this.error ?? "", uid: this.uid ?? 0, gid: this.gid ?? 0, home: HOME_IN_BOX, shell: "/bin/bash",
       path_prefix: this.pathPrefix, env_file: `${RUN_DIR}/env`, updated: Date.now(), pid: process.pid,
@@ -754,6 +437,7 @@ export class Box {
       schema: RECORD_SCHEMA,
       kind: "omnirush-box",
       box: { id: `box_${this.key}`, container: this.name, created_at: image.created_at ?? null },
+      backend: this.runtime.backend ?? this.runtime.name,
       runtime: { name: this.runtime.name, version: this.runtime.version ?? null, flavor: this.runtime.flavor ?? "unknown", rootless: Boolean(this.runtime.rootless), os: "linux", arch: this.runtime.arch || null },
       image: { ref: image.ref ?? null, digest: image.digest ?? null, id: image.id ?? this.imageId ?? null, stack: image.stack ?? null },
       host: { os: this.platform, arch: process.arch, os_version: os.release() },
@@ -767,7 +451,7 @@ export class Box {
   /** The block trace envelopes carry as environment.sandbox. */
   label(): BoxLabel {
     const d = this.describe();
-    return { kind: d.kind, box_id: d.box.id, runtime: { name: d.runtime.name, flavor: d.runtime.flavor, version: d.runtime.version, rootless: d.runtime.rootless }, image: { ref: d.image.ref, digest: d.image.digest, stack: d.image.stack }, host_os: d.host.os, host_arch: d.host.arch };
+    return { kind: d.kind, box_id: d.box.id, backend: d.backend, runtime: { name: d.runtime.name, flavor: d.runtime.flavor, version: d.runtime.version, rootless: d.runtime.rootless }, image: { ref: d.image.ref, digest: d.image.digest, stack: d.image.stack }, host_os: d.host.os, host_arch: d.host.arch };
   }
 
   /** Run a command in the box (toolchain probes, status). */
@@ -812,7 +496,9 @@ export class Box {
       stats = walked.filter((entry) => entry.kind !== "D" && keptPaths.has(entry.path));
     } else {
       source = "diff";
-      const diff = await rt(this.runtime, this.run)(["diff", this.name], { timeoutMs: 120_000, maxBytes: 256 << 20 });
+      const driver = driverFor(this.runtime);
+      if (!driver.diff) throw new Error("the sandbox helper could not list the changes");
+      const diff = await driver.diff(this.runtime, this.key, { run: this.run, home: this.home, env: this.env });
       if (diff.code !== 0) throw new Error(`diff failed: ${firstLine(diff.stderr)}`);
       entries = filterChanges(parseDiff(diff.stdout), { mounts });
       const present = entries.filter((entry) => entry.kind !== "D").map((entry) => entry.path);
@@ -928,83 +614,61 @@ export class Box {
     };
   }
 
-  /** Disk the container's own layer uses (bytes), when the runtime says. */
-  async upperBytes(): Promise<number | null> {
-    const res = await rt(this.runtime, this.run)(["ps", "-a", "-s", "--filter", `name=^/?${this.name}$`, "--format", "{{.Size}}"], { timeoutMs: 30_000 });
-    return parseSize(res.stdout);
+  /** Disk the box's own layer uses (bytes), when the backend says. */
+  upperBytes(): Promise<number | null> {
+    return driverFor(this.runtime).upperBytes(this.runtime, this.key, { run: this.run, home: this.home, env: this.env });
   }
-}
-
-/** "57.2MB (virtual 1.1GB)" -> bytes of the first number. */
-export function parseSize(text: string): number | null {
-  const match = /([\d.]+)\s*([kKMGT]?i?B)/.exec(String(text));
-  if (!match) return null;
-  const unit = match[2]!.replace(/i/, "").toUpperCase();
-  const mult = ({ B: 1, KB: 1e3, MB: 1e6, GB: 1e9, TB: 1e12 } as Record<string, number>)[unit] ?? 1;
-  return Math.round(Number(match[1]) * mult);
 }
 
 // --- status, reset, gc --------------------------------------------------------------
 
-export type ListedBox = { key: string; name: string; root: string; running: boolean; image: string; created: string };
+type Removed = Array<{ kind: string; name: string; reason: string }>;
 
 /** Boxes on this machine: { key, name, root, running, image, created }[] */
-export async function listBoxes(runtime: BoxRuntime, { run = runCommand }: { run?: RunCommand } = {}): Promise<ListedBox[]> {
-  const res = await rt(runtime, run)(["ps", "-a", "--filter", `label=${LABEL}=1`, "--format", "{{json .}}"], { timeoutMs: 30_000 });
-  if (res.code !== 0) return [];
-  const out: ListedBox[] = [];
-  for (const line of res.stdout.split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      const row = JSON.parse(line);
-      const labels: Record<string, string> = typeof row.Labels === "string"
-        ? Object.fromEntries(row.Labels.split(",").map((kv: string) => { const i = kv.indexOf("="); return [kv.slice(0, i), kv.slice(i + 1)]; }))
-        : (row.Labels ?? {});
-      const name = Array.isArray(row.Names) ? row.Names[0] : String(row.Names ?? "");
-      out.push({ key: labels[`${LABEL}.key`] ?? "", name, root: labels[`${LABEL}.root`] ?? "", running: /^up|running/i.test(String(row.Status ?? row.State ?? "")), image: String(row.Image ?? ""), created: String(row.CreatedAt ?? row.Created ?? "") });
-    } catch { /* skip */ }
-  }
-  return out;
+export async function listBoxes(runtime: BoxRuntime, { run = runCommand, env = process.env, home = boxHome(env) }: { run?: RunCommand; env?: Env; home?: string } = {}): Promise<ListedBox[]> {
+  return driverFor(runtime).list(runtime, { run, env, home });
 }
 
 /** Remove a project's box (the next start makes a new one). */
 export async function resetBox(runtime: BoxRuntime, root: string, { env = process.env, platform = process.platform, home = boxHome(env), run = runCommand }: { env?: Env; platform?: NodeJS.Platform; home?: string; run?: RunCommand } = {}): Promise<{ key: string; removed: boolean }> {
   const key = boxKey(root, { platform });
-  const res = await rt(runtime, run)(["rm", "-f", containerName(key, env)], { timeoutMs: 60_000 });
+  const res = await driverFor(runtime).remove(runtime, key, { run, env, home });
   rmSync(recordFile(home, key), { force: true });
   rmSync(path.join(home, "chains", key), { recursive: true, force: true });
-  return { key, removed: res.code === 0 };
+  return { key, removed: Boolean(res.removed) };
+}
+
+/** Stop a project's box (its installs stay; the next chat starts it again). */
+export async function stopBox(runtime: BoxRuntime, root: string, { env = process.env, platform = process.platform, home = boxHome(env), run = runCommand }: { env?: Env; platform?: NodeJS.Platform; home?: string; run?: RunCommand } = {}): Promise<{ key: string; stopped: boolean }> {
+  const key = boxKey(root, { platform });
+  return { key, ...(await driverFor(runtime).stop(runtime, key, { run, env, home })) };
 }
 
 /**
  * Remove boxes whose folder is gone or that were not used for `maxIdleDays`,
- * and box images no box uses that are not the current pins. Only containers
- * and images labelled/named as OmniRush boxes are touched; nothing is pruned.
+ * and box images no box uses that are not the current pins. Only boxes and
+ * images labelled/named as OmniRush boxes are touched; nothing is pruned.
  */
-export async function gcBoxes(runtime: BoxRuntime, { env = process.env, home = boxHome(env), run = runCommand, maxIdleDays = 30, pins = null, now = Date.now(), exists = existsSync }: { env?: Env; home?: string; run?: RunCommand; maxIdleDays?: number; pins?: ImagePins | null; now?: number; exists?: (file: string) => boolean } = {}): Promise<Array<{ kind: string; name: string; reason: string }>> {
-  const removed: Array<{ kind: string; name: string; reason: string }> = [];
-  const boxes = await listBoxes(runtime, { run });
+export async function gcBoxes(runtime: BoxRuntime, { env = process.env, home = boxHome(env), run = runCommand, maxIdleDays = 30, pins = null, now = Date.now(), exists = existsSync }: { env?: Env; home?: string; run?: RunCommand; maxIdleDays?: number; pins?: ImagePins | null; now?: number; exists?: (file: string) => boolean } = {}): Promise<Removed> {
+  const driver = driverFor(runtime);
+  const removed: Removed = [];
+  const boxes = await driver.list(runtime, { run, env, home });
   for (const box of boxes) {
     const rec = readRecord(home, box.key);
     const idle = rec?.updated ? (now - rec.updated) / 86_400_000 : Infinity;
     if ((box.root && !exists(box.root)) || idle > maxIdleDays) {
-      const res = await rt(runtime, run)(["rm", "-f", box.name], { timeoutMs: 60_000 });
-      if (res.code === 0) {
+      const res = await driver.remove(runtime, box.key, { run, env, home });
+      if (res.removed) {
         removed.push({ kind: "container", name: box.name, reason: box.root && !exists(box.root) ? "folder gone" : "unused" });
         rmSync(recordFile(home, box.key), { force: true });
         rmSync(path.join(home, "chains", box.key), { recursive: true, force: true });
       }
     }
   }
-  const images = await rt(runtime, run)(["images", "--format", "{{.Repository}}:{{.Tag}} {{.ID}}"], { timeoutMs: 30_000 });
   const current = new Set(Object.values(pins?.images ?? {}).map((pin) => pin.ref));
-  const used = new Set((await listBoxes(runtime, { run })).map((box) => box.image));
-  for (const line of images.stdout.split("\n")) {
-    const [ref, id] = line.trim().split(/\s+/);
-    if (!ref || !/(^|\/)omnirush-ai\/box-[a-z]+:/.test(ref) || current.has(ref) || used.has(ref) || (id && used.has(id))) continue;
-    const res = await rt(runtime, run)(["rmi", ref], { timeoutMs: 60_000 });
-    if (res.code === 0) removed.push({ kind: "image", name: ref, reason: "not current" });
-  }
+  const used = new Set<string>();
+  for (const box of await driver.list(runtime, { run, env, home })) used.add(box.image);
+  removed.push(...await driver.gcImages(runtime, { run, env, home, current, used }));
   return removed;
 }
 

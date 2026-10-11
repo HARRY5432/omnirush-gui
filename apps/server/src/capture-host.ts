@@ -225,7 +225,7 @@ export class CaptureHost {
     }
     this.boxChats.set(sessionId, box.container);
     if (!this.boxViews.has(box.container)) {
-      const view = sandboxFilesUsed({ container: box.container, manifest: { home: "/root", workspaces: [box.croot] }, cwd: box.root, hostHome: null, docker: box.runtimeBin, dockerArgs: box.runtimeArgs, log: this.log });
+      const view = sandboxFilesUsed({ container: box.container, manifest: { home: "/root", workspaces: [box.croot] }, cwd: box.root, hostHome: null, docker: box.runtimeBin, dockerArgs: box.runtimeArgs, exec: box.exec, log: this.log });
       if (view) this.boxViews.set(box.container, view);
     }
   }

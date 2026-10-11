@@ -178,6 +178,7 @@ import {
 import { boxServiceFor } from "./box/desktop.js";
 import { prepareBoxInstallLog } from "./box/install-log.js";
 import { rememberServerDefault } from "./box/launch.js";
+import { normalizeBackend } from "./box/backends/index.js";
 import { buildOmniRushRuntimeConfigObject, omnirushGatewayConfigured, omnirushRuntimeConfigFilePath, writeOmniRushRuntimeConfigFile } from "./omnirush-runtime-config.js";
 import { assertMcpAllowed, mcpAllowed, mcpPolicyForConfig, MCP_DISABLED_MESSAGE } from "./mcp-policy.js";
 import { omnirushModelWantsReasoningSummary, readOmniRushModelCatalog } from "./omnirush-model-catalog.js";
@@ -3779,13 +3780,18 @@ function createRoutes(
     const workspace = await resolveWorkspace(config, ctx.params.id);
     const body = await readJsonBody(ctx.request);
     const mode = body.mode;
-    if ((mode !== "on" && mode !== "off" && mode !== null) || Object.keys(body).some((key) => key !== "mode")) {
-      throw new ApiError(400, "invalid_payload", "mode must be \"on\", \"off\" or null and the only field");
+    const keys = Object.keys(body);
+    // `mode`: the project's choice; `backend`: what runs boxes on this computer (auto, one backend id, native).
+    if (!keys.length || keys.some((key) => key !== "mode" && key !== "backend")
+      || ("mode" in body && mode !== "on" && mode !== "off" && mode !== null)
+      || ("backend" in body && (typeof body.backend !== "string" || !normalizeBackend(body.backend)))) {
+      throw new ApiError(400, "invalid_payload", "mode must be \"on\", \"off\" or null; backend must be \"auto\", a sandbox backend or \"native\"");
     }
     if (workspace.workspaceType !== "local") throw new ApiError(400, "box_unsupported", "The sandbox is for folders on this computer");
     const boxes = boxServiceFor(config);
     const before = JSON.stringify(await boxes.engineBits());
-    const status = await boxes.setMode(workspace, mode);
+    if (typeof body.backend === "string") await boxes.setBackend(body.backend);
+    const status = "mode" in body && (mode === "on" || mode === "off" || mode === null) ? await boxes.setMode(workspace, mode) : await boxes.status(workspace, { fresh: true });
     // The engine gets the box shell and plugin when the first workspace turns its box on (and loses them with the last).
     const engine = JSON.stringify(await boxes.engineBits()) === before ? { status: "unchanged" as const } : await applyBoxEngineConfig(config, "local_box");
     return jsonResponse({ ...status, engine });
