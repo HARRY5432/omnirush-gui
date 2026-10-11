@@ -1,0 +1,11 @@
+# The sandbox image sources: the same files in omnirush-cli (box/) and omnirush-gui (apps/desktop/box/).
+# A change to one must be ported to the other and this list updated in both (scripts/box/pins.mjs refreshes the pins' list).
+c314a88a6333258f07228d9472629cb4f1365807786cfbce285b560616a03f53  VERSION
+4318ca0c74f47444ba42bab9e02f603188e12c9ef02001c1062d0e5ab04452c3  images/base/Dockerfile
+789e75f84e6977c034fec626a4882e00d3acaad0bba32273f27e12883766b39f  images/go/Dockerfile
+33a3256b9b7ce5a07ffc9486e6ce310d8c4c83f5e3e9574a3747dcb3fd9e394b  images/rust/Dockerfile
+e80096eddeb85b1b9164382511c576a7b9c1847188d3986aadb29c863eb59da1  images/java/Dockerfile
+d2ded63441637089b8b19561d1bddff003c92cce9769721c86a4a20c6fb1cc99  images/ruby/Dockerfile
+7bf26aa39fb1d91b79dd36f0bc1e6be24365e26d6a86aa80c04ecede3b6c23d0  wsl/Dockerfile
+7fbd3f78323f2d36ebcd0a8bb941dafc4fdfaf3ccc229c656ebc632483836368  wsl/build-rootfs.sh
+65493e3c3c8a2c434ab7062506fa364670710800b611b174eb4392d7d4783f9c  wsl/wsl.conf

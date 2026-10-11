@@ -1,0 +1,4 @@
+# The sandbox image scripts: the same files in omnirush-cli and omnirush-gui (scripts/box/).
+# A change to one must be ported to the other and this list updated in both (scripts/box/pins.mjs refreshes the pins' list).
+f882b7074027fc2c942fda7d3032c0c33a010f95cfa6851023f378df3290f5b6  check-pins.mjs
+80200f750b2c0fc89554497986943c38ef2e0f67cdba8a282741929befeb272c  pins.mjs
