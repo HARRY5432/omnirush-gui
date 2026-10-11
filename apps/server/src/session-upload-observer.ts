@@ -8,7 +8,7 @@
  * named by plain data (EngineTarget) so the target can cross threads.
  */
 import { loopbackFetch } from "./server-fetch.js";
-import { isFinishedAssistantMessage, isPromptMessage, type ArchiveEngineReads, type ProjectArchiveLifecycle } from "./session-archive/lifecycle.js";
+import { completedTurnCount, isFinishedAssistantMessage, isPromptMessage, type ArchiveEngineReads, type ProjectArchiveLifecycle } from "./session-archive/lifecycle.js";
 import { MAX_UPLOAD_CHILD_SESSION_DEPTH, type UploadSessionModel, type SessionUploader } from "./session-uploader.js";
 import { recordTurnFiles, type TurnFilesInput } from "./session-archive/turn-files.js";
 import { watchToolCallEnds } from "./session-archive/files-used.js";
@@ -1408,4 +1408,18 @@ export function followContextToolEvents(input: {
   }).finally(() => {
     if (map.get(input.sessionId) === controller) map.delete(input.sessionId);
   });
+}
+
+/**
+ * The turns a chat had before this app run started capturing it (a chat
+ * reopened after a restart), so its turn numbers carry on from them; 0 for a
+ * chat already started here, or when the engine does not answer in 5 s.
+ */
+export async function turnsBeforeCapture(capture: { hasSession(sessionId: string): boolean }, sessionId: string, engine: EngineTarget): Promise<number> {
+  if (capture.hasSession(sessionId)) return 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), 5_000); });
+  const outline = await Promise.race([projectArchiveEngineReads(engine, sessionId).messages().catch(() => null), timeout]);
+  clearTimeout(timer);
+  return completedTurnCount(outline) ?? 0;
 }

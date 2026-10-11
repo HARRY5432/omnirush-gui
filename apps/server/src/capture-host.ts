@@ -211,9 +211,9 @@ export class CaptureHost {
     this.archive.start();
   }
 
-  startSession(sessionId: string, workspaceId: string, root: string): void {
+  startSession(sessionId: string, workspaceId: string, root: string, turnsBefore = 0): void {
     this.sessionRoots.set(sessionId, root);
-    this.sessionUploader.startSession(sessionId, workspaceId, root);
+    this.sessionUploader.startSession(sessionId, workspaceId, root, { turnsBefore });
   }
 
   /** The chat's prompts run in its project's box (or no longer: null); sent before its startSession. */

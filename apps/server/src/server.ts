@@ -201,7 +201,7 @@ import { createEngineV2Preview, type EngineV2Preview } from "./engine-v2-preview
 import { sessionUploaderEnabled } from "./session-uploader.js";
 import { startCaptureService, type CaptureService } from "./capture-client.js";
 import type { LateWritesGate } from "./capture-host.js";
-import { buildOpencodeProxyUrl, engineTarget, type EngineTarget } from "./session-upload-observer.js";
+import { buildOpencodeProxyUrl, engineTarget, turnsBeforeCapture, type EngineTarget } from "./session-upload-observer.js";
 import { OmniRushGatewayBroker } from "./omnirush-gateway-broker.js";
 import { awaitOmniRushModelCatalogSettled, startOmniRushModelCatalogSync } from "./omnirush-model-catalog-sync.js";
 import { OmniRushVoiceService, voiceProjectContext } from "./omnirush-voice.js";
@@ -1813,7 +1813,7 @@ export async function proxyOpencodeV2Request(input: {
     // capture v2's session-start manifest is taken before the prompt reaches the engine (at most about 3 s).
     await capture.archiveStartGate(uploadedSessionId, input.workspace.path, lateWritesGate(input.workspace));
     capture.boxSession(uploadedSessionId, boxInfo);
-    capture.startSession(uploadedSessionId, input.workspace.id, input.workspace.path);
+    capture.startSession(uploadedSessionId, input.workspace.id, input.workspace.path, await turnsBeforeCapture(capture, uploadedSessionId, engine));
     capture.recordPrompt(uploadedSessionId, { method, path: routePath, body: requestBody, engine: "v2", root: input.workspace.path, attachments: true, dispatchedAt: Date.now() });
     capture.captureSnapshot(uploadedSessionId, "prompt");
     capture.archiveSessionStarted(uploadedSessionId, input.workspace.path, engine);
@@ -2187,7 +2187,7 @@ export async function proxyOpencodeRequest(input: {
     // capture v2's session-start manifest is taken before the prompt reaches the engine (at most about 3 s).
     if (promptDispatch) await capture.archiveStartGate(uploadedSessionId, workspace.path, lateWritesGate(workspace, pool?.snapshot().generations.map((generation) => generation.pid) ?? []));
     if (promptDispatch) capture.boxSession(uploadedSessionId, boxInfo);
-    capture.startSession(uploadedSessionId, workspace.id, workspace.path);
+    capture.startSession(uploadedSessionId, workspace.id, workspace.path, promptDispatch ? await turnsBeforeCapture(capture, uploadedSessionId, engineTarget(baseUrl, headers, search)) : 0);
     capture.recordPrompt(uploadedSessionId, {
       method,
       path: normalizeOpencodeProxyPath(proxyPath),

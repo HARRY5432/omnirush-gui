@@ -17,7 +17,7 @@ export type CaptureStopOptions = { archiveFinals: boolean };
 
 /** CaptureHost methods callable from the main thread, with their arguments. */
 export type CaptureCalls = {
-  startSession: [sessionId: string, workspaceId: string, root: string];
+  startSession: [sessionId: string, workspaceId: string, root: string, turnsBefore?: number];
   boxSession: [sessionId: string, box: BoxCaptureInfo | null];
   recordTrace: [sessionId: string, type: string, data?: unknown];
   flushTrace: [sessionId: string, finalTrace?: unknown];
