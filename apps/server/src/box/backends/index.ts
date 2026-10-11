@@ -240,7 +240,7 @@ export async function detectBackend({ boxHome, env = process.env, platform = pro
     if (id === "bwrap") found = [{ backend: "bwrap", ...(await probeBwrap({ env, boxHome: boxHome ?? path.join(home, ".omnirush", "box"), run, exists, platform, arch, ...limit })) }];
     else if (id === "apple") found = [{ backend: "apple", ...(await probeApple({ env, platform, arch, release, run, exists, ...limit })) }];
     else if (id === "wsl") found = [{ backend: "wsl", ...(await probeWslDistro({ env, platform, run, exists, arch, ...limit })) }];
-    else if (id === "wslc") found = [{ backend: "wslc", ...(await probeWslc({ env, platform, run, exists, arch, ...limit })) }];
+    else if (id === "wslc") found = [{ backend: "wslc", ...(await probeWslc({ env, platform, run, exists, arch, explicit: wanted === "wslc", ...limit })) }];
     else if (id === "wsl-engine") {
       if (platform !== "win32" || env.OMNIRUSH_BOX_WSL === "0") continue;
       const bin = wslLauncher({ env, exists });

@@ -63,10 +63,11 @@ export function parseWslcVersion(text: unknown): string {
   return (/(\d+\.\d+\.\d+(?:\.\d+)?)/.exec(s) ?? [])[1] ?? "";
 }
 
-export async function probeWslc({ env = process.env, platform = process.platform, run = runCommand, exists = existsSync, timeoutMs = 15_000, arch = process.arch }: { env?: Env; platform?: NodeJS.Platform; run?: RunCommand; exists?: (file: string) => boolean; timeoutMs?: number; arch?: string } = {}): Promise<RuntimeResult> {
+export async function probeWslc({ env = process.env, platform = process.platform, run = runCommand, exists = existsSync, timeoutMs = 15_000, arch = process.arch, explicit = false }: { env?: Env; platform?: NodeJS.Platform; run?: RunCommand; exists?: (file: string) => boolean; timeoutMs?: number; arch?: string; explicit?: boolean } = {}): Promise<RuntimeResult> {
   const base = { name: "wslc", backend: "wslc" };
   if (platform !== "win32") return { ...base, ok: false, reason: "WSL containers are Windows only" };
-  if (env.OMNIRUSH_BOX_WSL === "0") return { ...base, ok: false, reason: "turned off (OMNIRUSH_BOX_WSL=0)" };
+  // OMNIRUSH_BOX_WSL=0 turns off the WSL distro and engines; wslc asked for by name still runs.
+  if (env.OMNIRUSH_BOX_WSL === "0" && !explicit) return { ...base, ok: false, reason: "turned off (OMNIRUSH_BOX_WSL=0)" };
   const bin = findWslc({ env, exists });
   if (!bin) {
     // Tell "WSL is old" (one `wsl --update`) from "WSL is off" (admin, restart).
