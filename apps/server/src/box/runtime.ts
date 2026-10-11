@@ -162,19 +162,52 @@ function firstLine(text: unknown): string {
   return String(text ?? "").split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? "";
 }
 
-/** A user-facing reason for a failed probe, from what the runtime printed. */
-export function explainFailure(name: string, result: Partial<RunResult>, { platform = process.platform }: { platform?: NodeJS.Platform } = {}): string {
+/** Cut at a word boundary (never mid-word), with an ellipsis when cut. */
+export function clip(text: unknown, max = 200): string {
+  const s = String(text ?? "");
+  if (s.length <= max) return s;
+  const cut = s.slice(0, max + 1);
+  const at = cut.search(/\s\S*$/);
+  return `${(at > max / 2 ? cut.slice(0, at) : s.slice(0, max)).replace(/[\s,;:.]+$/, "")}…`;
+}
+
+/**
+ * Docker's socket on this machine, when it is a file we can look at:
+ * DOCKER_HOST's unix:// path, else the platform's default (Linux:
+ * /var/run/docker.sock; macOS: ~/.docker/run/docker.sock, then
+ * /var/run/docker.sock). Null for a named pipe or a remote host.
+ */
+export function dockerSocket({ env = process.env, platform = process.platform, home = os.homedir(), exists = existsSync }: { env?: NodeJS.ProcessEnv; platform?: NodeJS.Platform; home?: string; exists?: (file: string) => boolean } = {}): string | null {
+  const host = String(env.DOCKER_HOST || "").trim();
+  if (host) return host.startsWith("unix://") ? host.slice("unix://".length) : null;
+  if (platform === "linux") return "/var/run/docker.sock";
+  if (platform === "darwin") {
+    const mine = path.posix.join(home, ".docker", "run", "docker.sock");
+    return exists(mine) ? mine : "/var/run/docker.sock";
+  }
+  return null;
+}
+
+/**
+ * A user-facing reason for a failed probe: the exit and the socket first
+ * (Docker 29 words its errors differently from 2x), then what the runtime
+ * printed, cut at a word.
+ */
+export function explainFailure(name: string, result: Partial<RunResult>, { platform = process.platform, env = process.env, home = os.homedir(), exists = existsSync }: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv; home?: string; exists?: (file: string) => boolean } = {}): string {
   const said = firstLine(result.stderr) || firstLine(result.stdout);
   if (result.error === "ENOENT") return `${name} is not installed`;
   if (result.error === "timeout") return `${name} did not answer in time (is it starting?)`;
-  if (/permission denied/i.test(said) && /docker\.sock|docker daemon socket/i.test(said)) {
+  const notRunning = platform === "linux" ? "the Docker daemon is not running" : "Docker is installed but not running (start Docker Desktop, OrbStack or colima)";
+  if (name === "docker" && /permission denied/i.test(said) && /docker\.sock|docker daemon socket|docker api/i.test(said)) {
     return "Docker refused this user (add it to the docker group: `sudo usermod -aG docker $USER`, then log in again), or use rootless Podman";
   }
-  if (/cannot connect to the docker daemon|is the docker daemon running|error during connect|docker_engine/i.test(said)) {
-    return platform === "linux" ? "the Docker daemon is not running" : "Docker is installed but not running (start Docker Desktop, OrbStack or colima)";
+  if (name === "docker" && result.code !== 0) {
+    const socket = dockerSocket({ env, platform, home, exists });
+    if (socket && !exists(socket)) return notRunning;
   }
+  if (/cannot connect to the docker daemon|failed to connect to the docker api|is the docker daemon running|daemon is running|error during connect|docker_engine/i.test(said)) return notRunning;
   if (/podman machine|cannot connect to podman|unable to connect to podman/i.test(said)) return "Podman is installed but its machine is not running (`podman machine start`)";
-  if (said) return `${name}: ${said.slice(0, 200)}`;
+  if (said) return `${name}: ${clip(said)}`;
   return `${name} exited with ${result.code}`;
 }
 
@@ -218,7 +251,7 @@ export async function probe(candidate: RuntimeCandidate, { run = runCommand, env
   }
   const args = name === "podman" ? ["info", "--format", "json"] : ["info", "--format", "{{json .}}"];
   const result = await run(bin, args, { env, timeoutMs });
-  if (result.code !== 0) return { ok: false, name, bin, reason: explainFailure(name, result, { platform }) };
+  if (result.code !== 0) return { ok: false, name, bin, reason: explainFailure(name, result, { platform, env }) };
   let info: Info;
   try {
     info = JSON.parse(result.stdout);
@@ -239,7 +272,7 @@ export async function probe(candidate: RuntimeCandidate, { run = runCommand, env
   }
   const osType = String(info.OSType ?? "linux");
   if (osType !== "linux") return { ok: false, name, bin, reason: `Docker is set to ${osType} containers; switch it to Linux containers` };
-  if (Array.isArray(info.ServerErrors) && info.ServerErrors.length) return { ok: false, name, bin, reason: explainFailure(name, { code: 1, stderr: String(info.ServerErrors[0]) }, { platform }) };
+  if (Array.isArray(info.ServerErrors) && info.ServerErrors.length) return { ok: false, name, bin, reason: explainFailure(name, { code: 1, stderr: String(info.ServerErrors[0]) }, { platform, env }) };
   const security = Array.isArray(info.SecurityOptions) ? info.SecurityOptions.join(",") : "";
   const flavor = flavorOf({ name, info, platform, wsl });
   return {

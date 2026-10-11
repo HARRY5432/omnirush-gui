@@ -61,6 +61,12 @@ describe("box runtime", () => {
     expect(explainFailure("docker", { code: 1, stderr: "permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock" })).toContain("docker group");
     expect(explainFailure("docker", { code: 1, stderr: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" }, { platform: "darwin" })).toContain("start Docker Desktop");
     expect(explainFailure("docker", { code: -1, stderr: "", error: "ENOENT" })).toBe("docker is not installed");
+    // Docker 29's wording, and a stopped daemon told by its missing socket whatever the words.
+    const d29 = "failed to connect to the docker API at unix:///var/run/docker.sock; check if the path is correct and if the daemon is running: dial unix /var/run/docker.sock: connect: no such file or directory";
+    expect(explainFailure("docker", { code: 1, stderr: d29 }, { platform: "linux", env: {}, exists: () => false })).toBe("the Docker daemon is not running");
+    expect(explainFailure("docker", { code: 1, stderr: "some new wording" }, { platform: "darwin", env: {}, home: "/Users/sam", exists: () => false })).toContain("start Docker Desktop");
+    const said = explainFailure("docker", { code: 1, stderr: `docker: ${"wordy ".repeat(60)}end` }, { platform: "linux", env: {}, exists: () => true });
+    expect(said.length <= 220 && said.endsWith("wordy…")).toBe(true);
   });
 
   test("a docker probe reads `docker info`; a remote DOCKER_HOST is refused", async () => {
