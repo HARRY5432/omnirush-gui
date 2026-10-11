@@ -4,11 +4,12 @@ import { createReadStream } from "node:fs";
 import { SESSION_UPLOAD_BUDGET, SESSION_UPLOAD_ENDPOINT_PATH, sessionUploadTimeoutMs, type SessionUploadBudget } from "./session-upload-budget.js";
 import { externalFetch } from "./server-fetch.js";
 import type { OmniRushGatewayCredentials } from "./types.js";
-import type { TraceCapabilities } from "./session-uploader.js";
+import type { TraceCapabilities, UploadRequestOptions } from "./session-uploader.js";
 import {
   SUBAGENT_FALLBACK_EFFORT_HEADER,
   SUBAGENT_FALLBACK_MODEL_HEADER,
   SUBAGENT_ROOT_SESSION_HEADER,
+  PARENT_SESSION_HEADER,
 } from "./omnirush-swarm.js";
 import { builtinOmniRushModelCatalog, omnirushModelWantsReasoningSummary } from "./omnirush-model-catalog.js";
 import { RejectedAttachments, isRejectedAttachmentError, type Attachment } from "./rejected-attachments.js";
@@ -190,6 +191,7 @@ const GATEWAY_ERROR_COPY: Record<string, string> = {
   token_capacity: BUSY_COPY,
   gateway_overload: BUSY_COPY,
   queue_timeout: BUSY_COPY,
+  omni_queue_timeout: "every model seat is taken right now, and this turn waited in line too long. Send your message again; your place in line is kept for a few minutes.",
   provider_rate_limited: BUSY_COPY,
   voice_unavailable: "voice input is not available on this account yet.",
   transcription_unavailable: "the transcription service did not answer. Try again in a moment.",
@@ -259,9 +261,33 @@ function stringField(value: unknown): string | null {
  * type, code or message), which would end the turn silently, and the engine
  * shows only a nested error's message.
  */
+/**
+ * Codes that end the turn instead of being retried by the engine. A turn the
+ * gateway's omni queue held past its maximum wait (`omni_queue_timeout`,
+ * sent inside the committed stream) would otherwise be retried up to five
+ * times by the engine, each retry waiting in line again: the chat shows
+ * "running" for many minutes with nothing happening. The engine retries any
+ * stream error except a few codes; `invalid_prompt` is one it shows as it is
+ * and never retries (provider/error.ts, session/retry.ts), as long as the
+ * message names nothing its retry patterns match.
+ */
+const TURN_ENDING_STREAM_CODES = new Set(["omni_queue_timeout"]);
+const QUEUE_TIMEOUT_COPY = "omnirush.ai: every model seat is taken right now, and this turn waited in line too long. Send your message again; your place in line is kept for a few minutes.";
+
+function turnEndingEvent(code: string, sequence: unknown): Uint8Array {
+  const frame = {
+    type: "error",
+    sequence_number: typeof sequence === "number" && Number.isFinite(sequence) ? sequence : -1,
+    error: { type: "invalid_request_error", code: "invalid_prompt", message: QUEUE_TIMEOUT_COPY, param: code },
+  };
+  return new TextEncoder().encode(`event: error\ndata: ${JSON.stringify(frame)}\n\n`);
+}
+
 function errorEvent(block: Uint8Array, payload: Record<string, unknown>): Uint8Array {
   const nested = isRecord(payload.error) ? payload.error : null;
   const code = stringField(nested ? nested.code : payload.code);
+  const baseCode = code?.replace(/^upstream_/, "") ?? null;
+  if (baseCode && TURN_ENDING_STREAM_CODES.has(baseCode)) return turnEndingEvent(baseCode, payload.sequence_number);
   const original = stringField(nested ? nested.message : payload.message);
   const readable = code ? gatewayErrorMessage(code, original) : null;
   const sequence = payload.sequence_number;
@@ -548,6 +574,84 @@ async function readableErrorResponse(response: Response, consoleUrl: string | nu
   });
 }
 
+/** A streamed refusal is one small error frame; anything longer is a real stream. */
+const MAX_STREAMED_REFUSAL_BYTES = 64 * 1024;
+
+/**
+ * A streamed refusal as a 403 the engine shows once: the gateway refuses a
+ * capped session or a Windows cut-off with HTTP 200, one `event: error`
+ * frame naming its `detail`, and `x-should-retry: false`. The engine
+ * retries any stream error it does not recognise (and never sees that
+ * header), so the same refusal would be sent again and again. The message
+ * is kept word for word: one ending on the console link keeps the app's
+ * "Open console" button. Null for anything but exactly one such frame.
+ */
+function streamedRefusalResponse(text: string, headers: Headers): Response | null {
+  const events = text.split(/\r\n\r\n|\n\n|\r\r/).filter((block) => block.trim());
+  if (events.length !== 1) return null;
+  const { name, data } = sseEventFields(new TextEncoder().encode(events[0]));
+  if (data === null) return null;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(data);
+  } catch {
+    return null;
+  }
+  if (!isRecord(payload) || (name !== "error" && payload.type !== "error")) return null;
+  const detail = stringField(payload.detail);
+  if (!detail) return null;
+  const nested = isRecord(payload.error) ? payload.error : null;
+  const message = stringField(nested?.message) ?? stringField(payload.message)
+    ?? gatewayErrorMessage(detail) ?? `omnirush.ai could not complete the model request (${detail}).`;
+  const result = responseHeaders(headers);
+  result.set("content-type", "application/json");
+  result.set("x-should-retry", "false");
+  return new Response(JSON.stringify({ error: { message, type: stringField(nested?.type) ?? "invalid_request_error", code: detail } }), {
+    status: 403,
+    headers: result,
+  });
+}
+
+/**
+ * A stream marked `x-should-retry: false`: the refusal as a 403
+ * (streamedRefusalResponse), or the stream's bytes unchanged.
+ */
+async function streamedRefusalOrBody(response: Response, body: ReadableStream<Uint8Array>): Promise<Response | ReadableStream<Uint8Array>> {
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let done = false;
+  while (total <= MAX_STREAMED_REFUSAL_BYTES) {
+    const result = await reader.read();
+    if (result.done) {
+      done = true;
+      break;
+    }
+    chunks.push(result.value);
+    total += result.value.byteLength;
+  }
+  if (done) {
+    const decoder = new TextDecoder();
+    const text = chunks.map((chunk) => decoder.decode(chunk, { stream: true })).join("") + decoder.decode();
+    const refusal = streamedRefusalResponse(text, response.headers);
+    if (refusal) return refusal;
+  }
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(chunk);
+      if (done) controller.close();
+    },
+    async pull(controller) {
+      const result = await reader.read();
+      if (result.done) controller.close();
+      else controller.enqueue(result.value);
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
+}
+
 async function boundedText(response: Response, maxBytes: number): Promise<string | null> {
   if (!response.body) return "";
   const reader = response.body.getReader();
@@ -615,6 +719,22 @@ function secureEqual(left: string, right: string): boolean {
   const b = Buffer.from(right);
   return a.length === b.length && a.length > 0 && timingSafeEqual(a, b);
 }
+
+/** The feature flags of a /collect/capabilities answer, each true only when the backend says so. */
+function uploadFeatureFlags(payload: Record<string, unknown>): Pick<TraceCapabilities, "idempotency_key" | "body_sha256" | "integrity" | "integrity_summary" | "recovered_segments"> {
+  return {
+    idempotency_key: payload.idempotency_key === true,
+    body_sha256: payload.body_sha256 === true,
+    integrity: payload.integrity === true,
+    integrity_summary: payload.integrity_summary === true,
+    recovered_segments: payload.recovered_segments === true,
+  };
+}
+
+/** Integrity reads per minute this device makes, under the route's 30 per account. */
+const INTEGRITY_CALLS_PER_MINUTE = 24;
+
+export type SessionIntegrityOptions = { summary?: boolean; turns?: number };
 
 function refreshUrl(gatewayUrl: string): string {
   const url = new URL(gatewayUrl);
@@ -918,6 +1038,11 @@ function responseHeaders(headers: Headers): Headers {
 
 export class OmniRushGatewayBroker {
   private state: CredentialState | null;
+  private knownAccountId: string | null = null;
+  /** When the last integrity reads went out (one minute's worth), and a Retry-After the route gave. */
+  private integrityCalls: number[] = [];
+  private integrityBlockedUntil = 0;
+  private accountIdLookup: Promise<string | null> | null = null;
   private readonly engineToken: string;
   private readonly invalidate?: OmniRushGatewayCredentials["invalidate"];
   private readonly refreshOwner?: OmniRushGatewayCredentials["refresh"];
@@ -940,8 +1065,8 @@ export class OmniRushGatewayBroker {
    * every later request, so one bad file cannot fail the rest of a session.
    */
   private readonly rejectedAttachments = new RejectedAttachments();
-  private capabilityCache: { gatewayUrl: string; accountKey: string; version: 2 | 3; expiresAt: number } | null = null;
-  private capabilityProbe: { key: string; promise: Promise<2 | 3> } | null = null;
+  private capabilityCache: { gatewayUrl: string; accountKey: string; capabilities: TraceCapabilities; expiresAt: number } | null = null;
+  private capabilityProbe: { key: string; promise: Promise<TraceCapabilities> } | null = null;
 
   constructor(options: BrokerOptions) {
     const gatewayUrl = options.credentials ? normalizedGatewayUrl(options.credentials.gatewayUrl) : null;
@@ -1088,11 +1213,17 @@ export class OmniRushGatewayBroker {
       return await readableErrorResponse(response, this.consoleUrl);
     }
     const streamed = response.ok && response.body && contentType.includes("text/event-stream");
-    const responseBody = streamed && response.body
-      ? guardEventStream(response.body, {
+    let upstreamBody: ReadableStream<Uint8Array> | null = response.body;
+    if (streamed && upstreamBody && response.headers.get("x-should-retry") === "false") {
+      const refusal = await streamedRefusalOrBody(response, upstreamBody);
+      if (refusal instanceof Response) return refusal;
+      upstreamBody = refusal;
+    }
+    const responseBody = streamed && upstreamBody
+      ? guardEventStream(upstreamBody, {
           onInterrupted: (reason) => this.log?.("warn", "omnirush.ai model stream interrupted", { reason, path: normalizedPath }),
         })
-      : response.body;
+      : upstreamBody;
     return new Response(responseBody, {
       status: response.status,
       statusText: response.statusText,
@@ -1158,7 +1289,7 @@ export class OmniRushGatewayBroker {
    * deadline of its own; `signal`, the session uploader's own deadline or cancel,
    * ends either sooner.
    */
-  uploadSession(sessionId: string, body: Uint8Array, signal?: AbortSignal): Promise<Response> {
+  uploadSession(sessionId: string, body: Uint8Array, signal?: AbortSignal, options: UploadRequestOptions = {}): Promise<Response> {
     const timeoutMs = sessionUploadTimeoutMs(body.byteLength, this.sessionUploadBudget);
     return this.withDeviceBearer((state) => this.fetcher(apiUrl(state.gatewayUrl, SESSION_UPLOAD_ENDPOINT_PATH), {
       method: "POST",
@@ -1166,13 +1297,14 @@ export class OmniRushGatewayBroker {
         Authorization: `Bearer ${state.accessToken}`,
         "Content-Type": "application/zstd",
         "X-OmniRush-Session-ID": sessionId,
+        ...(options.idempotencyKey ? { "Idempotency-Key": options.idempotencyKey } : {}),
       },
       body: body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) as ArrayBuffer,
       signal: signal ? AbortSignal.any([AbortSignal.timeout(timeoutMs), signal]) : AbortSignal.timeout(timeoutMs),
     }));
   }
 
-  uploadSessionFile(sessionId: string, path: string, size: number, signal?: AbortSignal): Promise<Response> {
+  uploadSessionFile(sessionId: string, path: string, size: number, signal?: AbortSignal, options: UploadRequestOptions = {}): Promise<Response> {
     const timeoutMs = sessionUploadTimeoutMs(size, this.sessionUploadBudget);
     return this.withDeviceBearer(async (state) => {
       const requestSignal = signal ? AbortSignal.any([AbortSignal.timeout(timeoutMs), signal]) : AbortSignal.timeout(timeoutMs);
@@ -1181,6 +1313,7 @@ export class OmniRushGatewayBroker {
         Authorization: `Bearer ${state.accessToken}`,
         "Content-Type": "application/zstd",
         "X-OmniRush-Session-ID": sessionId,
+        ...(options.idempotencyKey ? { "Idempotency-Key": options.idempotencyKey } : {}),
       };
       // The Electron file transport bypasses this.fetcher.
       if (this.clientHeader) headers[CLIENT_HEADER] = this.clientHeader;
@@ -1213,7 +1346,7 @@ export class OmniRushGatewayBroker {
     if (this.capabilityCache?.gatewayUrl === gatewayUrl
       && this.capabilityCache.accountKey === key
       && this.capabilityCache.expiresAt > Date.now()) {
-      return { schema_versions: this.capabilityCache.version === 3 ? [1, 2, 3] : [1, 2], canonical_trace: this.capabilityCache.version === 3 };
+      return this.capabilityCache.capabilities;
     }
     const pending = this.capabilityProbe?.key === key
       ? this.capabilityProbe.promise
@@ -1224,11 +1357,11 @@ export class OmniRushGatewayBroker {
         if (this.capabilityProbe?.promise === pending) this.capabilityProbe = null;
       }).catch(() => undefined);
     }
-    const version = await pending;
+    const capabilities = await pending;
     if (this.state && this.capabilityKey(this.state) === key) {
-      this.capabilityCache = { gatewayUrl, accountKey: key, version, expiresAt: Date.now() + TRACE_CAPABILITY_TTL_MS };
+      this.capabilityCache = { gatewayUrl, accountKey: key, capabilities, expiresAt: Date.now() + TRACE_CAPABILITY_TTL_MS };
     }
-    return { schema_versions: version === 3 ? [1, 2, 3] : [1, 2], canonical_trace: version === 3 };
+    return capabilities;
   }
 
   resetCapabilities(): void {
@@ -1236,13 +1369,88 @@ export class OmniRushGatewayBroker {
     this.capabilityProbe = null;
   }
 
+  /**
+   * The server's integrity record of one chat (GET
+   * `<gateway root>/me/sessions/{id}/integrity`), with the device bearer and
+   * the same bounded 401 refresh as uploadSession(). `turns` is the client's
+   * count of completed turns; `summary` leaves out the per-upload rows. The
+   * route allows 30 calls a minute per account: past INTEGRITY_CALLS_PER_MINUTE
+   * here, or before a Retry-After it gave, the answer is a local 429.
+   */
+  async sessionIntegrity(sessionId: string, options: SessionIntegrityOptions = {}): Promise<Response> {
+    // A backend without the route answers like one that holds nothing (the callers' "pending").
+    const features = await this.sessionUploadCapabilities();
+    if (features.integrity !== true) return Response.json({ detail: "integrity_unavailable" }, { status: 404 });
+    const summary = options.summary === true && features.integrity_summary === true;
+    const now = Date.now();
+    this.integrityCalls = this.integrityCalls.filter((at) => now - at < 60_000);
+    const waitMs = Math.max(this.integrityBlockedUntil - now, this.integrityCalls.length >= INTEGRITY_CALLS_PER_MINUTE ? this.integrityCalls[0]! + 60_000 - now : 0);
+    if (waitMs > 0) {
+      return Response.json({ detail: "rate_limited" }, { status: 429, headers: { "Retry-After": String(Math.ceil(waitMs / 1_000)) } });
+    }
+    this.integrityCalls.push(now);
+    const response = await this.withDeviceBearer((state) => {
+      const url = new URL(apiUrl(state.gatewayUrl, `me/sessions/${encodeURIComponent(sessionId)}/integrity`));
+      if (summary) url.searchParams.set("summary", "1");
+      if (options.turns !== undefined && Number.isSafeInteger(options.turns) && options.turns >= 0) url.searchParams.set("turns", String(options.turns));
+      return this.fetcher(url.toString(), {
+        method: "GET",
+        headers: { Authorization: `Bearer ${state.accessToken}`, Accept: "application/json" },
+        signal: AbortSignal.timeout(10_000),
+      });
+    });
+    if (response.status === 429) {
+      const retryAfter = Number(response.headers.get("retry-after"));
+      this.integrityBlockedUntil = Date.now() + (Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter, 3_600) * 1_000 : 60_000);
+    }
+    return response;
+  }
+
+  /**
+   * The id of the account behind the device bearer (`<gateway root>/device/me`),
+   * learned once: an account change restarts the server. Null while it
+   * cannot be learned (signed out, offline, an unexpected answer).
+   */
+  accountId(): Promise<string | null> {
+    if (this.knownAccountId) return Promise.resolve(this.knownAccountId);
+    this.accountIdLookup ??= (async () => {
+      try {
+        const response = await this.withDeviceBearer((state) => this.fetcher(apiUrl(state.gatewayUrl, "device/me"), {
+          method: "GET",
+          headers: { Authorization: `Bearer ${state.accessToken}`, Accept: "application/json" },
+          signal: AbortSignal.timeout(8_000),
+        }));
+        if (!response.ok) {
+          await response.body?.cancel().catch(() => undefined);
+          return null;
+        }
+        const text = await boundedText(response, 256 * 1024);
+        const payload: unknown = text === null ? null : JSON.parse(text);
+        const id = isRecord(payload) && typeof payload.id === "string" ? payload.id.trim() : "";
+        if (id) this.knownAccountId = id;
+        return id || null;
+      } catch {
+        return null;
+      } finally {
+        this.accountIdLookup = null;
+      }
+    })();
+    return this.accountIdLookup;
+  }
+
   private capabilityKey(state: CredentialState): string {
     return `${state.gatewayUrl}\0${state.refreshToken}`;
   }
 
-  private async probeSessionUploadCapabilities(gatewayUrl: string): Promise<2 | 3> {
+  /**
+   * The backend's /collect/capabilities: the trace schema and the features
+   * it has (a key it does not name is false). A failed read is the oldest
+   * backend: schema 2 and no features, asked again once the cache expires.
+   */
+  private async probeSessionUploadCapabilities(gatewayUrl: string): Promise<TraceCapabilities> {
+    const none: TraceCapabilities = { schema_versions: [1, 2], canonical_trace: false };
     try {
-      if (this.state?.gatewayUrl !== gatewayUrl) return 2;
+      if (this.state?.gatewayUrl !== gatewayUrl) return none;
       const response = await this.withDeviceBearer((state) => this.fetcher(apiUrl(state.gatewayUrl, "collect/capabilities"), {
         method: "GET",
         headers: { Authorization: `Bearer ${state.accessToken}`, Accept: "application/json" },
@@ -1250,15 +1458,22 @@ export class OmniRushGatewayBroker {
       }));
       if (!response.ok) {
         await response.body?.cancel().catch(() => undefined);
-        return 2;
+        return none;
       }
       const text = await boundedText(response, 64 * 1024);
-      if (text === null) return 2;
+      if (text === null) return none;
       const payload: unknown = JSON.parse(text);
-      if (!isRecord(payload) || payload.canonical_trace !== true || !Array.isArray(payload.schema_versions)) return 2;
-      return payload.schema_versions.some((version) => version === 3) ? 3 : 2;
+      if (!isRecord(payload)) return none;
+      const v3 = payload.canonical_trace === true && Array.isArray(payload.schema_versions) && payload.schema_versions.some((version) => version === 3);
+      const triggers = Array.isArray(payload.triggers) ? payload.triggers.filter((item): item is string => typeof item === "string") : null;
+      return {
+        schema_versions: v3 ? [1, 2, 3] : [1, 2],
+        canonical_trace: v3,
+        ...uploadFeatureFlags(payload),
+        ...(triggers ? { triggers } : {}),
+      };
     } catch {
-      return 2;
+      return none;
     }
   }
 
@@ -1490,7 +1705,7 @@ export class OmniRushGatewayBroker {
     headers.set("Authorization", `Bearer ${accessToken ?? this.state.accessToken}`);
     headers.set("Content-Type", request.headers.get("content-type") || "application/json");
     headers.set("Accept", request.headers.get("accept") || "application/json");
-    for (const name of ["x-omnirush-session-id", "x-omnirush-task-id"]) {
+    for (const name of ["x-omnirush-session-id", "x-omnirush-task-id", PARENT_SESSION_HEADER]) {
       const value = request.headers.get(name);
       if (value) headers.set(name, value);
     }

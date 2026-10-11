@@ -1,105 +1,124 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 
 import { OmniRushBudgetWrap } from "./omnirush-budget-wrap.js";
 
-const previousAdapter = process.env.OMNIRUSH_ENGINE_ADAPTER_URL;
-const previousAuthorization = process.env.OMNIRUSH_ENGINE_ADAPTER_AUTHORIZATION;
+const originalFetch = globalThis.fetch;
+const originalServer = process.env.OMNIRUSH_SERVER_URL;
+const originalToken = process.env.OMNIRUSH_SERVER_TOKEN;
+const gatewayHeaders = new Map<string, Record<string, string>>();
 
-afterEach(() => {
-  if (previousAdapter === undefined) delete process.env.OMNIRUSH_ENGINE_ADAPTER_URL;
-  else process.env.OMNIRUSH_ENGINE_ADAPTER_URL = previousAdapter;
-  if (previousAuthorization === undefined) delete process.env.OMNIRUSH_ENGINE_ADAPTER_AUTHORIZATION;
-  else process.env.OMNIRUSH_ENGINE_ADAPTER_AUTHORIZATION = previousAuthorization;
+beforeAll(() => {
+  process.env.OMNIRUSH_SERVER_URL = "http://localhost:3579";
+  process.env.OMNIRUSH_SERVER_TOKEN = "local-token";
+  globalThis.fetch = Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+    return new Response("{}", { status: 200, headers: gatewayHeaders.get(headers.get("x-omnirush-session-id") ?? "") ?? {} });
+  }, originalFetch);
 });
 
+afterAll(() => {
+  globalThis.fetch = originalFetch;
+  if (originalServer === undefined) delete process.env.OMNIRUSH_SERVER_URL;
+  else process.env.OMNIRUSH_SERVER_URL = originalServer;
+  if (originalToken === undefined) delete process.env.OMNIRUSH_SERVER_TOKEN;
+  else process.env.OMNIRUSH_SERVER_TOKEN = originalToken;
+});
+
+type Hooks = Awaited<ReturnType<typeof OmniRushBudgetWrap>>;
+
+async function modelRequest(hooks: Hooks, sessionID: string, answer: Record<string, string>, agent?: string): Promise<Record<string, string>> {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  await hooks["chat.headers"]!({ sessionID, agent, model: { providerID: "omnirush", id: "gpt-6-astra" } }, { headers });
+  gatewayHeaders.set(sessionID, answer);
+  await (await fetch("http://gateway.test/v1/responses", { method: "POST", headers, body: "{}" })).text();
+  return headers;
+}
+
+function operation(init?: RequestInit): string {
+  const body: unknown = JSON.parse(String(init?.body));
+  if (!body || typeof body !== "object" || !("input" in body)) return "";
+  const input = body.input;
+  if (!input || typeof input !== "object" || !("args" in input)) return "";
+  const args = input.args;
+  return args && typeof args === "object" && "operation" in args ? String(args.operation) : "";
+}
+
 describe("account budget wrap plugin", () => {
-  test("waits for session idle, then compacts without inserting a trace message", async () => {
-    process.env.OMNIRUSH_ENGINE_ADAPTER_URL = "http://adapter.test";
-    process.env.OMNIRUSH_ENGINE_ADAPTER_AUTHORIZATION = "Bearer adapter";
-    const calls: Array<{ url: string; init?: RequestInit }> = [];
-    const hooks = await OmniRushBudgetWrap({
-      directory: "/workspace/project",
+  test("compacts only after acceptance, with the selected model and private marker", async () => {
+    const controls: string[] = [];
+    let compactCalls = 0;
+    let hooks: Hooks;
+    hooks = await OmniRushBudgetWrap({
+      serverUrl: "http://127.0.0.1:4096",
       fetch: async (input, init) => {
-        calls.push({ url: String(input), init });
-        return new Response(null, { status: 204 });
+        const url = String(input);
+        if (url.includes("/experimental/ui-control/request")) {
+          const action = operation(init);
+          controls.push(action);
+          return Response.json({ ok: true, result: { choice: action === "offer" ? "accept" : "ok" } });
+        }
+        if (url.endsWith("/session/ses_accept/summarize")) {
+          compactCalls += 1;
+          expect(JSON.parse(String(init?.body))).toEqual({ providerID: "omnirush", modelID: "gpt-6-astra" });
+          const headers = await modelRequest(hooks, "ses_accept", { "x-omnirush-wrap-up": "1" }, "compaction");
+          expect(headers["x-omnirush-context-wrap"]).toBe("1");
+          await hooks.event!({ event: { type: "session.compacted", properties: { sessionID: "ses_accept" } } });
+          return new Response("true", { status: 200 });
+        }
+        throw new Error("unexpected URL: " + url);
       },
     });
-
-    const modelHeaders: Record<string, string> = {};
-    await hooks["chat.headers"]!({ sessionID: "ses_1", model: { providerID: "omnirush" } }, { headers: modelHeaders });
-    expect(modelHeaders["x-omnirush-session-id"]).toBe("ses_1");
-
-    await hooks["omnirush.http.response"]!({
-      request: new Request("http://gateway.test/v1/responses", {
-        headers: { "x-omnirush-session-id": "ses_1" },
-      }),
-      response: new Response(null, {
-        status: 200,
-        headers: { "x-omnirush-wrap-required": "1" },
-      }),
-    });
-    await hooks.event!({ event: { type: "session.updated", properties: { sessionID: "ses_1" } } });
-    expect(calls).toHaveLength(0);
-    await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "ses_1" } } });
-
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.url).toBe("http://adapter.test/session/ses_1/summarize");
-    expect(calls[0]!.init?.method).toBe("POST");
-    expect(calls[0]!.init?.body).toBe("{}");
-    expect(new Headers(calls[0]!.init?.headers).get("authorization")).toBe("Bearer adapter");
-    expect(new Headers(calls[0]!.init?.headers).get("x-opencode-directory")).toBe(encodeURIComponent("/workspace/project"));
+    try {
+      const headers = await modelRequest(hooks, "ses_accept", {
+        "x-omnirush-wrap-required": "1",
+        "x-omnirush-wrap-offer-id": "allowance-1",
+        "x-omnirush-wrap-scopes": "day",
+      });
+      expect(headers["x-omnirush-context-wrap"]).toBeUndefined();
+      expect(compactCalls).toBe(0);
+      await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "ses_accept" } } });
+      await Bun.sleep(30);
+      expect(controls).toContain("offer");
+      expect(controls).toContain("finish");
+      expect(compactCalls).toBe(1);
+      await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "ses_accept" } } });
+      await Bun.sleep(10);
+      expect(compactCalls).toBe(1);
+    } finally { await hooks.dispose!(); }
   });
 
-  test("the backend wrap-up response clears the pending marker", async () => {
-    process.env.OMNIRUSH_ENGINE_ADAPTER_URL = "http://adapter.test";
-    const calls: string[] = [];
+  test("declining leaves the session running and never compacts it", async () => {
+    let compactCalls = 0;
     const hooks = await OmniRushBudgetWrap({
+      serverUrl: "http://127.0.0.1:4096",
       fetch: async (input) => {
-        calls.push(String(input));
-        return new Response(null, { status: 204 });
+        if (String(input).includes("/experimental/ui-control/request")) return Response.json({ ok: true, result: { choice: "decline" } });
+        compactCalls += 1;
+        return new Response("true", { status: 200 });
       },
     });
-
-    const request = new Request("http://gateway.test/v1/responses", {
-      headers: { "x-omnirush-session-id": "ses_2" },
-    });
-    await hooks["omnirush.http.response"]!({
-      request,
-      response: new Response(null, { status: 200, headers: { "x-omnirush-wrap-required": "1" } }),
-    });
-    await hooks["omnirush.http.response"]!({
-      request,
-      response: new Response(null, { status: 200, headers: { "x-omnirush-wrap-up": "1" } }),
-    });
-    await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "ses_2" } } });
-    expect(calls).toHaveLength(0);
+    try {
+      await modelRequest(hooks, "ses_decline", { "x-omnirush-wrap-required": "1", "x-omnirush-wrap-offer-id": "allowance-2" });
+      await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "ses_decline" } } });
+      await Bun.sleep(30);
+      expect(compactCalls).toBe(0);
+    } finally { await hooks.dispose!(); }
   });
 
-  test("a failed wrap retries on the next idle without showing the toast again", async () => {
-    process.env.OMNIRUSH_ENGINE_ADAPTER_URL = "http://adapter.test";
-    const toasts: string[] = [];
-    let attempts = 0;
+  test("no connected window keeps the offer pending without compaction", async () => {
+    let controlCalls = 0;
     const hooks = await OmniRushBudgetWrap({
-      client: { tui: { showToast: async ({ body }) => { toasts.push(body.title); } } },
-      fetch: async () => {
-        attempts += 1;
-        return new Response(null, { status: attempts < 3 ? 500 : 204 });
-      },
+      serverUrl: "http://127.0.0.1:4096",
+      fetch: async () => { controlCalls += 1; return Response.json({ ok: false, error: "window away" }); },
     });
-    const request = new Request("http://gateway.test/v1/responses", {
-      headers: { "x-omnirush-session-id": "ses_3" },
-    });
-    const required = () => hooks["omnirush.http.response"]!({
-      request,
-      response: new Response(null, { status: 200, headers: { "x-omnirush-wrap-required": "1" } }),
-    });
-    await required();
-    for (let idle = 0; idle < 3; idle += 1) {
-      // Every answer of the retried turns still asks for the wrap.
-      await required();
-      await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "ses_3" } } });
-    }
-    expect(attempts).toBe(3);
-    expect(toasts).toEqual(["Wrapping up", "Wrap up complete"]);
+    try {
+      await modelRequest(hooks, "ses_away", { "x-omnirush-wrap-required": "1", "x-omnirush-wrap-offer-id": "allowance-3" });
+      await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "ses_away" } } });
+      await Bun.sleep(30);
+      expect(controlCalls).toBeGreaterThan(0);
+      const headers: Record<string, string> = {};
+      await hooks["chat.headers"]!({ sessionID: "ses_away", model: { providerID: "omnirush", id: "gpt-6-astra" } }, { headers });
+      expect(headers["x-omnirush-context-wrap"]).toBeUndefined();
+    } finally { await hooks.dispose!(); }
   });
 });

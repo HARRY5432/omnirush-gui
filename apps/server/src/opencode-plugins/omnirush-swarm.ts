@@ -71,6 +71,7 @@ import {
   SUBAGENT_FALLBACK_EFFORT_HEADER,
   SUBAGENT_FALLBACK_MODEL_HEADER,
   SUBAGENT_ROOT_SESSION_HEADER,
+  PARENT_SESSION_HEADER,
   OMNIRUSH_SWARM_ARCHIVE_DIR,
   OMNIRUSH_SWARM_FILE,
   OMNIRUSH_SWARM_MAX_PER_TURN,
@@ -347,7 +348,10 @@ export const OmniRushSwarm = async (input?: { client?: SwarmClient; directory?: 
     if (known !== undefined) return known;
     try {
       const response = await input?.client?.session?.get?.({ path: { id: sessionId } });
-      const parent = typeof response?.data?.parentID === "string" && response.data.parentID ? response.data.parentID : null;
+      // An error answer (no session record) is unknown too: not cached, so the
+      // sub-agent's next request still names its main session.
+      if (!response?.data || typeof response.data !== "object") return null;
+      const parent = typeof response.data.parentID === "string" && response.data.parentID ? response.data.parentID : null;
       remember(parents, sessionId, parent, MAX_TRACKED_SESSIONS);
       return parent;
     } catch {
@@ -655,13 +659,19 @@ export const OmniRushSwarm = async (input?: { client?: SwarmClient; directory?: 
       if (main) remember(mainModels, message.sessionID, main, MAX_TRACKED_TREES);
     },
 
-    // A sub-agent on a picked model names the main model for the gateway
-    // broker's fallback (the broker consumes these headers).
+    // Every sub-agent model request names its main session, so the gateway
+    // files it under that session from the first request on. A sub-agent on
+    // a picked model also names the main model for the gateway broker's
+    // fallback (the broker consumes those headers).
     "chat.headers": async (
       request: { sessionID?: string; model?: { id?: string; providerID?: string } },
       output: { headers: Record<string, string> },
     ) => {
       if (typeof request?.sessionID !== "string" || !output?.headers) return;
+      if (request.model?.providerID === "omnirush") {
+        const { root } = await locate(request.sessionID);
+        if (root !== request.sessionID) output.headers[PARENT_SESSION_HEADER] = root;
+      }
       const override = overrides.get(request.sessionID);
       if (!override?.fallbackModel || request.model?.providerID !== "omnirush" || request.model.id !== override.model) return;
       output.headers[SUBAGENT_FALLBACK_MODEL_HEADER] = override.fallbackModel;

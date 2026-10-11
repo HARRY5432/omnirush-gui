@@ -98,6 +98,7 @@ import { getSessionActivityStatusLabel, useSessionActivityStore, type SessionAct
 import { PermissionApprovalPanel } from "@/react-app/domains/session/chat/permission-approval-modal";
 import { QuestionPanel } from "@/react-app/domains/session/modals/question-modal";
 import { QueuedMessagesPanel } from "@/react-app/domains/session/modals/queued-messages-panel";
+import { GoodSessionChecklistBar, noteUserStop } from "@/react-app/domains/quality/good-session";
 import { deriveOpenTargets, sameOpenTargets, selectAutoOpenTarget, type OpenTarget } from "@/react-app/domains/session/artifacts/open-target";
 import { usePanelTabStore } from "@/react-app/domains/session/panel/panel-tab-store";
 import {
@@ -644,6 +645,8 @@ export type SessionSurfaceProps = {
   onForkAtMessage?: (messageId: string | null, sessionId: string) => void;
   /** Open a sub-agent (child) session in the main chat surface. */
   onOpenSubagentSession?: (sessionId: string) => void;
+  /** The engine confirmed this chat does not exist; the shell forgets it and moves on. */
+  onSessionMissing?: (workspaceId: string, sessionId: string) => void;
   onOpenTarget?: (target: OpenTarget, options?: OpenTargetOptions, sessionId?: string) => void;
   environmentRuntimeKey?: string | null;
   onApplyEnvironmentChanges?: () => Promise<ApplyEnvironmentChangesResult>;
@@ -1293,6 +1296,33 @@ export function SessionSurface(props: SessionSurfaceProps) {
   });
 
   const currentSnapshot = snapshotQuery.data?.session.id === props.sessionId ? snapshotQuery.data : null;
+  const snapshotSessionMissing = opencodeSessionNative.isMissingSessionError(snapshotQuery.error);
+  const onSessionMissingRef = useRef(props.onSessionMissing);
+  onSessionMissingRef.current = props.onSessionMissing;
+  // A chat the sidebar or a saved tab still lists but the engine does not
+  // have. Confirm with one more read (a stale answer must not drop a real
+  // chat), then let the shell forget it instead of showing a dead end.
+  useEffect(() => {
+    if (!snapshotSessionMissing) return;
+    const { workspaceId, sessionId } = props;
+    let cancelled = false;
+    void opencodeSessionNative.getNativeSession(
+      { opencodeBaseUrl: props.opencodeBaseUrl, token: props.omnirushToken },
+      sessionId,
+    ).then(
+      () => {
+        if (!cancelled) void snapshotQuery.refetch();
+      },
+      (error: unknown) => {
+        if (cancelled || !opencodeSessionNative.isMissingSessionError(error)) return;
+        onSessionMissingRef.current?.(workspaceId, sessionId);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [snapshotSessionMissing, props.workspaceId, props.sessionId, props.opencodeBaseUrl, props.omnirushToken]);
   const inspectorOpencodeBaseUrl = useMemo(() => {
     try {
       const url = new URL(props.opencodeBaseUrl);
@@ -2293,6 +2323,8 @@ export function SessionSurface(props: SessionSurfaceProps) {
   const handleAbort = useCallback(async () => {
     const phase = getQueuedDrainState(props.sessionId).phase;
     if (!chatStreaming && phase.kind !== "sending" && phase.kind !== "admission_unknown") return;
+    // A stopped turn is the user's call: no automatic retry follows it.
+    noteUserStop(props.sessionId);
     setError(null);
     // Stop means stop: drop queued follow-ups before aborting, otherwise the
     // queue-drain effect below re-prompts the agent the moment the abort
@@ -2847,6 +2879,9 @@ export function SessionSurface(props: SessionSurfaceProps) {
       }
     });
   }, [props.sessionId, sendDraft]);
+  const handleAutoRetry = useCallback((prompt: string) => {
+    void handleResumeInterrupted(prompt);
+  }, [handleResumeInterrupted]);
   const handleResumeUnknownOutcome = useCallback(() => {
     void handleResumeInterrupted(interruptedTaskRecoveryPrompt);
   }, [handleResumeInterrupted]);
@@ -3164,7 +3199,9 @@ export function SessionSurface(props: SessionSurfaceProps) {
                   <div className="mx-auto max-w-xl rounded-3xl border border-red-6/40 bg-red-3/20 px-6 py-5 text-sm text-red-11">
                     {props.developerMode && snapshotQuery.error instanceof Error
                       ? snapshotQuery.error.message
-                      : describeOpencodeSessionError(snapshotQuery.error, "Failed to load session.")}
+                      : snapshotSessionMissing
+                        ? t("session.missing_chat_inline")
+                        : describeOpencodeSessionError(snapshotQuery.error, "Failed to load session.")}
                   </div>
                 )}
               </div>
@@ -3302,6 +3339,16 @@ export function SessionSurface(props: SessionSurfaceProps) {
             {attachment.name}{sending ? " · Uploading…" : ""}
           </div>
         )))}
+        <GoodSessionChecklistBar
+          sessionId={props.sessionId}
+          messages={renderedMessages}
+          workspaceRoot={props.workspaceRoot}
+          isRemoteWorkspace={props.isRemoteWorkspace}
+          turnRunning={chatStreaming || (effectiveActivityStatus !== "idle" && effectiveActivityStatus !== "error")}
+          onFinishIt={handleMessageListSetPrompt}
+          onAutoRetry={handleAutoRetry}
+          client={props.client}
+        />
         <ReactSessionComposer
           runModeControl={<WorkspaceRunModeMenu client={props.client} workspaceId={props.workspaceId} busy={chatStreaming || preparingCloudTools || Boolean(props.activePermission || props.activeQuestion)} />}
           fullPermissionsControl={<FullPermissionsToggle client={props.client} workspaceId={props.workspaceId} />}

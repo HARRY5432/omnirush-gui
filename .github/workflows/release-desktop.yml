@@ -65,7 +65,8 @@ jobs:
   build:
     name: Build ${{ matrix.name }}
     needs: prepare
-    timeout-minutes: 120
+    # Apple's notarization review of the app and the DMG can take an hour each.
+    timeout-minutes: ${{ matrix.platform == 'macos' && 300 || 120 }}
     strategy:
       fail-fast: false
       matrix:
@@ -74,10 +75,16 @@ jobs:
             runner: macos-14
             platform: macos
             target: aarch64-apple-darwin
-            builder_args: --mac --arm64
+            builder_args: --mac --arm64 -c.mac.forceCodeSigning=true
             update_manifest: latest-mac.yml
-          # No Windows build: Windows installs and updates are no longer
-          # offered, so no installer and no latest.yml feed are published.
+          # Windows NSIS installer. It is unsigned until WINDOWS_CSC_LINK
+          # and WINDOWS_CSC_KEY_PASSWORD are configured in repository secrets.
+          - name: Windows x64
+            runner: windows-2022
+            platform: windows
+            target: x86_64-pc-windows-msvc
+            builder_args: --win --x64
+            update_manifest: latest.yml
           - name: Linux x64
             runner: ubuntu-22.04
             platform: linux
@@ -149,13 +156,70 @@ jobs:
         shell: bash
         run: pnpm --filter @omnirush/desktop build:electron
 
+      # Developer ID signature, hardened runtime and notarization. Refuses to
+      # package a mac build without the signing secrets.
+      - name: Prepare macOS signing
+        if: matrix.platform == 'macos'
+        env:
+          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        shell: bash
+        run: scripts/release/macos-signing-env.sh
+
+      - name: Report Windows signing status
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        env:
+          WINDOWS_CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CSC_LINK)) {
+            Write-Host '::warning::WINDOWS_CSC_LINK is not configured; this Windows installer will be unsigned.'
+          } else {
+            Write-Host 'Windows signing certificate configured; electron-builder will sign the installer.'
+          }
+
       - name: Package installer
+        env:
+          CSC_LINK: ${{ matrix.platform == 'macos' && secrets.MAC_CSC_LINK || (matrix.platform == 'windows' && secrets.WINDOWS_CSC_LINK || '') }}
+          CSC_KEY_PASSWORD: ${{ matrix.platform == 'macos' && secrets.MAC_CSC_KEY_PASSWORD || (matrix.platform == 'windows' && secrets.WINDOWS_CSC_KEY_PASSWORD || '') }}
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ (matrix.platform == 'macos' && 'true') || (matrix.platform == 'windows' && secrets.WINDOWS_CSC_LINK != '' && 'true') || 'false' }}
         shell: bash
         run: |
           pnpm --dir apps/desktop exec electron-builder \
             --config electron-builder.yml \
             ${{ matrix.builder_args }} \
             --publish never
+
+      - name: Report Windows Authenticode signature
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem apps/desktop/dist-electron -Filter '*.exe' -File)
+          if ($installers.Count -eq 0) { throw 'No Windows installer was produced.' }
+          foreach ($installer in $installers) {
+            $signature = Get-AuthenticodeSignature -FilePath $installer.FullName
+            Write-Host ("{0}: {1}" -f $installer.Name, $signature.Status)
+          }
+
+      # The app was notarized and stapled before electron-builder zipped it;
+      # the DMG is signed, notarized and stapled here, and its sha512 in
+      # latest-mac.yml rewritten to match.
+      - name: Notarize macOS disk image
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          node apps/desktop/scripts/macos-notarize.cjs \
+            --dist apps/desktop/dist-electron \
+            --manifest "apps/desktop/dist-electron/${{ matrix.update_manifest }}" \
+            --keychain "$MACOS_SIGNING_KEYCHAIN"
+
+      - name: Verify macOS signature and notarization
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: scripts/release/verify-macos-signing.sh apps/desktop/dist-electron
 
       - name: Verify packaged server imports
         shell: bash

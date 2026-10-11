@@ -29,6 +29,7 @@ import { EnterpriseActivationGate } from "../domains/cloud/enterprise-activation
 import { OmniRushWebAccessGate } from "../domains/cloud/omnirush-web-access-gate";
 import { OrgOnboardingPage } from "../domains/cloud/org-onboarding-page";
 import { NewProvidersListener } from "./new-providers-listener";
+import { BudgetWrapConsent } from "./budget-wrap-consent";
 import { useDesktopFontZoomBehavior } from "./font-zoom";
 import { LoadingOverlay } from "./loading-overlay";
 import { useVisualViewportInset } from "../../hooks/use-visual-viewport-inset";
@@ -45,8 +46,10 @@ import {
 import { OmniRushContextPublisher } from "./omnirush-context-publisher";
 import { SessionRoute } from "./session-route";
 import { DesktopUpdaterProvider } from "../domains/settings/state/desktop-updater-provider";
+import { SyncRestartGate } from "./sync-restart-banner";
 import { UpdateGate } from "./update-gate";
 import { QualityRewards } from "../domains/quality/quality-notice";
+import { TurnRunningSync } from "../domains/quality/good-session";
 import { SettingsRoute } from "./settings-route";
 import { ShellConfigProvider } from "./shell-config";
 import { WelcomeRoute } from "./welcome-route";
@@ -383,11 +386,13 @@ export function AppRoot() {
       <DevProfiler id="AppRoot">
         <DesktopUpdaterProvider>
         <UpdateGate>
+        <SyncRestartGate>
         <ShellConfigProvider>
         <AppMenuProvider>
         <OmniRushControlProvider>
           <OmniRushRouteControlActions />
           <OmniRushContextPublisher />
+          <BudgetWrapConsent />
           <DenAuthControlActions />
           <BrandThemeControlActions />
           <EnterpriseActivationGate>
@@ -512,6 +517,7 @@ export function AppRoot() {
                   <LoadingOverlay />
                   <CloudWorkspaceOverlay />
                   {isDesktopRuntime() ? <QualityRewards /> : null}
+                  {isDesktopRuntime() ? <TurnRunningSync /> : null}
                 </CloudWorkspaceStatusProvider>
               </OmniRushWebAccessGate>
             </DenSigninGate>
@@ -519,6 +525,7 @@ export function AppRoot() {
         </OmniRushControlProvider>
         </AppMenuProvider>
         </ShellConfigProvider>
+        </SyncRestartGate>
         </UpdateGate>
         </DesktopUpdaterProvider>
       </DevProfiler>

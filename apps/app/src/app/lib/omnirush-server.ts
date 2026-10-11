@@ -407,6 +407,19 @@ export type OmniRushRuntimeApprovals = {
 
 /** Saved only on this server/device, independent of account and workspace. */
 export type OmniRushBestPractices = { enabled: boolean };
+/**
+ * Session files (files used): whether omnirush.ai records them for this
+ * account now, whether its setting is on, and the line it asks the app to
+ * show once (null when it could not be asked).
+ */
+export type OmniRushFilesUsed = { active: boolean | null; available: boolean | null; consentText: string | null };
+/** GET /omnirush/capture/status: whether session capture runs; "off" when signed out (nothing to capture). */
+export type OmniRushCaptureStatus = {
+  running: boolean;
+  mode: "off" | "starting" | "worker" | "local" | "restarting" | "down";
+  since: string | null;
+  restarts: number;
+};
 export type OmniRushBestPracticesChange = OmniRushBestPractices & {
   ok: boolean;
   changed: boolean;
@@ -434,6 +447,17 @@ export type OmniRushVoiceStatus = {
   remainingSecondsToday?: number | null;
   repo: string | null;
   branch: string | null;
+};
+
+/** GET /omnirush/integrity/:sessionId: the server's "Good session ★" for one chat ("pending" until it confirms). */
+export type OmniRushGoodSession = {
+  good_session: true | false | "pending";
+  reasons: string[];
+  good_session_reasons: string[];
+  integrity: string | null;
+  checked_at: string | null;
+  /** The server's human message per quality reason code, when it sends them. */
+  messages?: Record<string, string>;
 };
 
 export type OmniRushSubagentModelState = {
@@ -1433,6 +1457,8 @@ const resolveFetch = (url?: string) => {
 
 const DEFAULT_OMNIRUSH_SERVER_TIMEOUT_MS = 10_000;
 const ENGINE_RELOAD_TIMEOUT_MS = 60_000;
+/** The session files status waits for omnirush.ai (10 s at most on the server side). */
+const FILES_USED_TIMEOUT_MS = 15_000;
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -1898,6 +1924,10 @@ export function createOmniRushServerClient(options: { baseUrl: string; token?: s
         body: { mode },
         timeoutMs: timeouts.config,
       }),
+    getFilesUsed: () =>
+      requestJson<OmniRushFilesUsed>(baseUrl, "/runtime-config/files-used", { token, hostToken, timeoutMs: FILES_USED_TIMEOUT_MS }),
+    getCaptureStatus: () =>
+      requestJson<OmniRushCaptureStatus>(baseUrl, "/omnirush/capture/status", { token, hostToken, timeoutMs: timeouts.config }),
     getBestPractices: () =>
       requestJson<OmniRushBestPractices>(baseUrl, "/runtime-config/best-practices", { token, hostToken, timeoutMs: timeouts.config }),
     setBestPractices: (enabled: boolean) =>
@@ -1914,6 +1944,8 @@ export function createOmniRushServerClient(options: { baseUrl: string; token?: s
         `/omnirush/voice/status${workspaceId ? `?workspace=${encodeURIComponent(workspaceId)}` : ""}`,
         { token, hostToken, timeoutMs: timeouts.config },
       ),
+    getGoodSession: (sessionId: string) =>
+      requestJson<OmniRushGoodSession>(baseUrl, `/omnirush/integrity/${encodeURIComponent(sessionId)}`, { token, hostToken, timeoutMs: timeouts.sessionRead }),
     /** Where the renderer POSTs one voice segment (multipart), and its headers; the local server adds the device bearer. */
     voiceTranscriptionEndpoint: () => ({
       url: `${baseUrl}/omnirush/voice/transcribe`,
