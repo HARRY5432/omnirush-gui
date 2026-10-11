@@ -15,8 +15,6 @@ export type VoiceSettings = {
   language: string;
   /** Send the prompt when dictation ends (at least 3 words). */
   autoSend: boolean;
-  /** The one-time privacy note was shown. */
-  disclosureSeen: boolean;
 };
 
 type VoiceSettingsStore = VoiceSettings & {
@@ -30,7 +28,6 @@ export const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
   deviceId: null,
   language: "auto",
   autoSend: false,
-  disclosureSeen: false,
 };
 
 export const useVoiceSettings = create<VoiceSettingsStore>()(
@@ -48,7 +45,7 @@ export const useVoiceSettings = create<VoiceSettingsStore>()(
 );
 
 /**
- * Shown once, on first use, and in Settings → Voice. The provider's
+ * Shown in Settings → Voice. The provider's
  * retention comes from the backend's voice status (it cannot be turned off
  * upstream today: 30 days); without one the clause is left out.
  */

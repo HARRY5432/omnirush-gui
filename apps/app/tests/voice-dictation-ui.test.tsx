@@ -185,7 +185,7 @@ describe("dictation in the composer", () => {
     document.body.append(container);
     root = createRoot(container);
     const { useVoiceSettings, DEFAULT_VOICE_SETTINGS } = await import("../src/react-app/domains/voice/voice-settings");
-    useVoiceSettings.setState({ ...DEFAULT_VOICE_SETTINGS, disclosureSeen: true });
+    useVoiceSettings.setState(DEFAULT_VOICE_SETTINGS);
     await act(async () => {
       root.render(
         <QueryClientProvider client={queryClient}>
