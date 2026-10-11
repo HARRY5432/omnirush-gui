@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { createReadStream, createWriteStream, watch, type FSWatcher, type WriteStream } from "node:fs";
-import { lstat, mkdir, open, readFile, readdir, readlink, rename, rm, stat } from "node:fs/promises";
+import { appendFile, lstat, mkdir, open, readFile, readdir, readlink, rename, rm, stat } from "node:fs/promises";
 import { homedir, release as osRelease, tmpdir } from "node:os";
 import nodePath, { basename, dirname, extname, join, relative, resolve, sep, type PlatformPath } from "node:path";
 import { promisify } from "node:util";
@@ -13,6 +13,7 @@ import { SESSION_UPLOAD_BUDGET, SESSION_UPLOAD_ENDPOINT_PATH, sessionUploadTimeo
 import { externalFetch } from "./server-fetch.js";
 import {
   UPLOAD_BASE_DIRECTORY,
+  UPLOAD_JOURNAL_DIRECTORY,
   UPLOAD_SESSION_LEDGER_FILE,
   UPLOAD_SPOOL_DIRECTORY,
   UPLOAD_TEMP_DIRECTORY,
@@ -27,8 +28,13 @@ import { writeFileAtomic } from "./atomic-write.js";
 import { XCODE_CLT_MISSING, gitSkipReason } from "./command-guard.js";
 import { ExcludedFiles, listGitIgnored, type HashCache } from "./excluded-files.js";
 import { ToolchainCache, type CollectOptions as ToolchainOptions, type UploadToolchain } from "./toolchain.js";
+import { engine2ImportedFrom } from "./engine2/imported.js";
 import { ContextCapture, captureContextEnabled, type ContextOptions } from "./context/index.js";
+import { isOpaqueKey, isOpaqueString, isSecretKey, isSecretValue, redactCredentials, redactionPolicy, redactionV3 } from "./context/redact-policy.js";
+import { maskWindowsProfiles } from "./context/privacy.js";
 import bundledBestPractices from "./bundled-best-practices.json" with { type: "json" };
+import serverPackage from "../package.json" with { type: "json" };
+import { BUNDLED_ENGINE_VERSION, BUNDLED_HARNESS, type Harness } from "./engine-identity.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -105,7 +111,10 @@ const MAX_IGNORED_CACHE_ENTRIES = 8_192;
 const ENVELOPE_WRITE_CHUNK_BYTES = 64 * 1024;
 const MAX_CHANGE_JOURNAL_ENTRIES = 512;
 const MAX_CHANGE_JOURNAL_BYTES = 768 * 1024;
-const MAX_SESSION_LEDGER_ENTRIES = 512;
+/** Sessions the ledger keeps: an older chat resumed later restarts at sequence 0 and uploads its history again. */
+const MAX_SESSION_LEDGER_ENTRIES = 5_000;
+/** Of those, the most recent keep their sub-agent ids and checkpoints too (the bulk of a record). */
+const MAX_LEDGER_CHILD_ENTRIES = 512;
 const MAX_TOUCHED_PATHS = 128;
 const MAX_GIT_STATUS_ENTRIES = 500;
 const MAX_GIT_RECENT_COMMITS = 50;
@@ -130,9 +139,20 @@ const REDACTED_TEXT_CACHE_BYTES = 32 * 1024 * 1024;
  * another machine) is no write of the current turn's.
  */
 const TURN_CLOCK_SLACK_MS = 1_000;
+/** Workspace snapshots (start, change, end) in the spool. */
 const MAX_SPOOL_BYTES = 128 * 1024 * 1024;
 const MAX_SPOOL_ENTRIES = 200;
-const MAX_SPOOL_ATTEMPTS = 24;
+/** Trace uploads have a budget of their own: a large snapshot never pushes one out. */
+const MAX_SPOOL_TRACE_BYTES = 128 * 1024 * 1024;
+const MAX_SPOOL_TRACE_ENTRIES = 2_000;
+/** A spooled upload that keeps failing with a retryable answer is kept this long, then dropped. */
+export const MAX_SPOOL_AGE_MS = 7 * 24 * 60 * 60_000;
+/** Trace events reach the chat's journal on disk within this long. */
+const JOURNAL_FLUSH_MS = 250;
+/** A journal stops taking events past this size (its chat's meta lines still go in). */
+const MAX_JOURNAL_BYTES = 256 * 1024 * 1024;
+/** How long spooling or a drain waits to learn which account is signed in. */
+const ACCOUNT_LOOKUP_TIMEOUT_MS = 5_000;
 const UPLOAD_ATTEMPTS = 3;
 const UPLOAD_RETRY_DELAY_MS = 250;
 const RETRY_BASE_MS = 5_000;
@@ -176,6 +196,22 @@ export function isRetryableUploadStatus(status: number, retryAfter: number | nul
 // A rejected bearer. The body tells a stale device token (refreshed once and
 // retried, spooled if still rejected) from the sign-in gate, which is final.
 const UNAUTHORIZED_STATUSES = new Set([401, 403]);
+/** The 409 detail for an Idempotency-Key the server already holds with other bytes. */
+const IDEMPOTENCY_KEY_REUSED = "idempotency_key_reused";
+/** Refused uploads remembered per chat (for explaining the server's gaps). */
+const MAX_REFUSED_SEQUENCES = 256;
+/** A chat is checked this long after its end snapshot went out (the server stores and judges it first). */
+const CONFIRM_AFTER_END_MS = 15_000;
+/** At launch, chats this recent that the server has not judged yet are checked again. */
+const CONFIRM_WINDOW_MS = 7 * 24 * 60 * 60_000;
+/** A pending answer is asked again after these waits, up to CONFIRM_PENDING_MS after the chat ended. */
+const CONFIRM_BACKOFF_MS = [60_000, 5 * 60_000, 15 * 60_000, 60 * 60_000, 3 * 60 * 60_000, 6 * 60 * 60_000];
+const CONFIRM_PENDING_MS = 24 * 60 * 60_000;
+/** Launch checks go out one at a time, this far apart, and at most this many per launch. */
+const CONFIRM_LAUNCH_SPACING_MS = 5_000;
+const CONFIRM_LAUNCH_MAX = 20;
+/** How long a chat's first prompt waits to learn where the server's copy of it stands. */
+const SERVER_POSITION_TIMEOUT_MS = 5_000;
 const ACCOUNT_REQUIRED_MARKER = "omnirush_account_required";
 
 type SnapshotType = "start" | "change" | "end" | "trace";
@@ -222,8 +258,12 @@ export type UploadEnvironment = {
   os: string;
   os_version: string;
   arch: string;
-  app_version: string | null;
-  engine_version: string | null;
+  /** Never null: the desktop's version, else the server package's. */
+  app_version: string;
+  /** Never null: "opencode/1.18.32-r2" for the bundled engine (engine-identity.ts). */
+  engine_version: string;
+  /** Which engine and harness produced the upload; the same shape the CLI sends. */
+  harness: Harness;
   node_version: string;
   shell: string | null;
   locale: string | null;
@@ -231,33 +271,12 @@ export type UploadEnvironment = {
   git_version: string | null;
   /** Exact toolchain versions of the session's project (toolchain.ts); absent on older clients. */
   toolchain?: UploadToolchain;
-  /** What is and is not covered by this capture, without adding capture work. */
-  reproducibility?: UploadReproducibility;
+  /**
+   * A session imported from the opencode 2.x engine's store and continued
+   * here: its earlier turns are the 2.x engine's ("opencode 2.0.18").
+   */
+  imported_from?: string;
 };
-
-/**
- * Compact evidence about what the uploader already captured. Building this
- * object is synchronous and performs no file reads, commands, or uploads.
- */
-export type UploadReproducibility = {
-  schema: 1;
-  capture: "bounded_existing_data";
-  workspace: "archive_and_turn_diffs";
-  dependencies: {
-    manifest_count: number;
-    lockfile_count: number;
-    toolchain_recorded: boolean;
-  };
-  external: "metadata_only";
-  replay: "not_verified";
-  performance: {
-    extra_scans: 0;
-    extra_commands: 0;
-    extra_uploads: 0;
-  };
-  limitations: string[];
-};
-
 
 type TraceEvent = {
   at: string;
@@ -406,6 +425,26 @@ type SessionLedgerRecord = {
   childSessionIds?: string[];
   /** child session id -> id of its last captured message */
   childCheckpoints?: Record<string, string>;
+  /** Where the chat ran, for a repair upload after it ended. */
+  workspaceId?: string;
+  root?: string;
+  /** "segment:sequence" of uploads the server refused for good: gaps it reports there are explained. */
+  refused?: string[];
+  /** When this chat's last segment ended (its end snapshot went out). */
+  endedAt?: string;
+  /** The server's word on the chat (GET /me/sessions/{id}/integrity). */
+  confirmation?: SessionConfirmation;
+};
+
+/** The integrity check's state for one chat: final once the server says good or not good. */
+type SessionConfirmation = {
+  verdict: "good" | "not_good" | "pending";
+  checkedAt: string;
+  checks: number;
+  /** Not asked again before this. */
+  nextAt?: string;
+  /** The transcript was re-sent from the engine (once per chat). */
+  repairedAt?: string;
 };
 
 type SessionLedger = {
@@ -461,6 +500,12 @@ type SpoolMeta = {
   last_attempt_at?: string;
   /** Not sent again before this (a Retry-After the server gave). */
   not_before?: string;
+  /** The account it was captured for; only that account's drain sends it. */
+  account_id?: string;
+  /** Sent as Idempotency-Key, so a re-send is recognised as the same envelope. */
+  idempotency_key?: string;
+  /** SHA-256 of the compressed bytes, checked against the server's `body_sha256`. */
+  body_sha256?: string;
 };
 
 type SessionState = {
@@ -489,6 +534,8 @@ type SessionState = {
   /** Watchers still being added for top-level directories the listing did not name. */
   watchSetup: Promise<void>;
   trace: TraceEvent[];
+  /** The session's trace has this process's `client.launch` event (which engine and harness ran it). */
+  launchRecorded?: boolean;
   changeJournal: Map<string, ChangeJournalEntry>;
   touchedPaths: Set<string>;
   changeJournalBytes: number;
@@ -529,6 +576,8 @@ type SessionState = {
   /** The dirty set cannot be trusted; the next capture scans the whole tree. */
   dirtyOverflow: boolean;
   lastHead: string | null;
+  lastBranch: string | null;
+  hasGitSample: boolean;
   lastChangeAt: number;
   /** Untracked-but-not-ignored files as they stood when the current turn began. */
   artifactBaseline: Promise<Map<string, ArtifactStat>> | null;
@@ -549,16 +598,113 @@ type SessionState = {
   tail: Promise<void>;
   /** Capture v2: the binary files and symlinks of the workspace as last scanned (manifest entries without text). */
   extras: Map<string, ExtraManifestEntry>;
+  /** The numbering already moved past the server's once (an Idempotency-Key it held with other bytes). */
+  repositioned?: boolean;
+  /** "segment:sequence" of uploads the server refused for good. */
+  refused: string[];
+  /** Set once the chat's end snapshot went out. */
+  endedAt?: string;
+  /** Trace events not yet handed to an upload, as written to the chat's journal on disk. */
+  journal: JournalState;
 };
+
+type JournalState = {
+  pending: string[];
+  timer: ReturnType<typeof setTimeout> | null;
+  tail: Promise<void>;
+  bytes: number;
+  full: boolean;
+  /** A recovery's stand-in state: never journaled itself. */
+  off: boolean;
+  /**
+   * Lines are written once the chat's own recovery is done (prepareSession):
+   * a journal a previous process left under the same name is read first.
+   */
+  ready: boolean;
+};
+
+/** What a chat's journal says about it (its last meta line). */
+type JournalMeta = {
+  v: 1;
+  session_id: string;
+  workspace_id: string;
+  root: string;
+  segment: number;
+  /** A prompt went out and its turn has not ended. */
+  turn_open: boolean;
+  at: string;
+};
+
+function parseJournalMeta(value: unknown): JournalMeta | null {
+  if (!isRecord(value) || value.v !== 1 || typeof value.session_id !== "string" || typeof value.workspace_id !== "string"
+    || typeof value.root !== "string" || !Number.isSafeInteger(value.segment) || typeof value.turn_open !== "boolean"
+    || typeof value.at !== "string") return null;
+  return {
+    v: 1,
+    session_id: value.session_id,
+    workspace_id: value.workspace_id,
+    root: value.root,
+    segment: Number(value.segment),
+    turn_open: value.turn_open,
+    at: value.at,
+  };
+}
+
+/** A journal file's meta (the last meta line) and its events; null when it holds no meta. */
+export function parseJournal(text: string): { meta: JournalMeta; events: TraceEvent[] } | null {
+  let meta: JournalMeta | null = null;
+  const events: TraceEvent[] = [];
+  for (const line of text.split("\n")) {
+    if (!line) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      // A line cut off by the crash.
+      continue;
+    }
+    if (!isRecord(parsed)) continue;
+    if ("m" in parsed) meta = parseJournalMeta(parsed.m) ?? meta;
+    else if (isRecord(parsed.e) && typeof parsed.e.at === "string" && typeof parsed.e.type === "string") {
+      events.push({ at: parsed.e.at, type: parsed.e.type, ...("data" in parsed.e ? { data: parsed.e.data } : {}) });
+    }
+  }
+  return meta ? { meta, events } : null;
+}
+
+/** Where the turns a previous process left open are told: their chat is settled from the engine (capture-host.ts). */
+export type RecoveredTurn = { sessionId: string; workspaceId: string; root: string };
 
 type SessionUploaderOptions = {
   gatewayUrl?: string;
   accessToken?: string;
   fetch?: typeof externalFetch;
   /** Sends one envelope; `signal` aborts at the upload deadline (session-upload-budget.ts) or when the spool is cleared. */
-  upload?: (sessionId: string, compressed: Uint8Array, signal?: AbortSignal) => Promise<Response>;
+  upload?: (sessionId: string, compressed: Uint8Array, signal?: AbortSignal, request?: UploadRequestOptions) => Promise<Response>;
   /** Sends an immutable compressed envelope directly from its spool/temp path. */
-  uploadFile?: (sessionId: string, path: string, size: number, signal?: AbortSignal) => Promise<Response>;
+  uploadFile?: (sessionId: string, path: string, size: number, signal?: AbortSignal, request?: UploadRequestOptions) => Promise<Response>;
+  /**
+   * The signed-in account's id (null: not known right now). Spooled uploads
+   * are stamped with it and only that account's drain sends them. Without
+   * this hook the spool is the one account's.
+   */
+  accountId?: () => Promise<string | null>;
+  /**
+   * A chat a previous process left with its turn open (a crash, a killed
+   * worker): its journaled events are uploaded, then the host settles the
+   * turn from the engine's messages.
+   */
+  onRecoveredTurn?: (turn: RecoveredTurn) => void;
+  /**
+   * The server is missing parts of a chat no spooled upload will fill: the
+   * host reads its transcript from the engine (oldest first, in trace-sized
+   * parts), null when it cannot. Re-sent once per chat.
+   */
+  repairTranscript?: (chat: RecoveredTurn) => Promise<unknown[][] | null>;
+  /** Integrity checks of ended chats (after each end, and at launch for recent unconfirmed ones); on unless false. */
+  confirm?: boolean;
+  /** GET /omnirush/me/sessions/{id}/integrity for this account (where the server's copy of a chat stands). */
+  sessionIntegrity?: (sessionId: string, options?: { summary?: boolean; turns?: number }) => Promise<Response>;
   /** Negotiates the canonical structured trace envelope. Failures fall back to schema v2. */
   capabilities?: () => Promise<TraceCapabilities>;
   /**
@@ -581,6 +727,10 @@ type SessionUploaderOptions = {
   uploadBudget?: SessionUploadBudget;
   spoolMaxEntries?: number;
   spoolMaxBytes?: number;
+  spoolMaxTraceEntries?: number;
+  spoolMaxTraceBytes?: number;
+  /** How long a spooled upload is kept; MAX_SPOOL_AGE_MS unless a test lowers it. */
+  spoolMaxAgeMs?: number;
   /** Uncompressed envelope cap; the backend's MAX_SNAPSHOT_BYTES unless a test lowers it. */
   snapshotMaxBytes?: number;
   /** Minimum spacing between change snapshots; MIN_UPLOAD_CHANGE_INTERVAL_MS unless a test lowers it. */
@@ -616,11 +766,20 @@ type SessionUploaderOptions = {
 export type TraceCapabilities = {
   schema_versions: number[];
   canonical_trace: boolean;
+  /** Features of /collect/capabilities: a key the backend does not send is false. */
+  idempotency_key?: boolean;
+  body_sha256?: boolean;
+  integrity?: boolean;
+  integrity_summary?: boolean;
+  recovered_segments?: boolean;
+  /** The upload triggers the backend takes, when it lists them. */
+  triggers?: string[];
 };
+
 
 type TransmitOutcome =
   | { ok: true }
-  | { ok: false; retryable: boolean; reason: string; unsupportedSchema?: boolean; retryAfterMs?: number };
+  | { ok: false; retryable: boolean; reason: string; unsupportedSchema?: boolean; retryAfterMs?: number; keyReused?: boolean };
 
 type CompressedArtifact = { path: string; size: number };
 
@@ -896,7 +1055,7 @@ const PII_PATTERNS: Redaction[] = [
   [tokenPattern(String.raw`(?<![A-Za-z0-9][.~+-])(?<!\d:)(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}(?!\.?\d)(?!-\d+(?![\d.]))`, "g", String.raw`[\dA-Za-z.\\]`), (match) => (isKeptIpv4(match) ? match : REDACTED_PII)],
 ];
 
-const PRIVACY_POLICY = {
+const PRIVACY_POLICY_BASE = {
   capture_policy: "consented_workspace_session",
   gitignored_paths_excluded: true,
   git_internals_excluded: true,
@@ -908,6 +1067,17 @@ const PRIVACY_POLICY = {
   max_files: MAX_FILES,
   max_diff_bytes: MAX_UPLOAD_DIFF_BYTES,
 } as const;
+
+/**
+ * The envelope's privacy block: which rules ran on this upload. Under
+ * `client-v3` (the server's `policy.redaction_v3`) credentials only; personal
+ * data is left to the server.
+ */
+function privacyPolicy() {
+  return redactionV3()
+    ? { ...PRIVACY_POLICY_BASE, redaction: ["provider_secrets", "secret_assignments", "private_keys"], redaction_policy: redactionPolicy() }
+    : { ...PRIVACY_POLICY_BASE, redaction_policy: redactionPolicy() };
+}
 
 /**
  * SessionUploader's `enabled` for these options, without building one: an
@@ -1385,7 +1555,15 @@ export type RedactUploadTextOptions = {
  * never contains a dangling backslash, so JSON-escaped text stays escapable.
  */
 export function redactUploadText(input: string, options: RedactUploadTextOptions = {}): { text: string; count: number } {
-  const tally = { count: 0 };
+  // A Windows account name in a profile path (C:\Users\<name>, WSL's /mnt/c/Users/<name>): masked, the path kept, under every rule set.
+  const masked = maskWindowsProfiles(input);
+  const profiles = masked !== input ? 1 : 0;
+  input = masked;
+  if (redactionV3()) {
+    const result = redactCredentials(input, { context: options.context, mode: options.mode, awsContext: options.awsContext });
+    return { text: result.text, count: result.count + profiles };
+  }
+  const tally = { count: profiles };
   let text = input.includes("-----BEGIN ") ? applyRedaction(input, PRIVATE_KEY_BLOCK, tally) : input;
   if (text.includes("://")) text = applyRedaction(text, URL_USERINFO, tally);
   const mode = options.mode ?? "config";
@@ -1457,6 +1635,17 @@ function redactJsonValue(
   if (depth > maxDepth) throw new JsonTooDeep();
   if (value instanceof Prescrubbed) return value.text;
   if (typeof value === "string") {
+    if (redactionV3()) {
+      // client-v3: opaque provider data (encrypted reasoning, signatures, blobs, data: URIs) is never read.
+      if (isOpaqueKey(key) || isOpaqueString(value)) return value;
+      if (key !== undefined && !isPathLikeKey(key) && isSecretKey(key) && isSecretValue(value, { quoted: true })) {
+        tally.count += 1;
+        return REDACTED;
+      }
+      const result = redactUploadText(value, { context: key, awsContext });
+      tally.count += result.count;
+      return result.text;
+    }
     // A JSON string is always a quoted literal, scrubbed in CONFIG mode.
     // A path-like key (`{"src/admin_auth.py": "<sha256>"}`) names a file, never a secret.
     if (key !== undefined && !isPathLikeKey(key) && isSecretAssignmentKey(key) && isSecretAssignmentValue(value, "config", true)) {
@@ -1629,7 +1818,7 @@ function stringifyJsonPairs(value: unknown, indent: string | undefined, current 
  * sanitize_json_file.
  */
 export function redactUploadJsonText(text: string, path?: string): string | null {
-  const raw = redactAwsSecrets(text, path, { count: 0 });
+  const raw = redactionV3() ? text : redactAwsSecrets(text, path, { count: 0 });
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -2323,6 +2512,11 @@ async function readSessionLedger(path: string | null): Promise<SessionLedger> {
           ...(model ? { model } : {}),
           ...(childSessionIds.length > 0 ? { childSessionIds } : {}),
           ...(Object.keys(childCheckpoints).length > 0 ? { childCheckpoints } : {}),
+          ...(optionalString(record.workspaceId) ? { workspaceId: record.workspaceId } : {}),
+          ...(optionalString(record.root) ? { root: record.root } : {}),
+          ...(Array.isArray(record.refused) ? { refused: record.refused.filter((item): item is string => typeof item === "string").slice(-MAX_REFUSED_SEQUENCES) } : {}),
+          ...(optionalString(record.endedAt) ? { endedAt: record.endedAt } : {}),
+          ...(parseConfirmation(record.confirmation) ? { confirmation: parseConfirmation(record.confirmation)! } : {}),
         };
         return [[sessionId, cleaned] as const];
       }),
@@ -2331,6 +2525,42 @@ async function readSessionLedger(path: string | null): Promise<SessionLedger> {
   } catch {
     return { version: 1, sessions: {} };
   }
+}
+
+function parseConfirmation(value: unknown): SessionConfirmation | null {
+  if (!isRecord(value) || (value.verdict !== "good" && value.verdict !== "not_good" && value.verdict !== "pending")
+    || typeof value.checkedAt !== "string" || !Number.isSafeInteger(value.checks)) return null;
+  return {
+    verdict: value.verdict,
+    checkedAt: value.checkedAt,
+    checks: Number(value.checks),
+    ...(typeof value.nextAt === "string" ? { nextAt: value.nextAt } : {}),
+    ...(typeof value.repairedAt === "string" ? { repairedAt: value.repairedAt } : {}),
+  };
+}
+
+/**
+ * What an integrity answer says for the client: its verdict, and the
+ * sequence gaps no refusal recorded here explains ("segment:sequence"), plus
+ * whether the trace or a segment's start is missing outright.
+ */
+export function integrityFindings(payload: unknown, refused: readonly string[] = []): { verdict: "good" | "not_good" | "pending"; gaps: string[]; missing: boolean } | null {
+  if (!isRecord(payload)) return null;
+  const verdict = payload.good_session === true ? "good" : payload.good_session === false ? "not_good" : "pending";
+  const explained = new Set(refused);
+  const gaps: string[] = [];
+  for (const segment of Array.isArray(payload.segments) ? payload.segments : []) {
+    if (!isRecord(segment) || !Array.isArray(segment.gaps)) continue;
+    const number = Number.isSafeInteger(segment.segment) ? Number(segment.segment) : null;
+    for (const gap of segment.gaps) {
+      if (!Number.isSafeInteger(gap)) continue;
+      const key = `${number ?? "?"}:${gap}`;
+      if (!explained.has(key)) gaps.push(key);
+    }
+  }
+  const reasons = [...(Array.isArray(payload.reasons) ? payload.reasons : []), ...(Array.isArray(payload.good_session_reasons) ? payload.good_session_reasons : [])];
+  const missing = reasons.includes("no_trace") || reasons.includes("segment_start_missing");
+  return { verdict, gaps, missing };
 }
 
 type BoundedTraceBatch = { content: string; events: unknown[] };
@@ -2873,20 +3103,6 @@ export async function collectGitBlock(root: string): Promise<UploadGitBlock | nu
     diff: diff.diff,
     diff_truncated: diff.truncated,
   };
-}
-
-/** Cheap pre-scan git evidence used before the listing/file-count cap. */
-async function gitPriorityPaths(root: string): Promise<Set<string>> {
-  if (await gitText(root, ["rev-parse", "--is-inside-work-tree"]) !== "true") return new Set();
-  const prefixResult = await runGit(root, ["rev-parse", "--show-prefix"], { maxBytes: 64 * 1024, timeoutMs: 5_000 });
-  if (!prefixResult.ok || prefixResult.truncated) return new Set();
-  const prefix = prefixResult.stdout.toString("utf8").trim().replaceAll("\\", "/");
-  const status = await runGit(root, ["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=normal", "--", "."], {
-    maxBytes: 2 * 1024 * 1024,
-    timeoutMs: 15_000,
-  });
-  if (!status.ok) return new Set();
-  return new Set(parseGitStatus(status.stdout.toString("utf8"), prefix).entries.map((entry) => entry.path));
 }
 
 /**
@@ -3901,6 +4117,17 @@ async function boundedResponseText(response: Response, maxBytes = MAX_RESPONSE_B
   }
 }
 
+/** The `body_sha256` of a /collect answer (null: none, as from an older backend). */
+async function responseBodySha256(response: Response): Promise<string | null> {
+  try {
+    const payload: unknown = JSON.parse(await boundedResponseText(response));
+    const value = isRecord(payload) ? payload.body_sha256 : null;
+    return typeof value === "string" && SHA256_HEX.test(value.toLowerCase()) ? value.toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
 async function responseSignalsAccountRequired(response: Response): Promise<boolean> {
   return (await boundedResponseText(response)).includes(ACCOUNT_REQUIRED_MARKER);
 }
@@ -4058,28 +4285,11 @@ async function gitSkippedField(): Promise<{ git_skipped?: string }> {
   return reason ? { git_skipped: reason } : {};
 }
 
-function reproducibilityEvidence(toolchain: UploadToolchain | null): UploadReproducibility {
-  return {
-    schema: 1,
-    capture: "bounded_existing_data",
-    workspace: "archive_and_turn_diffs",
-    dependencies: {
-      manifest_count: toolchain?.manifests.length ?? 0,
-      lockfile_count: toolchain?.lockfiles.length ?? 0,
-      toolchain_recorded: Boolean(toolchain),
-    },
-    external: "metadata_only",
-    replay: "not_verified",
-    performance: {
-      extra_scans: 0,
-      extra_commands: 0,
-      extra_uploads: 0,
-    },
-    limitations: [
-      "external services and network state are metadata-only",
-      "replay verification is not performed during capture",
-    ],
-  };
+const SERVER_PACKAGE_VERSION: string = serverPackage.version;
+
+/** The desktop's `client.launch` trace data: the CLI's keys, plus the harness. */
+export function clientLaunchData(): { mode: "app"; engine: "opencode"; engine_version: string; harness: Harness } {
+  return { mode: "app", engine: "opencode", engine_version: BUNDLED_ENGINE_VERSION, harness: { ...BUNDLED_HARNESS } };
 }
 
 function uploadEnvironment(appVersion: string | undefined, engineVersion: string | undefined, gitVersion: string | null): UploadEnvironment {
@@ -4099,8 +4309,9 @@ function uploadEnvironment(appVersion: string | undefined, engineVersion: string
     os: process.platform,
     os_version: field(osRelease()) ?? "",
     arch: process.arch,
-    app_version: field(appVersion),
-    engine_version: field(engineVersion),
+    app_version: field(appVersion) ?? field(SERVER_PACKAGE_VERSION) ?? "unknown",
+    engine_version: field(engineVersion) ?? BUNDLED_ENGINE_VERSION,
+    harness: { ...BUNDLED_HARNESS },
     node_version: field(process.versions.node ?? process.version.replace(/^v/, "")) ?? "",
     shell: shellPath?.trim() ? field(basename(shellPath.trim())) : null,
     locale: field(locale),
@@ -4154,8 +4365,56 @@ function parseSpoolMeta(value: unknown): SpoolMeta | null {
     attempts: optionalCount(record.attempts) ?? 0,
     ...(optionalString(record.last_attempt_at) ? { last_attempt_at: record.last_attempt_at } : {}),
     ...(optionalString(record.not_before) ? { not_before: record.not_before } : {}),
+    ...(optionalString(record.account_id) ? { account_id: record.account_id } : {}),
+    ...(typeof record.idempotency_key === "string" && SHA256_HEX.test(record.idempotency_key) ? { idempotency_key: record.idempotency_key } : {}),
+    ...(typeof record.body_sha256 === "string" && SHA256_HEX.test(record.body_sha256) ? { body_sha256: record.body_sha256 } : {}),
   };
 }
+
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+/**
+ * The Idempotency-Key of a /collect upload: the lowercase hex SHA-256 of
+ * `${session_id}\n${segment}\n${sequence}\n${snapshot_type}` (UTF-8, no
+ * trailing newline), the same in the CLI. The backend answers a re-send
+ * under the same key with the first upload's answer.
+ */
+export function uploadIdempotencyKey(sessionId: string, segment: number, sequence: number, snapshotType: SnapshotType): string {
+  return createHash("sha256").update(`${sessionId}\n${segment}\n${sequence}\n${snapshotType}`, "utf8").digest("hex");
+}
+
+/**
+ * The highest segment and sequence of an integrity answer (its top-level
+ * max_segment and max_sequence, else read off its segments); null when it
+ * holds nothing.
+ */
+export function serverSessionPosition(payload: unknown): { segment: number; sequence: number } | null {
+  if (!isRecord(payload)) return null;
+  const topSegment = Number.isSafeInteger(payload.max_segment) ? Number(payload.max_segment) : null;
+  const topSequence = Number.isSafeInteger(payload.max_sequence) ? Number(payload.max_sequence) : null;
+  if (topSequence !== null) return { segment: topSegment ?? 0, sequence: topSequence };
+  if (!Array.isArray(payload.segments)) return null;
+  let segment = 0;
+  let sequence = 0;
+  let found = false;
+  for (const item of payload.segments) {
+    if (!isRecord(item)) continue;
+    const max = typeof item.max_sequence === "number" && Number.isSafeInteger(item.max_sequence) ? item.max_sequence : 0;
+    const sequences = Array.isArray(item.sequences) ? item.sequences.filter((value): value is number => Number.isSafeInteger(value)) : [];
+    const highest = Math.max(max, ...sequences, 0);
+    if (typeof item.segment === "number" && Number.isSafeInteger(item.segment)) segment = Math.max(segment, item.segment);
+    sequence = Math.max(sequence, highest);
+    found = found || highest > 0;
+  }
+  return found ? { segment, sequence } : null;
+}
+
+/** The /collect features this client uses; without a capability answer, none. */
+type UploadFeatures = { idempotencyKey: boolean; integrity: boolean };
+const NO_UPLOAD_FEATURES: UploadFeatures = { idempotencyKey: false, integrity: false };
+
+/** What a /collect upload carries besides its body. */
+export type UploadRequestOptions = { idempotencyKey?: string };
 
 export class SessionUploader {
   private readonly uploadUrl: string | null;
@@ -4183,6 +4442,28 @@ export class SessionUploader {
   private readonly uploadBudget: SessionUploadBudget;
   private readonly spoolMaxEntries: number;
   private readonly spoolMaxBytes: number;
+  private readonly spoolMaxTraceEntries: number;
+  private readonly spoolMaxTraceBytes: number;
+  private readonly spoolMaxAgeMs: number;
+  private readonly accountIdHook?: SessionUploaderOptions["accountId"];
+  private readonly sessionIntegrity?: SessionUploaderOptions["sessionIntegrity"];
+  private readonly onRecoveredTurn?: SessionUploaderOptions["onRecoveredTurn"];
+  private readonly repairTranscript?: SessionUploaderOptions["repairTranscript"];
+  private readonly confirmEnabled: boolean;
+  /** Integrity checks waiting, by chat. */
+  private readonly confirmTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly confirming = new Set<string>();
+  /** Each live chat's journal of trace events (null without a state dir). */
+  private readonly journalDir: string | null;
+  /** The journals a previous process left, read at start; a chat's own start waits for its recovery. */
+  private readonly journalsRead: Promise<void>;
+  private readonly recovering = new Map<string, Promise<void>>();
+  private journalWarned = false;
+  /** The signed-in account, once known (it never changes within a process: an account change restarts the server). */
+  private accountKnown: string | null = null;
+  private accountLookup: Promise<string | null> | null = null;
+  /** Spool entries this process wrote: the current account's even while its id is not known. */
+  private readonly ownSpoolEntries = new Set<string>();
   private readonly snapshotMaxBytes: number;
   private environmentCache: Promise<UploadEnvironment> | null = null;
   private readonly toolchains: ToolchainCache | null;
@@ -4226,7 +4507,7 @@ export class SessionUploader {
   private readonly onBinaryFile?: (sessionId: string, path: string) => void;
   private readonly fileUploader?: SessionUploaderOptions["uploadFile"];
   private readonly capabilityProbe?: SessionUploaderOptions["capabilities"];
-  private traceSchemaCache: { version: 2 | 3; expiresAt: number } | null = null;
+  private traceSchemaCache: { version: 2 | 3; features: UploadFeatures; expiresAt: number } | null = null;
   private traceSchemaProbe: Promise<2 | 3> | null = null;
   /** Work counters for tests and profiling. */
   readonly metrics: UploadMetrics = freshMetrics();
@@ -4246,6 +4527,7 @@ export class SessionUploader {
     this.stateDir = stateDir;
     this.ledgerPath = stateDir ? join(stateDir, UPLOAD_SESSION_LEDGER_FILE) : null;
     this.spoolDir = stateDir ? join(stateDir, UPLOAD_SPOOL_DIRECTORY) : null;
+    this.journalDir = stateDir ? join(stateDir, UPLOAD_JOURNAL_DIRECTORY) : null;
     // State left under the pre-2.2.2 names is moved before anything reads it.
     this.stateMigrated = stateDir
       ? migrateLegacyUploadState(stateDir, (message, details) => this.log("warn", message, details))
@@ -4261,6 +4543,14 @@ export class SessionUploader {
     this.uploadBudget = options.uploadBudget ?? SESSION_UPLOAD_BUDGET;
     this.spoolMaxEntries = options.spoolMaxEntries ?? MAX_SPOOL_ENTRIES;
     this.spoolMaxBytes = options.spoolMaxBytes ?? MAX_SPOOL_BYTES;
+    this.spoolMaxTraceEntries = options.spoolMaxTraceEntries ?? MAX_SPOOL_TRACE_ENTRIES;
+    this.spoolMaxTraceBytes = options.spoolMaxTraceBytes ?? MAX_SPOOL_TRACE_BYTES;
+    this.spoolMaxAgeMs = options.spoolMaxAgeMs ?? MAX_SPOOL_AGE_MS;
+    this.accountIdHook = options.accountId;
+    this.sessionIntegrity = options.sessionIntegrity;
+    this.onRecoveredTurn = options.onRecoveredTurn;
+    this.repairTranscript = options.repairTranscript;
+    this.confirmEnabled = options.confirm !== false && Boolean(options.sessionIntegrity);
     this.snapshotMaxBytes = options.snapshotMaxBytes ?? MAX_SNAPSHOT_BYTES;
     this.minChangeIntervalMs = options.minChangeIntervalMs ?? MIN_UPLOAD_CHANGE_INTERVAL_MS;
     this.maxWatchedFiles = options.maxWatchedFiles ?? MAX_UPLOAD_WATCHED_FILES;
@@ -4283,16 +4573,14 @@ export class SessionUploader {
     );
     void this.stateMigrated.then(() => this.cleanTempDir(60 * 60_000)).catch(() => undefined);
     this.context = !options.context || !this.enabled ? null : this.createContext(stateDir, options.context);
-    if (this.spoolDir) {
-      if (this.enabled) {
-        // Uploads spooled by a previous process are retried once this one is up.
-        this.scheduleRetry(this.retryBaseMs);
-      } else {
-        // Without an account there is nobody to deliver queued snapshots to;
-        // a sign-out must not leave workspace content waiting on disk.
-        void this.clearSpool().catch(() => undefined);
-      }
-    }
+    // Uploads spooled by a previous process are retried once this one is up.
+    // Without an account they wait (up to the spool's age limit) for the
+    // account to come back: only a user sign-out clears them (clearSpool()).
+    if (this.spoolDir && this.enabled) this.scheduleRetry(this.retryBaseMs);
+    // So do the journals a previous process left: their turns are settled now.
+    this.journalsRead = this.enabled ? this.recoverJournals() : Promise.resolve();
+    // And the recent chats the server has not judged yet are asked about once that is done.
+    if (this.enabled && this.confirmEnabled) void this.journalsRead.then(() => this.confirmAtLaunch()).catch(() => undefined);
   }
 
   /** Capture context wired to this uploader: its trace, its scrub, the project archive and the archive's exclusions. */
@@ -4321,7 +4609,7 @@ export class SessionUploader {
     const capture = new ContextCapture({
       client: "gui",
       appVersion: this.appVersion ?? null,
-      engineVersion: this.engineVersion ?? null,
+      engineVersion: this.engineVersion ?? BUNDLED_ENGINE_VERSION,
       cacheDir: stateDir ? join(stateDir, "context") : null,
       scrub: {
         text: (text) => redactUploadText(text).text,
@@ -4359,7 +4647,12 @@ export class SessionUploader {
     await this.ledgerReady;
     const entries = Object.entries(this.ledger.sessions)
       .sort(([, left], [, right]) => right.lastSeenAt.localeCompare(left.lastSeenAt))
-      .slice(0, MAX_SESSION_LEDGER_ENTRIES);
+      .slice(0, MAX_SESSION_LEDGER_ENTRIES)
+      .map(([sessionId, record], index): [string, SessionLedgerRecord] => {
+        if (index < MAX_LEDGER_CHILD_ENTRIES || (!record.childSessionIds && !record.childCheckpoints)) return [sessionId, record];
+        const { childSessionIds: _ids, childCheckpoints: _checkpoints, ...rest } = record;
+        return [sessionId, rest];
+      });
     this.ledger.sessions = Object.fromEntries(entries);
     const snapshot = JSON.stringify(this.ledger);
     this.ledgerWriteTail = this.ledgerWriteTail
@@ -4384,12 +4677,27 @@ export class SessionUploader {
       ...(state.model ? { model: state.model } : {}),
       ...(state.childSessionIds.length > 0 ? { childSessionIds: [...state.childSessionIds] } : {}),
       ...(state.childCheckpoints.size > 0 ? { childCheckpoints: Object.fromEntries(state.childCheckpoints) } : {}),
+      workspaceId: state.workspaceId,
+      root: state.root,
+      ...(state.refused.length > 0 ? { refused: state.refused.slice(-MAX_REFUSED_SEQUENCES) } : {}),
+      // A new segment is judged again once it ends.
+      ...(state.endedAt ? { endedAt: state.endedAt } : {}),
     };
   }
 
   private async prepareSession(state: SessionState): Promise<void> {
     await this.ledgerReady;
-    const previous = this.ledger.sessions[state.id];
+    // What a previous process left of this chat goes out first, numbered before this segment.
+    await this.journalsRead;
+    await this.recovering.get(state.id);
+    state.journal.ready = true;
+    const recorded = this.ledger.sessions[state.id];
+    // No local record: a new chat, or one this device's ledger lost. The
+    // server says where its copy stands, so the numbering goes on after it
+    // instead of reusing keys it already holds.
+    const server = recorded ? null : await this.serverPosition(state.id);
+    const previous: SessionLedgerRecord | undefined = recorded
+      ?? (server ? { segment: server.segment, nextSequence: server.sequence, lastSeenAt: new Date().toISOString() } : undefined);
     state.segment = (previous?.segment ?? 0) + 1;
     state.sequence = previous?.nextSequence ?? 0;
     state.sentBytes = previous?.sentBytes ?? 0;
@@ -4397,6 +4705,9 @@ export class SessionUploader {
     state.failureCount = previous?.failureCount ?? 0;
     state.lastFailureAt = previous?.lastFailureAt;
     state.lastSuccessAt = previous?.lastSuccessAt;
+    state.refused = [...(previous?.refused ?? [])];
+    // A pending check of the chat's earlier segment is left to this segment's end.
+    this.cancelConfirm(state.id);
     // Events recorded before the ledger loaded take precedence over what the
     // previous segment left behind; nothing recorded so far is discarded.
     state.model = state.model ?? previous?.model ?? null;
@@ -4404,10 +4715,55 @@ export class SessionUploader {
     state.childCheckpoints = new Map([...Object.entries(previous?.childCheckpoints ?? {}), ...state.childCheckpoints]);
     state.resumed = Boolean(previous);
     if (state.resumed) {
-      this.appendTrace(state, "session.resumed", { session_segment: state.segment, previous_segment: previous?.segment ?? null });
+      this.appendTrace(state, "session.resumed", {
+        session_segment: state.segment,
+        previous_segment: previous?.segment ?? null,
+        ...(server ? { ledger: "server" } : {}),
+      });
     }
     this.ledger.sessions[state.id] = this.ledgerRecord(state);
     await this.saveLedger();
+    this.journalMeta(state);
+  }
+
+  /**
+   * Where the server's copy of a chat stands (its highest segment and
+   * sequence), from the integrity route; null when it has none or cannot
+   * say (offline, an older backend).
+   */
+  private async serverPosition(sessionId: string): Promise<{ segment: number; sequence: number } | null> {
+    if (!this.sessionIntegrity || !(await this.uploadFeatures()).integrity) return null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const response = await Promise.race([
+        this.sessionIntegrity(sessionId, { summary: true }),
+        new Promise<null>((resolvePromise) => {
+          timer = setTimeout(() => resolvePromise(null), SERVER_POSITION_TIMEOUT_MS);
+          timer.unref?.();
+        }),
+      ]);
+      if (!response) return null;
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined);
+        return null;
+      }
+      return serverSessionPosition(JSON.parse(await boundedResponseText(response, 4 * 1024 * 1024)));
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Moves a chat's numbering past the server's (or one segment on, when the server cannot say). */
+  private async repositionSession(state: SessionState): Promise<void> {
+    const server = await this.serverPosition(state.id);
+    const from = { segment: state.segment, sequence: state.sequence };
+    state.segment = Math.max(state.segment + 1, (server?.segment ?? 0) + 1);
+    state.sequence = Math.max(state.sequence, server?.sequence ?? 0);
+    this.appendTrace(state, "collector.resegmented", { from_segment: from.segment, from_sequence: from.sequence, session_segment: state.segment, sequence: state.sequence });
+    this.log("warn", "OmniRush session numbering moved past the server's copy", { sessionId: state.id, segment: state.segment, sequence: state.sequence });
+    await this.persistSession(state).catch(() => undefined);
   }
 
   private async persistSession(state: SessionState): Promise<void> {
@@ -4503,15 +4859,16 @@ export class SessionUploader {
     return excluded.finish(maxBytes);
   }
 
-  /** The environment block plus the toolchain of the session's project root, when one was captured. */
-  private async sessionEnvironment(root: string, waitMs?: number): Promise<UploadEnvironment> {
+  /**
+   * The environment block plus the toolchain of the session's project root,
+   * when one was captured, and where the session came from when it was
+   * imported from the opencode 2.x engine (engine2/imported.ts).
+   */
+  private async sessionEnvironment(root: string, sessionId: string, waitMs?: number): Promise<UploadEnvironment> {
     const environment = await this.environment();
     const toolchain = this.toolchains ? await this.toolchains.get(root, waitMs).catch(() => null) : null;
-    return {
-      ...environment,
-      ...(toolchain ? { toolchain } : {}),
-      reproducibility: reproducibilityEvidence(toolchain),
-    };
+    const importedFrom = engine2ImportedFrom(sessionId);
+    return { ...environment, ...(toolchain ? { toolchain } : {}), ...(importedFrom ? { imported_from: importedFrom } : {}) };
   }
 
   private negotiatedTraceSchema(force = false): Promise<2 | 3> {
@@ -4521,6 +4878,7 @@ export class SessionUploader {
     if (this.traceSchemaProbe) return this.traceSchemaProbe;
     this.traceSchemaProbe = (async () => {
       let version: 2 | 3 = 2;
+      let features: UploadFeatures = NO_UPLOAD_FEATURES;
       if (this.capabilityProbe) {
         try {
           const capabilities = await this.capabilityProbe();
@@ -4529,11 +4887,12 @@ export class SessionUploader {
             && capabilities.schema_versions.includes(TRACE_SCHEMA_VERSION)
             ? 3
             : 2;
+          features = { idempotencyKey: capabilities.idempotency_key === true, integrity: capabilities.integrity === true };
         } catch {
           version = 2;
         }
       }
-      this.traceSchemaCache = { version, expiresAt: Date.now() + TRACE_CAPABILITY_TTL_MS };
+      this.traceSchemaCache = { version, features, expiresAt: Date.now() + TRACE_CAPABILITY_TTL_MS };
       return version;
     })().finally(() => {
       this.traceSchemaProbe = null;
@@ -4542,13 +4901,44 @@ export class SessionUploader {
   }
 
   private downgradeTraceSchema(): void {
-    this.traceSchemaCache = { version: 2, expiresAt: Date.now() + TRACE_CAPABILITY_TTL_MS };
+    this.traceSchemaCache = { version: 2, features: this.traceSchemaCache?.features ?? NO_UPLOAD_FEATURES, expiresAt: Date.now() + TRACE_CAPABILITY_TTL_MS };
+  }
+
+  /** What the backend's /collect takes beyond the envelope (Idempotency-Key, the integrity route), asked with the trace schema. */
+  private async uploadFeatures(): Promise<UploadFeatures> {
+    await this.negotiatedTraceSchema();
+    return this.traceSchemaCache?.features ?? NO_UPLOAD_FEATURES;
   }
 
   startSession(sessionId: string, workspaceId: string, root: string): void {
     if (!this.enabled || this.sessions.has(sessionId) || !/^[A-Za-z0-9._:-]{8,128}$/.test(sessionId)) return;
     void this.toolchains?.get(root).catch(() => null); // toolchain.ts: collected in the background
-    const state: SessionState = {
+    const state = this.newSessionState(sessionId, workspaceId, root, this.acquireCache(root));
+    state.ready = this.prepareSession(state);
+    this.sessions.set(sessionId, state);
+    this.journalMeta(state);
+    // Capture context collects once the start snapshot is out.
+    let startSnapshotDone: () => void = () => undefined;
+    const startSnapshot = new Promise<void>((resolveStart) => (startSnapshotDone = resolveStart));
+    this.context?.sessionStarted(sessionId, root, startSnapshot);
+    this.enqueue(state, async () => {
+      await state.ready;
+      try {
+        // The watchers go up as soon as the start snapshot's listing is in,
+        // before any file is read: an edit made during the scan is either
+        // seen by the scan or reported by a watcher.
+        await this.uploadWorkspace(state, "start", state.resumed ? "resume" : "session_start");
+      } finally {
+        state.started = true;
+        startSnapshotDone();
+        // No listing reached the plan (a failed scan): poll.
+        if (state.watchMode === "starting") this.installWatchers(state, null);
+      }
+    });
+  }
+
+  private newSessionState(sessionId: string, workspaceId: string, root: string, cache: Map<string, HashCacheEntry>): SessionState {
+    return {
       id: sessionId,
       root,
       workspaceId,
@@ -4585,12 +4975,14 @@ export class SessionUploader {
       turnSkipped: new Map(),
       turnWrittenPaths: new Map(),
       relevance: new Map(),
-      cache: this.acquireCache(root),
+      cache,
       listing: { denied: 0, truncated: false },
       dirty: new Set(),
       // Nothing is known about the tree yet: the first change capture rescans it.
       dirtyOverflow: true,
       lastHead: null,
+      lastBranch: null,
+      hasGitSample: false,
       lastChangeAt: 0,
       artifactBaseline: null,
       model: null,
@@ -4600,27 +4992,9 @@ export class SessionUploader {
       failureCount: 0,
       ready: Promise.resolve(),
       tail: Promise.resolve(),
+      journal: { pending: [], timer: null, tail: Promise.resolve(), bytes: 0, full: false, off: false, ready: false },
+      refused: [],
     };
-    state.ready = this.prepareSession(state);
-    this.sessions.set(sessionId, state);
-    // Capture context collects once the start snapshot is out.
-    let startSnapshotDone: () => void = () => undefined;
-    const startSnapshot = new Promise<void>((resolveStart) => (startSnapshotDone = resolveStart));
-    this.context?.sessionStarted(sessionId, root, startSnapshot);
-    this.enqueue(state, async () => {
-      await state.ready;
-      try {
-        // The watchers go up as soon as the start snapshot's listing is in,
-        // before any file is read: an edit made during the scan is either
-        // seen by the scan or reported by a watcher.
-        await this.uploadWorkspace(state, "start", state.resumed ? "resume" : "session_start");
-      } finally {
-        state.started = true;
-        startSnapshotDone();
-        // No listing reached the plan (a failed scan): poll.
-        if (state.watchMode === "starting") this.installWatchers(state, null);
-      }
-    });
   }
 
   // --- watcher and dirty tracking --------------------------------------------
@@ -5044,13 +5418,22 @@ export class SessionUploader {
         }
       }
     }
+    // A session's first trace event in this process follows the engine and
+    // harness that ran it, like the CLI's `client.launch` (an opaque event
+    // type, kept as sent); it shares the trace's event cap.
+    if (!state.launchRecorded) {
+      state.launchRecorded = true;
+      this.appendTrace(state, "client.launch", clientLaunchData());
+    }
     this.appendTrace(state, type, data);
     if (type === "turn.messages" && isRecord(data)) this.context?.turnMessages(sessionId, data.messages);
   }
 
   /** Appends one trace event, keeping only the newest MAX_UPLOAD_TRACE_EVENTS. */
   private appendTrace(state: SessionState, type: string, data?: unknown): void {
-    state.trace.push({ at: new Date().toISOString(), type, ...(data === undefined ? {} : { data }) });
+    const event: TraceEvent = { at: new Date().toISOString(), type, ...(data === undefined ? {} : { data }) };
+    state.trace.push(event);
+    this.journalEvent(state, event);
     if (state.trace.length > MAX_UPLOAD_TRACE_EVENTS) state.trace.splice(0, state.trace.length - MAX_UPLOAD_TRACE_EVENTS);
   }
 
@@ -5108,6 +5491,26 @@ export class SessionUploader {
     if (!state) return [];
     await state.ready;
     return [...state.childSessionIds];
+  }
+
+  /**
+   * Notes the subagent session ids seen below this root session while its
+   * turn still runs: ids only (their messages still come when the turn
+   * settles), kept in the ledger so the next envelope lists them even when
+   * the app quits before the turn settles. Returns how many were new.
+   */
+  noteChildSessionIds(sessionId: string, ids: readonly string[]): number {
+    const state = this.sessions.get(sessionId);
+    if (!state || state.finished) return 0;
+    let added = 0;
+    for (const id of ids) {
+      if (id === sessionId || !/^[A-Za-z0-9._:-]{1,256}$/.test(id) || state.childSessionIds.includes(id)) continue;
+      if (state.childSessionIds.length >= MAX_CHILD_SESSIONS) break;
+      state.childSessionIds.push(id);
+      added += 1;
+    }
+    if (added > 0) void this.persistOnceReady(state);
+    return added;
   }
 
   /**
@@ -5258,6 +5661,8 @@ export class SessionUploader {
     if (trigger === "prompt") state.turnStartedAt = Date.now() + 1;
     const startedAt = state.turnStartedAt;
     state.turnInProgress = trigger === "prompt";
+    // A crash from here on leaves the turn open in the journal (or no longer).
+    this.journalMeta(state, true);
     // The milestone carries whatever edits were held back for another session's turn.
     state.changesHeld = false;
     if (state.changeTimer) {
@@ -5406,7 +5811,12 @@ export class SessionUploader {
       try {
         await this.uploadTrace(state, pendingTrace);
         await this.uploadWorkspace(state, "end", "session_end");
+        state.endedAt = new Date().toISOString();
+        await this.persistSession(state).catch(() => undefined);
+        // Once after a chat ends (not at quit: the next launch asks).
+        if (!this.stopped) this.scheduleConfirm(sessionId, CONFIRM_AFTER_END_MS);
       } finally {
+        await this.journalRemove(state);
         this.releaseCache(state);
         this.sessions.delete(sessionId);
         this.onSessionClosed?.(sessionId);
@@ -5430,7 +5840,12 @@ export class SessionUploader {
     this.enqueue(state, async () => {
       await state.ready;
       if (state.trace.length > 0) pendingTrace.push(...state.trace.splice(0));
-      await this.uploadTrace(state, pendingTrace);
+      try {
+        await this.uploadTrace(state, pendingTrace);
+      } finally {
+        // Uploaded, spooled or refused: the journal keeps only what came after.
+        await this.journalRewrite(state);
+      }
     });
   }
 
@@ -5450,6 +5865,8 @@ export class SessionUploader {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    for (const timer of this.confirmTimers.values()) clearTimeout(timer);
+    this.confirmTimers.clear();
     if (this.retryTimer) {
       clearTimeout(this.retryTimer);
       this.retryTimer = null;
@@ -5571,13 +5988,19 @@ export class SessionUploader {
     return state.changesHeld && uploading;
   }
 
-  /** Whether anything could have moved since the last accepted snapshot. Git history is finalized at session end. */
-  private hasPendingChanges(state: SessionState): boolean {
+  /** Whether anything could have moved since the last accepted snapshot; one `git rev-parse` at most. */
+  private async hasPendingChanges(state: SessionState): Promise<boolean> {
     if (state.dirtyOverflow || state.watchMode !== "watching" || state.dirty.size > 0 || this.journalHasChanges(state)) return true;
-    // A commit with no working-tree change is represented by the final Git
-    // block. Polling HEAD for every turn made Git a recurring capture cost and
-    // did not add files to the workspace snapshot.
-    return false;
+    return this.headMoved(state);
+  }
+
+  /** Detect commit-only and same-tree branch changes without status/log/diff. */
+  private async headMoved(state: SessionState): Promise<boolean> {
+    const [head, rawBranch] = await Promise.all([
+      gitHead(state.root), gitText(state.root, ["branch", "--show-current"]),
+    ]);
+    const branch = rawBranch ? clampUploadText(portablePathForUpload(rawBranch), MAX_GIT_REF_CHARS) : null;
+    return head !== state.lastHead || branch !== state.lastBranch;
   }
 
   private deferChange(state: SessionState, trigger: ChangeTrigger, wait: number): void {
@@ -5764,12 +6187,13 @@ export class SessionUploader {
       // Collect the cheap relevance evidence before the listing cap. A late
       // alphabetical path named by a tool or git status must not disappear
       // merely because the workspace has many files.
-      // Git status is needed once for the initial cap-priority plan and once
-      // for the final snapshot. Change snapshots use watcher, journal and tool
-      // evidence instead of spawning Git on every turn.
-      const preGitPaths = type === "change"
-        ? new Set<string>()
-        : await gitPriorityPaths(state.root);
+      // Keep start/end and full-scan evidence. Only ordinary watched edits
+      // defer full Git; ref-only turns still record their commit and branch.
+      const refsMoved = targeted && previous !== null && await this.headMoved(state);
+      const gitDeferred = targeted && previous !== null && state.hasGitSample && !refsMoved;
+      const git = gitDeferred ? null : await collectGitBlock(state.root);
+      const gitChanged = git ? git.commit !== state.lastHead || git.branch !== state.lastBranch : refsMoved;
+      const preGitPaths = snapshotPriorityPaths([], git);
       const preScanPaths = new Set<string>([
         ...state.relevance.keys(),
         ...state.touchedPaths,
@@ -5805,21 +6229,16 @@ export class SessionUploader {
           if (state.turnStartedAt !== null) state.turnWrittenPaths.set(path, Date.now());
         }
       }
-      // A change capture with no filesystem or journal evidence has nothing
-      // to upload. Git-only history changes are represented by the final
-      // session snapshot, where the complete status and diff are collected.
-      if (type === "change" && scan.changed !== null && scan.changed.size === 0 && scan.removed === 0 && !this.journalHasChanges(state)) {
+      // A change capture that found nothing moved stops at one `git rev-parse`
+      // (a commit changes history without touching a file); the full git block
+      // with its status, log and diff is read only for a snapshot that goes out.
+      if (type === "change" && scan.changed !== null && scan.changed.size === 0 && scan.removed === 0 && !this.journalHasChanges(state)
+        && !gitChanged) {
         accepted = true;
         return false;
       }
-      // The complete Git summary (status, upstream, recent commits and diff)
-      // is intentionally collected once, at session end. Earlier snapshots
-      // still carry manifests and turn diffs, which are the replay baseline.
-      const git = type === "end" ? await collectGitBlock(state.root) : null;
-      const gitPaths = new Set<string>([
-        ...preGitPaths,
-        ...snapshotPriorityPaths([], git),
-      ]);
+      // Its status and diff name the files a capped snapshot must keep.
+      const gitPaths = preGitPaths;
       const candidates = candidatesFor(scan, state.relevance, gitPaths);
       // A full listing names the gitignored files too: a denied one (a gitignored
       // `.env`) is left out for privacy and counted with the denied files, so
@@ -5827,7 +6246,7 @@ export class SessionUploader {
       const ignoredListing = !(targeted && previous !== null) ? await listGitIgnored(state.root) : null;
       const deniedCount = scan.deniedCount + (ignoredListing ?? []).filter((path) => isUploadPathDenied(path.replace(/\/$/, ""))).length;
       // The last snapshot waits briefly for a collection still running (toolchain.ts).
-      const environment = await this.sessionEnvironment(state.root, type === "end" ? FINAL_TOOLCHAIN_WAIT_MS : undefined);
+      const environment = await this.sessionEnvironment(state.root, state.id, type === "end" ? FINAL_TOOLCHAIN_WAIT_MS : undefined);
       const rootName = workspaceRootName(state.root);
       const touchedPaths = this.touchedPathsForUpload(state);
       const metadata = JSON.stringify({
@@ -5838,11 +6257,11 @@ export class SessionUploader {
         session_resumed: state.resumed,
         trigger,
         touched_paths: touchedPaths,
-        ...PRIVACY_POLICY,
+        ...privacyPolicy(),
         denied_file_count: deniedCount,
         root_name: rootName,
-        git: { commit: git?.commit ?? null, branch: git?.branch ?? null, dirty: git ? String(git.dirty) : "false" },
-        git_deferred: type !== "end",
+        git: { commit: git?.commit ?? null, branch: git?.branch ?? null, dirty: git ? String(git.dirty) : null },
+        ...(gitDeferred ? { git_deferred: "session_end" } : {}),
       });
       const leading: UploadFile[] = [{ path: "__omnirush__/workspace.json", content: metadata, sha256: sha256Hex(metadata) }];
       if (journal.length > 0) {
@@ -5855,13 +6274,9 @@ export class SessionUploader {
       }
       const filesScope: "full" | "changed" = type === "start" ? "full" : "changed";
       const extras: Record<string, unknown> = {
-        workspace: {
-          root_name: rootName,
-          git,
-          ...(git ? {} : await gitSkippedField()),
-          ...(type === "start" && !git ? await projectArchiveField(state.root) : {}),
-          ...(type === "end" ? {} : { git_deferred: "session_end" }),
-        },
+        workspace: { root_name: rootName, git, ...(gitDeferred ? { git_deferred: "session_end" } : {}),
+          ...(git || gitDeferred ? {} : await gitSkippedField()),
+          ...(type === "start" && !git ? await projectArchiveField(state.root) : {}) },
         environment,
         touched_paths: touchedPaths,
         files_scope: filesScope,
@@ -5923,7 +6338,7 @@ export class SessionUploader {
           yield* extraEntries.values();
         },
         privacy: () => ({
-          ...PRIVACY_POLICY,
+          ...privacyPolicy(),
           denied_file_count: deniedCount,
           manifest_truncated: scan.manifestTruncated,
           files_truncated: omittedCount > 0,
@@ -5957,7 +6372,7 @@ export class SessionUploader {
           budgetBytes: budget,
         });
       }
-      if (!uploaded) return false;
+      if (uploaded !== true) return false;
       // The baseline is the last *accepted* manifest (uploaded or spooled): the
       // next change snapshot reports exactly what moved since this one.
       accepted = true;
@@ -5965,7 +6380,11 @@ export class SessionUploader {
       state.extras = extraEntries;
       state.turnManifest ??= turnBaseline(manifest, state.turnStartedAt, [previous]);
       state.listing = { denied: scan.deniedCount, truncated: scan.manifestTruncated };
-      if (git) state.lastHead = git.commit;
+      if (git) {
+        state.lastHead = git.commit;
+        state.lastBranch = git.branch;
+        state.hasGitSample = true;
+      }
       if (journal.length > 0) this.acknowledgeJournal(state, journal);
       if (type === "change") state.lastChangeAt = Date.now();
       return true;
@@ -5975,8 +6394,15 @@ export class SessionUploader {
     }
   }
 
-  private async uploadTrace(state: SessionState, traceEvents: TraceEvent[]): Promise<void> {
-    if (traceEvents.length === 0) return;
+  private async uploadTrace(state: SessionState, events: TraceEvent[]): Promise<void> {
+    if (events.length === 0) return;
+    // A session imported from the opencode 2.x engine's store says so in each
+    // trace upload (an opaque event type: kept as sent), so a reader can tell
+    // why its earlier turns look like 2.x (engine2/imported.ts).
+    const importedFrom = engine2ImportedFrom(state.id);
+    const traceEvents: TraceEvent[] = importedFrom
+      ? [{ at: events[0]!.at, type: "session.imported", data: { from: importedFrom } }, ...events]
+      : events;
     let schemaVersion = await this.negotiatedTraceSchema();
     let downgraded = false;
     const batches = boundedTraceBatches(state, traceEvents, MAX_TRACE_BYTES);
@@ -5985,7 +6411,7 @@ export class SessionUploader {
           schemaVersion: version,
           extras: {
             workspace: { root_name: workspaceRootName(state.root), git: null, ...(await gitSkippedField()) },
-            environment: await this.sessionEnvironment(state.root),
+            environment: await this.sessionEnvironment(state.root, state.id),
             touched_paths: this.touchedPathsForUpload(state),
             files_scope: "full",
           },
@@ -5995,10 +6421,12 @@ export class SessionUploader {
                 await emit({ path: "__omnirush__/trace.json", content: batch.content, sha256: sha256Hex(batch.content) });
               },
           manifest: () => [],
-          privacy: () => ({ ...PRIVACY_POLICY }),
-          trace: batch.events,
+          privacy: () => privacyPolicy(),
+          // One form per schema: the server reads the top-level trace for 3, and only trace.json for 1 and 2.
+          ...(version === TRACE_SCHEMA_VERSION ? { trace: batch.events } : {}),
         });
       let uploaded = await this.uploadEnvelope(state, "trace", "trace_flush", await makeBody(schemaVersion));
+      if (uploaded === "key_reused") uploaded = await this.uploadEnvelope(state, "trace", "trace_flush", await makeBody(schemaVersion));
       if (uploaded === "unsupported_schema" && schemaVersion === TRACE_SCHEMA_VERSION && !downgraded) {
         downgraded = true;
         schemaVersion = 2;
@@ -6032,37 +6460,29 @@ export class SessionUploader {
     }
   }
 
-  private async send(sessionId: string, compressed: Uint8Array | CompressedArtifact, deadline: AbortSignal, cancel?: AbortSignal): Promise<Response> {
+  private async send(sessionId: string, compressed: Uint8Array | CompressedArtifact, deadline: AbortSignal, cancel?: AbortSignal, request: UploadRequestOptions = {}): Promise<Response> {
     const signal = cancel ? AbortSignal.any([deadline, cancel]) : deadline;
     if (signal.aborted) return Promise.reject(signal.reason);
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${this.token}`,
+      "Content-Type": "application/zstd",
+      "X-OmniRush-Session-ID": sessionId,
+      ...(request.idempotencyKey ? { "Idempotency-Key": request.idempotencyKey } : {}),
+    };
     if ("path" in compressed) {
       await this.validateCompressedArtifact(compressed);
-      if (this.fileUploader) return untilAborted(this.fileUploader(sessionId, compressed.path, compressed.size, signal), signal);
+      if (this.fileUploader) return untilAborted(this.fileUploader(sessionId, compressed.path, compressed.size, signal, request), signal);
       if (!this.uploader) {
         const body = fileReadableBody(compressed.path, signal);
-        const init: RequestInit & { duplex: "half" } = {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${this.token}`,
-            "Content-Type": "application/zstd",
-            "X-OmniRush-Session-ID": sessionId,
-          },
-          body,
-          duplex: "half",
-          signal,
-        };
+        const init: RequestInit & { duplex: "half" } = { method: "POST", headers, body, duplex: "half", signal };
         return this.fetcher(this.uploadUrl!, init);
       }
-      return untilAborted(readFile(compressed.path).then((bytes) => this.uploader!(sessionId, bytes, signal)), signal);
+      return untilAborted(readFile(compressed.path).then((bytes) => this.uploader!(sessionId, bytes, signal, request)), signal);
     }
-    if (this.uploader) return untilAborted(this.uploader(sessionId, compressed, signal), signal);
+    if (this.uploader) return untilAborted(this.uploader(sessionId, compressed, signal, request), signal);
     return this.fetcher(this.uploadUrl!, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.token}`,
-        "Content-Type": "application/zstd",
-        "X-OmniRush-Session-ID": sessionId,
-      },
+      headers,
       body: compressed.buffer.slice(compressed.byteOffset, compressed.byteOffset + compressed.byteLength) as ArrayBuffer,
       signal,
     });
@@ -6094,25 +6514,42 @@ export class SessionUploader {
     attempts = UPLOAD_ATTEMPTS,
     cancel?: AbortSignal,
     schemaVersion: 2 | 3 = 2,
+    check: { idempotencyKey?: string; bodySha256?: string } = {},
   ): Promise<TransmitOutcome> {
     const timeoutMs = sessionUploadTimeoutMs("path" in compressed ? compressed.size : compressed.byteLength, this.uploadBudget);
     let lastReason = "session upload unavailable";
     let refreshAttempted = false;
+    let resentForHash = false;
     let attempt = 0;
+    // The key goes out (and its 400/409 answers mean something) only where the backend takes it.
+    const request: UploadRequestOptions = check.idempotencyKey && (await this.uploadFeatures()).idempotencyKey ? { idempotencyKey: check.idempotencyKey } : {};
     while (attempt < attempts) {
       // Each attempt, the retry with a refreshed bearer too, gets a deadline of its own.
       const deadline = AbortSignal.timeout(timeoutMs);
       try {
-        const response = await this.send(sessionId, compressed, deadline, cancel);
-        if (response.ok) return { ok: true };
+        const response = await this.send(sessionId, compressed, deadline, cancel, request);
+        if (response.ok) {
+          // The server names the SHA-256 of the bytes it stored: a different
+          // one means the body was damaged on the way, so it is sent again.
+          const stored = check.bodySha256 ? await responseBodySha256(response) : null;
+          if (!stored || stored === check.bodySha256) return { ok: true };
+          lastReason = "the server stored different bytes than were sent";
+          this.log("warn", "OmniRush session upload stored with a different body hash; sending it again", { sessionId });
+          // The first such answer is sent again at once, outside the transport attempts.
+          if (!resentForHash) resentForHash = true;
+          else attempt += 1;
+          continue;
+        }
         lastReason = `sessionUploader upload failed with status ${response.status}`;
         if (UNAUTHORIZED_STATUSES.has(response.status)) {
-          // The sign-in gate is final: nothing is queued for an account that
-          // is gone. Any other rejection is a device token the gateway broker
-          // rotates moments later, so the upload gets one fresh token and one
-          // more try, and is spooled rather than dropped if still refused.
+          // No account on this device right now (the server retired its sign-in):
+          // the upload is kept, stamped with its account, for when it is back;
+          // only a user's sign-out deletes it. Any other rejection is a device
+          // token the gateway broker rotates moments later, so the upload gets
+          // one fresh token and one more try, and is spooled rather than
+          // dropped if still refused.
           if (await responseSignalsAccountRequired(response)) {
-            return { ok: false, retryable: false, reason: `${lastReason} (${ACCOUNT_REQUIRED_MARKER})` };
+            return { ok: false, retryable: true, reason: `${lastReason} (${ACCOUNT_REQUIRED_MARKER})` };
           }
           if (refreshAttempted) return { ok: false, retryable: true, reason: lastReason };
           refreshAttempted = true;
@@ -6129,6 +6566,11 @@ export class SessionUploader {
         }
         if (response.status === 422 && schemaVersion === TRACE_SCHEMA_VERSION && await responseSignalsUnsupportedSchema(response)) {
           return { ok: false, retryable: false, reason: lastReason, unsupportedSchema: true };
+        }
+        // The server holds other bytes under this key: final for this envelope.
+        if (response.status === 409 && request.idempotencyKey) {
+          const keyReused = (await boundedResponseText(response)).includes(IDEMPOTENCY_KEY_REUSED);
+          return { ok: false, retryable: false, reason: keyReused ? `${lastReason} (${IDEMPOTENCY_KEY_REUSED})` : lastReason, ...(keyReused ? { keyReused } : {}) };
         }
         await response.body?.cancel().catch(() => undefined);
         const retryAfter = retryAfterMs(response.headers?.get?.("retry-after"));
@@ -6193,7 +6635,7 @@ export class SessionUploader {
     snapshotType: SnapshotType,
     trigger: UploadTrigger,
     body: EnvelopeBody,
-  ): Promise<boolean | "unsupported_schema"> {
+  ): Promise<boolean | "unsupported_schema" | "key_reused"> {
     if (!this.uploadUrl && !this.uploader && !this.fileUploader) return false;
     const sequence = state.sequence + 1;
     const path = await this.envelopeTempPath();
@@ -6263,11 +6705,22 @@ export class SessionUploader {
         return false;
       }
       const compressed: CompressedArtifact = { path, size: compressedBytes };
+      const idempotencyKey = uploadIdempotencyKey(state.id, state.segment, sequence, snapshotType);
+      const bodySha256 = await sha256File(path);
+      // The sequence is taken before the envelope leaves: one the server
+      // stored is never used again for other bytes (it would answer
+      // idempotency_key_reused), even if this process ends before it answers.
+      state.sequence = sequence;
+      await this.persistSession(state).catch(() => undefined);
       const account = this.account.signal;
       const uploadSignal = AbortSignal.any([account, this.halted.signal]);
       const spoolArtifact = async (reason: string, retryAfter?: number): Promise<boolean> => {
+        const accountId = await this.currentAccount();
         const spooled = await this.spoolEnvelopeFile({
           id: "", session_id: state.id, snapshot_type: snapshotType, trigger, sequence, bytes: compressedBytes, created_at: new Date().toISOString(), attempts: 1,
+          idempotency_key: idempotencyKey,
+          body_sha256: bodySha256,
+          ...(accountId ? { account_id: accountId } : {}),
           ...(retryAfter !== undefined ? { not_before: new Date(Date.now() + retryAfter).toISOString() } : {}),
         }, path, account);
         if (!spooled) {
@@ -6276,7 +6729,6 @@ export class SessionUploader {
           return false;
         }
         state.sentBytes += bytes;
-        state.sequence = sequence;
         state.failureCount += 1;
         state.lastFailureAt = new Date().toISOString();
         await this.persistSession(state).catch(() => undefined);
@@ -6301,22 +6753,31 @@ export class SessionUploader {
       }
       let outcome: TransmitOutcome;
       try {
-        outcome = await this.transmit(state.id, compressed, UPLOAD_ATTEMPTS, uploadSignal, body.schemaVersion ?? UPLOAD_SCHEMA_VERSION);
+        outcome = await this.transmit(state.id, compressed, UPLOAD_ATTEMPTS, uploadSignal, body.schemaVersion ?? UPLOAD_SCHEMA_VERSION, { idempotencyKey, bodySha256 });
       } finally {
         releaseUpload();
       }
       if (!outcome.ok && outcome.unsupportedSchema) return "unsupported_schema";
+      if (!outcome.ok && outcome.keyReused && !state.repositioned) {
+        // This chat's numbering on the server is ahead of the local ledger (a
+        // lost or capped ledger): continue after the server's, once.
+        state.repositioned = true;
+        await this.repositionSession(state);
+        return "key_reused";
+      }
       if (!outcome.ok) {
         if ((!outcome.retryable || !this.spoolDir) && !account.aborted) {
+          // Refused for good: the gap the server will show at this sequence is explained.
+          if (!outcome.retryable) state.refused = [...state.refused, `${state.segment}:${sequence}`].slice(-MAX_REFUSED_SEQUENCES);
           await this.recordLedgerOutcome(state.id, "failure").catch(() => undefined);
           throw new Error(outcome.reason);
         }
         return await spoolArtifact(outcome.reason, outcome.retryAfterMs);
       }
       state.sentBytes += bytes;
-      state.sequence = sequence;
       state.lastSuccessAt = new Date().toISOString();
-      await this.persistSession(state).catch((error: unknown) => {
+      // The sequence is already on disk; this only records the outcome (stop() waits for it).
+      void this.persistSession(state).catch((error: unknown) => {
         this.log("warn", "OmniRush session ledger update failed", {
           sessionId: state.id,
           error: error instanceof Error ? error.message : "unknown",
@@ -6333,6 +6794,349 @@ export class SessionUploader {
       return true;
     } finally {
       await rm(path, { force: true }).catch(() => undefined);
+    }
+  }
+
+  // --- integrity confirmation ---------------------------------------------
+  // Once a chat ends, and at launch for recent chats the server has not
+  // judged yet, the server's integrity record is compared with the ledger.
+  // Gaps a spooled upload will fill wait for the spool; gaps nothing here
+  // explains (not refused, not spooled) get the chat's transcript re-sent
+  // from the engine, once. Good and not good are final; pending is asked
+  // again with backoff for up to a day after the chat ended.
+
+  private cancelConfirm(sessionId: string): void {
+    const timer = this.confirmTimers.get(sessionId);
+    if (timer) clearTimeout(timer);
+    this.confirmTimers.delete(sessionId);
+  }
+
+  private scheduleConfirm(sessionId: string, delayMs: number): void {
+    if (!this.confirmEnabled || this.stopped) return;
+    this.cancelConfirm(sessionId);
+    const timer = setTimeout(() => {
+      this.confirmTimers.delete(sessionId);
+      void this.confirmSession(sessionId).catch((error: unknown) => {
+        this.log("warn", "OmniRush session check failed", { sessionId, error: error instanceof Error ? error.message : "unknown" });
+      });
+    }, Math.max(0, delayMs));
+    timer.unref?.();
+    this.confirmTimers.set(sessionId, timer);
+  }
+
+  /** Launch: recent ended chats without a final verdict, oldest-due first, paced. */
+  private async confirmAtLaunch(): Promise<void> {
+    await this.ledgerReady;
+    const now = Date.now();
+    const due = Object.entries(this.ledger.sessions)
+      .filter(([sessionId, record]) => {
+        if (this.sessions.has(sessionId) || !record.endedAt) return false;
+        const ended = Date.parse(record.endedAt);
+        if (!Number.isFinite(ended) || now - ended > CONFIRM_WINDOW_MS) return false;
+        const confirmation = record.confirmation;
+        if (confirmation && confirmation.verdict !== "pending" && Date.parse(confirmation.checkedAt) >= ended) return false;
+        return !confirmation?.nextAt || Date.parse(confirmation.nextAt) <= now || Date.parse(confirmation.checkedAt) < ended;
+      })
+      .sort(([, left], [, right]) => right.endedAt!.localeCompare(left.endedAt!))
+      .slice(0, CONFIRM_LAUNCH_MAX);
+    due.forEach(([sessionId], index) => this.scheduleConfirm(sessionId, CONFIRM_AFTER_END_MS + index * CONFIRM_LAUNCH_SPACING_MS));
+  }
+
+  /** One integrity check of an ended chat; schedules the next one while the answer is pending. */
+  async confirmSession(sessionId: string): Promise<SessionConfirmation | null> {
+    if (!this.sessionIntegrity || this.confirming.has(sessionId) || this.sessions.has(sessionId)) return null;
+    await this.ledgerReady;
+    const record = this.ledger.sessions[sessionId];
+    if (!record?.endedAt || !(await this.uploadFeatures()).integrity) return null;
+    this.confirming.add(sessionId);
+    try {
+      const previous = record.confirmation;
+      const checks = (previous && Date.parse(previous.checkedAt) >= Date.parse(record.endedAt) ? previous.checks : 0) + 1;
+      let findings: ReturnType<typeof integrityFindings> = null;
+      let retryAfterMs: number | null = null;
+      try {
+        const response = await this.sessionIntegrity(sessionId, { summary: true });
+        if (response.ok) findings = integrityFindings(JSON.parse(await boundedResponseText(response, 4 * 1024 * 1024)), record.refused);
+        else {
+          if (response.status === 429) retryAfterMs = Number(response.headers.get("retry-after")) * 1_000 || 60_000;
+          await response.body?.cancel().catch(() => undefined);
+        }
+      } catch {
+        findings = null;
+      }
+      const verdict = findings?.verdict ?? "pending";
+      let repairedAt = previous?.repairedAt;
+      if (findings && verdict === "pending" && (findings.gaps.length > 0 || findings.missing)) {
+        // What the spool still holds for this chat is on its way: the gaps may be those.
+        const spooled = (await this.spoolLocked(() => this.listSpool())).some((entry) => entry.session_id === sessionId);
+        if (spooled) void this.drainSpool().catch(() => undefined);
+        else if (!repairedAt && record.root && record.workspaceId && this.repairTranscript) {
+          repairedAt = await this.repairSession(sessionId, record, findings.gaps) ? new Date().toISOString() : repairedAt;
+        }
+      }
+      const ended = Date.parse(record.endedAt);
+      const step = CONFIRM_BACKOFF_MS[Math.min(checks, CONFIRM_BACKOFF_MS.length) - 1]!;
+      const wait = Math.max(step, retryAfterMs ?? 0);
+      const again = verdict === "pending" && Date.now() + wait <= ended + CONFIRM_PENDING_MS;
+      const confirmation: SessionConfirmation = {
+        verdict,
+        checkedAt: new Date().toISOString(),
+        checks,
+        ...(again ? { nextAt: new Date(Date.now() + wait).toISOString() } : {}),
+        ...(repairedAt ? { repairedAt } : {}),
+      };
+      const current = this.ledger.sessions[sessionId];
+      if (current) {
+        current.confirmation = confirmation;
+        await this.saveLedger().catch(() => undefined);
+      }
+      if (again) this.scheduleConfirm(sessionId, wait);
+      this.log("info", "OmniRush session checked", { sessionId, verdict, gaps: findings?.gaps.length ?? null, checks });
+      return confirmation;
+    } finally {
+      this.confirming.delete(sessionId);
+    }
+  }
+
+  /** Re-sends an ended chat's transcript from the engine as a trace of its last segment, after a "collector.repair" event. */
+  private async repairSession(sessionId: string, record: SessionLedgerRecord, gaps: readonly string[]): Promise<boolean> {
+    const parts = await this.repairTranscript!({ sessionId, workspaceId: record.workspaceId!, root: record.root! }).catch(() => null);
+    if (!parts || this.sessions.has(sessionId)) return false;
+    const state = this.newSessionState(sessionId, record.workspaceId!, record.root!, new FileHashCache());
+    state.journal.off = true;
+    state.segment = record.segment;
+    state.sequence = record.nextSequence;
+    state.sentBytes = record.sentBytes ?? 0;
+    state.lastMessageId = record.lastMessageId;
+    state.model = record.model ?? null;
+    state.childSessionIds = [...(record.childSessionIds ?? [])];
+    state.refused = [...(record.refused ?? [])];
+    state.endedAt = record.endedAt;
+    state.resumed = state.segment > 1;
+    const at = new Date().toISOString();
+    const events: TraceEvent[] = [{ at, type: "collector.repair", data: { reason: "integrity_gaps", gaps: gaps.slice(0, 200), parts: parts.length } }];
+    parts.forEach((messages, index) => events.push({ at, type: "turn.messages", data: { messages, part: index + 1, parts: parts.length, repair: true } }));
+    await this.uploadTrace(state, events);
+    this.log("info", "OmniRush session transcript re-sent for the server's gaps", { sessionId, gaps: gaps.length, parts: parts.length });
+    return true;
+  }
+
+  // --- trace journal -------------------------------------------------------
+  // Each live chat's trace events not yet handed to an upload are appended to
+  // a journal on disk (JSON lines: {"m": meta} and {"e": event}) within
+  // JOURNAL_FLUSH_MS, and its turn's opening and end at once. A crash or a
+  // killed worker loses none of them: the next start uploads what a journal
+  // holds, marked recovered, and has the host settle a turn left open.
+
+  private journalPath(sessionId: string): string {
+    return join(this.journalDir!, `${createHash("sha256").update(sessionId).digest("hex").slice(0, 40)}.jsonl`);
+  }
+
+  private journalMetaLine(state: SessionState): string {
+    const meta: JournalMeta = {
+      v: 1,
+      session_id: state.id,
+      workspace_id: state.workspaceId,
+      root: state.root,
+      segment: state.segment,
+      turn_open: state.turnInProgress,
+      at: new Date().toISOString(),
+    };
+    return JSON.stringify({ m: meta });
+  }
+
+  private journalMeta(state: SessionState, now = false): void {
+    if (!this.journalDir || state.finished || state.journal.off) return;
+    state.journal.pending.push(this.journalMetaLine(state));
+    this.scheduleJournal(state, now);
+  }
+
+  private journalEvent(state: SessionState, event: TraceEvent): void {
+    if (!this.journalDir || state.journal.full || state.journal.off) return;
+    let line: string;
+    try {
+      line = JSON.stringify({ e: event });
+    } catch {
+      return;
+    }
+    if (state.journal.bytes + line.length > MAX_JOURNAL_BYTES) {
+      state.journal.full = true;
+      return;
+    }
+    state.journal.bytes += line.length + 1;
+    state.journal.pending.push(line);
+    this.scheduleJournal(state, false);
+  }
+
+  private scheduleJournal(state: SessionState, now: boolean): void {
+    if (now) {
+      if (state.journal.timer) clearTimeout(state.journal.timer);
+      state.journal.timer = null;
+      void this.flushJournal(state);
+      return;
+    }
+    if (state.journal.timer) return;
+    state.journal.timer = setTimeout(() => {
+      state.journal.timer = null;
+      void this.flushJournal(state);
+    }, JOURNAL_FLUSH_MS);
+    state.journal.timer.unref?.();
+  }
+
+  /** Appends the lines waiting for the journal; resolves once they are on disk. */
+  private flushJournal(state: SessionState): Promise<void> {
+    if (!state.journal.ready) return state.journal.tail;
+    const lines = state.journal.pending.splice(0);
+    if (lines.length === 0 || !this.journalDir) return state.journal.tail;
+    const path = this.journalPath(state.id);
+    state.journal.tail = state.journal.tail
+      .then(async () => {
+        await mkdir(this.journalDir!, { recursive: true, mode: 0o700 });
+        await appendFile(path, `${lines.join("\n")}\n`, { mode: 0o600 });
+      })
+      .catch((error: unknown) => this.journalFailed(state, error));
+    return state.journal.tail;
+  }
+
+  /** The events went to an upload: the journal keeps its meta and what was recorded since. */
+  private journalRewrite(state: SessionState): Promise<void> {
+    if (!this.journalDir || state.finished || state.journal.off || !state.journal.ready) return state.journal.tail;
+    if (state.journal.timer) clearTimeout(state.journal.timer);
+    state.journal.timer = null;
+    state.journal.pending = [];
+    const lines = [this.journalMetaLine(state)];
+    state.journal.bytes = 0;
+    state.journal.full = false;
+    for (const event of state.trace) {
+      const line = JSON.stringify({ e: event });
+      if (state.journal.bytes + line.length > MAX_JOURNAL_BYTES) {
+        state.journal.full = true;
+        break;
+      }
+      state.journal.bytes += line.length + 1;
+      lines.push(line);
+    }
+    const path = this.journalPath(state.id);
+    state.journal.tail = state.journal.tail
+      .then(async () => {
+        await mkdir(this.journalDir!, { recursive: true, mode: 0o700 });
+        await writeFileAtomic(path, `${lines.join("\n")}\n`, { mode: 0o600 });
+      })
+      .catch((error: unknown) => this.journalFailed(state, error));
+    return state.journal.tail;
+  }
+
+  /** The chat's last upload settled: nothing is left to recover. */
+  private journalRemove(state: SessionState): Promise<void> {
+    if (state.journal.timer) clearTimeout(state.journal.timer);
+    state.journal.timer = null;
+    state.journal.pending = [];
+    if (!this.journalDir || state.journal.off) return state.journal.tail;
+    const path = this.journalPath(state.id);
+    state.journal.tail = state.journal.tail.then(() => rm(path, { force: true })).catch((error: unknown) => this.journalFailed(state, error));
+    return state.journal.tail;
+  }
+
+  private journalFailed(state: SessionState, error: unknown): void {
+    if (this.journalWarned) return;
+    this.journalWarned = true;
+    this.log("warn", "OmniRush session journal write failed", { sessionId: state.id, error: error instanceof Error ? error.message : "unknown" });
+  }
+
+  /**
+   * App (or capture worker) start: every journal a previous process left is
+   * uploaded as a trace of the segment it was recorded in, after a
+   * "collector.recovered" event; a turn it left open is handed to the host
+   * (onRecoveredTurn) to be settled from the engine. A chat started meanwhile
+   * waits for its own (prepareSession). Journals past the spool's age limit
+   * are deleted unread.
+   */
+  private async recoverJournals(): Promise<void> {
+    if (!this.journalDir) return;
+    await this.stateMigrated;
+    await this.ledgerReady;
+    let names: string[];
+    try {
+      names = (await readdir(this.journalDir)).filter((name) => name.endsWith(".jsonl"));
+    } catch {
+      return;
+    }
+    const found: Array<{ path: string; meta: JournalMeta; events: TraceEvent[] }> = [];
+    for (const name of names) {
+      const path = join(this.journalDir, name);
+      try {
+        const file = await stat(path);
+        const parsed = Date.now() - file.mtimeMs > this.spoolMaxAgeMs ? null : parseJournal(await readFile(path, "utf8"));
+        if (!parsed || (parsed.events.length === 0 && !parsed.meta.turn_open)) {
+          await rm(path, { force: true });
+          continue;
+        }
+        found.push({ path, ...parsed });
+      } catch {
+        await rm(path, { force: true }).catch(() => undefined);
+      }
+    }
+    // Registered before this resolves, so a chat's start finds its recovery.
+    const recovered: Promise<void>[] = [];
+    let chain = Promise.resolve();
+    for (const journal of found) {
+      chain = chain.then(() => this.recoverJournal(journal)).catch((error: unknown) => {
+        this.log("warn", "OmniRush session journal recovery failed", { sessionId: journal.meta.session_id, error: error instanceof Error ? error.message : "unknown" });
+      });
+      const done = chain;
+      this.recovering.set(journal.meta.session_id, done);
+      recovered.push(done.finally(() => {
+        if (this.recovering.get(journal.meta.session_id) === done) this.recovering.delete(journal.meta.session_id);
+      }));
+    }
+    void Promise.allSettled(recovered);
+  }
+
+  private async recoverJournal(journal: { path: string; meta: JournalMeta; events: TraceEvent[] }): Promise<void> {
+    const { meta, events } = journal;
+    const record = this.ledger.sessions[meta.session_id];
+    if (events.length > 0) {
+      // The segment the events were recorded in, numbered after what it already sent.
+      const state = this.newSessionState(meta.session_id, meta.workspace_id, meta.root, new FileHashCache());
+      state.journal.off = true;
+      state.segment = record?.segment ?? meta.segment;
+      state.sequence = record?.nextSequence ?? 0;
+      state.sentBytes = record?.sentBytes ?? 0;
+      state.lastMessageId = record?.lastMessageId;
+      state.failureCount = record?.failureCount ?? 0;
+      state.lastFailureAt = record?.lastFailureAt;
+      state.lastSuccessAt = record?.lastSuccessAt;
+      state.model = record?.model ?? null;
+      state.childSessionIds = [...(record?.childSessionIds ?? [])];
+      state.childCheckpoints = new Map(Object.entries(record?.childCheckpoints ?? {}));
+      state.refused = [...(record?.refused ?? [])];
+      state.endedAt = record?.endedAt;
+      state.resumed = state.segment > 1;
+      for (const event of events) {
+        for (const evidence of knownToolPathEvidence(event.type, event.data)) {
+          const path = workspaceRelativePath(state.root, evidence.path.replaceAll("\\", "/"));
+          if (path && !isUploadPathDenied(path) && state.touchedPaths.size < MAX_TOUCHED_PATHS) state.touchedPaths.add(path);
+        }
+      }
+      const marker: TraceEvent = {
+        at: new Date().toISOString(),
+        type: "collector.recovered",
+        data: { reason: "restart", turn_open: meta.turn_open, events: events.length, journal_at: meta.at, session_segment: state.segment },
+      };
+      try {
+        await this.uploadTrace(state, [marker, ...events]);
+      } catch (error) {
+        // Refused (a 422): recovered data is never dropped; the next start tries again, up to the age limit.
+        this.log("warn", "OmniRush session journal upload refused; kept for the next start", { sessionId: meta.session_id, error: error instanceof Error ? error.message : "unknown" });
+        return;
+      }
+      this.log("info", "OmniRush session journal recovered", { sessionId: meta.session_id, events: events.length, turnOpen: meta.turn_open });
+    }
+    await rm(journal.path, { force: true });
+    // The open turn's messages are still in the engine: the host settles it once this chat's recovery is done.
+    if (meta.turn_open && this.onRecoveredTurn) {
+      const turn: RecoveredTurn = { sessionId: meta.session_id, workspaceId: meta.workspace_id, root: meta.root };
+      queueMicrotask(() => this.onRecoveredTurn?.(turn));
     }
   }
 
@@ -6402,26 +7206,90 @@ export class SessionUploader {
         await writePrivateFileAtomic(target, await readFile(sourcePath));
       }
       await this.writeSpoolMeta({ ...meta, id });
+      this.ownSpoolEntries.add(id);
       await this.enforceSpoolBounds();
       return true;
     });
   }
 
+  /**
+   * Keeps the spool within its bounds, oldest first: trace uploads and
+   * workspace snapshots each within a budget of their own, so a large start
+   * snapshot never pushes out a trace (nor traces a snapshot).
+   */
   private async enforceSpoolBounds(): Promise<void> {
     const entries = await this.listSpool();
-    let total = entries.reduce((sum, entry) => sum + entry.bytes, 0);
-    let count = entries.length;
-    for (const entry of entries) {
-      if (count <= this.spoolMaxEntries && total <= this.spoolMaxBytes) break;
-      await this.removeSpoolEntry(entry.id);
-      total -= entry.bytes;
-      count -= 1;
-      this.log("warn", "OmniRush session upload spool dropped its oldest entry", {
-        sessionId: entry.session_id,
-        snapshotType: entry.snapshot_type,
-        sequence: entry.sequence,
-      });
+    const classes: Array<{ entries: SpoolMeta[]; maxEntries: number; maxBytes: number }> = [
+      { entries: entries.filter((entry) => entry.snapshot_type === "trace"), maxEntries: this.spoolMaxTraceEntries, maxBytes: this.spoolMaxTraceBytes },
+      { entries: entries.filter((entry) => entry.snapshot_type !== "trace"), maxEntries: this.spoolMaxEntries, maxBytes: this.spoolMaxBytes },
+    ];
+    for (const kind of classes) {
+      let total = kind.entries.reduce((sum, entry) => sum + entry.bytes, 0);
+      let count = kind.entries.length;
+      for (const entry of kind.entries) {
+        if (count <= kind.maxEntries && total <= kind.maxBytes) break;
+        await this.removeSpoolEntry(entry.id);
+        total -= entry.bytes;
+        count -= 1;
+        this.log("warn", "OmniRush session upload spool dropped its oldest entry", {
+          sessionId: entry.session_id,
+          snapshotType: entry.snapshot_type,
+          sequence: entry.sequence,
+        });
+      }
     }
+  }
+
+  /** Whether a spooled upload is past the spool's age limit (an unreadable date counts as fresh). */
+  private spoolEntryExpired(entry: SpoolMeta, now = Date.now()): boolean {
+    const created = Date.parse(entry.created_at);
+    return Number.isFinite(created) && now - created > this.spoolMaxAgeMs;
+  }
+
+  /**
+   * The signed-in account's id; null while it cannot be learned (offline, or
+   * no account). Asked once per process: an account change restarts the server.
+   */
+  private async currentAccount(): Promise<string | null> {
+    if (this.accountKnown || !this.accountIdHook) return this.accountKnown;
+    this.accountLookup ??= (async () => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const id = await Promise.race([
+          this.accountIdHook!().catch(() => null),
+          new Promise<null>((resolvePromise) => {
+            timer = setTimeout(() => resolvePromise(null), ACCOUNT_LOOKUP_TIMEOUT_MS);
+            timer.unref?.();
+          }),
+        ]);
+        const trimmed = typeof id === "string" ? id.trim() : "";
+        if (trimmed) this.accountKnown = trimmed;
+        return this.accountKnown;
+      } finally {
+        clearTimeout(timer);
+        this.accountLookup = null;
+      }
+    })();
+    return this.accountLookup;
+  }
+
+  /**
+   * Whether the current account's drain may send `entry`. Without an account
+   * hook the spool is one account's. An entry stamped for another account
+   * waits (for that account, or its age limit). An unstamped one (spooled
+   * before stamping, or while the id was unknown) is this account's once
+   * the id is known, and stamped so; until then only this process's own are.
+   */
+  private async spoolEntryOwned(entry: SpoolMeta, account: string | null, spoolDir: string): Promise<boolean> {
+    if (!this.accountIdHook) return true;
+    if (entry.account_id) return entry.account_id === account;
+    if (!account) return this.ownSpoolEntries.has(entry.id);
+    entry.account_id = account;
+    await this.spoolLocked(async () => {
+      await lstat(join(spoolDir, `${entry.id}.zst`));
+      await this.writeSpoolMeta(entry);
+    }).catch(() => undefined);
+    return true;
   }
 
   private scheduleRetry(delayMs?: number): void {
@@ -6495,11 +7363,31 @@ export class SessionUploader {
     const spoolDir = this.spoolDir;
     if (!spoolDir || !this.enabled) return { delivered, pending: 0 };
     const entries = await this.spoolLocked(() => this.listSpool());
+    const account = this.accountIdHook ? await this.currentAccount() : null;
     let pending = entries.length;
     let failures = 0;
     let nextDueAt = Number.POSITIVE_INFINITY;
+    let waitingForAccount = false;
     for (const entry of entries) {
       if (this.stopped || signal.aborted) break;
+      if (this.spoolEntryExpired(entry)) {
+        await this.spoolLocked(() => this.removeSpoolEntry(entry.id));
+        pending -= 1;
+        this.log("warn", "OmniRush session upload artifact dropped from spool", {
+          sessionId: entry.session_id,
+          snapshotType: entry.snapshot_type,
+          sequence: entry.sequence,
+          reason: "expired",
+        });
+        continue;
+      }
+      // Another account's upload is never sent; it is not this drain's to retry either.
+      if (!(await this.spoolEntryOwned(entry, account, spoolDir))) {
+        // Waiting to learn the account: tried again on the backoff.
+        if (account) pending -= 1;
+        else waitingForAccount = true;
+        continue;
+      }
       const dueAt = this.spoolEntryDueAt(entry);
       if (failures >= MAX_DRAIN_FAILURES || dueAt > Date.now()) {
         nextDueAt = Math.min(nextDueAt, dueAt);
@@ -6519,11 +7407,15 @@ export class SessionUploader {
       const releaseUpload = await GLOBAL_CAPTURE_ADMISSION.acquire(signal);
       let outcome: TransmitOutcome;
       try {
-        outcome = await this.transmit(entry.session_id, compressed, 1, signal);
+        outcome = await this.transmit(entry.session_id, compressed, 1, signal, 2, {
+          ...(entry.idempotency_key ? { idempotencyKey: entry.idempotency_key } : {}),
+          ...(entry.body_sha256 ? { bodySha256: entry.body_sha256 } : {}),
+        });
       } finally {
         releaseUpload();
       }
       if (outcome.ok) {
+        this.ownSpoolEntries.delete(entry.id);
         await this.spoolLocked(() => this.removeSpoolEntry(entry.id));
         await this.recordLedgerOutcome(entry.session_id, "success").catch(() => undefined);
         this.retryFailures = 0;
@@ -6540,7 +7432,8 @@ export class SessionUploader {
       }
       // Stopped or signed out mid-upload: the entry stays as it was, or goes with the spool.
       if (signal.aborted) break;
-      if (!outcome.retryable || entry.attempts + 1 >= MAX_SPOOL_ATTEMPTS) {
+      // A retryable failure keeps the entry, however long the outage (up to the spool's age limit).
+      if (!outcome.retryable) {
         await this.spoolLocked(() => this.removeSpoolEntry(entry.id));
         pending -= 1;
         this.log("warn", "OmniRush session upload artifact dropped from spool", {
@@ -6567,7 +7460,7 @@ export class SessionUploader {
       await this.recordLedgerOutcome(entry.session_id, "failure").catch(() => undefined);
       nextDueAt = Math.min(nextDueAt, this.spoolEntryDueAt(attempted));
     }
-    if (failures > 0) this.retryFailures += 1;
+    if (failures > 0 || waitingForAccount) this.retryFailures += 1;
     if (pending > 0 && !signal.aborted) {
       this.scheduleRetry(Math.max(this.jitteredBackoffMs(), Number.isFinite(nextDueAt) ? nextDueAt - Date.now() : 0));
     }
@@ -6584,11 +7477,13 @@ export class SessionUploader {
 
   /**
    * Discards every spooled upload and the stored turn-diff bases, and aborts
-   * every upload in flight without spooling it. Wire this to sign-out and
-   * consent withdrawal: once the account is gone nothing may stay queued on
-   * disk.
+   * every upload in flight without spooling it. Wire this to a user's
+   * sign-out and consent withdrawal only: a device session the server
+   * retired (a refused refresh) keeps its queue for when the account is
+   * back, each upload stamped with its account.
    */
   clearSpool(): Promise<void> {
+    this.ownSpoolEntries.clear();
     if (this.retryTimer) {
       clearTimeout(this.retryTimer);
       this.retryTimer = null;
@@ -6600,8 +7495,9 @@ export class SessionUploader {
     this.traceSchemaProbe = null;
     this.retryFailures = 0;
     return this.spoolLocked(async () => {
-      // The turn diffs' bases are workspace content on disk too.
+      // The turn diffs' bases are workspace content on disk too, and so are the journals.
       await this.bases.clear();
+      if (this.journalDir) await rm(this.journalDir, { recursive: true, force: true });
       if (!this.spoolDir) return;
       await rm(this.spoolDir, { recursive: true, force: true });
       if (this.stateDir) await removeLegacyUploadContent(this.stateDir);

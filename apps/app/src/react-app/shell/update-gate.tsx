@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { ArrowUpCircle, Download, Loader2 } from "lucide-react";
 
 import {
@@ -16,8 +16,16 @@ import { useBrandAppName } from "../domains/cloud/brand-theme";
 import { useDesktopUpdater } from "../domains/settings/state/desktop-updater-provider";
 import { InstallCommand } from "./install-command";
 
-/** Height of the required-update banner; the app below it is shifted by this much. */
-const BANNER_HEIGHT_PX = 36;
+/** Height of the app's top banners; the app below one is shifted by this much. */
+export const BANNER_HEIGHT_PX = 36;
+export const BANNER_CLASS = "fixed inset-x-0 top-0 z-[70] flex items-center justify-center gap-3 border-b border-amber-700/30 bg-amber-300 px-4 text-[12px] font-medium text-amber-950 mac:titlebar-drag mac:ps-20";
+
+/** The app below a top banner: shifted beneath it (its transform also makes it the containing block of a nested banner, which stacks below this one). */
+export function bannerShiftStyle(shifted: boolean): CSSProperties {
+  return shifted
+    ? { position: "fixed", inset: `${BANNER_HEIGHT_PX}px 0 0 0`, transform: "translateZ(0)", overflow: "hidden" }
+    : { display: "contents" };
+}
 
 function useNow(active: boolean, intervalMs = 15_000): number {
   const [now, setNow] = useState(() => Date.now());
@@ -154,7 +162,9 @@ function useRequiredUpdate(gate: UpdateGateState) {
           ? "The installer is open. Replace the app from it, then open it again."
           : null;
   const command = installMode === "package" && updaterState === "ready" ? status?.installCommand ?? null : null;
-  return { updateNow, working, detail, label, command, showDownloaded: updater.showDownloadedUpdate };
+  // A restart that did not go through: offer the manual download next to the retry.
+  const installFailed = updaterState === "error" && status?.failedAction === "install";
+  return { updateNow, working, detail, label, command, installFailed, showDownloaded: updater.showDownloadedUpdate };
 }
 
 type RequiredUpdate = ReturnType<typeof useRequiredUpdate>;
@@ -187,13 +197,23 @@ export function RequiredUpdateBanner(props: { gate: UpdateGateState; appName: st
       aria-live="polite"
       data-testid="update-required-banner"
       data-update-deadline={props.gate.deadline ?? undefined}
-      className="fixed inset-x-0 top-0 z-[70] flex items-center justify-center gap-3 border-b border-amber-700/30 bg-amber-300 px-4 text-[12px] font-medium text-amber-950 mac:titlebar-drag mac:ps-20"
+      className={BANNER_CLASS}
       style={{ height: BANNER_HEIGHT_PX }}
     >
       <ArrowUpCircle className="size-4 shrink-0" aria-hidden="true" />
       <span className="truncate" data-testid="update-required-banner-text">{text}</span>
       {detail ? <span className={props.update.command ? "hidden truncate font-mono text-amber-900/80 select-text md:inline" : "hidden truncate text-amber-900/80 md:inline"}>· {detail}</span> : null}
       <UpdateNowButton update={props.update} testId="update-required-banner-button" />
+      {props.update.installFailed ? (
+        <button
+          type="button"
+          data-testid="update-required-banner-download"
+          onClick={() => openDownload(props.gate.downloadUrl)}
+          className="shrink-0 text-[11px] font-semibold underline underline-offset-2 hover:text-black mac:titlebar-no-drag"
+        >
+          Download manually
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -280,9 +300,7 @@ export function UpdateGate({ children }: { children: ReactNode }) {
       {banner ? <RequiredUpdateBanner gate={gate} appName={appName} update={update} /> : null}
       <div
         data-update-gate-shifted={banner ? "" : undefined}
-        style={banner
-          ? { position: "fixed", inset: `${BANNER_HEIGHT_PX}px 0 0 0`, transform: "translateZ(0)", overflow: "hidden" }
-          : { display: "contents" }}
+        style={bannerShiftStyle(banner)}
       >
         {children}
       </div>

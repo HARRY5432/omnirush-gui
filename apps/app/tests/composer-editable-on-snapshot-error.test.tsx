@@ -118,6 +118,7 @@ test("the composer stays editable when snapshot refresh fails or the model is un
       if (rejectSnapshot) throw new Error("snapshot refresh failed");
       return fetchedSnapshot;
     },
+    isMissingSessionError: () => false,
   }));
   const { SessionSurface } = await import("../src/react-app/domains/session/surface/session-surface");
   const { snapshotKey } = await import("../src/react-app/domains/session/sync/session-sync");

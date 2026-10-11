@@ -144,7 +144,7 @@ describe("omnirush swarm plugin", () => {
     expect(await system("ses_grand")).toContain("layer 2 of at most 3");
     const great = await system("ses_great");
     expect(great).toContain("You cannot delegate further");
-    expect(great).not.toContain("Start sub-agents with the subagent tool");
+    expect(great).not.toContain("Start sub-agents with the task tool");
     // Same text on every step (prompt cache).
     expect(await system("ses_child")).toBe(child);
   });
@@ -539,12 +539,18 @@ describe("omnirush swarm plugin: sub-agent model and effort", () => {
       return output.headers;
     };
     expect(await headers("ses_grand", "gpt-6-sol")).toEqual({
+      "x-parent-session-id": "ses_main",
       "x-omnirush-subagent-fallback-model": "gpt-6-astra",
       "x-omnirush-subagent-fallback-effort": "max",
       "x-omnirush-subagent-root": "ses_main",
     });
     expect(await headers("ses_main", "gpt-6-astra")).toEqual({});
-    expect(await headers("ses_grand", "gpt-6-astra")).toEqual({});
+    // Every sub-agent request names its main session, on any model.
+    expect(await headers("ses_grand", "gpt-6-astra")).toEqual({ "x-parent-session-id": "ses_main" });
+    expect(await headers("ses_child", "gpt-6-astra")).toEqual({ "x-parent-session-id": "ses_main" });
+    const other = { headers: {} as Record<string, string> };
+    await hooks["chat.headers"]({ sessionID: "ses_child", model: { id: "claude", providerID: "anthropic" } }, other);
+    expect(other.headers).toEqual({});
 
     // The finished task names the sub-agent's own model.
     const output = { output: "<task>done</task>", metadata: { sessionId: "ses_child", model: { providerID: "omnirush", modelID: "gpt-6-astra" } } as Record<string, unknown> };
@@ -708,5 +714,31 @@ describe("omnirush swarm plugin: sub-agent model and effort", () => {
     process.env.OMNIRUSH_SERVER_URL = "http://127.0.0.1:9";
     expect(await prompt(hooks, "ses_child", { providerID: "omnirush", modelID: "gpt-6-astra", variant: "low" }))
       .toEqual({ providerID: "omnirush", modelID: "gpt-6-astra", variant: "low" });
+  });
+});
+
+describe("parent session header", () => {
+  test("a sub-agent whose session read failed once (an error answer, not a throw) still names its main session on the next request", async () => {
+    let failing = true;
+    const parents: Record<string, string | null> = { ses_child_x: "ses_main_x", ses_main_x: null };
+    const client = {
+      session: {
+        get: async ({ path }: { path: { id: string } }) => {
+          if (failing) return { error: { name: "UnknownError" } };
+          return { data: { id: path.id, ...(parents[path.id] ? { parentID: parents[path.id] } : {}) } };
+        },
+      },
+    };
+    const directory = await mkdtemp(join(tmpdir(), "omnirush-swarm-"));
+    dirs.push(directory);
+    const hooks = await OmniRushSwarm({ client, directory });
+    const headers = async () => {
+      const output = { headers: {} as Record<string, string> };
+      await hooks["chat.headers"]({ sessionID: "ses_child_x", model: { id: "gpt-6-astra", providerID: "omnirush" } }, output);
+      return output.headers;
+    };
+    expect(await headers()).toEqual({});
+    failing = false;
+    expect(await headers()).toEqual({ "x-parent-session-id": "ses_main_x" });
   });
 });

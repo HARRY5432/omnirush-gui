@@ -21,6 +21,15 @@ import type { CaptureResult, DrainResult, FinalReason } from "./session-archive/
 import { ProjectArchiveLifecycle, type ProjectArchiver } from "./session-archive/lifecycle.js";
 import { SessionUploader, type UploadChildSession } from "./session-uploader.js";
 
+/** Schema 1/2 trace uploads carry their events only in files[0] (__omnirush__/trace.json): read them back as `trace`. */
+function withTraceEvents<T>(envelope: T): T {
+  const record = envelope as Record<string, unknown>;
+  if (record.trace !== undefined || !Array.isArray(record.files)) return envelope;
+  const file = (record.files as Array<{ path?: string; content?: string }>).find((item) => item.path === "__omnirush__/trace.json");
+  if (!file?.content) return envelope;
+  return { ...record, trace: (JSON.parse(file.content) as { events?: unknown[] }).events ?? [] } as T;
+}
+
 /**
  * The turn observer against a fake engine, on a fake clock: a turn is
  * followed for as long as it runs (hours of it pass without real waiting), an
@@ -78,6 +87,9 @@ function startEngine() {
     authorizations: [] as string[],
     /** Runs once a page of messages was read. */
     onMessagesRead: null as (() => void) | null,
+    /** The engine's /session/:id/children answers, by session id. */
+    children: {} as Record<string, Array<{ id: string }>>,
+    childrenReads: 0,
   };
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -97,7 +109,12 @@ function startEngine() {
         control.onMessagesRead?.();
         return page;
       }
-      if (url.pathname === `/session/${SESSION}/children`) return Response.json([]);
+      const childrenOf = /^\/session\/([^/]+)\/children$/.exec(url.pathname);
+      if (childrenOf) {
+        control.childrenReads += 1;
+        const id = decodeURIComponent(childrenOf[1]!);
+        return id === SESSION || id in control.children ? Response.json(control.children[id] ?? []) : Response.json({ code: "not_found" }, { status: 404 });
+      }
       if (url.pathname === `/session/${SESSION}`) return Response.json({ id: SESSION });
       return Response.json({ code: "not_found" }, { status: 404 });
     },
@@ -173,6 +190,14 @@ class FakeUploader implements ObservedUploader {
   }
 
   recordChildSession(_sessionId: string, _child: UploadChildSession): void {}
+
+  /** Every batch of ids noted while a turn ran. */
+  readonly notedChildIds: string[][] = [];
+
+  noteChildSessionIds(_sessionId: string, ids: readonly string[]): number {
+    this.notedChildIds.push([...ids]);
+    return ids.length;
+  }
 
   captureSnapshot(_sessionId: string, trigger: "prompt" | "turn_completed", outcome?: "aborted"): void {
     this.entries.push({ kind: "snapshot", trigger, ...(outcome ? { outcome } : {}) });
@@ -306,6 +331,30 @@ describe("session upload observer", () => {
     expect(clock.waits.slice(0, 120).every((ms) => ms === 1_000)).toBe(true);
     expect(Math.max(...clock.waits)).toBe(10_000);
     expect(engine.control.statusReads).toBeLessThan(1_300);
+  });
+
+  test("the sub-agents below a running turn are listed about once a minute, ids only, before the turn settles", async () => {
+    const clock = fakeClock();
+    const engine = startEngine();
+    const sessionUploader = new FakeUploader();
+    engine.control.messages = [message("msg_user_0001", "user", "Split the work")];
+    engine.control.status = () => (clock.elapsed() < 5 * 60_000 ? "busy" : "idle");
+    clock.at(90_000, () => {
+      engine.control.children[SESSION] = [{ id: "ses_child_1" }, { id: "ses_child_2" }];
+      engine.control.children.ses_child_1 = [{ id: "ses_grand_1" }];
+      engine.control.children.ses_grand_1 = [{ id: "ses_great_1" }];
+      engine.control.children.ses_great_1 = [{ id: "ses_too_deep" }];
+    });
+    clock.at(5 * 60_000, () => engine.control.messages.push(message("msg_assistant_0001", "assistant", "Done")));
+
+    await observe({ sessionUploader, archive: fakeArchive(), observers: createSessionObservers(), target: engine.target, timing: clock.timing });
+
+    // About one listing a minute while busy (the first finds none yet), three layers down.
+    expect(sessionUploader.notedChildIds.length).toBeGreaterThanOrEqual(3);
+    expect(sessionUploader.notedChildIds.length).toBeLessThanOrEqual(5);
+    expect(sessionUploader.notedChildIds[0]).toEqual([]);
+    expect(sessionUploader.notedChildIds.at(-1)).toEqual(["ses_child_1", "ses_child_2", "ses_grand_1", "ses_great_1"]);
+    expect(sessionUploader.labels()).toEqual(["session.idle", "snapshot:turn_completed", "flush:turn"]);
   });
 
   test("a turn stopped with Esc is recorded as aborted: session.idle outcome, the snapshot's outcome and turn.completed's", async () => {
@@ -722,7 +771,7 @@ describe("session upload observer with the session uploader", () => {
     const uploads: Envelope[] = [];
     const sessionUploader = new SessionUploader({
       upload: async (_sessionId, compressed) => {
-        uploads.push(JSON.parse(zstdDecompressSync(compressed).toString("utf8")) as Envelope);
+        uploads.push(withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as Envelope);
         return Response.json({ ok: true }, { status: 201 });
       },
       changeDebounceMs: 60_000,
@@ -843,5 +892,59 @@ describe("message outlines and turn outcomes", () => {
       { info: { role: "user", agent: "compaction" }, parts: [{ type: "compaction" }] },
       { info: { role: "assistant", summary: true, finish: "stop" } },
     ])).toBe("stopped");
+  });
+});
+
+describe("turns left open by an ended process, and turns open at quit", () => {
+  test("a recovered turn on an idle session settles at the first read, with its messages, marked recovered", async () => {
+    const { control, target } = startEngine();
+    control.messages = [message("msg_1", "user"), message("msg_2", "assistant")];
+    const uploader = new FakeUploader();
+    const archive = fakeArchive();
+    const clock = fakeClock();
+    await observeUploadedSession({ sessionUploader: uploader, archive, observers: createSessionObservers(), target, timing: clock.timing, sessionId: SESSION, recovered: true });
+    expect(control.statusReads).toBe(1);
+    expect(uploader.turnMessageIds()).toEqual([["msg_1", "msg_2"]]);
+    const final = uploader.entries.find((entry) => entry.kind === "flush" && entry.final !== undefined);
+    expect(final).toMatchObject({ final: { recovered: true } });
+    expect(uploader.checkpoint).toBe("msg_2");
+    expect(archive.calls).toEqual(["followed", "completed"]);
+  });
+
+  test("a recovered turn still running (a restarted worker) is followed to its end as usual", async () => {
+    const { control, target } = startEngine();
+    let busy = true;
+    control.status = () => (busy ? "busy" : "idle");
+    control.messages = [message("msg_1", "user")];
+    const uploader = new FakeUploader();
+    const archive = fakeArchive();
+    const clock = fakeClock();
+    clock.at(30_000, () => {
+      busy = false;
+      control.messages.push(message("msg_2", "assistant"));
+    });
+    await observeUploadedSession({ sessionUploader: uploader, archive, observers: createSessionObservers(), target, timing: clock.timing, sessionId: SESSION, recovered: true });
+    expect(clock.elapsed()).toBeGreaterThanOrEqual(30_000);
+    expect(uploader.turnMessageIds()).toEqual([["msg_1", "msg_2"]]);
+  });
+
+  test("settleNow (an app quit) ends a running turn with the messages so far, once", async () => {
+    const { control, target } = startEngine();
+    control.status = () => "busy";
+    control.messages = [message("msg_1", "user"), message("msg_2", "assistant")];
+    const uploader = new FakeUploader();
+    const archive = fakeArchive();
+    const observers = createSessionObservers();
+    // A real clock: the observer is between status reads when the app quits.
+    void observeUploadedSession({ sessionUploader: uploader, archive, observers, target, sessionId: SESSION });
+    await Bun.sleep(50);
+    const observed = observers.sessions.get(SESSION);
+    expect(observed?.settleNow).toBeDefined();
+    await observed!.settleNow!();
+    await observed!.settleNow!();
+    observers.controller.abort();
+    expect(uploader.turnMessageIds()).toEqual([["msg_1", "msg_2"]]);
+    expect(uploader.labels()).toContain("session.quit_settled");
+    expect(uploader.entries.find((entry) => entry.kind === "flush" && entry.final !== undefined)).toMatchObject({ final: { reason: "app_quit" } });
   });
 });

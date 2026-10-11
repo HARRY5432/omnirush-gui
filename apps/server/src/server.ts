@@ -32,6 +32,7 @@ import {
 } from "./engine-pool.js";
 import { withEngineDirectoryFence } from "./engine-directory-fence.js";
 import { decodeEngineRouteParam, decodeEngineRoutePath } from "./engine-route-path.js";
+import { repairEngineStoresAfterServerError } from "./engine-store-repair.js";
 import {
   clearEngineInstanceReaperForConfig,
   EngineInstanceReaper,
@@ -193,16 +194,18 @@ import { CloudProviderSync, parseCloudProviderDenSession } from "./cloud-provide
 import { createEngineV2Preview, type EngineV2Preview } from "./engine-v2-preview.js";
 import { sessionUploaderEnabled } from "./session-uploader.js";
 import { startCaptureService, type CaptureService } from "./capture-client.js";
-import { buildOpencodeProxyUrl, engineTarget } from "./session-upload-observer.js";
+import { buildOpencodeProxyUrl, engineTarget, type EngineTarget } from "./session-upload-observer.js";
 import { OmniRushGatewayBroker } from "./omnirush-gateway-broker.js";
 import { awaitOmniRushModelCatalogSettled, startOmniRushModelCatalogSync } from "./omnirush-model-catalog-sync.js";
 import { OmniRushVoiceService, voiceProjectContext } from "./omnirush-voice.js";
+import { GOOD_SESSION_ID_PATTERN, readGoodSession } from "./omnirush-good-session.js";
 import { PROJECT_ARCHIVE_BASE_IDLE_MS, PROJECT_ARCHIVE_BASE_MAX_DEFER_MS, projectArchiveSettings } from "./project-archive.js";
 import type { ArchiveApiRequestInit } from "./session-archive/upload.js";
 import { runtimeStorageDir } from "./runtime-db.js";
 import pkg from "../package.json" with { type: "json" };
 import constants from "../../../constants.json" with { type: "json" };
-import { BestPracticesEngineReloads, waitForBestPracticesReady } from "./best-practices.js";
+import { BestPracticesEngineReloads } from "./best-practices.js";
+import { BUNDLED_ENGINE_VERSION } from "./engine-identity.js";
 
 export {
   isSupportedWorkspaceTextFilePath,
@@ -221,6 +224,8 @@ const commandAdmissionsByServer = new WeakMap<ServerConfig, Map<string, { finger
 const captureServicesByServer = new WeakMap<ServerConfig, CaptureService>();
 /** Voice dictation's broker hop (omnirush-voice.ts), per server. */
 const voiceServicesByServer = new WeakMap<ServerConfig, OmniRushVoiceService>();
+/** The broker's integrity read (rate-limited there), per server, for the checklist bar's "Good session ★". */
+const sessionIntegrityByServer = new WeakMap<ServerConfig, OmniRushGatewayBroker["sessionIntegrity"]>();
 
 /** Recent gateway fallbacks per sub-agent session, for the swarm plugin's task-result note. */
 const subagentGatewayFallbacks = new WeakMap<ServerConfig, Map<string, Array<Record<string, unknown>>>>();
@@ -719,10 +724,24 @@ async function assertWorkspaceOwnsProxiedSessionRead(
   const directory = resolveOpencodeDirectory(workspace);
   if (!sessionId || !directory) return;
 
-  const result = await createWorkspaceOpencodeClient(config, workspace, { sessionId }).session.get({ sessionID: sessionId });
+  const readSession = () => createWorkspaceOpencodeClient(config, workspace, { sessionId }).session.get({ sessionID: sessionId });
+  let result = await readSession();
+  // A 500 here is, in practice, a damaged row in the engine's session store
+  // (engine-store-repair.ts): set it aside while the engine runs and read again.
+  if (result.error !== undefined && result.response?.status === 500 && isEngineUnknownError(result.error)
+    && await repairEngineStoresAfterServerError() > 0) {
+    result = await readSession();
+  }
   if (result.error !== undefined) {
     if (result.response?.status === 404) {
       throw new ApiError(404, "session_not_found", "Session not found");
+    }
+    if (result.response?.status === 500 && isEngineUnknownError(result.error)) {
+      throw new ApiError(502, "opencode_session_unreadable", "This chat could not be read right now. Restart OmniRush.ai to repair it; your chats are kept.", {
+        status: result.response.status,
+        body: result.error,
+        path: `/session/${encodeURIComponent(sessionId)}`,
+      });
     }
     throw new ApiError(502, "opencode_request_failed", "OmniRush request failed", {
       ...(result.response ? { status: result.response.status } : {}),
@@ -900,6 +919,52 @@ function uploadDeletedSessionId(method: string, proxyPath: string): string | nul
 
 type EngineRequestTarget = { baseUrl: string; headers: Headers };
 
+/**
+ * The engine holding a chat of a local workspace, scoped like the proxy's
+ * requests, for settling a turn a previous process left open; null for a
+ * remote or unknown workspace, no engine, or an engine without the chat.
+ */
+async function captureEngineTarget(config: ServerConfig, sessionId: string, workspaceId: string): Promise<EngineTarget | null> {
+  const workspace = config.workspaces.find((item) => item.id === workspaceId);
+  if (!workspace || workspace.workspaceType === "remote") return null;
+  const route = enginePoolForConfig(config)?.routeRequest("GET", `/session/${sessionId}/message`) ?? null;
+  const connection = route ? null : resolveWorkspaceOpencodeConnection(config, workspace);
+  const baseUrl = route?.target.baseUrl ?? connection?.baseUrl?.trim() ?? "";
+  if (!baseUrl) return null;
+  const auth = route ? buildEngineAuthProbeHeader(route.target.username, route.target.password) : connection?.authHeader ?? null;
+  const directory = resolveOpencodeDirectory(workspace);
+  if (!(await engineHasSession(baseUrl, auth, directory, sessionId))) return null;
+  const headers = new Headers();
+  if (auth) headers.set("Authorization", auth);
+  const scoped = scopeWorkspaceOpencodeRequest(headers, "", directory);
+  return engineTarget(baseUrl, scoped.headers, scoped.search);
+}
+
+/** How long the existence check before a chat's first captured prompt waits for the engine. */
+const ENGINE_SESSION_CHECK_TIMEOUT_MS = 3_000;
+
+/**
+ * Whether the engine has this session: false only when it answers 404. An
+ * engine that is slow or unreachable counts as having it, so no prompt it
+ * does run goes uncaptured.
+ */
+export async function engineHasSession(baseUrl: string, auth: string | null, directory: string | null, sessionId: string): Promise<boolean> {
+  const headers = new Headers();
+  if (auth) headers.set("Authorization", auth);
+  const scoped = scopeWorkspaceOpencodeRequest(headers, "", directory);
+  try {
+    const response = await loopbackFetch(buildOpencodeProxyUrl(baseUrl, `/session/${encodeURIComponent(sessionId)}`, scoped.search), {
+      method: "GET",
+      headers: scoped.headers,
+      signal: AbortSignal.timeout(ENGINE_SESSION_CHECK_TIMEOUT_MS),
+    });
+    await response.body?.cancel().catch(() => undefined);
+    return response.status !== 404;
+  } catch {
+    return true;
+  }
+}
+
 const SESSION_STOP_TIMEOUT_MS = 5_000;
 const SESSION_STOP_MAX_SESSIONS = 100;
 
@@ -972,12 +1037,12 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
     credentials: gatewayCredentials
       ? {
           ...gatewayCredentials,
-          // Revoked or expired omnirush.ai credentials also discard spooled
-          // session uploads and queued project archives: a signed-out
-          // account leaves nothing queued.
+          // A device session the server retired (a refused refresh) keeps
+          // the queued uploads and archives, each stamped with its account,
+          // for when the account signs in again; only a user's sign-out
+          // deletes them (config.clearUploadQueue at the next start).
           invalidate: async () => {
             gatewayBroker.resetCapabilities();
-            await capture.signOut();
             await gatewayCredentials.invalidate?.();
           },
         }
@@ -1012,6 +1077,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
       });
     },
   });
+  if (gatewayBroker.enabled) sessionIntegrityByServer.set(config, (sessionId, options) => gatewayBroker.sessionIntegrity(sessionId, options));
   voiceServicesByServer.set(config, new OmniRushVoiceService(gatewayBroker, {
     log: (level, message, attributes) => logger.log(level, message, attributes),
   }));
@@ -1031,12 +1097,18 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
   const capture = startCaptureService({
     stateDir: runtimeStorageDir(config),
     appVersion,
-    engineVersion: OPENCODE_VERSION,
+    // "opencode/1.18.32-r2": the bundled engine, as every upload names it (engine-identity.ts).
+    engineVersion: BUNDLED_ENGINE_VERSION,
     log: (level, message, attributes) => logger.log(level, message, attributes),
+    // A turn a crashed process or worker left open is settled from the engine that has its chat.
+    engineTarget: (sessionId: string, workspaceId: string) => captureEngineTarget(config, sessionId, workspaceId),
+    ...(gatewayBroker.enabled
+      ? { accountId: () => gatewayBroker.accountId(), sessionIntegrity: (sessionId: string, options?: { summary?: boolean; turns?: number }) => gatewayBroker.sessionIntegrity(sessionId, options) }
+      : {}),
     sessionUploader: gatewayBroker.enabled
       ? {
-          upload: (sessionId, compressed, signal) => gatewayBroker.uploadSession(sessionId, compressed, signal),
-          uploadFile: (sessionId, path, size, signal) => gatewayBroker.uploadSessionFile(sessionId, path, size, signal),
+          upload: (sessionId, compressed, signal, request) => gatewayBroker.uploadSession(sessionId, compressed, signal, request),
+          uploadFile: (sessionId, path, size, signal, request) => gatewayBroker.uploadSessionFile(sessionId, path, size, signal, request),
           capabilities: () => gatewayBroker.sessionUploadCapabilities(),
           refreshAccessToken: () => gatewayBroker.refreshAccessToken(),
         }
@@ -1058,6 +1130,10 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
     },
   });
   captureServicesByServer.set(config, capture);
+  if (config.clearUploadQueue) {
+    // The user signed out: what the last account queued is deleted before anything else runs.
+    await Promise.race([capture.signOut(), new Promise((resolvePromise) => setTimeout(resolvePromise, 10_000).unref?.())]);
+  }
   try {
     await reconcileLocalManagedMcpRuntimeEntries(config);
   } catch (error) {
@@ -1462,19 +1538,10 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
 
   engineInstanceReaper.start();
   // The account's model catalog (omnirush-model-catalog-sync.ts): a change
-  // reaches an engine that re-reads its config (2.x) live, with no restart;
-  // any other engine reloads like a cloud provider sync, without stopping a run.
+  // reloads the engine like a cloud provider sync, without stopping a run.
   const modelCatalogSync = startOmniRushModelCatalogSync({
     config,
     broker: gatewayBroker,
-    applyLive: async (write) => {
-      const pool = enginePoolForConfig(config);
-      if (!pool) {
-        await write();
-        return false;
-      }
-      return pool.applyConfigLive(write);
-    },
     reloadEngine: async () => {
       if (config.workspaces.length === 0) return;
       await reloadOpencodeEngine(config, resolveEngineRuntimeWorkspace(config), engineMcpServerState, {
@@ -1936,6 +2003,11 @@ export function createWorkspaceOpencodeClient(
   });
 }
 
+/** The engine's answer to an unexpected failure: `{ name: "UnknownError", data: { message, ref } }`. */
+export function isEngineUnknownError(body: unknown): boolean {
+  return Boolean(body) && typeof body === "object" && (body as { name?: unknown }).name === "UnknownError";
+}
+
 export function unwrapOpencodeResult<T, E>(result: OpencodeClientResult<T, E>, path: string): NonNullable<T> {
   if (result.data != null) {
     return result.data;
@@ -2044,7 +2116,11 @@ export async function proxyOpencodeRequest(input: {
   const capture = workspace ? captureServicesByServer.get(input.config) : undefined;
   const uploadedSessionId = uploadSessionId(proxyPath);
   const deletedUploadedSessionId = uploadDeletedSessionId(method, proxyPath);
-  if (capture?.uploadEnabled && uploadedSessionId && workspace && workspace.workspaceType !== "remote") {
+  // A chat the engine does not have (a stale tab, a deleted chat) is not
+  // started: its prompt is refused, and it would only leave an empty start
+  // and end snapshot behind.
+  if (capture?.uploadEnabled && uploadedSessionId && workspace && workspace.workspaceType !== "remote"
+    && (capture.hasSession(uploadedSessionId) || await engineHasSession(baseUrl, auth, directory, uploadedSessionId))) {
     const promptDispatch = isUploadPromptDispatch(method, proxyPath);
     // Capture v2: the session-start manifest is taken before the prompt reaches the engine (at most about 3 s).
     if (promptDispatch) await capture.archiveStartGate(uploadedSessionId, workspace.path);
@@ -2192,6 +2268,17 @@ export async function proxyOpencodeRequest(input: {
         served = { baseUrl: reroute.target.baseUrl, headers: headersForEngineConnection(headers, reroute.target) };
       } finally {
         release?.();
+      }
+    }
+
+    // A session read the engine fails with 500 is, in practice, a damaged row
+    // in its session store (one row breaks the chat and the project's whole
+    // list): set it aside while the engine runs and read once more.
+    if (response.status === 500 && method === "GET" && /^\/(?:api\/)?session(?:\/|$)/.test(normalizeOpencodeProxyPath(proxyPath))) {
+      const failure = await response.clone().json().catch(() => null);
+      if (isEngineUnknownError(failure) && await repairEngineStoresAfterServerError() > 0) {
+        await response.body?.cancel().catch(() => undefined);
+        response = await loopbackFetch(buildOpencodeProxyUrl(served.baseUrl, proxyPath, search), { method, headers: served.headers, body, signal: input.recoverySignal });
       }
     }
 
@@ -3598,6 +3685,12 @@ function createRoutes(
     return jsonResponse({ ok: true, changed: result.changed, ...resolveApprovalMode(result.config) });
   });
 
+  // Files used (session-archive/files-used.ts): what omnirush.ai says, for the app's one-time notice of its line.
+  addRoute(routes, "GET", "/runtime-config/files-used", "client", async () => {
+    const status = await captureServicesByServer.get(config)?.filesUsedStatus().catch(() => null);
+    return jsonResponse(status ?? { active: null, available: null, consentText: null });
+  });
+
   addRoute(routes, "GET", "/runtime-config/best-practices", "client", async () => {
     const runtime = await readGlobalRuntimeOpencodeConfig(config);
     return jsonResponse({ enabled: runtime.bestPractices !== false });
@@ -3616,32 +3709,7 @@ function createRoutes(
     // Return a separate application status so the UI never calls it applied early.
     try {
       const pool = enginePoolForConfig(config);
-      const write = async () => { await writeOmniRushRuntimeConfigFile(config); };
-      if (pool && await pool.applyConfigLive(write)) {
-        const primary = primaryManagedEngineConnection(config);
-        if (!primary) throw new Error("Managed engine is unavailable");
-        const authorization = buildEngineAuthProbeHeader(primary.username, primary.password);
-        const baseUrl = primary.baseUrl.replace(/\/+$/, "");
-        const directories = [...new Set(config.workspaces
-          .filter((workspace) => resolveWorkspaceOpencodeConnection(config, workspace).baseUrl?.trim().replace(/\/+$/, "") === baseUrl)
-          .map(resolveOpencodeDirectory).filter((directory): directory is string => directory !== null))];
-        await waitForBestPracticesReady({
-          config, enabled,
-          read: async (signal) => await Promise.all(directories.map(async (directory) => {
-            const read = async (path: string): Promise<unknown> => {
-              const url = new URL(path, primary.baseUrl);
-              url.searchParams.set("directory", directory);
-              const response = await loopbackFetch(url, { headers: authorization ? { Authorization: authorization } : {}, signal });
-              if (!response.ok) throw new Error("Managed engine metadata is unavailable");
-              return await response.json();
-            };
-            const [agents, skills] = await Promise.all([read("/agent"), read("/skill")]);
-            return { agents, skills };
-          })),
-        });
-        return jsonResponse({ ok: true, enabled, changed: result.changed, engine: { status: "applied" } });
-      }
-      if (!pool) await write();
+      await writeOmniRushRuntimeConfigFile(config);
       const workspaces = config.workspaces.filter((workspace) => resolveWorkspaceOpencodeConnection(config, workspace).baseUrl?.trim());
       const workspace = findManagedEngineWorkspace(workspaces) ?? workspaces[0];
       if (!workspace) {
@@ -3846,6 +3914,14 @@ function createRoutes(
     return voice.transcribe(ctx.request);
   });
 
+  // "Good session ★" for one chat (omnirush-good-session.ts): never an error
+  // the bar would show; 404, 429, offline or signed out read "pending".
+  addRoute(routes, "GET", "/omnirush/integrity/:sessionId", "client", async (ctx) => {
+    const sessionId = ctx.params.sessionId ?? "";
+    if (!GOOD_SESSION_ID_PATTERN.test(sessionId)) throw new ApiError(400, "invalid_session_id", "A valid session id is required");
+    return jsonResponse(await readGoodSession(sessionIntegrityByServer.get(config) ?? null, sessionId));
+  });
+
   addRoute(routes, "GET", "/managed-policy", "client", async () =>
     jsonResponse({ policy: await managedDesktopPolicy(config).current() }));
   addRoute(routes, "POST", "/managed-policy/evaluate", "policy", async (ctx) => {
@@ -3856,6 +3932,15 @@ function createRoutes(
     // The plugin applies the git workflow rules (destructive marker, commit
     // identity refusal) only in guarded mode.
     return jsonResponse({ allowed: true, approvalMode: resolveApprovalMode(await readGlobalRuntimeOpencodeConfig(config)).mode });
+  });
+
+  // Where session capture runs (capture-client.ts), for the app's banner while it is not running.
+  // Signed out nothing is captured (the sign-in gate stops prompts): "off" shows no banner.
+  addRoute(routes, "GET", "/omnirush/capture/status", "client", async () => {
+    const capture = captureServicesByServer.get(config);
+    if (!capture?.uploadEnabled) return jsonResponse({ running: true, mode: "off", since: null, restarts: 0 });
+    const { mode, since, restarts } = capture.status();
+    return jsonResponse({ running: mode === "worker" || mode === "local", mode, since: since.toISOString(), restarts });
   });
 
   addRoute(routes, "GET", "/cloud-provider-sync/status", "client", async () => {

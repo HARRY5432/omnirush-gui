@@ -391,6 +391,15 @@ export function snapshotEngineState(state) {
  * apps have no visible stdout, so without this file every engine rollover
  * reason and reload trigger is lost. An explicit OMNIRUSH_SERVER_LOG_FILE wins.
  */
+/**
+ * Set by a user's sign-out, cleared once a server started with it: that
+ * server deletes the queued uploads and archives first. On disk, so a quit
+ * before the next start still clears them at the one after.
+ */
+export function uploadQueueClearMarkerPath(userDataDir) {
+  return path.join(userDataDir, "omnirush-upload-queue-clear");
+}
+
 export function resolveOmniRushServerLogFile(userDataDir, env = process.env) {
   const explicit = String(env.OMNIRUSH_SERVER_LOG_FILE ?? "").trim();
   if (explicit) return explicit;
@@ -1824,17 +1833,6 @@ export function createRuntimeManager({
     };
   }
 
-  async function pinnedOpencodeInstallCommand() {
-    const constantsPath = path.resolve(desktopRoot, "../../constants.json");
-    const payload = JSON.parse(await readFile(constantsPath, "utf8"));
-    const version = String(payload?.opencodeVersion ?? "").trim().replace(/^v/, "");
-    if (!version) {
-      throw new Error("constants.json is missing opencodeVersion");
-    }
-    // The 2.x engine ships on npm as @opencode/cli (binaries `opencode` / `opencode2`).
-    return `npm install -g @opencode/cli@${version}`;
-  }
-
   function processMatchesSidecar(command) {
     return commandMatchesPackagedSidecar(command, sidecarDirs);
   }
@@ -2204,6 +2202,7 @@ export function createRuntimeManager({
     process.env.OMNIRUSH_DESKTOP_USER_DATA_DIR = userDataDir;
     omnirushServerState.logFilePath = logFilePath;
     const { startEmbeddedServer } = await import(embeddedServerImportUrl(embeddedPath));
+    const clearUploadQueue = existsSync(uploadQueueClearMarkerPath(userDataDir));
     // startEmbeddedServer falls back to an OS-assigned port if `port` races
     // into EADDRINUSE (see apps/server/src/serve-node.ts), so the bound port
     // below is authoritative.
@@ -2225,6 +2224,7 @@ export function createRuntimeManager({
       localManagedMcpVaultKey,
       appVersion: typeof appVersion === "string" && appVersion.trim() ? appVersion.trim() : undefined,
       captureFileUpload: typeof captureFileUpload === "function" ? captureFileUpload : undefined,
+      clearUploadQueue,
       // Bundled UI-control MCP launch for the startup migration of persisted
       // `npx -y omnirush-ui-mcp` entries; null removes those entries instead.
       omnirushUiMcp: omnirushUiMcpLaunch() ?? null,
@@ -2250,6 +2250,7 @@ export function createRuntimeManager({
         : undefined,
     });
     inProcessServer = handle;
+    if (clearUploadQueue) await rm(uploadQueueClearMarkerPath(userDataDir), { force: true }).catch(() => undefined);
     omnirushServerState.managedOpencodeExecution = handle.managedOpencodeExecution ?? null;
     engineState.managedByServer = Boolean(handle.managedOpencode);
     engineState.managedPid = handle.managedOpencode?.pid ?? null;
@@ -2591,27 +2592,15 @@ export function createRuntimeManager({
   }
 
   async function engineInstall() {
-    if (process.platform === "win32") {
-      return {
-        ok: false,
-        status: -1,
-        stdout: "",
-        stderr:
-          "Guided install is not supported on Windows yet. Install the required OmniRush runtime manually, then restart OmniRush.ai.",
-      };
-    }
-
-    const installDir = path.join(app.getPath("home"), ".opencode", "bin");
-    const command = await pinnedOpencodeInstallCommand();
-    const result = await runShellCommand("bash", ["-lc", command], {
-      env: { ...(await buildChildEnv()), OPENCODE_INSTALL_DIR: installDir },
-      timeoutMs: 180_000,
-    });
+    // The engine is OmniRush.ai's own build of opencode 1.18.32 and ships
+    // inside the app (resources/sidecars); there is no separate installer.
+    // An upstream opencode install would keep its sessions apart from the
+    // app's, so none is offered.
     return {
-      ok: result.status === 0,
-      status: result.status,
-      stdout: result.stdout,
-      stderr: result.stderr,
+      ok: false,
+      status: -1,
+      stdout: "",
+      stderr: "The OmniRush engine ships inside OmniRush.ai. Reinstall OmniRush.ai to restore it, then restart the app.",
     };
   }
 
@@ -2682,6 +2671,11 @@ export function createRuntimeManager({
     engineInstall,
     omnirushServerInfo,
     omnirushServerRestart: (options) => withRuntimeLifecycle(() => omnirushServerRestart(options)),
+    /** A user's sign-out: the next server start deletes the queued uploads and archives. */
+    markUploadQueueClear: async () => {
+      await mkdir(userDataDir, { recursive: true });
+      await writeFile(uploadQueueClearMarkerPath(userDataDir), `${new Date().toISOString()}\n`, { mode: 0o600 });
+    },
     opencodeMcpAuth,
     sandboxCleanupOmniRushContainers,
   };

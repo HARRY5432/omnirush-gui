@@ -16,6 +16,11 @@ import {
   MAX_UPLOAD_TRACE_BYTES,
   MAX_UPLOAD_TRACE_EVENTS,
   MAX_UPLOAD_WEB_VISIT_TEXT_BYTES,
+  MAX_SPOOL_AGE_MS,
+  uploadIdempotencyKey,
+  serverSessionPosition,
+  parseJournal,
+  integrityFindings,
   SessionUploader,
   isRetryableUploadStatus,
   mapBounded,
@@ -39,6 +44,16 @@ import {
   workspaceRelativePath,
 } from "./session-uploader.js";
 import { SESSION_UPLOAD_BUDGET, sessionUploadTimeoutMs, type SessionUploadBudget } from "./session-upload-budget.js";
+
+/** Schema 1/2 trace uploads carry their events only in files[0] (__omnirush__/trace.json): read them back as `trace`. */
+function withTraceEvents<T>(envelope: T): T {
+  const record = envelope as Record<string, unknown>;
+  if (record.trace !== undefined || !Array.isArray(record.files)) return envelope;
+  const file = (record.files as Array<{ path?: string; content?: string }>).find((item) => item.path === "__omnirush__/trace.json");
+  if (!file?.content) return envelope;
+  return { ...record, trace: (JSON.parse(file.content) as { events?: unknown[] }).events ?? [] } as T;
+}
+
 
 const execFileAsync = promisify(execFile);
 const roots: string[] = [];
@@ -93,7 +108,7 @@ describe("session uploader privacy", () => {
       upload: async (sessionId, compressed) => {
         uploads.push({
           sessionId,
-          envelope: JSON.parse(zstdDecompressSync(compressed).toString("utf8")),
+          envelope: withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))),
         });
         return Response.json({ ok: true }, { status: 201 });
       },
@@ -127,7 +142,7 @@ describe("session uploader privacy", () => {
     const uploads: Array<Record<string, unknown>> = [];
     const sessionUploader = new SessionUploader({
       upload: async (_sessionId, compressed) => {
-        const envelope = JSON.parse(zstdDecompressSync(compressed).toString("utf8")) as Record<string, unknown>;
+        const envelope = withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as Record<string, unknown>;
         uploads.push(envelope);
         if (envelope.snapshot_type === "trace" && uploads.filter((item) => item.snapshot_type === "trace").length === 1) {
           traceStarted();
@@ -161,7 +176,7 @@ describe("session uploader privacy", () => {
     const uploads: Array<Record<string, unknown>> = [];
     const sessionUploader = new SessionUploader({
       upload: async (_sessionId, compressed) => {
-        uploads.push(JSON.parse(zstdDecompressSync(compressed).toString("utf8")) as Record<string, unknown>);
+        uploads.push(withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as Record<string, unknown>);
         return Response.json({ ok: true }, { status: 201 });
       },
       fallbackScanMs: 60_000,
@@ -172,12 +187,283 @@ describe("session uploader privacy", () => {
     sessionUploader.flushTrace(sessionId);
     await sessionUploader.stop();
 
-    const trace = uploads.find((item) => item.snapshot_type === "trace");
-    expect(trace).toBeDefined();
-    const traceFile = (trace?.files as Array<{ content: string }>)[0];
-    const parsed = JSON.parse(traceFile.content) as { trace_truncated: boolean; dropped_event_count: number };
-    expect(parsed.trace_truncated).toBe(true);
-    expect(parsed.dropped_event_count).toBeGreaterThanOrEqual(1);
+    // The session's leading client.launch event goes out in a batch of its own.
+    const traces = uploads
+      .filter((item) => item.snapshot_type === "trace")
+      .map((item) => JSON.parse((item.files as Array<{ content: string }>)[0]!.content) as { trace_truncated: boolean; dropped_event_count: number; events: Array<{ type: string }> });
+    expect(traces.length).toBeGreaterThan(0);
+    const parsed = traces.find((item) => item.trace_truncated);
+    expect(parsed).toBeDefined();
+    expect(parsed!.dropped_event_count).toBeGreaterThanOrEqual(1);
+  });
+
+  test("every upload carries the Idempotency-Key of its session, segment, sequence and type, and its sequence is taken first", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-keys-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-keys-state-"));
+    roots.push(root, stateDir);
+    await writeFile(join(root, "app.txt"), "hello\n");
+    const sent: Array<{ key: string | undefined; envelope: Record<string, unknown> }> = [];
+    const sessionUploader = new SessionUploader({
+      capabilities: async () => ({ schema_versions: [1, 2], canonical_trace: false, idempotency_key: true, integrity: true, integrity_summary: true }),
+      stateDir,
+      upload: async (_sessionId, compressed, _signal, request) => {
+        sent.push({ key: request?.idempotencyKey, envelope: withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as Record<string, unknown> });
+        // An envelope the server refuses keeps its sequence: the next one never reuses its key.
+        return sent.length === 2 ? Response.json({ detail: "bad" }, { status: 422 }) : Response.json({ ok: true }, { status: 201 });
+      },
+      fallbackScanMs: 60_000,
+    });
+    const sessionId = "session-keys-1234";
+    sessionUploader.startSession(sessionId, "workspace-keys", root);
+    sessionUploader.recordTrace(sessionId, "tool.call", {});
+    sessionUploader.flushTrace(sessionId);
+    await sessionUploader.idle(sessionId);
+    sessionUploader.recordTrace(sessionId, "tool.call", {});
+    sessionUploader.flushTrace(sessionId);
+    await sessionUploader.stop();
+    expect(sent.map((item) => [item.envelope.snapshot_type, item.envelope.sequence])).toEqual([["start", 1], ["trace", 2], ["trace", 3], ["end", 4]]);
+    for (const item of sent) {
+      const envelope = item.envelope as { session_id: string; session_segment: number; sequence: number; snapshot_type: "start" | "trace" | "end" };
+      expect(item.key).toBe(uploadIdempotencyKey(envelope.session_id, envelope.session_segment, envelope.sequence, envelope.snapshot_type));
+    }
+  });
+
+  test("a chat the local ledger does not know continues after the server's segment and sequence", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-position-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-position-state-"));
+    roots.push(root, stateDir);
+    const envelopes: Array<Record<string, unknown>> = [];
+    const asked: string[] = [];
+    const sessionUploader = new SessionUploader({
+      capabilities: async () => ({ schema_versions: [1, 2], canonical_trace: false, idempotency_key: true, integrity: true, integrity_summary: true }),
+      stateDir,
+      upload: async (_sessionId, compressed) => {
+        envelopes.push(withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as Record<string, unknown>);
+        return Response.json({ ok: true }, { status: 201 });
+      },
+      sessionIntegrity: async (sessionId, options) => {
+        asked.push(`${sessionId}:${options?.summary === true}`);
+        return Response.json({ session_id: sessionId, segments: [
+          { segment: 1, sequences: [1, 2, 3], gaps: [], max_sequence: 3 },
+          { segment: 3, sequences: [9, 10], gaps: [], max_sequence: 10 },
+        ] });
+      },
+      fallbackScanMs: 60_000,
+    });
+    const sessionId = "session-position-1234";
+    sessionUploader.startSession(sessionId, "workspace-position", root);
+    await sessionUploader.stop();
+    expect(asked).toEqual([`${sessionId}:true`]);
+    expect(envelopes[0]).toMatchObject({ snapshot_type: "start", trigger: "resume", session_segment: 4, sequence: 11, session_resumed: true });
+  });
+
+  test("a new chat the server has never seen starts at segment 1; the lookup is skipped once the ledger knows it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-newchat-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-newchat-state-"));
+    roots.push(root, stateDir);
+    const envelopes: Array<Record<string, unknown>> = [];
+    let asked = 0;
+    const make = () => new SessionUploader({
+      capabilities: async () => ({ schema_versions: [1, 2], canonical_trace: false, idempotency_key: true, integrity: true, integrity_summary: true }),
+      stateDir,
+      upload: async (_sessionId, compressed) => {
+        envelopes.push(withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as Record<string, unknown>);
+        return Response.json({ ok: true }, { status: 201 });
+      },
+      sessionIntegrity: async () => {
+        asked += 1;
+        return Response.json({ detail: "session_not_found" }, { status: 404 });
+      },
+      fallbackScanMs: 60_000,
+    });
+    const first = make();
+    first.startSession("session-newchat-1234", "workspace-newchat", root);
+    await first.stop();
+    const second = make();
+    second.startSession("session-newchat-1234", "workspace-newchat", root);
+    await second.stop();
+    expect(asked).toBe(1);
+    expect(envelopes.filter((item) => item.snapshot_type === "start").map((item) => [item.session_segment, item.sequence])).toEqual([[1, 1], [2, 3]]);
+  });
+
+  test("an Idempotency-Key the server holds with other bytes moves the chat past the server's numbering and sends the trace again once", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-reused-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-reused-state-"));
+    roots.push(root, stateDir);
+    const accepted: Array<Record<string, unknown>> = [];
+    let lookups = 0;
+    const sessionUploader = new SessionUploader({
+      capabilities: async () => ({ schema_versions: [1, 2], canonical_trace: false, idempotency_key: true, integrity: true, integrity_summary: true }),
+      stateDir,
+      upload: async (_sessionId, compressed) => {
+        const envelope = withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as Record<string, unknown>;
+        // The server already holds segment 1 up to sequence 5 (this device's ledger was lost).
+        if (envelope.session_segment === 1 && Number(envelope.sequence) <= 5 && envelope.snapshot_type === "trace") {
+          return Response.json({ detail: "idempotency_key_reused" }, { status: 409 });
+        }
+        accepted.push(envelope);
+        return Response.json({ ok: true }, { status: 201 });
+      },
+      sessionIntegrity: async () => {
+        lookups += 1;
+        // Offline for the first lookup at start; known by the time of the 409.
+        return lookups === 1
+          ? Response.json({ detail: "unavailable" }, { status: 503 })
+          : Response.json({ segments: [{ segment: 1, sequences: [1, 2, 3, 4, 5], gaps: [], max_sequence: 5 }] });
+      },
+      fallbackScanMs: 60_000,
+    });
+    const sessionId = "session-reused-1234";
+    sessionUploader.startSession(sessionId, "workspace-reused", root);
+    sessionUploader.recordTrace(sessionId, "tool.call", { n: 1 });
+    sessionUploader.flushTrace(sessionId);
+    await sessionUploader.stop();
+    const trace = accepted.find((item) => item.snapshot_type === "trace");
+    expect(trace).toMatchObject({ session_segment: 2, sequence: 6 });
+    expect(JSON.stringify(accepted)).toContain("collector.resegmented");
+    expect(accepted.map((item) => [item.snapshot_type, item.session_segment, item.sequence])).toEqual([["start", 1, 1], ["trace", 2, 6], ["trace", 2, 7], ["end", 2, 8]]);
+  });
+
+  test("reads the server's position from an integrity answer", () => {
+    expect(serverSessionPosition({ segments: [{ segment: null, sequences: [1, 4], max_sequence: 4 }, { segment: 2, sequences: [7], max_sequence: 7 }] })).toEqual({ segment: 2, sequence: 7 });
+    expect(serverSessionPosition({ segments: [] })).toBeNull();
+    expect(serverSessionPosition({ detail: "session_not_found" })).toBeNull();
+    expect(serverSessionPosition({ summary: true, max_segment: 3, max_sequence: 12, segments: [] })).toEqual({ segment: 3, sequence: 12 });
+    expect(serverSessionPosition({ summary: true, max_segment: null, max_sequence: null, segments: [] })).toBeNull();
+  });
+
+  test("the ledger keeps far more than 512 chats, so an older one resumed continues its numbering; only the newest keep sub-agent detail", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-ledger-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-ledger-state-"));
+    roots.push(root, stateDir);
+    const sessions: Record<string, unknown> = {};
+    for (let index = 0; index < 1_200; index += 1) {
+      sessions[`session-ledger-${String(index).padStart(5, "0")}`] = {
+        segment: 2,
+        nextSequence: 40,
+        lastSeenAt: new Date(Date.UTC(2026, 0, 1) + index * 60_000).toISOString(),
+        childSessionIds: ["child-a"],
+      };
+    }
+    await writeFile(join(stateDir, "omnirush-upload-sessions.json"), JSON.stringify({ version: 1, sessions }));
+    const envelopes: Array<Record<string, unknown>> = [];
+    const sessionUploader = new SessionUploader({
+      stateDir,
+      upload: async (_sessionId, compressed) => {
+        envelopes.push(withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as Record<string, unknown>);
+        return Response.json({ ok: true }, { status: 201 });
+      },
+      fallbackScanMs: 60_000,
+    });
+    // The oldest chat of the 1,200 (it fell out of the old 512 cap).
+    sessionUploader.startSession("session-ledger-00000", "workspace-ledger", root);
+    await sessionUploader.stop();
+    expect(envelopes[0]).toMatchObject({ snapshot_type: "start", session_segment: 3, sequence: 41, session_resumed: true });
+    const ledger = JSON.parse(await readFile(join(stateDir, "omnirush-upload-sessions.json"), "utf8")) as { sessions: Record<string, { childSessionIds?: string[] }> };
+    expect(Object.keys(ledger.sessions)).toHaveLength(1_200);
+    expect(Object.values(ledger.sessions).filter((record) => record.childSessionIds)).toHaveLength(512);
+  });
+
+  test("a crash mid-turn loses no trace event: the next start uploads the journal in its own segment, marked recovered, and settles the open turn", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-journal-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-journal-state-"));
+    roots.push(root, stateDir);
+    await writeFile(join(root, "app.txt"), "hello\n");
+    const envelopes: Array<Record<string, unknown>> = [];
+    const upload = async (_sessionId: string, compressed: Uint8Array) => {
+      envelopes.push(withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as Record<string, unknown>);
+      return Response.json({ ok: true }, { status: 201 });
+    };
+    const crashed = new SessionUploader({ stateDir, upload, fallbackScanMs: 60_000 });
+    const sessionId = "session-journal-1234";
+    crashed.startSession(sessionId, "workspace-journal", root);
+    await crashed.idle(sessionId);
+    crashed.captureSnapshot(sessionId, "prompt");
+    crashed.recordTrace(sessionId, "engine.request", { body: "do the task" });
+    crashed.recordTrace(sessionId, "tool.call", { name: "edit" });
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    // The process dies here: no stop(), nothing flushed.
+    expect(envelopes.map((item) => item.snapshot_type)).toEqual(["start"]);
+    const journals = await readdir(join(stateDir, "omnirush-upload-journal"));
+    expect(journals).toHaveLength(1);
+
+    const recoveredTurns: Array<{ sessionId: string; workspaceId: string; root: string }> = [];
+    const next = new SessionUploader({ stateDir, upload, fallbackScanMs: 60_000, onRecoveredTurn: (turn) => recoveredTurns.push(turn) });
+    for (let waited = 0; waited < 5_000 && envelopes.length < 2; waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
+    const recovered = envelopes[1]!;
+    expect(recovered).toMatchObject({ snapshot_type: "trace", session_segment: 1, sequence: 2 });
+    const types = (recovered.trace as Array<{ type: string }>).map((event) => event.type);
+    expect(types[0]).toBe("collector.recovered");
+    expect(types).toContain("engine.request");
+    expect(types).toContain("tool.call");
+    expect(recoveredTurns).toEqual([{ sessionId, workspaceId: "workspace-journal", root }]);
+    expect(await readdir(join(stateDir, "omnirush-upload-journal"))).toEqual([]);
+    // The chat's next segment starts after the recovered upload.
+    next.startSession(sessionId, "workspace-journal", root);
+    await next.stop();
+    expect(envelopes.slice(2).map((item) => [item.snapshot_type, item.session_segment, item.sequence])).toEqual([["start", 2, 3], ["trace", 2, 4], ["end", 2, 5]]);
+  }, 20_000);
+
+  test("the journal holds only what is not yet handed to an upload, and is gone once the chat ends", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-journal2-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-journal2-state-"));
+    roots.push(root, stateDir);
+    const sessionUploader = new SessionUploader({
+      stateDir,
+      upload: async () => Response.json({ ok: true }, { status: 201 }),
+      fallbackScanMs: 60_000,
+    });
+    const sessionId = "session-journal2-1234";
+    sessionUploader.startSession(sessionId, "workspace-journal2", root);
+    sessionUploader.captureSnapshot(sessionId, "prompt");
+    sessionUploader.recordTrace(sessionId, "tool.call", { n: 1 });
+    sessionUploader.captureSnapshot(sessionId, "turn_completed");
+    sessionUploader.flushTrace(sessionId, { messages: [] });
+    await sessionUploader.idle(sessionId);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const dir = join(stateDir, "omnirush-upload-journal");
+    const [name] = await readdir(dir);
+    const journal = parseJournal(await readFile(join(dir, name!), "utf8"));
+    expect(journal?.meta).toMatchObject({ session_id: sessionId, turn_open: false, segment: 1 });
+    expect(journal?.events.map((event) => event.type) ?? []).not.toContain("tool.call");
+    await sessionUploader.stop();
+    expect(await readdir(dir)).toEqual([]);
+  }, 20_000);
+
+  test("reads a journal cut off mid-line by a crash", () => {
+    const meta = { v: 1 as const, session_id: "session-cut-1234", workspace_id: "ws", root: "/w", segment: 3, turn_open: true, at: "2026-10-10T00:00:00.000Z" };
+    const text = `${JSON.stringify({ m: meta })}\n${JSON.stringify({ e: { at: "t", type: "tool.call", data: { a: 1 } } })}\n{"e":{"at":"t","ty`;
+    expect(parseJournal(text)).toEqual({ meta, events: [{ at: "t", type: "tool.call", data: { a: 1 } }] });
+    expect(parseJournal(`${JSON.stringify({ e: { at: "t", type: "x" } })}\n`)).toBeNull();
+  });
+
+  test("a schema 2 trace upload carries its events in trace.json only; schema 3 in the top-level trace only", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-forms-"));
+    roots.push(root);
+    for (const canonical of [false, true]) {
+      const raw: Array<Record<string, unknown>> = [];
+      const sessionUploader = new SessionUploader({
+        upload: async (_sessionId, compressed) => {
+          raw.push(JSON.parse(zstdDecompressSync(compressed).toString("utf8")) as Record<string, unknown>);
+          return Response.json({ ok: true }, { status: 201 });
+        },
+        capabilities: async () => ({ schema_versions: canonical ? [1, 2, 3] : [1, 2], canonical_trace: canonical }),
+        fallbackScanMs: 60_000,
+      });
+      sessionUploader.startSession("session-forms-1234", "workspace-forms", root);
+      sessionUploader.recordTrace("session-forms-1234", "tool.call", {});
+      sessionUploader.flushTrace("session-forms-1234");
+      await sessionUploader.stop();
+      const trace = raw.find((item) => item.snapshot_type === "trace")!;
+      const files = trace.files as Array<{ path: string }>;
+      if (canonical) {
+        expect(Array.isArray(trace.trace)).toBe(true);
+        expect(files).toEqual([]);
+      } else {
+        expect("trace" in trace).toBe(false);
+        expect(files.map((file) => file.path)).toEqual(["__omnirush__/trace.json"]);
+      }
+    }
   });
 
   test("persists session segments and message checkpoints across a resume", async () => {
@@ -188,7 +474,7 @@ describe("session uploader privacy", () => {
     const makeUploader = () => new SessionUploader({
       stateDir,
       upload: async (_sessionId, compressed) => {
-        uploads.push(JSON.parse(zstdDecompressSync(compressed).toString("utf8")) as Record<string, unknown>);
+        uploads.push(withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as Record<string, unknown>);
         return Response.json({ ok: true }, { status: 201 });
       },
       fallbackScanMs: 60_000,
@@ -221,7 +507,7 @@ describe("session uploader privacy", () => {
     const uploads: Array<Record<string, unknown>> = [];
     const sessionUploader = new SessionUploader({
       upload: async (_sessionId, compressed) => {
-        uploads.push(JSON.parse(zstdDecompressSync(compressed).toString("utf8")) as Record<string, unknown>);
+        uploads.push(withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as Record<string, unknown>);
         return Response.json({ ok: true }, { status: 201 });
       },
       changeDebounceMs: 10,
@@ -252,7 +538,7 @@ describe("session uploader privacy", () => {
     const uploads: Array<Record<string, unknown>> = [];
     const sessionUploader = new SessionUploader({
       upload: async (_sessionId, compressed) => {
-        uploads.push(JSON.parse(zstdDecompressSync(compressed).toString("utf8")) as Record<string, unknown>);
+        uploads.push(withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as Record<string, unknown>);
         return Response.json({ ok: true }, { status: 201 });
       },
       fallbackScanMs: 60_000,
@@ -362,7 +648,7 @@ describe("session uploader privacy", () => {
     const types: string[] = [];
     // The backend refuses the start snapshot (a 400 is never spooled), so no manifest is accepted.
     const upload = async (_sessionId: string, compressed: Uint8Array) => {
-      const type = (JSON.parse(zstdDecompressSync(compressed).toString("utf8")) as { snapshot_type: string }).snapshot_type;
+      const type = (withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as { snapshot_type: string }).snapshot_type;
       types.push(type);
       return type === "start" ? Response.json({ error: "bad_request" }, { status: 400 }) : Response.json({ ok: true }, { status: 201 });
     };
@@ -402,7 +688,7 @@ const sha256 = (text: string) => createHash("sha256").update(text).digest("hex")
 function makeUploads() {
   const uploads: Envelope[] = [];
   const upload = async (_sessionId: string, compressed: Uint8Array) => {
-    uploads.push(JSON.parse(zstdDecompressSync(compressed).toString("utf8")) as Envelope);
+    uploads.push(withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as Envelope);
     return Response.json({ ok: true }, { status: 201 });
   };
   return { uploads, upload };
@@ -483,7 +769,7 @@ describe("session uploader envelope v2", () => {
         return { schema_versions: [1, 2, 3], canonical_trace: true };
       },
       upload: async (_sessionId, compressed) => {
-        const envelope = JSON.parse(zstdDecompressSync(compressed).toString("utf8")) as Envelope;
+        const envelope = withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as Envelope;
         attempts.push(envelope);
         if (envelope.schema_version === 3 && rejectSchema3) {
           rejectSchema3 = false;
@@ -511,10 +797,10 @@ describe("session uploader envelope v2", () => {
     const rejected = attempts[1]!;
     const fallback = attempts[2]!;
     expect(rejected.files).toEqual([]);
-    expect(rejected.trace?.map((event) => event.type)).toEqual(["engine.request"]);
+    expect(rejected.trace?.map((event) => event.type)).toEqual(["client.launch", "engine.request"]);
     expect(fallback.files.map((file) => file.path)).toEqual(["__omnirush__/trace.json"]);
     expect(fallback.trace?.map((event) => event.type)).toEqual(rejected.trace?.map((event) => event.type));
-    expect(JSON.parse(fallback.files[0]!.content).events.map((event: { type: string }) => event.type)).toEqual(["engine.request"]);
+    expect(JSON.parse(fallback.files[0]!.content).events.map((event: { type: string }) => event.type)).toEqual(["client.launch", "engine.request"]);
   });
 
   test("summarises a git repository without shipping internals or remote credentials", async () => {
@@ -544,10 +830,7 @@ describe("session uploader envelope v2", () => {
     await sessionUploader.stop();
 
     const start = uploads.find((item) => item.snapshot_type === "start")!;
-    const end = uploads.find((item) => item.snapshot_type === "end")!;
-    expect(start.workspace.git).toBeNull();
-    expect(start.workspace.git_deferred).toBe("session_end");
-    const gitBlock = end.workspace.git as {
+    const gitBlock = start.workspace.git as {
       commit: string; branch: string; dirty: boolean; upstream: string | null; ahead: number | null; behind: number | null;
       remotes: Array<{ name: string; url: string }>; recent_commits: Array<{ sha: string; at: string; subject: string }>;
       status: Array<{ code: string; path: string }>; diff: string; diff_truncated: boolean;
@@ -602,8 +885,7 @@ describe("session uploader envelope v2", () => {
     sessionUploader.startSession("session-v2-bigdiff-1", "workspace-bigdiff", root);
     await sessionUploader.stop();
 
-    const end = uploads.find((item) => item.snapshot_type === "end")!;
-    const gitBlock = end.workspace.git as { diff: string; diff_truncated: boolean };
+    const gitBlock = uploads[0]!.workspace.git as { diff: string; diff_truncated: boolean };
     expect(gitBlock.diff_truncated).toBe(true);
     expect(Buffer.byteLength(gitBlock.diff)).toBeLessThanOrEqual(MAX_UPLOAD_DIFF_BYTES);
     expect(gitBlock.diff).toContain("+line 0 ");
@@ -781,7 +1063,7 @@ describe("session uploader durable retry", () => {
       stateDir,
       upload: async (_sessionId, compressed) => {
         if (!healthy) return Response.json({ error: "unavailable" }, { status: 503 });
-        uploads.push(JSON.parse(zstdDecompressSync(compressed).toString("utf8")) as Envelope);
+        uploads.push(withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as Envelope);
         return Response.json({ ok: true }, { status: 201 });
       },
       log: (level, message) => { if (level === "warn") warnings.push(message); },
@@ -858,7 +1140,7 @@ describe("session uploader durable retry", () => {
     const first = new SessionUploader({
       stateDir,
       upload: async (_sessionId, compressed) => {
-        const envelope = JSON.parse(zstdDecompressSync(compressed).toString("utf8")) as Envelope;
+        const envelope = withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as Envelope;
         sent.push(String(envelope.snapshot_type));
         // The server's disk filled up before the session ended.
         return envelope.snapshot_type === "end" ? Response.json({ detail: "insufficient storage" }, { status: 507 }) : Response.json({ ok: true }, { status: 201 });
@@ -918,7 +1200,7 @@ describe("session uploader durable retry", () => {
       await uploader.clearSpool();
       await uploader.stop();
     }
-  });
+  }, 20_000);
 
   test("bounds the spool, drops permanently rejected uploads and clears on request", async () => {
     const root = await mkdtemp(join(tmpdir(), "omnirush-upload-spoolcap-"));
@@ -1128,21 +1410,135 @@ describe("session upload deadline and spool drain", () => {
     await sessionUploader.stop();
   });
 
-  test("drops an entry once it reaches the attempt limit", async () => {
+  test("a long outage keeps every entry however many attempts fail; only age drops one", async () => {
     const stateDir = await drainState();
-    await spoolEntry(stateDir, 1, 512, { attempts: 23 });
-    await spoolEntry(stateDir, 2, 512);
+    // 85 min of 503s used to drop an entry at its 24th attempt; it is kept now.
+    await spoolEntry(stateDir, 1, 512, { attempts: 400 });
+    await spoolEntry(stateDir, 2, 512, { created_at: new Date(Date.now() - 2 * 60 * 60_000).toISOString() });
     const warnings: string[] = [];
     const sessionUploader = new SessionUploader({
       stateDir,
       upload: async () => Response.json({ error: "unavailable" }, { status: 503 }),
-      log: (level, message) => { if (level === "warn") warnings.push(message); },
+      log: (level, message, attributes) => { if (level === "warn") warnings.push(`${message}:${String(attributes?.reason ?? "")}`); },
+      retryBaseMs: 60_000,
+      // A short age limit stands in for the 7 days.
+      spoolMaxAgeMs: 60 * 60_000,
+    });
+    expect(await sessionUploader.drainSpool()).toEqual({ delivered: 0, pending: 1 });
+    expect(warnings).toEqual(["OmniRush session upload artifact dropped from spool:expired"]);
+    expect(await sessionUploader.spoolStatus()).toEqual({ entries: 1, bytes: 512 });
+    await sessionUploader.stop();
+  });
+
+  test("the default age limit is seven days", () => {
+    expect(MAX_SPOOL_AGE_MS).toBe(7 * 24 * 60 * 60_000);
+  });
+
+  test("a non-retryable answer still drops the entry", async () => {
+    const stateDir = await drainState();
+    await spoolEntry(stateDir, 1, 512);
+    const sessionUploader = new SessionUploader({
+      stateDir,
+      upload: async () => Response.json({ detail: "idempotency_key_reused" }, { status: 409 }),
+      retryBaseMs: 60_000,
+    });
+    expect(await sessionUploader.drainSpool()).toEqual({ delivered: 0, pending: 0 });
+    expect(await sessionUploader.spoolStatus()).toEqual({ entries: 0, bytes: 0 });
+    await sessionUploader.stop();
+  });
+
+  test("traces have their own spool budget: a large snapshot never pushes one out", async () => {
+    const stateDir = await drainState();
+    await spoolEntry(stateDir, 1, 600, { snapshot_type: "trace", trigger: "trace_flush" });
+    await spoolEntry(stateDir, 2, 600, { snapshot_type: "trace", trigger: "trace_flush" });
+    await spoolEntry(stateDir, 3, 600);
+    const sessionUploader = new SessionUploader({
+      stateDir,
+      upload: async () => Response.json({ error: "unavailable" }, { status: 503 }),
+      retryBaseMs: 60_000,
+      spoolMaxBytes: 1_000,
+      spoolMaxTraceBytes: 1_000,
+    });
+    const uploads = sessionUploader as unknown as { enforceSpoolBounds(): Promise<void> };
+    await uploads.enforceSpoolBounds();
+    // The oldest trace went for the trace budget; the snapshot did not touch either trace.
+    const left = (await readdir(join(stateDir, "omnirush-upload-spool"))).filter((name) => name.endsWith(".json")).sort();
+    expect(left.map((name) => name.slice(-6, -5))).toEqual(["2", "3"]);
+    await sessionUploader.stop();
+  });
+
+  test("the spool is kept at start without an account and drained for that account once it is back", async () => {
+    const stateDir = await drainState();
+    await spoolEntry(stateDir, 1, 512, { account_id: "acct-a" });
+    await spoolEntry(stateDir, 2, 512, { account_id: "acct-b" });
+    await spoolEntry(stateDir, 3, 512);
+    // Signed out by a refused refresh: nothing uploads, and nothing is deleted.
+    const signedOut = new SessionUploader({ stateDir, retryBaseMs: 60_000 });
+    expect(signedOut.enabled).toBe(false);
+    await signedOut.stop();
+    expect(await signedOut.spoolStatus()).toEqual({ entries: 3, bytes: 1_536 });
+    const sent: string[] = [];
+    const sessionUploader = new SessionUploader({
+      stateDir,
+      upload: async (sessionId) => {
+        sent.push(sessionId);
+        return Response.json({}, { status: 201 });
+      },
+      accountId: async () => "acct-a",
+      retryBaseMs: 60_000,
+    });
+    // Account A's own entry and the unstamped one go out; account B's stays for B.
+    expect(await sessionUploader.drainSpool()).toEqual({ delivered: 2, pending: 0 });
+    expect(sent.sort()).toEqual(["session-drain-1", "session-drain-3"]);
+    expect(await sessionUploader.spoolStatus()).toEqual({ entries: 1, bytes: 512 });
+    await sessionUploader.stop();
+  });
+
+  test("while the account cannot be learned only this process's own entries go out", async () => {
+    const stateDir = await drainState();
+    await spoolEntry(stateDir, 1, 512);
+    const sent: string[] = [];
+    const sessionUploader = new SessionUploader({
+      stateDir,
+      upload: async (sessionId) => {
+        sent.push(sessionId);
+        return Response.json({}, { status: 201 });
+      },
+      accountId: async () => null,
       retryBaseMs: 60_000,
     });
     expect(await sessionUploader.drainSpool()).toEqual({ delivered: 0, pending: 1 });
-    expect(warnings).toEqual(["OmniRush session upload artifact dropped from spool"]);
-    expect(await sessionUploader.spoolStatus()).toEqual({ entries: 1, bytes: 512 });
+    expect(sent).toEqual([]);
     await sessionUploader.stop();
+  });
+
+  test("a spooled entry is re-sent with its Idempotency-Key and checked against the stored body hash", async () => {
+    const stateDir = await drainState();
+    const body = Buffer.alloc(512, 1);
+    const digest = createHash("sha256").update(body).digest("hex");
+    const key = uploadIdempotencyKey("session-drain-1", 2, 1, "start");
+    await spoolEntry(stateDir, 1, 512, { idempotency_key: key, body_sha256: digest });
+    const keys: Array<string | undefined> = [];
+    let answers = 0;
+    const sessionUploader = new SessionUploader({
+      capabilities: async () => ({ schema_versions: [1, 2], canonical_trace: false, idempotency_key: true, integrity: true, integrity_summary: true }),
+      stateDir,
+      upload: async (_sessionId, _compressed, _signal, request) => {
+        keys.push(request?.idempotencyKey);
+        answers += 1;
+        // The first answer names other bytes: the envelope is sent again.
+        return Response.json({ body_sha256: answers === 1 ? "0".repeat(64) : digest }, { status: 201 });
+      },
+      retryBaseMs: 60_000,
+    });
+    expect(await sessionUploader.drainSpool()).toEqual({ delivered: 1, pending: 0 });
+    expect(keys).toEqual([key, key]);
+    await sessionUploader.stop();
+  });
+
+  test("the Idempotency-Key is the sha256 of session, segment, sequence and type joined by newlines", () => {
+    expect(uploadIdempotencyKey("ses_abc12345", 2, 7, "trace")).toBe(createHash("sha256").update("ses_abc12345\n2\n7\ntrace").digest("hex"));
+    expect(uploadIdempotencyKey("ses_abc12345", 2, 7, "trace")).toMatch(/^[0-9a-f]{64}$/);
   });
 
   test("a sign-out aborts the spooled upload in flight and empties the spool", async () => {
@@ -1544,6 +1940,39 @@ describe("session uploader trace additions", () => {
     expect(resumedStart.session).toEqual({
       provider_id: "anthropic", model_id: "claude-sonnet-4-5", variant: "high", child_session_ids: ["ses_child_1", "ses_grandchild_1"],
     });
+    await second.stop();
+  });
+
+  test("child ids noted while the turn runs are listed at once, deduped, and kept across a restart without a transcript event", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-child-ids-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-child-ids-state-"));
+    roots.push(root, stateDir);
+    await writeFile(join(root, "app.txt"), "hello\n");
+    const { uploads, upload } = makeUploads();
+    const makeUploader = () => new SessionUploader({ stateDir, upload, fallbackScanMs: 60_000 });
+    const sessionId = "session-child-ids-1234";
+
+    const first = makeUploader();
+    first.startSession(sessionId, "workspace-child-ids", root);
+    await first.idle(sessionId);
+    expect(first.noteChildSessionIds(sessionId, ["ses_child_1", "ses_grandchild_1"])).toBe(2);
+    expect(first.noteChildSessionIds(sessionId, ["ses_child_1", sessionId, "bad id!", "ses_child_2"])).toBe(1);
+    expect(first.noteChildSessionIds("session-unknown", ["ses_child_9"])).toBe(0);
+    expect(await first.childSessionIds(sessionId)).toEqual(["ses_child_1", "ses_grandchild_1", "ses_child_2"]);
+    // The next envelope (here a trace flush) lists them.
+    first.recordTrace(sessionId, "session.idle", { status: "busy" });
+    first.flushTrace(sessionId);
+    await first.idle(sessionId);
+    expect(uploads.at(-1)!.session).toMatchObject({ child_session_ids: ["ses_child_1", "ses_grandchild_1", "ses_child_2"] });
+    // Ids only: the transcripts still come when the turn settles.
+    expect(traceEvents(uploads).filter((event) => event.type === "session.child")).toEqual([]);
+    // The app quits before the turn settles: the next start still lists them.
+    await first.stop();
+    const second = makeUploader();
+    second.startSession(sessionId, "workspace-child-ids", root);
+    await second.idle(sessionId);
+    const resumedStart = uploads.find((item) => item.snapshot_type === "start" && item.session_segment === 2)!;
+    expect(resumedStart.session).toMatchObject({ child_session_ids: ["ses_child_1", "ses_grandchild_1", "ses_child_2"] });
     await second.stop();
   });
 
@@ -1963,7 +2392,8 @@ describe("session uploader secret rails", () => {
       ["a.ts", 'const secret = "./secrets/key1.pem";'],
       ["a.ts", 'const secret = "../keys/key1.pem";'],
       ["a.ts", 'const secret = "~/.aws/credentials1";'],
-      ["a.ts", 'const secret = "C:/Users/me/token1.txt";'],
+      // (A profile path's account segment is masked, maskWindowsProfiles; a drive path elsewhere stays as it is.)
+      ["a.ts", 'const secret = "D:/keys/me/token1.txt";'],
       ["a.go", 'password := "secrets/db/primary"'],
       ["a.rb", 'password = "abcdefghijklmnopqrstuvwxyz"'],
       ["a.rb", 'password = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"'],
@@ -2551,14 +2981,13 @@ describe("session uploader scrubber parity: second-sample refinements", () => {
     await sessionUploader.stop();
 
     const start = uploads.find((item) => item.snapshot_type === "start")!;
-    const end = uploads.find((item) => item.snapshot_type === "end")!;
     const content = (path: string) => start.files.find((file) => file.path === path)?.content;
     // Workspace files: .py, .patch and .diff are source, so a bare name stays and a quoted literal goes.
     expect(content("app/settings.py")).toBe("import config\npassword = hunter2abc\n");
     expect(content("fix.patch")).toBe(PATCH.replace('"hunter2abc"', '"[REDACTED]"'));
     expect(content("notes.diff")).toBe("+password = hunter2abc\n");
     // The envelope's git diff scrubs the .py section as source, as the file itself.
-    const gitBlock = end.workspace.git as { diff: string };
+    const gitBlock = start.workspace.git as { diff: string };
     expect(gitBlock.diff).toContain("+password = hunter2abc");
     expect(gitBlock.diff).not.toContain("[REDACTED]");
   });
@@ -2582,7 +3011,7 @@ describe("session uploader gateway auth", () => {
       upload: async (_sessionId, compressed) => {
         counters.attempts += 1;
         const response = respond(counters.attempts);
-        if (response.ok) uploads.push(JSON.parse(zstdDecompressSync(compressed).toString("utf8")) as Envelope);
+        if (response.ok) uploads.push(withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as Envelope);
         return response;
       },
       ...(refresh
@@ -2680,19 +3109,19 @@ describe("session uploader gateway auth", () => {
     await sessionUploader.stop();
   });
 
-  test("drops the upload without a refresh or spool entry when the account is signed out", async () => {
+  test("keeps the upload in the spool, without a refresh, while this device has no account (a sign-in the server retired)", async () => {
     for (const status of [403, 401]) {
-      const { sessionUploader, sessionId, uploads, warnings, rejected, counters } = await authHarness(
+      const { sessionUploader, sessionId, uploads, rejected, counters } = await authHarness(
         () => unauthorized(status, { error: "omnirush_account_required" }),
         async () => "fresh-token",
       );
       expect(counters).toEqual({ attempts: 1, refreshes: 0 });
       expect(uploads).toHaveLength(0);
       expect(rejected).toHaveLength(0);
-      expect(await sessionUploader.spoolStatus()).toEqual({ entries: 0, bytes: 0 });
-      expect(await sessionUploader.sessionDeliveryStatus(sessionId)).toMatchObject({ failureCount: 1, lastSuccessAt: null });
-      const failed = warnings.find((warning) => warning.message === "OmniRush session upload operation failed");
-      expect(failed?.attributes).toMatchObject({ error: `sessionUploader upload failed with status ${status} (omnirush_account_required)` });
+      expect(await sessionUploader.spoolStatus()).toMatchObject({ entries: 1 });
+      // A drain while the account is still gone keeps it too.
+      await sessionUploader.drainSpool();
+      expect(await sessionUploader.spoolStatus()).toMatchObject({ entries: 1 });
       await sessionUploader.stop();
     }
   });
@@ -2726,7 +3155,7 @@ describe("session uploader snapshot cap", () => {
       upload: async (_sessionId, compressed) => {
         const buffer = zstdDecompressSync(compressed);
         rawBytes.push(buffer.length);
-        uploads.push(JSON.parse(buffer.toString("utf8")) as Envelope);
+        uploads.push(withTraceEvents(JSON.parse(buffer.toString("utf8")) as Envelope));
         return Response.json({ ok: true }, { status: 201 });
       },
       log: (level, message) => { if (level === "warn") warnings.push(message); },
@@ -3054,7 +3483,7 @@ describe("session uploader incremental snapshots", () => {
       stateDir,
       upload: async (_sessionId, compressed) => {
         if (status !== 201) return Response.json({ error: "rejected" }, { status });
-        uploads.push(JSON.parse(zstdDecompressSync(compressed).toString("utf8")) as Envelope);
+        uploads.push(withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as Envelope);
         return Response.json({ ok: true }, { status: 201 });
       },
       changeDebounceMs: 60_000,
@@ -3599,9 +4028,235 @@ describe("session uploader incremental snapshots", () => {
 
     const growthMB = (peak - baseline) / (1024 * 1024);
     expect(growthMB).toBeLessThan(120);
-    const start = JSON.parse(zstdDecompressSync(compressedEnvelopes[0]!).toString("utf8")) as Envelope;
+    const start = withTraceEvents(JSON.parse(zstdDecompressSync(compressedEnvelopes[0]!).toString("utf8"))) as Envelope;
     expect(start.snapshot_type).toBe("start");
     expect(start.files.reduce((sum, file) => sum + file.content.length, 0)).toBeGreaterThanOrEqual(58 * 1024 * 1024);
     expect(start.privacy).toMatchObject({ files_truncated: false });
   }, 60_000);
+});
+
+describe("upload features", () => {
+  test("without the backend's idempotency_key feature (or any capability answer) no Idempotency-Key is sent and no integrity read is made", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-nofeat-"));
+    roots.push(root);
+    const keys: Array<string | undefined> = [];
+    let integrity = 0;
+    for (const capabilities of [undefined, async () => ({ schema_versions: [1, 2], canonical_trace: false })]) {
+      const sessionUploader = new SessionUploader({
+        upload: async (_sessionId, _compressed, _signal, request) => {
+          keys.push(request?.idempotencyKey);
+          return Response.json({ ok: true }, { status: 201 });
+        },
+        sessionIntegrity: async () => {
+          integrity += 1;
+          return Response.json({ max_segment: 4, max_sequence: 9 });
+        },
+        ...(capabilities ? { capabilities } : {}),
+        fallbackScanMs: 60_000,
+      });
+      sessionUploader.startSession("session-nofeat-1234", "workspace-nofeat", root);
+      await sessionUploader.stop();
+    }
+    expect(keys.length).toBeGreaterThan(0);
+    expect(keys.every((key) => key === undefined)).toBe(true);
+    expect(integrity).toBe(0);
+  });
+});
+
+describe("integrity confirmation", () => {
+  const FEATURES = async () => ({ schema_versions: [1, 2], canonical_trace: false, idempotency_key: true, integrity: true, integrity_summary: true });
+
+  async function endedChat(options: { refuseSecond?: boolean } = {}) {
+    const root = await mkdtemp(join(tmpdir(), "omnirush-confirm-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-confirm-state-"));
+    roots.push(root, stateDir);
+    await writeFile(join(root, "app.txt"), "hello\n");
+    let uploads = 0;
+    const first = new SessionUploader({
+      stateDir,
+      capabilities: FEATURES,
+      upload: async () => {
+        uploads += 1;
+        return options.refuseSecond && uploads === 2 ? Response.json({ detail: "bad" }, { status: 422 }) : Response.json({ ok: true }, { status: 201 });
+      },
+      sessionIntegrity: async () => Response.json({ detail: "session_not_found" }, { status: 404 }),
+      confirm: false,
+      fallbackScanMs: 60_000,
+    });
+    first.startSession("session-confirm-1234", "workspace-confirm", root);
+    first.recordTrace("session-confirm-1234", "tool.call", {});
+    first.flushTrace("session-confirm-1234");
+    await first.stop();
+    return { root, stateDir };
+  }
+
+  test("a good or not-good answer is final; the ledger keeps it", async () => {
+    const { stateDir } = await endedChat();
+    let calls = 0;
+    const uploader = new SessionUploader({
+      stateDir,
+      capabilities: FEATURES,
+      upload: async () => Response.json({ ok: true }, { status: 201 }),
+      sessionIntegrity: async (_sessionId, options) => {
+        calls += 1;
+        expect(options).toEqual({ summary: true });
+        return Response.json({ integrity: "ok", reasons: [], good_session: true, good_session_reasons: [], segments: [{ segment: 1, sequences: [1, 2, 3], gaps: [] }] });
+      },
+      confirm: false,
+    });
+    expect(await uploader.confirmSession("session-confirm-1234")).toMatchObject({ verdict: "good", checks: 1 });
+    expect(calls).toBe(1);
+    await uploader.stop();
+    const ledger = JSON.parse(await readFile(join(stateDir, "omnirush-upload-sessions.json"), "utf8")) as { sessions: Record<string, { confirmation?: { verdict: string; nextAt?: string } }> };
+    expect(ledger.sessions["session-confirm-1234"]?.confirmation).toMatchObject({ verdict: "good" });
+    expect(ledger.sessions["session-confirm-1234"]?.confirmation?.nextAt).toBeUndefined();
+  });
+
+  test("a gap the ledger explains (an upload the server refused) asks for nothing; pending is asked again later", async () => {
+    const { stateDir } = await endedChat({ refuseSecond: true });
+    let repairs = 0;
+    const uploader = new SessionUploader({
+      stateDir,
+      capabilities: FEATURES,
+      upload: async () => Response.json({ ok: true }, { status: 201 }),
+      sessionIntegrity: async () => Response.json({ integrity: "incomplete", reasons: ["sequence_gaps"], good_session: "pending", segments: [{ segment: 1, sequences: [1, 3], gaps: [2] }] }),
+      repairTranscript: async () => {
+        repairs += 1;
+        return [[]];
+      },
+      confirm: false,
+    });
+    const confirmation = await uploader.confirmSession("session-confirm-1234");
+    expect(confirmation).toMatchObject({ verdict: "pending", checks: 1 });
+    expect(confirmation?.nextAt).toBeDefined();
+    expect(confirmation?.repairedAt).toBeUndefined();
+    expect(repairs).toBe(0);
+    await uploader.stop();
+  });
+
+  test("a gap nothing here explains gets the transcript re-sent from the engine, once", async () => {
+    const { stateDir, root } = await endedChat();
+    const sent: Array<Record<string, unknown>> = [];
+    const asked: Array<{ sessionId: string; workspaceId: string; root: string }> = [];
+    const uploader = new SessionUploader({
+      stateDir,
+      capabilities: FEATURES,
+      upload: async (_sessionId, compressed) => {
+        sent.push(withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as Record<string, unknown>);
+        return Response.json({ ok: true }, { status: 201 });
+      },
+      sessionIntegrity: async () => Response.json({ integrity: "incomplete", reasons: ["sequence_gaps"], good_session: "pending", segments: [{ segment: 1, sequences: [1, 3], gaps: [2] }] }),
+      repairTranscript: async (chat) => {
+        asked.push(chat);
+        return [[{ info: { id: "msg_1", role: "user" }, parts: [] }]];
+      },
+      confirm: false,
+    });
+    const first = await uploader.confirmSession("session-confirm-1234");
+    expect(first?.repairedAt).toBeDefined();
+    expect(asked).toEqual([{ sessionId: "session-confirm-1234", workspaceId: "workspace-confirm", root }]);
+    expect(sent).toHaveLength(1);
+    const types = (sent[0]!.trace as Array<{ type: string }>).map((event) => event.type);
+    expect(types[0]).toBe("collector.repair");
+    expect(types).toContain("turn.messages");
+    expect(sent[0]).toMatchObject({ snapshot_type: "trace", session_segment: 1, sequence: 4 });
+    await uploader.confirmSession("session-confirm-1234");
+    expect(asked).toHaveLength(1);
+    await uploader.stop();
+  });
+
+  test("a gap a spooled upload will fill drains the spool instead of re-sending", async () => {
+    const { stateDir } = await endedChat();
+    const spool = join(stateDir, "omnirush-upload-spool");
+    await mkdir(spool, { recursive: true });
+    const id = "000000000009-000009-00000009";
+    await writeFile(join(spool, `${id}.zst`), Buffer.alloc(32, 9));
+    await writeFile(join(spool, `${id}.json`), JSON.stringify({ id, session_id: "session-confirm-1234", snapshot_type: "trace", trigger: "trace_flush", sequence: 2, bytes: 32, created_at: new Date().toISOString(), attempts: 1 }));
+    let repairs = 0;
+    const delivered: string[] = [];
+    const uploader = new SessionUploader({
+      stateDir,
+      capabilities: FEATURES,
+      upload: async (sessionId) => {
+        delivered.push(sessionId);
+        return Response.json({ ok: true }, { status: 201 });
+      },
+      sessionIntegrity: async () => Response.json({ integrity: "incomplete", reasons: ["sequence_gaps"], good_session: "pending", segments: [{ segment: 1, sequences: [1, 3], gaps: [2] }] }),
+      repairTranscript: async () => {
+        repairs += 1;
+        return [[]];
+      },
+      confirm: false,
+      retryBaseMs: 60_000,
+    });
+    await uploader.confirmSession("session-confirm-1234");
+    await uploader.drainSpool();
+    expect(repairs).toBe(0);
+    expect(delivered).toContain("session-confirm-1234");
+    await uploader.stop();
+  });
+
+  test("at launch, recent ended chats without a final verdict are checked; a judged one is not", async () => {
+    const { stateDir } = await endedChat();
+    const ledgerPath = join(stateDir, "omnirush-upload-sessions.json");
+    const ledger = JSON.parse(await readFile(ledgerPath, "utf8")) as { version: 1; sessions: Record<string, Record<string, unknown>> };
+    const record = ledger.sessions["session-confirm-1234"]!;
+    ledger.sessions["session-judged-1234"] = { ...record, confirmation: { verdict: "not_good", checkedAt: new Date().toISOString(), checks: 1 } };
+    await writeFile(ledgerPath, JSON.stringify(ledger));
+    const checked: string[] = [];
+    const uploader = new SessionUploader({
+      stateDir,
+      capabilities: FEATURES,
+      upload: async () => Response.json({ ok: true }, { status: 201 }),
+      sessionIntegrity: async (sessionId) => {
+        checked.push(sessionId);
+        return Response.json({ integrity: "ok", reasons: [], good_session: true, segments: [] });
+      },
+    });
+    for (let waited = 0; waited < 25_000 && checked.length === 0; waited += 100) await new Promise((resolve) => setTimeout(resolve, 100));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(checked).toEqual(["session-confirm-1234"]);
+    await uploader.stop();
+  }, 40_000);
+
+  test("reads an integrity answer against the refusals the ledger holds", () => {
+    expect(integrityFindings({ good_session: "pending", reasons: ["sequence_gaps"], segments: [{ segment: 2, gaps: [5, 6] }, { segment: null, gaps: [1] }] }, ["2:5"]))
+      .toEqual({ verdict: "pending", gaps: ["2:6", "?:1"], missing: false });
+    expect(integrityFindings({ good_session: false, reasons: ["no_trace"], segments: [] })).toEqual({ verdict: "not_good", gaps: [], missing: true });
+    expect(integrityFindings("nope")).toBeNull();
+  });
+
+  test("keeps the Git baseline and defers only ordinary watched-edit metadata", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omnirush-git-review-"));
+    roots.push(root);
+    await writeFile(join(root, "note.txt"), "baseline\\n");
+    await execFileAsync("git", ["init", "-q", "-b", "main", root]);
+    await execFileAsync("git", ["-C", root, "add", "."]);
+    await execFileAsync("git", ["-C", root, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-qm", "baseline"]);
+    const uploads: Array<Record<string, unknown>> = [];
+    const uploader = new SessionUploader({
+      upload: async (_sessionId, compressed) => {
+        uploads.push(JSON.parse(zstdDecompressSync(compressed).toString("utf8")) as Record<string, unknown>);
+        return Response.json({ ok: true }, { status: 201 });
+      },
+      changeDebounceMs: 10,
+      fallbackScanMs: 60_000,
+    });
+    const sessionId = "session-git-review-1234";
+    uploader.startSession(sessionId, "workspace-git", root);
+    await uploader.idle(sessionId);
+    const start = uploads.find((item) => item.snapshot_type === "start")!;
+    const startGit = (start.workspace as { git: { commit: string; branch: string; dirty: string } }).git;
+    expect(startGit.branch).toBe("main");
+    expect(startGit.commit).toMatch(/^[0-9a-f]{40}$/);
+    await writeFile(join(root, "note.txt"), "edited\\n");
+    uploader.captureSnapshot(sessionId, "prompt");
+    await uploader.idle(sessionId);
+    const change = uploads.find((item) => item.snapshot_type === "change")!;
+    expect(change.workspace).toMatchObject({ git: null, git_deferred: "session_end" });
+    await uploader.stop();
+    const end = uploads.find((item) => item.snapshot_type === "end")!;
+    expect((end.workspace as { git: { commit: string } }).git.commit).toBe(startGit.commit);
+  });
+
 });

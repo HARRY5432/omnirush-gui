@@ -93,6 +93,7 @@ import {
   setOmniRushSentrySession,
 } from "./sentry.mjs";
 import { installStdioErrorHandlers } from "./stdio-errors.mjs";
+import { createTurnGuard } from "./turn-guard.mjs";
 import {
   createRendererCrashRecovery,
   installSocketTypeOfServiceGuard,
@@ -148,7 +149,10 @@ const BLANK_SLATE_LAUNCH = resolveBlankSlateLaunch({
   profile: processBlankSlateProfile,
 });
 const APP_NAME = BLANK_SLATE_LAUNCH.appName;
-let currentDisplayAppName = APP_NAME;
+// The name people see. APP_NAME stays the Electron app name because it names
+// the keychain item that holds the sign-in.
+const DISPLAY_APP_NAME = APP_NAME === DESKTOP_DISTRIBUTION.appName ? DESKTOP_DISTRIBUTION.displayName : APP_NAME;
+let currentDisplayAppName = DISPLAY_APP_NAME;
 installStdioErrorHandlers();
 installSocketTypeOfServiceGuard();
 await initOmniRushSentry({
@@ -178,7 +182,7 @@ const RELEASE_DOWNLOAD_BASE_URL = "https://github.com/omnirush-ai/omnirush-gui/r
 const RELEASE_PAGE_URL = "https://github.com/omnirush-ai/omnirush-gui/releases/latest";
 const DOCS_PAGE_URL = "https://github.com/omnirush-ai/omnirush-gui#readme";
 const applicationMenu = createApplicationMenu({
-  appName: APP_NAME,
+  appName: DISPLAY_APP_NAME,
   docsUrl: DOCS_PAGE_URL,
   getWindow: () => createMainWindow(),
 });
@@ -482,7 +486,7 @@ function windowsBrandShortcutPath() {
 }
 
 function windowsInstalledShortcutPath() {
-  return path.join(windowsProgramsPath(), windowsInstalledShortcutFileName(APP_NAME));
+  return path.join(windowsProgramsPath(), windowsInstalledShortcutFileName(DISPLAY_APP_NAME));
 }
 
 function windowsBrandShortcutMarkerPath() {
@@ -1103,6 +1107,11 @@ const IDLE_ROUTER_INFO = Object.freeze({
 
 let mainWindow = null;
 const pendingDeepLinks = [];
+const turnGuard = createTurnGuard({
+  showMessageBox: (win, options) => (win ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options)),
+  getWindow: () => (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null),
+  appName: APP_NAME,
+});
 
 browserPanel = createBrowserPanel({
   remoteDebugPort,
@@ -1353,7 +1362,8 @@ const omnirushAccountStore = createDesktopOmniRushAccountStore({
   // Sign-in, device code, token refresh, profile and sign-out.
   fetchImpl: desktopExternalFetch,
   loadSafeStorage: () => require("electron").safeStorage,
-  // Linux without a usable keyring only; unencrypted at rest, owner-only.
+  // Only while no keyring is usable (none on Linux, or one that refuses to
+  // encrypt); unencrypted at rest, owner-only.
   fallbackFilePath: path.join(app.getPath("userData"), "private-credentials", "omnirush-account.json"),
   onKeyringSealed: recordKeyringSealed("omnirush-account.bin"),
   onClientUpdate: (clientUpdate) => updateGate.signal({ kind: "profile", clientUpdate }),
@@ -1398,7 +1408,8 @@ const runtimeManager = createRuntimeManager({
     : createDesktopVaultKeyProvider({
         filePath: path.join(app.getPath("userData"), "local-managed-mcp-vault-key.bin"),
         loadSafeStorage: () => require("electron").safeStorage,
-        // Linux without a usable keyring only; unencrypted at rest, owner-only.
+        // Only while no keyring is usable (none on Linux, or one that refuses to
+        // encrypt); unencrypted at rest, owner-only.
         fallbackFilePath: path.join(app.getPath("userData"), "private-credentials", "local-managed-mcp-vault-key.json"),
         onKeyringSealed: recordKeyringSealed("local-managed-mcp-vault-key.bin"),
       }),
@@ -1444,6 +1455,8 @@ const wakeAutomationRunner = (wakeEvent) => {
   }
 };
 powerMonitor.on("resume", () => wakeAutomationRunner("resume"));
+// OS shutdown or logout never waits on the turn guard (a prevented quit would block it).
+powerMonitor.on("shutdown", () => turnGuard.allowQuit());
 powerMonitor.on("unlock-screen", () => wakeAutomationRunner("unlock-screen"));
 
 let runtimeDisposedForQuit = false;
@@ -2130,6 +2143,7 @@ const desktopCommandHandlers = {
         runtimeManager,
         uiControlServer,
         removeWindowsBrandShortcut,
+        allowQuit: () => turnGuard.allowQuit(),
       }, {
         preserveBootstrap: args[0]?.preserveBootstrap !== false,
         input: {
@@ -2162,6 +2176,11 @@ const desktopCommandHandlers = {
   "omnirushQualitySpins": async (event) => {
       return omnirushAccountStore.qualitySpinTotals();
   },
+  // The server's live checklist for the open session; null: the app shows its own.
+  "omnirushSessionStatus": async (event, ...args) => {
+      const input = args[0] && typeof args[0] === "object" ? args[0] : {};
+      return omnirushAccountStore.sessionStatus({ sessionId: input.sessionId });
+  },
   "omnirushQualitySpin": async (event, ...args) => {
       const input = args[0] && typeof args[0] === "object" ? args[0] : {};
       return omnirushAccountStore.spinQuality({ idempotencyKey: typeof input.idempotencyKey === "string" ? input.idempotencyKey : undefined });
@@ -2177,6 +2196,8 @@ const desktopCommandHandlers = {
       return result;
   },
   "omnirushAccountSignOut": async (event, ...args) => {
+      // Only a user's sign-out deletes what is queued for upload; a sign-in the server retired keeps it.
+      await runtimeManager.markUploadQueueClear();
       const result = await omnirushAccountStore.clear();
       await runtimeManager.omnirushServerRestart({ reason: "account_signed_out", source: "account", userInitiated: true });
       return { connected: false, remoteRevoked: result.remoteRevoked, reason: result.reason };
@@ -2374,7 +2395,8 @@ const desktopCommandHandlers = {
     currentDisplayAppName = applyBrandAppName(
       BLANK_SLATE_LAUNCH.enabled || DESKTOP_DISTRIBUTION.flavor === "enterprise" ? null : args[0],
       {
-      fallbackName: APP_NAME,
+      fallbackName: DISPLAY_APP_NAME,
+      electronFallbackName: APP_NAME,
       platform: process.platform,
       updateElectronAppName: process.platform === "darwin",
       runtimeProcess: process,
@@ -2541,6 +2563,12 @@ const desktopCommandHandlers = {
   "__setApplicationMenuVisible": async (event, ...args) => {
       return applicationMenu.setVisible(args[0]);
   },
+  "__setTurnRunning": async (event, ...args) => {
+      return turnGuard.setTurnRunning(args[0] === true);
+  },
+  "__setFinishState": async (event, ...args) => {
+      return turnGuard.setFinishState(args[0]);
+  },
 };
 
 if (isDevMode) {
@@ -2555,6 +2583,7 @@ if (isDevMode) {
       // Best effort — never block the relaunch on a flush failure.
     }
     setTimeout(() => {
+      turnGuard.allowQuit();
       app.relaunch();
       // Graceful quit (not app.exit) so before-quit teardown runs and managed
       // sidecars are stopped — a hard exit orphans them and they can hold
@@ -2719,9 +2748,20 @@ async function createMainWindow() {
     flushPendingDeepLinks();
   });
 
+  // Windows logout or shutdown never waits on the turn guard.
+  mainWindow.on("session-end", () => turnGuard.allowQuit());
+  // A turn still running: ask before the window goes (turn-guard.mjs).
+  mainWindow.on("close", (event) => {
+    const win = mainWindow;
+    turnGuard.guardClose(event, () => {
+      if (win && !win.isDestroyed()) win.close();
+    });
+  });
+
   mainWindow.on("closed", () => {
     browserPanel.destroy();
     mainWindow = null;
+    turnGuard.setTurnRunning(false);
   });
 
   const recoverRendererCrash = createRendererCrashRecovery({
@@ -2737,6 +2777,8 @@ async function createMainWindow() {
     },
   });
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
+    // The renderer that said a turn runs is gone; a reload says it again.
+    turnGuard.setTurnRunning(false);
     recoverRendererCrash(details);
   });
 
@@ -2826,6 +2868,7 @@ ipcMain.handle("omnirush:update-gate:refresh", async () => {
   setInterval(readProfile, 30 * 60_000).unref?.();
 }
 ipcMain.handle("omnirush:shell:relaunch", async () => {
+  turnGuard.allowQuit();
   app.relaunch();
   app.quit();
 });
@@ -2910,9 +2953,15 @@ const browserLoginSync = createBrowserLoginSync({
 browserLoginSync.registerIpc(ipcMain, { evalSeam: browserLoginEvalSeam });
 
 registerMigrationIpc({ app, ipcMain });
-const { ensureAutoUpdater, prepareInstallOnQuit } = registerUpdaterIpc({
+const { ensureAutoUpdater, prepareInstallOnQuit, offerMoveAtLaunch } = registerUpdaterIpc({
   app,
   ipcMain,
+  allowQuit: () => turnGuard.allowQuit(),
+  restoreQuitGuard: () => turnGuard.restoreQuit(),
+  nativeUpdater: require("electron").autoUpdater,
+  showMessageBox: (options) => (mainWindow && !mainWindow.isDestroyed()
+    ? dialog.showMessageBox(mainWindow, options)
+    : dialog.showMessageBox(options)),
   getMainWindow: () => mainWindow,
   // All distributions intentionally share one application identifier, so they also
   // share Squirrel's ShipIt domain. Keep the shared default rather than
@@ -2943,6 +2992,7 @@ or use: pnpm dev:worktree`);
 } else {
   app.on("before-quit", (event) => {
     if (runtimeDisposedForQuit) return;
+    if (!turnGuard.guardQuit(event, () => app.quit())) return;
     event.preventDefault();
     if (runtimeDisposeInProgress) return;
     showShutdownScreen();
@@ -3007,7 +3057,8 @@ or use: pnpm dev:worktree`);
         ? null
         : bootstrapConfig.brandAppName,
       {
-      fallbackName: APP_NAME,
+      fallbackName: DISPLAY_APP_NAME,
+      electronFallbackName: APP_NAME,
       platform: process.platform,
       updateElectronAppName: true,
       runtimeProcess: process,
@@ -3081,6 +3132,10 @@ or use: pnpm dev:worktree`);
     // a working app first. Renderer-owned checks pass the selected release
     // channel explicitly, avoiding stale stable-feed results for alpha users.
     runDetachedTask("initialize updater", ensureAutoUpdater);
+    // macOS: a copy running from the DMG or Downloads can never update itself.
+    if (process.platform === "darwin" && !BLANK_SLATE_LAUNCH.enabled) {
+      runDetachedTask("offer move to Applications", offerMoveAtLaunch);
+    }
   }).catch((error) => {
     console.error("[desktop] startup failed", error);
     dialog.showErrorBox(

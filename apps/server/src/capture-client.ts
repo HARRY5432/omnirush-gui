@@ -7,13 +7,14 @@
  * and external egress. Opening or switching sessions never waits on a scan,
  * a snapshot or an archive. If the worker cannot start (a runtime without
  * worker support for this module, or OMNIRUSH_CAPTURE_WORKER=0) the same host
- * runs in-process; a worker that dies after starting is replaced, a bounded
- * number of times.
+ * runs in-process; a worker that dies after starting is replaced, again and
+ * again with a growing pause, and the calls made meanwhile wait for it.
  */
 import { Worker } from "node:worker_threads";
 import { lstat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { START_GATE_MS } from "./session-archive/capture-v2.js";
+import type { FilesUsedStatus } from "./session-archive/index.js";
 
 import { CaptureHost, type CaptureDiagnostics, type CaptureHostOptions, type EngineReplacement, type EngineTarget, type PromptRecord } from "./capture-host.js";
 import {
@@ -37,22 +38,43 @@ const MAX_TRACED_REQUEST_BYTES = 4 * 1024 * 1024;
 const STOP_TIMEOUT_MS = 20_000;
 /** Shutdown waits this long to learn whether the account is still there (for the final project archives), else packs none. */
 const ACCOUNT_CHECK_TIMEOUT_MS = 1_000;
-/** A worker that exits unexpectedly is replaced at most this many times per server. */
-const MAX_WORKER_RESTARTS = 3;
+/** The pause before a new worker: `baseMs` doubled per consecutive exit, at most `maxMs`; `stableMs` up and ready starts over. */
+type RestartBackoff = { baseMs: number; maxMs: number; stableMs?: number };
+/** A worker that exits unexpectedly is replaced after 1 s, then 2 s, 4 s, ... at most 60 s. */
+const RESTART_BACKOFF: RestartBackoff = { baseMs: 1_000, maxMs: 60_000 };
+/** A worker that stayed up and ready this long starts the backoff over. */
+const RESTART_STABLE_MS = 5 * 60_000;
+/** Calls waiting for a worker to start; past this the oldest one nobody waits on is dropped. */
+const MAX_QUEUED_CALLS = 20_000;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._:-]{8,128}$/;
+/** Chats whose engine is remembered for a restarted worker. */
+const MAX_OBSERVED_TARGETS = 256;
 
 export type CaptureServiceOptions = Omit<CaptureHostOptions, "onSessionClosed"> & {
   /** Run capture on a worker thread; default on unless OMNIRUSH_CAPTURE_WORKER is 0, false, no or off. */
   worker?: boolean;
   /** How long shutdown waits for the capture to stop; STOP_TIMEOUT_MS unless a test lowers it. */
   stopTimeoutMs?: number;
+  /** RESTART_BACKOFF and RESTART_STABLE_MS unless a test lowers them. */
+  restartBackoffMs?: RestartBackoff;
+  /** Told each time the mode changes. */
+  onModeChange?: (mode: CaptureMode) => void;
 };
+
+/**
+ * Where capture runs: "restarting" between a worker's exit and the next
+ * one's start, and "down" only once stopped. While "starting" or
+ * "restarting", calls wait for the worker.
+ */
+export type CaptureMode = "starting" | "worker" | "local" | "restarting" | "down";
 
 export type CaptureService = {
   /** The session uploader has an account to upload to (the sign-in gate's question). */
   readonly uploadEnabled: boolean;
   /** Where capture runs right now. */
-  mode(): "starting" | "worker" | "local" | "down";
+  mode(): CaptureMode;
+  /** The mode, when it began, and how many times a worker was replaced (the app's status). */
+  status(): { mode: CaptureMode; since: Date; restarts: number };
   /** Whether the session uploader is tracking this session (started and not finished). */
   hasSession(sessionId: string): boolean;
   startSession(sessionId: string, workspaceId: string, root: string): void;
@@ -85,6 +107,8 @@ export type CaptureService = {
   /** Every queued capture, upload and archive step settled (tests, profiling). */
   idle(): Promise<void>;
   diagnostics(): Promise<CaptureDiagnostics | null>;
+  /** Files used, for the app's one-time notice (null: capture is not running). */
+  filesUsedStatus(): Promise<FilesUsedStatus | null>;
 };
 
 /** How much longer than the start gate's own cap the main thread waits for the worker's answer. */
@@ -107,7 +131,8 @@ type QueuedCall = { call: CaptureCall; transfer: ArrayBuffer[] };
 
 class CaptureClient implements CaptureService {
   readonly uploadEnabled: boolean;
-  private current: "starting" | "worker" | "local" | "down" = "starting";
+  private current: CaptureMode = "starting";
+  private since = new Date();
   private worker: Worker | null = null;
   private local: CaptureHost | null = null;
   private queue: QueuedCall[] = [];
@@ -119,6 +144,15 @@ class CaptureClient implements CaptureService {
   /** Sessions the worker's session uploader tracks: true while live, false once finishing. */
   private readonly sessions = new Map<string, boolean>();
   private restarts = 0;
+  /** Exits since a worker last stayed up RESTART_STABLE_MS: the next pause doubles with each. */
+  private attempt = 0;
+  private readyAt = 0;
+  private restartTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Only the first start falls back to capturing in-process; later failures start new workers. */
+  private canRunLocally = true;
+  private overflowing = false;
+  /** The engine each recently observed chat's requests went to: a restarted worker settles their open turns there. */
+  private readonly observedTargets = new Map<string, EngineTarget>();
   private stopping: Promise<void> | null = null;
 
   constructor(private readonly options: CaptureServiceOptions) {
@@ -131,8 +165,19 @@ class CaptureClient implements CaptureService {
     else this.runLocally(null);
   }
 
-  mode(): "starting" | "worker" | "local" | "down" {
+  mode(): CaptureMode {
     return this.current;
+  }
+
+  status(): { mode: CaptureMode; since: Date; restarts: number } {
+    return { mode: this.current, since: this.since, restarts: this.restarts };
+  }
+
+  private setMode(mode: CaptureMode): void {
+    if (mode === this.current) return;
+    this.current = mode;
+    this.since = new Date();
+    this.options.onModeChange?.(mode);
   }
 
   hasSession(sessionId: string): boolean {
@@ -193,6 +238,9 @@ class CaptureClient implements CaptureService {
   }
 
   observeSession(sessionId: string, target: EngineTarget): void {
+    this.observedTargets.delete(sessionId);
+    this.observedTargets.set(sessionId, target);
+    if (this.observedTargets.size > MAX_OBSERVED_TARGETS) this.observedTargets.delete(this.observedTargets.keys().next().value as string);
     this.send({ kind: "call", id: null, method: "observeSession", args: [sessionId, target] });
   }
 
@@ -218,6 +266,10 @@ class CaptureClient implements CaptureService {
     return isDiagnostics(value) ? value : null;
   }
 
+  async filesUsedStatus(): Promise<FilesUsedStatus | null> {
+    return filesUsedStatusOf(await this.query({ kind: "call", id: null, method: "filesUsedStatus", args: [] }));
+  }
+
   stop(options: { archiveFinals?: boolean | Promise<boolean> } = {}): Promise<void> {
     this.stopping ??= this.shutdown(options.archiveFinals ?? true);
     return this.stopping;
@@ -226,6 +278,11 @@ class CaptureClient implements CaptureService {
   private async shutdown(archiveFinals: boolean | Promise<boolean>): Promise<void> {
     // First, and synchronously: archive uploads this thread makes for the worker are aborted now.
     for (const { controller, channel } of this.served.values()) if (channel === "archive") controller.abort();
+    // Between workers: the next one starts now, so the queued calls and the stop reach it.
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.spawn();
+    }
     const finals = await withinTimeout(archiveFinals, ACCOUNT_CHECK_TIMEOUT_MS);
     const done = this.dispatch({ kind: "call", id: null, method: "stop", args: [{ archiveFinals: finals }] }, [], true);
     const timeoutMs = this.options.stopTimeoutMs ?? STOP_TIMEOUT_MS;
@@ -245,7 +302,7 @@ class CaptureClient implements CaptureService {
     if (late) this.local?.sessionUploader.abortUploads();
     const worker = this.worker;
     this.worker = null;
-    this.current = "down";
+    this.setMode("down");
     if (worker) await worker.terminate().catch(() => undefined);
     // Also aborts the requests this thread was still serving for the worker.
     this.settleOutstanding();
@@ -281,8 +338,32 @@ class CaptureClient implements CaptureService {
       reply = new Promise((resolvePromise) => this.replies.set(id, resolvePromise));
     }
     if (this.current === "worker" && this.worker) this.post(this.worker, call, transfer);
-    else this.queue.push({ call, transfer });
+    else this.enqueue({ call, transfer });
     return reply;
+  }
+
+  /** Queues a call for the next worker; a full queue drops its oldest call nobody waits on (an awaited one only if all are). */
+  private enqueue(queued: QueuedCall): void {
+    if (this.queue.length >= MAX_QUEUED_CALLS) {
+      const [dropped] = this.queue.splice(Math.max(0, this.queue.findIndex((item) => item.call.id === null)), 1);
+      if (dropped && dropped.call.id !== null) {
+        this.replies.get(dropped.call.id)?.(null);
+        this.replies.delete(dropped.call.id);
+      }
+      if (!this.overflowing) {
+        this.overflowing = true;
+        this.options.log("warn", "OmniRush capture calls are queued past the limit while the capture worker starts; the oldest are dropped", { limit: MAX_QUEUED_CALLS });
+      }
+    }
+    this.queue.push(queued);
+  }
+
+  /** Hands the queued calls over (the worker is ready, or the host runs in-process). */
+  private takeQueue(): QueuedCall[] {
+    const queued = this.queue;
+    this.queue = [];
+    this.overflowing = false;
+    return queued;
   }
 
   /** Posts a call; one whose arguments cannot be cloned is dropped with a warn line, never thrown into the request. */
@@ -306,6 +387,10 @@ class CaptureClient implements CaptureService {
       stateDir: this.options.stateDir,
       appVersion: this.options.appVersion,
       engineVersion: this.options.engineVersion,
+      accountId: Boolean(this.options.accountId),
+      sessionIntegrity: Boolean(this.options.sessionIntegrity),
+      // Always: the chats this thread saw observed are known here even without a resolver.
+      engineTarget: true,
       sessionUploader: {
         upload: Boolean(sessionUploader.upload),
         uploadFile: Boolean(sessionUploader.uploadFile),
@@ -329,12 +414,14 @@ class CaptureClient implements CaptureService {
   }
 
   private spawn(): void {
-    this.current = "starting";
+    this.restartTimer = null;
+    this.setMode("starting");
     let worker: Worker;
     try {
       worker = new Worker(workerUrl(), { workerData: this.workerInit() });
     } catch (error) {
-      this.runLocally(error);
+      if (this.canRunLocally) this.runLocally(error);
+      else this.scheduleRestart("OmniRush capture worker could not start; starting a new one", { error: errorSummary(error) });
       return;
     }
     // The server's listener keeps the process alive; the worker never holds it open on its own.
@@ -351,10 +438,10 @@ class CaptureClient implements CaptureService {
     if (worker !== this.worker) return;
     switch (message.kind) {
       case "ready": {
-        this.current = "worker";
-        const queued = this.queue;
-        this.queue = [];
-        for (const { call, transfer } of queued) this.post(worker, call, transfer);
+        this.setMode("worker");
+        this.readyAt = Date.now();
+        this.canRunLocally = false;
+        for (const { call, transfer } of this.takeQueue()) this.post(worker, call, transfer);
         return;
       }
       case "log":
@@ -383,20 +470,27 @@ class CaptureClient implements CaptureService {
     this.worker = null;
     this.settleOutstanding();
     if (this.stopping) return;
-    if (this.current === "starting") {
+    if (this.current === "starting" && this.canRunLocally) {
       this.runLocally(new Error(`the capture worker exited with code ${code} before it was ready`));
       return;
     }
     // Its sessions are gone with it; each resumes on its next prompt.
     this.sessions.clear();
-    if (this.restarts < MAX_WORKER_RESTARTS) {
-      this.restarts += 1;
-      this.options.log("warn", "OmniRush capture worker exited; starting a new one", { code, restarts: this.restarts });
-      this.spawn();
-      return;
-    }
-    this.current = "down";
-    this.options.log("warn", "OmniRush capture worker exited too often; capture is off until the app restarts", { code });
+    this.scheduleRestart("OmniRush capture worker exited; starting a new one", { code });
+  }
+
+  /** Starts a new worker after the backoff's pause; calls made meanwhile are queued for it. */
+  private scheduleRestart(message: string, attributes: Record<string, unknown>): void {
+    const { baseMs, maxMs, stableMs = RESTART_STABLE_MS } = this.options.restartBackoffMs ?? RESTART_BACKOFF;
+    if (this.readyAt && Date.now() - this.readyAt >= stableMs) this.attempt = 0;
+    this.readyAt = 0;
+    const delayMs = Math.min(baseMs * 2 ** this.attempt, maxMs);
+    this.attempt += 1;
+    this.restarts += 1;
+    this.setMode("restarting");
+    this.options.log("warn", message, { ...attributes, attempt: this.attempt, delayMs });
+    this.restartTimer = setTimeout(() => this.spawn(), delayMs);
+    this.restartTimer.unref?.();
   }
 
   /**
@@ -417,22 +511,18 @@ class CaptureClient implements CaptureService {
     if (reason !== null) {
       this.options.log("warn", "OmniRush capture worker could not start; capturing in-process", { error: errorSummary(reason) });
     }
-    const { worker: _worker, stopTimeoutMs: _stopTimeoutMs, ...hostOptions } = this.options;
+    const { worker: _worker, stopTimeoutMs: _stopTimeoutMs, restartBackoffMs: _backoff, onModeChange: _onModeChange, ...hostOptions } = this.options;
+    this.canRunLocally = false;
     try {
       this.local = new CaptureHost(hostOptions);
     } catch (error) {
-      // Only reached after a worker failed the same way: capture is off rather than the server down.
+      // Only reached after a worker failed the same way: new workers are tried, with the queued calls kept for them.
       if (reason === null) throw error;
-      this.options.log("warn", "OmniRush capture could not start in-process either; capture is off until the app restarts", { error: errorSummary(error) });
-      this.current = "down";
-      this.queue = [];
-      this.settleOutstanding();
+      this.scheduleRestart("OmniRush capture could not start in-process either; starting a new capture worker", { error: errorSummary(error) });
       return;
     }
-    this.current = "local";
-    const queued = this.queue;
-    this.queue = [];
-    for (const { call } of queued) {
+    this.setMode("local");
+    for (const { call } of this.takeQueue()) {
       const id = call.id;
       let value: unknown = null;
       try {
@@ -472,7 +562,7 @@ class CaptureClient implements CaptureService {
     switch (request.type) {
       case "upload": {
         if (!sessionUploader.upload) throw new Error("no session upload hook");
-        return { kind: "result", id, ok: true, response: await serializeResponse(await sessionUploader.upload(request.sessionId, request.body, signal)) };
+        return { kind: "result", id, ok: true, response: await serializeResponse(await sessionUploader.upload(request.sessionId, request.body, signal, request.options)) };
       }
       case "uploadFile": {
         if (!sessionUploader.uploadFile) throw new Error("no session file upload hook");
@@ -487,13 +577,31 @@ class CaptureClient implements CaptureService {
           kind: "result",
           id,
           ok: true,
-          response: await serializeResponse(await sessionUploader.uploadFile(request.sessionId, path, request.size, signal)),
+          response: await serializeResponse(await sessionUploader.uploadFile(request.sessionId, path, request.size, signal, request.options)),
         };
       }
       case "capabilities": {
         if (!sessionUploader.capabilities) throw new Error("no session capability hook");
         return { kind: "result", id, ok: true, response: null, value: await sessionUploader.capabilities() };
       }
+      case "sessionIntegrity": {
+        if (!this.options.sessionIntegrity) throw new Error("no integrity hook");
+        return { kind: "result", id, ok: true, response: await serializeResponse(await this.options.sessionIntegrity(request.sessionId, {
+          ...(request.summary ? { summary: true } : {}),
+          ...(request.turns !== undefined ? { turns: request.turns } : {}),
+        })) };
+      }
+      case "engineTarget":
+        // A chat this server saw go to an engine (a restarted worker's), else the workspace's engine.
+        return {
+          kind: "result",
+          id,
+          ok: true,
+          response: null,
+          target: this.observedTargets.get(request.sessionId) ?? (this.options.engineTarget ? await this.options.engineTarget(request.sessionId, request.workspaceId) : null),
+        };
+      case "accountId":
+        return { kind: "result", id, ok: true, response: null, account: this.options.accountId ? await this.options.accountId() : null };
       case "refreshAccessToken": {
         const refresh = channel === "archive" ? archive.refreshAccessToken : sessionUploader.refreshAccessToken;
         return { kind: "result", id, ok: true, response: null, token: refresh ? await refresh() : null };
@@ -535,6 +643,13 @@ async function withinTimeout(answer: boolean | Promise<boolean>, ms: number): Pr
   } finally {
     clearTimeout(timer);
   }
+}
+
+function filesUsedStatusOf(value: unknown): FilesUsedStatus | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  const flag = (item: unknown) => (typeof item === "boolean" ? item : null);
+  return { active: flag(record.active), available: flag(record.available), consentText: typeof record.consentText === "string" ? record.consentText : null };
 }
 
 function isDiagnostics(value: unknown): value is CaptureDiagnostics {

@@ -52,6 +52,7 @@ const quality: AccountQuality = {
   nextSpinHint: { progress: 0.6, text: "Add tests to earn a spin.", sessionId: "ses_1" },
   biggestWinToday: { tokens: 10_000_000, at: "2026-10-04T09:00:00Z" },
   nudge: null,
+  windowsCounts: false,
 };
 
 const spin: QualitySpin = {
@@ -141,9 +142,20 @@ describe("notice: once per id", () => {
     expect(html).toContain("Spin (2)");
     expect(html).toContain("4-day streak");
     expect(html).toContain("Next spin · 60%");
+    expect(html).not.toContain("WSL");
     // The app's toast style: theme surfaces, sentence case, no coloured bar or eyebrow.
     expect(html).toContain("bg-popover");
     expect(html).not.toMatch(/uppercase|tracking-\[|#a3e635|#0b1120|shadow-\[0_0/);
+  });
+
+  test("the popup's guide has no WSL tip, whatever windows_counts says", () => {
+    for (const windowsCounts of [true, false]) {
+      const html = renderToStaticMarkup(
+        <QualityNoticeCard quality={{ ...quality, windowsCounts }} notice={quality.notice} onSpin={() => undefined} onDismiss={() => undefined} />,
+      );
+      expect(html).toContain("How to make a Good session");
+      expect(html).not.toContain("WSL");
+    }
   });
 
   test("no Spin button without spins; a resting wheel says so", () => {
@@ -168,7 +180,7 @@ describe("notice: once per id", () => {
   });
 
   test("streak text", () => {
-    expect(streakText(quality)).toBe("4-day streak · +1 spin per reproducible session · 7 days: +2");
+    expect(streakText(quality)).toBe("4-day streak · +1 spin per Good session ★ · 7 days: +2");
     expect(streakText({ streakDays: 0, streakMultiplier: 0, streakNext: null })).toBeNull();
   });
 });
@@ -285,11 +297,11 @@ describe("revision: fail labels, jackpot, open session", () => {
     expect(html).toContain("Started in your home folder");
     expect(html).toContain("3 code files · 120 lines · no tests");
     expect(html).toContain("Reproducible ✓");
-    expect(html).not.toContain("Replay-ready ★");
+    expect(html).not.toContain("Good session ★");
     expect(html).toContain("+2 spins on a richer wheel");
   });
 
-  test("the sidebar row shows the ready count, and a ★ count only for replay-ready spins", () => {
+  test("the sidebar row shows the ready count, and a ★ count only for Good session spins", () => {
     const plain = renderToStaticMarkup(<SpinCounts quality={quality} />);
     expect(plain).toContain("2 ready");
     expect(plain).not.toContain("quality-client-spins");
@@ -299,7 +311,7 @@ describe("revision: fail labels, jackpot, open session", () => {
     expect(renderToStaticMarkup(<SpinCounts quality={{ ...quality, spinsAvailable: 0 }} />)).toBe("");
   });
 
-  test("a replay-ready session shows the star instead of the check", () => {
+  test("a Good session shows the star instead of the check", () => {
     const html = renderToStaticMarkup(
       <SessionReasons
         reasons={{
@@ -311,7 +323,7 @@ describe("revision: fail labels, jackpot, open session", () => {
         }}
       />,
     );
-    expect(html).toContain("Replay-ready ★");
+    expect(html).toContain("Good session ★");
     expect(html).not.toContain("Reproducible ✓");
   });
 
@@ -337,7 +349,7 @@ describe("revision: fail labels, jackpot, open session", () => {
   });
 });
 
-describe("replay-ready wording, history and the count-up", () => {
+describe("Good session wording, history and the count-up", () => {
   test("users never read the word client", () => {
     const starred = { ...quality, clientSpinsAvailable: 2, tier: "coaching" as const };
     const notice = { id: "c-1", kind: "tier-coaching", title: "Here is how to get spins", body: "" };
@@ -362,18 +374,19 @@ describe("replay-ready wording, history and the count-up", () => {
     const text = html.replace(/<[^>]*>/g, " ");
     expect(text.toLowerCase()).not.toContain("client");
     expect(text).toContain("old app version");
-    expect(text).toContain("Replay-ready ★");
-    expect(text).toContain("Replay-ready sessions earn +2 spins on a richer wheel.");
+    expect(text).toContain("Good session ★");
+    expect(text).toContain("Good sessions earn +2 spins on a richer wheel.");
+    expect(text.toLowerCase()).not.toContain("replay-ready");
   });
 
-  test("recent spins: the last 10, ★ on replay-ready ones", () => {
+  test("recent spins: the last 10, ★ on Good session ones", () => {
     const spins = Array.from({ length: 12 }, (_, index) => ({
       id: `s${index}`, status: "spun" as const, reason: null, reproducible: true, clientGrade: index % 2 === 0, sessionId: null,
       earnedAt: null, expiresAt: null, spunAt: null, prizeTokens: 500_000, paidTokens: 500_000,
     }));
     const html = renderToStaticMarkup(<RecentSpins spins={spins} />);
     expect(html.match(/<li /g)?.length).toBe(10);
-    expect(html.match(/data-replay-ready/g)?.length).toBe(5);
+    expect(html.match(/data-good-session/g)?.length).toBe(5);
     expect(html).toContain("★ 500K");
     expect(renderToStaticMarkup(<RecentSpins spins={[]} />)).toBe("");
   });
