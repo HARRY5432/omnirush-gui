@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import {
   createEngineV2Preview,
@@ -13,6 +14,10 @@ import {
 } from "./engine-v2-preview.js";
 import type { ServerConfig } from "./types.js";
 import { buildOmniRushV2Instructions, waitForOmniRushV2Skills } from "./opencode-v2-instructions.js";
+
+const realV2Binary = process.env.OMNIRUSH_OPENCODE2_BIN?.trim()
+  || join(resolve(import.meta.dir, "../../.."), "apps/desktop/resources/sidecars/opencode-x86_64-unknown-linux-gnu");
+const realV2Test = existsSync(realV2Binary) ? test : test.skip;
 
 test("v2 app guidance fits the native entry limit and uses the current native tools", () => {
   for (const connected of [true, false]) {
@@ -120,6 +125,57 @@ test("persists chat routing and includes it in preview status without starting t
     expect(readEngineV2PreviewState(config)).toEqual({ enabled: false, chatRouting: true });
   } finally {
     await preview.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+realV2Test("removes a configured MCP from the real v2 engine before admission", async () => {
+  const root = await mkdtemp(join(tmpdir(), "omnirush-engine-v2-mcp-ban-"));
+  const previousBinary = process.env.OMNIRUSH_OPENCODE2_BIN;
+  await writeEngineV2PreviewState(testConfig(root), { enabled: true, chatRouting: false });
+  process.env.OMNIRUSH_OPENCODE2_BIN = realV2Binary;
+  const config = testConfig(root);
+  const preview = createEngineV2Preview({ config, deferStart: true });
+
+  try {
+    preview.start();
+    const deadline = Date.now() + 60_000;
+    let connection: ReturnType<typeof preview.connection>;
+    while (!(connection = preview.connection()) && Date.now() < deadline) {
+      if (preview.status().lastError) throw new Error(preview.status().lastError);
+      await Bun.sleep(100);
+    }
+    if (!connection) throw new Error("Timed out waiting for the real v2 engine");
+
+    const directory = encodeURIComponent(root);
+    const request = (path: string, init?: RequestInit) => fetch(
+      `${connection!.url}${path}${path.includes("?") ? "&" : "?"}location%5Bdirectory%5D=${directory}`,
+      {
+        ...init,
+        headers: {
+          authorization: `Basic ${Buffer.from(`${connection!.username}:${connection!.password}`).toString("base64")}`,
+          "content-type": "application/json",
+          ...(init?.headers ?? {}),
+        },
+      },
+    );
+    const configured = await request("/api/mcp/fixture", {
+      method: "PUT",
+      body: JSON.stringify({ config: { type: "remote", url: "https://example.invalid/mcp" } }),
+    });
+    expect(configured.status).toBe(204);
+
+    const before = await (await request("/api/mcp")).json() as { data?: Array<{ name?: string }> };
+    expect(before.data?.some((entry) => entry.name === "fixture")).toBe(true);
+
+    await preview.syncWorkspaceMcp("ws_1", root);
+
+    const after = await (await request("/api/mcp")).json() as { data?: Array<{ name?: string }> };
+    expect(after.data?.some((entry) => entry.name === "fixture")).toBe(false);
+  } finally {
+    await preview.stop();
+    if (previousBinary === undefined) delete process.env.OMNIRUSH_OPENCODE2_BIN;
+    else process.env.OMNIRUSH_OPENCODE2_BIN = previousBinary;
     await rm(root, { recursive: true, force: true });
   }
 });

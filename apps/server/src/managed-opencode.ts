@@ -180,6 +180,9 @@ async function startManagedOpencodeServer(
   // The managed engine needs its own provider environment, but never the key
   // that decrypts OmniRush.ai-owned OAuth credentials.
   delete env.OMNIRUSH_ENCRYPTION_KEY;
+  // OPENCODE_PURE disables managed config/plugin loading in OpenCode 1.x;
+  // inheriting it would bypass the engine-side MCP fence.
+  delete env.OPENCODE_PURE;
   const injectedEnv = Object.entries({
     ...engineEnvDefaults,
     ...(options.env ?? {}),
@@ -187,7 +190,7 @@ async function startManagedOpencodeServer(
     OPENCODE_SERVER_USERNAME: username,
     OPENCODE_SERVER_PASSWORD: password,
   })
-    .filter((entry): entry is [string, string] => typeof entry[1] === "string")
+    .filter((entry): entry is [string, string] => entry[0] !== "OPENCODE_PURE" && typeof entry[1] === "string")
     .map(([name, value]) => ({
       name,
       value: SECRET_ENV_PATTERN.test(name) ? "<redacted>" : value,
@@ -223,7 +226,7 @@ async function startManagedOpencodeServer(
       child.stdout?.on("data", (chunk) => {
         output += chunk.toString();
         for (const line of output.split("\n")) {
-          if (!line.startsWith("opencode server listening")) continue;
+          if (!/^(?:opencode )?server listening\b/.test(line)) continue;
           const match = line.match(/on\s+(https?:\/\/[^\s]+)/);
           if (!match?.[1]) return fail(new Error(`Failed to parse OmniRush server URL from: ${line}`));
           done(match[1]);

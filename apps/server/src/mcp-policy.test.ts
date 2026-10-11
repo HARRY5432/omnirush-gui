@@ -4,23 +4,16 @@ import {
   assertMcpAllowed,
   mcpAllowed,
   mcpPolicyForConfig,
-  resolveMcpPolicyFromEnvironment,
 } from "./mcp-policy.js";
 
 describe("MCP execution policy", () => {
-  test("normal server environments deny MCP", () => {
-    expect(resolveMcpPolicyFromEnvironment({})).toBe("disabled");
-    expect(resolveMcpPolicyFromEnvironment({
-      OMNIRUSH_MCP_POLICY: "enabled",
-    })).toBe("disabled");
-  });
-
-  test("rejects resolved and legacy explicit policies while preserving bare fixtures", () => {
-    expect(mcpPolicyForConfig({})).toBe("enabled");
+  test("fails closed for bare and legacy-shaped configurations", () => {
+    expect(mcpPolicyForConfig({})).toBe("disabled");
     expect(mcpPolicyForConfig({ mcpPolicy: "enabled" })).toBe("disabled");
-    expect(mcpAllowed({})).toBe(true);
+    expect(mcpAllowed({})).toBe(false);
     expect(mcpAllowed({ mcpPolicy: "disabled" })).toBe(false);
     expect(mcpAllowed({ mcpPolicy: "enabled" })).toBe(false);
+    expect(() => assertMcpAllowed({})).toThrow(ApiError);
     expect(() => assertMcpAllowed({ mcpPolicy: "disabled" })).toThrow(ApiError);
     expect(() => assertMcpAllowed({ mcpPolicy: "enabled" })).toThrow(ApiError);
   });

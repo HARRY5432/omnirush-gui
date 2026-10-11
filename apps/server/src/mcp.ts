@@ -6,8 +6,7 @@ import { readJsoncFile } from "./jsonc.js";
 import { opencodeConfigPath } from "./workspace-files.js";
 import { validateMcpConfig, validateMcpName, validateUserMcpName } from "./validators.js";
 import { ApiError } from "./errors.js";
-import { assertMcpAllowed, mcpAllowed } from "./mcp-policy.js";
-import { isOmniRushUiMcpRegistryEntry, OMNIRUSH_UI_MCP_REGISTRY_COMMAND_MESSAGE } from "./omnirush-ui-mcp-command.js";
+import { assertMcpAllowed, mcpAllowed, MCP_DISABLED_MESSAGE } from "./mcp-policy.js";
 import {
   readRuntimeOpencodeConfig,
   runtimeMcpMap,
@@ -586,6 +585,41 @@ export async function listMcpFromRuntimeSnapshot(
 }
 
 /**
+ * Read only MCP names from static project/global config and the supplied
+ * runtime snapshot. The names are used at an engine boundary; configs and
+ * credentials never leave the server.
+ */
+export async function configuredMcpNames(
+  workspaceRoot: string,
+  runtimeConfig: RuntimeOpencodeConfig = {},
+): Promise<string[]> {
+  const [project, global] = await Promise.all([
+    readJsoncFile(opencodeConfigPath(workspaceRoot), {} as Record<string, unknown>, {
+      allowInvalid: true,
+      maxBytes: DIAGNOSTIC_STATIC_CONFIG_MAX_BYTES,
+    }),
+    readJsoncFile(resolveGlobalOpenCodeConfigPath(), {} as Record<string, unknown>, {
+      allowInvalid: true,
+      maxBytes: DIAGNOSTIC_STATIC_CONFIG_MAX_BYTES,
+    }),
+  ]);
+  return [...new Set([
+    ...Object.keys(getMcpConfig(project.data)),
+    ...Object.keys(getMcpConfig(global.data)),
+    ...Object.keys(runtimeMcpMap(runtimeConfig)),
+  ])].sort();
+}
+
+export async function assertNoConfiguredMcp(
+  workspaceRoot: string,
+  runtimeConfig: RuntimeOpencodeConfig = {},
+): Promise<void> {
+  const names = await configuredMcpNames(workspaceRoot, runtimeConfig);
+  if (names.length === 0) return;
+  throw new ApiError(403, "mcp_disabled", MCP_DISABLED_MESSAGE, { servers: names });
+}
+
+/**
  * Diagnostics-only passive inventory. It returns every configured layer and
  * collision metadata without claiming which entry is effective: OpenCode's
  * static config merge and OmniRush.ai's later dynamic MCP registration can make
@@ -681,7 +715,6 @@ export async function addMcp(
 }
 
 export async function removeMcp(serverConfig: ServerConfig, workspaceId: string, name: string): Promise<boolean> {
-  assertMcpAllowed(serverConfig);
   const runtimeConfig = await readRuntimeOpencodeConfig(serverConfig, workspaceId);
   const mcpMap = { ...runtimeMcpMap(runtimeConfig) };
   if (!Object.prototype.hasOwnProperty.call(mcpMap, name)) return false;
@@ -703,28 +736,14 @@ export async function setMcpEnabled(
   name: string,
   enabled: boolean,
 ): Promise<boolean> {
-  assertMcpAllowed(serverConfig);
   validateMcpName(name);
+  if (enabled) {
+    assertMcpAllowed(serverConfig);
+  }
   const runtimeConfig = await readRuntimeOpencodeConfig(serverConfig, workspaceId);
   const mcpMap = { ...runtimeMcpMap(runtimeConfig) };
   if (!Object.prototype.hasOwnProperty.call(mcpMap, name)) return false;
-  const current = mcpMap[name];
-  if (!current || typeof current !== "object" || Array.isArray(current)) return false;
-  if (isOmniRushUiMcpRegistryEntry(current)) {
-    // Never re-enable a registry launch of omnirush-ui-mcp. Disabling one
-    // removes it: the runtime store does not keep such entries and the
-    // engine never receives them, so there is nothing left to toggle.
-    if (enabled) throw new ApiError(400, "unsafe_mcp_command", OMNIRUSH_UI_MCP_REGISTRY_COMMAND_MESSAGE);
-    delete mcpMap[name];
-    await writeRuntimeOpencodeConfig(serverConfig, workspaceId, (currentConfig) => ({ ...currentConfig, mcp: mcpMap }));
-    return true;
-  }
-  try {
-    validateMcpConfig({ ...(current as Record<string, unknown>), enabled });
-  } catch {
-    return false;
-  }
-  mcpMap[name] = { ...(current as Record<string, unknown>), enabled };
+  delete mcpMap[name];
   await writeRuntimeOpencodeConfig(serverConfig, workspaceId, (currentConfig) => ({ ...currentConfig, mcp: mcpMap }));
   return true;
 }

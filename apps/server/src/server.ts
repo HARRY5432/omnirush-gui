@@ -45,7 +45,7 @@ import { LatestTrailingWorkQueue } from "./latest-trailing-work-queue.js";
 import { buildEngineAuthProbeHeader } from "./engine-registry.js";
 import { addPlugin, listPlugins, normalizePluginSpec, removePlugin } from "./plugins.js";
 import { sanitizePortableOpencodeConfig } from "./portable-opencode.js";
-import { addMcp, listMcp, removeMcp, setMcpEnabled } from "./mcp.js";
+import { addMcp, assertNoConfiguredMcp, listMcp, removeMcp, setMcpEnabled } from "./mcp.js";
 import { buildOmniRushV2Instructions, waitForOmniRushV2Skills, OMNIRUSH_V2_INSTRUCTION_KEY } from "./opencode-v2-instructions.js";
 import {
   callMcpAppTool,
@@ -164,6 +164,7 @@ import {
   runtimeMcpMap,
   runtimeProviderMap,
   type RuntimeOpencodeConfig,
+  withoutMcpRuntimeConfig,
   writeGlobalRuntimeOpencodeConfig,
   writeRuntimeOpencodeConfig,
 } from "./runtime-opencode-config-store.js";
@@ -1645,6 +1646,10 @@ export async function proxyOpencodeV2Request(input: {
   const promptDispatch = isUploadV2PromptDispatch(method, routePath);
   const collectible = input.workspace.workspaceType !== "remote";
   if (promptDispatch && collectible) {
+    await assertNoConfiguredMcp(
+      input.workspace.path,
+      await readRuntimeOpencodeConfig(input.config, input.workspace.id),
+    );
     if (uploadDispatchRefused(input.config, input.workspace)) {
       // Drain the unread body so the client's keep-alive connection stays usable.
       await input.request.arrayBuffer().catch(() => undefined);
@@ -1714,13 +1719,7 @@ export async function proxyOpencodeV2Request(input: {
   if (method === "POST" && sessionId && /^\/api\/session\/[^/]+\/(?:prompt|command|generate)$/.test(routePath)) {
     // Session ownership was verified above. Replace one native instruction
     // entry immediately before admission; never append to conversation text.
-    const mcpUrl = new URL(target);
-    mcpUrl.pathname = "/api/mcp";
     const internalHeaders = new Headers({ authorization: headers.get("authorization") ?? "", "content-type": "application/json" });
-    const mcpResponse = await loopbackFetch(mcpUrl.toString(), { headers: internalHeaders, signal: AbortSignal.timeout(10_000) });
-    const mcpPayload: unknown = mcpResponse.ok ? await mcpResponse.json() : null;
-    const connectReady = isRecord(mcpPayload) && Array.isArray(mcpPayload.data) && mcpPayload.data.some((entry) =>
-      isRecord(entry) && entry.name === "omnirush-cloud" && isRecord(entry.status) && entry.status.status === "connected");
     const skillUrl = new URL(target);
     skillUrl.pathname = "/api/skill";
     await waitForOmniRushV2Skills(input.workspace.path, async () => {
@@ -1728,7 +1727,7 @@ export async function proxyOpencodeV2Request(input: {
       if (!response.ok) throw new ApiError(502, "engine_skill_sync_failed", "Native skills are unavailable");
       return response.json();
     });
-    const value = buildOmniRushV2Instructions(connectReady);
+    const value = buildOmniRushV2Instructions(false);
     const instructionUrl = new URL(target);
     instructionUrl.pathname = `/api/session/${encodeURIComponent(sessionId)}/instructions/entries/${OMNIRUSH_V2_INSTRUCTION_KEY}`;
     const synced = await loopbackFetch(instructionUrl.toString(), {
@@ -2067,6 +2066,10 @@ export async function proxyOpencodeRequest(input: {
     assertMcpAllowed(input.config);
   }
   if (workspace && workspace.workspaceType !== "remote" && isUploadPromptDispatch(method, proxyPath)) {
+    await assertNoConfiguredMcp(
+      workspace.path,
+      await readRuntimeOpencodeConfig(input.config, workspace.id),
+    );
     if (uploadDispatchRefused(input.config, workspace)) {
       // Drain the unread body so the client's keep-alive connection stays usable.
       await input.request.arrayBuffer().catch(() => undefined);
@@ -3208,7 +3211,6 @@ function createRoutes(
     const opencode = mergeOpencodeConfigs(
       await readOpencodeConfig(workspace.path),
       await readEffectiveRuntimeOpencodeConfig(config, workspace.id),
-      mcpAllowed(config),
     );
     const lastAudit = await readLastAudit(workspace.path, workspace.id);
     return jsonResponse({ opencode, omnirush, updatedAt: lastAudit?.timestamp ?? null });
@@ -3271,9 +3273,6 @@ function createRoutes(
     const workspace = await resolveWorkspace(config, ctx.params.id);
     const body = await readJsonBody(ctx.request);
     const resolved = readCloudPluginResolved(body.resolved);
-    if (resolved.memberships.some((membership) => membership.configObject?.objectType === "mcp")) {
-      assertMcpAllowed(config);
-    }
     const marketplace = body.marketplace && typeof body.marketplace === "object" && !Array.isArray(body.marketplace)
       ? Object.fromEntries(Object.entries(body.marketplace))
       : null;
@@ -3347,9 +3346,6 @@ function createRoutes(
     const dryRun = body.dryRun === true;
 
     const bundle = await resolveClaudePluginBundle({ url, ref });
-    if (bundle.resolved.memberships.some((membership) => membership.configObject?.objectType === "mcp")) {
-      assertMcpAllowed(config);
-    }
     if (dryRun) {
       return jsonResponse({ preview: bundle.preview });
     }
@@ -4020,7 +4016,7 @@ function createRoutes(
 
   addRoute(routes, "GET", "/workspace/:id/runtime-config", "client", async (ctx) => {
     const workspace = await resolveWorkspace(config, ctx.params.id);
-    const runtime = await readRuntimeOpencodeConfig(config, workspace.id);
+    const runtime = withoutMcpRuntimeConfig(await readRuntimeOpencodeConfig(config, workspace.id));
     const rawOpencode = await readRawOpencodeConfig(opencodeConfigPath(workspace.path));
     const persistedOpencode = await readOpencodeConfig(workspace.path);
     const globalOpencodePath = resolveOpencodeConfigFilePath("global", workspace.path);
@@ -4172,6 +4168,9 @@ function createRoutes(
     if (opencode) {
       const configPath = omnirushConfigPath(workspace.path);
       const nextOpencode = ensurePlainObject(opencode);
+      if (Object.prototype.hasOwnProperty.call(nextOpencode, "mcp")) {
+        assertMcpAllowed(config);
+      }
       const { permission, provider, ...topLevelUpdates } = nextOpencode;
       const logicalUpdates: Record<string, unknown> = { ...topLevelUpdates };
 
@@ -4600,244 +4599,40 @@ function createRoutes(
 
   addRoute(routes, "POST", "/workspace/:id/mcp-apps/resolve", "client", async (ctx) => {
     assertMcpAllowed(config);
-    requireClientScope(ctx, "viewer");
-    const workspace = await resolveWorkspace(config, ctx.params.id);
-    const body = await readJsonBody(ctx.request);
-    const projectedToolName = typeof body.projectedToolName === "string" ? body.projectedToolName.trim() : "";
-    const launch = body.launch && typeof body.launch === "object" && !Array.isArray(body.launch)
-      ? body.launch as Record<string, unknown>
-      : null;
-    try {
-      const app = launch && typeof launch.connectionId === "string"
-        ? await resolveConnectMcpAppResource({
-            serverConfig: config,
-            workspaceId: workspace.id,
-            workspaceRoot: workspace.path,
-            launch: {
-              connectionId: typeof launch.connectionId === "string" ? launch.connectionId : "",
-              toolName: typeof launch.toolName === "string" ? launch.toolName : "",
-              resourceUri: typeof launch.resourceUri === "string" ? launch.resourceUri : "",
-            },
-          })
-        : launch
-          ? await resolveSameServerMcpAppResource({
-              serverConfig: config,
-              workspaceId: workspace.id,
-              workspaceRoot: workspace.path,
-              projectedToolName,
-              launch: {
-                toolName: typeof launch.toolName === "string" ? launch.toolName : "",
-                resourceUri: typeof launch.resourceUri === "string" ? launch.resourceUri : "",
-              },
-            })
-        : await resolveMcpAppResource({
-            serverConfig: config,
-            workspaceId: workspace.id,
-            workspaceRoot: workspace.path,
-            projectedToolName,
-          });
-      return jsonResponse({ app });
-    } catch (error) {
-      rethrowMcpAppHostError(error);
-    }
   });
 
-  addRoute(routes, "POST", "/workspace/:id/mcp-apps/call", "client", async (ctx) => {
+  addRoute(routes, "POST", "/workspace/:id/mcp-apps/call", "client", async () => {
     assertMcpAllowed(config);
-    requireClientScope(ctx, "viewer");
-    const workspace = await resolveWorkspace(config, ctx.params.id);
-    const body = await readJsonBody(ctx.request);
-    const serverName = typeof body.serverName === "string" ? body.serverName.trim() : "";
-    const name = typeof body.name === "string" ? body.name.trim() : "";
-    const resourceUri = typeof body.resourceUri === "string" ? body.resourceUri.trim() : "";
-    const args = body.arguments && typeof body.arguments === "object" && !Array.isArray(body.arguments)
-      ? body.arguments as Record<string, unknown>
-      : {};
-    const approved = body.approved === true;
-    if (!serverName || !name) throw new ApiError(400, "invalid_payload", "serverName and name are required");
-    if (approved) requireClientScope(ctx, "collaborator");
-    try {
-      return jsonResponse(await callMcpAppTool({
-        serverConfig: config,
-        workspaceId: workspace.id,
-        workspaceRoot: workspace.path,
-        serverName,
-        name,
-        resourceUri,
-        arguments: args,
-        approved,
-      }));
-    } catch (error) {
-      rethrowMcpAppHostError(error);
-    }
   });
 
-  addRoute(routes, "POST", "/workspace/:id/mcp/managed", "client", async (ctx) => {
+  addRoute(routes, "POST", "/workspace/:id/mcp/managed", "client", async () => {
     assertMcpAllowed(config);
-    ensureWritable(config);
-    requireClientScope(ctx, "collaborator");
-    const workspace = await resolveWorkspace(config, ctx.params.id);
-    const body = await readJsonBody(ctx.request);
-    const name = String(body.name ?? "").trim();
-    validateUserMcpName(name);
-    const serverUrl = typeof body.url === "string" ? body.url.trim() : "";
-    const oauth = body.oauth && typeof body.oauth === "object" && !Array.isArray(body.oauth)
-      ? body.oauth as Record<string, unknown>
-      : {};
-    if (!serverUrl) throw new ApiError(400, "invalid_payload", "Managed MCP URL is required");
-    const requestedScopes = Array.isArray(oauth.requestedScopes)
-      ? oauth.requestedScopes.filter((scope): scope is string => typeof scope === "string" && scope.trim().length > 0)
-      : [];
-    if ((await listMcp(config, workspace.id, workspace.path)).some((item) => item.name === name)) {
-      throw new ApiError(409, "mcp_exists", `MCP ${name} already exists in this workspace`);
-    }
-    await requireApproval(ctx, {
-      workspaceId: workspace.id,
-      action: "mcp.add",
-      summary: `Add OmniRush.ai-managed MCP ${name}`,
-      paths: [omnirushConfigPath(workspace.path)],
-    });
-    await createLocalManagedMcpConnection(config, {
-      workspaceId: workspace.id,
-      name,
-      serverUrl,
-      oauth: {
-        applicationType: oauth.applicationType === "web" ? "web" : "native",
-        requestedScopes,
-        ...(typeof oauth.authorizationServerIssuer === "string" && oauth.authorizationServerIssuer.trim()
-          ? { authorizationServerIssuer: oauth.authorizationServerIssuer.trim() }
-          : {}),
-        ...(typeof oauth.clientId === "string" && oauth.clientId.trim() ? { clientId: oauth.clientId.trim() } : {}),
-        ...(typeof oauth.clientSecret === "string" && oauth.clientSecret.trim() ? { clientSecret: oauth.clientSecret.trim() } : {}),
-      },
-    });
-    const result = await (async () => {
-      try {
-        return await startLocalManagedMcpAuthorization(config, workspace.id, name);
-      } catch (error) {
-        // Creation writes the encrypted connection and runtime facade before
-        // OAuth discovery starts. If that first handshake fails, roll both back
-        // so the failed Add request cannot leave a ghost connection behind.
-        await deleteLocalManagedMcp(config, workspace.id, name).catch(() => undefined);
-        if (error instanceof ApiError) throw error;
-        const cause = (error instanceof Error ? error.message : String(error)).trim().slice(0, 300);
-        throw new ApiError(
-          502,
-          "managed_mcp_connection_failed",
-          `OmniRush.ai could not start sign-in with this MCP server. Check the server URL, OAuth settings, and network connection, then try again.${cause ? ` (${cause})` : ""}`,
-          cause ? { cause } : undefined,
-        );
-      }
-    })();
-    await syncRuntimeMcpToOpencodeEngine(config, workspace, [name], undefined, engineMcpServerState).catch(() => undefined);
-    await recordAudit(workspace.path, {
-      id: shortId(),
-      workspaceId: workspace.id,
-      actor: ctx.actor ?? { type: "remote" },
-      action: "mcp.add",
-      target: omnirushConfigPath(workspace.path),
-      summary: `Added OmniRush.ai-managed MCP ${name}`,
-      timestamp: Date.now(),
-    });
-    emitReloadEvent(ctx.reloadEvents, workspace, "mcp", { type: "mcp", name, action: "added" });
-    return jsonResponse(result, 201);
   });
 
-  addRoute(routes, "GET", "/workspace/:id/mcp/:name/managed", "client", async (ctx) => {
+  addRoute(routes, "GET", "/workspace/:id/mcp/:name/managed", "client", async () => {
     assertMcpAllowed(config);
-    const workspace = await resolveWorkspace(config, ctx.params.id);
-    return jsonResponse(await getLocalManagedMcpConnection(config, workspace.id, ctx.params.name ?? ""));
   });
 
-  addRoute(routes, "POST", "/workspace/:id/mcp/:name/managed/connect", "client", async (ctx) => {
+  addRoute(routes, "POST", "/workspace/:id/mcp/:name/managed/connect", "client", async () => {
     assertMcpAllowed(config);
-    ensureWritable(config);
-    requireClientScope(ctx, "collaborator");
-    const workspace = await resolveWorkspace(config, ctx.params.id);
-    const name = String(ctx.params.name ?? "").trim();
-    validateMcpName(name);
-    const result = await startLocalManagedMcpAuthorization(config, workspace.id, name);
-    await syncRuntimeMcpToOpencodeEngine(config, workspace, [name], undefined, engineMcpServerState).catch(() => undefined);
-    return jsonResponse(result);
   });
 
-  addRoute(routes, "GET", "/mcp/oauth/callback", "none", async (ctx) => {
+  addRoute(routes, "GET", "/mcp/oauth/callback", "none", async () => {
     assertMcpAllowed(config);
-    const state = ctx.url.searchParams.get("state") ?? "";
-    const code = ctx.url.searchParams.get("code") ?? "";
-    if (!state || !code) throw new ApiError(400, "managed_mcp_oauth_callback_invalid", "OAuth callback is missing code or state");
-    const { connection, workspaceId } = await completeLocalManagedMcpAuthorization(config, state, code, ctx.url.searchParams.get("iss") ?? undefined);
-    const workspace = config.workspaces.find((item) => item.id === workspaceId);
-    if (workspace) {
-      await syncRuntimeMcpToOpencodeEngine(config, workspace, [connection.name], undefined, engineMcpServerState).catch(() => undefined);
-    }
-    return new Response(
-      `<!doctype html><meta charset="utf-8"><title>Connected</title><main style="font:16px system-ui;padding:40px;max-width:560px"><h1>Connected</h1><p>${connection.name} is ready in OmniRush.ai. You can close this window.</p><script>setTimeout(()=>window.close(),1200)</script></main>`,
-      { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } },
-    );
   });
 
-  const managedGatewayHandler = async (ctx: RequestContext) => {
+  const managedGatewayHandler = async () => {
     assertMcpAllowed(config);
-    return handleLocalManagedMcpGateway(
-      config,
-      ctx.request,
-      ctx.params.workspaceId ?? "",
-      ctx.params.name ?? "",
-    );
   };
   addRoute(routes, "POST", "/mcp/managed/:workspaceId/:name", "none", managedGatewayHandler);
   addRoute(routes, "GET", "/mcp/managed/:workspaceId/:name", "none", managedGatewayHandler);
   addRoute(routes, "DELETE", "/mcp/managed/:workspaceId/:name", "none", managedGatewayHandler);
 
-  addRoute(routes, "POST", "/workspace/:id/mcp", "client", async (ctx) => {
+  addRoute(routes, "POST", "/workspace/:id/mcp", "client", async () => {
     assertMcpAllowed(config);
-    ensureWritable(config);
-    requireClientScope(ctx, "collaborator");
-    const workspace = await resolveWorkspace(config, ctx.params.id);
-    const body = await readJsonBody(ctx.request);
-    const name = String(body.name ?? "");
-    validateUserMcpName(name);
-    const configPayload = body.config as Record<string, unknown> | undefined;
-    if (!configPayload) {
-      throw new ApiError(400, "invalid_payload", "MCP config is required");
-    }
-    await requireApproval(ctx, {
-      workspaceId: workspace.id,
-      action: "mcp.add",
-      summary: `Add MCP ${name}`,
-      paths: [omnirushConfigPath(workspace.path)],
-    });
-    const result = await addMcp(config, workspace.id, name, configPayload);
-    // Hot-add into the running engine so connect/auth works immediately,
-    // without waiting for an engine instance rebuild.
-    await syncRuntimeMcpToOpencodeEngine(
-      config,
-      workspace,
-      [name],
-      undefined,
-      engineMcpServerState,
-    ).catch(() => undefined);
-    await recordAudit(workspace.path, {
-      id: shortId(),
-      workspaceId: workspace.id,
-      actor: ctx.actor ?? { type: "remote" },
-      action: "mcp.add",
-      target: omnirushConfigPath(workspace.path),
-      summary: `Added MCP ${name}`,
-      timestamp: Date.now(),
-    });
-    emitReloadEvent(ctx.reloadEvents, workspace, "mcp", {
-      type: "mcp",
-      name,
-      action: result.action,
-    });
-    const items = await listMcp(config, workspace.id, workspace.path);
-    return jsonResponse({ items });
   });
 
   addRoute(routes, "DELETE", "/workspace/:id/mcp/:name", "client", async (ctx) => {
-    assertMcpAllowed(config);
     ensureWritable(config);
     requireClientScope(ctx, "collaborator");
     const workspace = await resolveWorkspace(config, ctx.params.id);
@@ -4888,7 +4683,6 @@ function createRoutes(
   // Toggle `enabled` on a workspace MCP. Strict body validation — `Boolean(body.enabled)`
   // would silently disable on `{}` or coerce `"false"` to true.
   addRoute(routes, "POST", "/workspace/:id/mcp/:name/enabled", "client", async (ctx) => {
-    assertMcpAllowed(config);
     ensureWritable(config);
     requireClientScope(ctx, "collaborator");
     const workspace = await resolveWorkspace(config, ctx.params.id);
@@ -4898,6 +4692,7 @@ function createRoutes(
       throw new ApiError(400, "invalid_payload", "enabled must be a boolean");
     }
     const enabled = body.enabled;
+    if (enabled) assertMcpAllowed(config);
     const action = enabled ? "mcp.enable" : "mcp.disable";
     const summary = `${enabled ? "Enable" : "Disable"} MCP ${name}`;
     await requireApproval(ctx, {
@@ -4938,7 +4733,6 @@ function createRoutes(
   });
 
   addRoute(routes, "DELETE", "/workspace/:id/mcp/:name/auth", "client", async (ctx) => {
-    assertMcpAllowed(config);
     ensureWritable(config);
     requireClientScope(ctx, "collaborator");
     const workspace = await resolveWorkspace(config, ctx.params.id);
@@ -5976,16 +5770,17 @@ async function syncRuntimeMcpToOpencodeEngine(
   serverState?: EngineMcpServerState | null,
 ): Promise<EngineMcpSyncResult> {
   if (!mcpAllowed(config)) {
-    // Existing runtime rows are retained for auditability, but must not remain
-    // live in an engine under the deny policy.
-    const runtimeConfig = await readEffectiveRuntimeOpencodeConfig(config, workspace.id).catch(() => undefined);
-    const names = Object.keys(runtimeConfig ? runtimeMcpMap(runtimeConfig) : {})
-      .filter((name) => !onlyNames || onlyNames.includes(name));
     const state = activeEngineMcpServerState(config, serverState);
-    for (const name of names) {
+    const recordedNames = state
+      ? [...(state.registrationByWorkspace.get(workspace.id)?.keys() ?? [])]
+      : [];
+    const liveNames = await readEngineMcpNames(config, workspace).catch(() => []);
+    const names = [...new Set([...recordedNames, ...liveNames])]
+      .filter((name) => !onlyNames || onlyNames.includes(name));
+    await Promise.all(names.map(async (name) => {
       if (state) deleteEngineMcpRegistration(config, state, workspace, name);
       await disconnectMcpFromOpencodeEngine(config, workspace, name).catch(() => undefined);
-    }
+    }));
     return { status: "skipped", syncedNames: [], failures: [] };
   }
   const activeState = activeEngineMcpServerState(config, serverState);
@@ -7163,6 +6958,34 @@ async function disconnectMcpFromOpencodeEngine(
       body,
     });
   }
+}
+
+async function readEngineMcpNames(
+  config: ServerConfig,
+  workspace: WorkspaceInfo,
+): Promise<string[]> {
+  const connection = resolveWorkspaceOpencodeConnection(config, workspace);
+  const baseUrl = connection.baseUrl?.trim() ?? "";
+  if (!baseUrl) return [];
+  const url = new URL(baseUrl);
+  url.pathname = "/mcp";
+  url.search = "";
+  const directory = resolveOpencodeDirectory(workspace);
+  if (directory) url.searchParams.set("directory", directory);
+  const headers: Record<string, string> = {};
+  if (connection.authHeader) headers.Authorization = connection.authHeader;
+  const response = await loopbackFetch(url, { headers, signal: AbortSignal.timeout(10_000) });
+  if (!response.ok) return [];
+  const payload: unknown = await response.json().catch(() => null);
+  const values = isRecord(payload) && Array.isArray(payload.data)
+    ? payload.data
+    : isRecord(payload)
+      ? Object.entries(payload).map(([name, status]) => ({ name, status }))
+      : [];
+  return values.flatMap((entry) => {
+    if (!isRecord(entry) || typeof entry.name !== "string" || !entry.name.trim()) return [];
+    return [entry.name];
+  });
 }
 
 async function requireApproval(

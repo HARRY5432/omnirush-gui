@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { createManagedOpencodeServer, type ManagedOpencodeServer } from "./managed-opencode.js";
-import { omnirushAnthropicToolSchemaPluginPath, omnirushTitleRecoveryPluginPath } from "./omnirush-extensions-plugin-path.js";
+import {
+  omnirushAnthropicToolSchemaPluginPath,
+  omnirushMcpPolicyPluginPath,
+  omnirushTitleRecoveryPluginPath,
+} from "./omnirush-extensions-plugin-path.js";
 
 /**
  * OmniRush plugins that patch the global fetch the engine sends model
@@ -15,8 +19,8 @@ import { omnirushAnthropicToolSchemaPluginPath, omnirushTitleRecoveryPluginPath 
  *     reaches the provider, and a rejected optional title parameter
  *     (`reasoning_effort`, `temperature`, `top_p`) is retried without it, so the session
  *     still gets its title;
- *   - Anthropic tool schemas: an MCP tool whose input schema has a top-level
- *     `anyOf` reaches the Anthropic Messages API flattened.
+ *   - MCP policy: a configured local MCP is removed before the supported
+ *     engine exposes its inventory or sends provider tools.
  *
  * Skipped when the sidecar binary is not present (prepare:sidecar not run).
  */
@@ -108,7 +112,8 @@ describeMaybe("OmniRush fetch plugins on the bundled engine (mock provider)", ()
       },
     });
     const base = `http://127.0.0.1:${provider.port}`;
-    // A local MCP server with one tool whose input schema has a top-level anyOf.
+    // A local MCP server that must be rejected by the policy plugin before the
+    // supported engine can expose or execute its tool.
     const mcpScript = join(data, "anyof-mcp.mjs");
     writeFileSync(mcpScript, `import readline from "node:readline";
 const rl = readline.createInterface({ input: process.stdin });
@@ -130,7 +135,11 @@ rl.on("line", (line) => {
         anth: { name: "Anth", npm: "@ai-sdk/anthropic", options: { baseURL: `${base}/v1`, apiKey: "mock-key" }, models: { "claude-mock": { name: "Claude mock", tool_call: true, limit: { context: 100_000, output: 4_000 } } } },
       },
       mcp: { anyof: { type: "local", command: ["node", mcpScript], enabled: true } },
-      plugin: [omnirushTitleRecoveryPluginPath(), omnirushAnthropicToolSchemaPluginPath()],
+      plugin: [
+        omnirushTitleRecoveryPluginPath(),
+        omnirushAnthropicToolSchemaPluginPath(),
+        omnirushMcpPolicyPluginPath(),
+      ],
     }));
     engine = await createManagedOpencodeServer({
       bin: enginePath!,
@@ -181,19 +190,23 @@ rl.on("line", (line) => {
     console.log("title requests: optional parameters", JSON.stringify(refused));
   }, 90_000);
 
-  test("an MCP tool with a top-level anyOf reaches the Anthropic API flattened", async () => {
+  test("a configured MCP never reaches the engine inventory or provider tools", async () => {
     seen.length = 0;
-    await waitFor(async () => {
-      const status = (await (await engineFetch("/mcp")).json()) as Record<string, { status: string }>;
-      return status.anyof?.status === "connected";
-    }, "the MCP server");
+    const status = await waitFor(async () => {
+      const response = await engineFetch("/mcp");
+      if (!response.ok) return null;
+      return (await response.json()) as Record<string, unknown>;
+    }, "the engine MCP inventory");
+    expect(status.anyof).toBeUndefined();
+
     await prompt({ providerID: "anth", modelID: "claude-mock" }, "Use the export tool.");
-    const request = await waitFor(async () => seen.find((entry) => entry.path === "/v1/messages" && Array.isArray(entry.body.tools) && entry.body.tools.length > 0), "an Anthropic request with tools");
-    const tool = (request.body.tools as Array<{ name: string; input_schema: Record<string, unknown> }>).find((entry) => entry.name.endsWith("export_batch"));
-    expect(tool).toBeDefined();
-    expect(tool!.input_schema.anyOf).toBeUndefined();
-    expect(tool!.input_schema.type).toBe("object");
-    expect(Object.keys(tool!.input_schema.properties as object).sort()).toEqual(["id", "name"]);
-    for (const entry of seen) expect(entry.headers[HEADER]).toBeUndefined();
+    await waitFor(async () => seen.find((entry) => entry.path === "/v1/messages"), "an Anthropic request");
+    const requests = seen.filter((entry) => entry.path === "/v1/messages");
+    expect(requests.length).toBeGreaterThan(0);
+    for (const request of requests) {
+      const tools = Array.isArray(request.body.tools) ? request.body.tools : [];
+      expect(tools.some((entry) => typeof entry === "object" && entry !== null
+        && "name" in entry && typeof entry.name === "string" && entry.name.endsWith("export_batch"))).toBe(false);
+    }
   }, 90_000);
 });

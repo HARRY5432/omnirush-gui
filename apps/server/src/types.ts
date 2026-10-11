@@ -14,8 +14,6 @@ export type ProviderPlacement = "in-sandbox" | "host-machine" | "client-machine"
 
 export type LogFormat = "pretty" | "json";
 
-export type McpPolicyMode = "disabled";
-
 export interface WorkspaceConfig {
   id?: string;
   path: string;
@@ -151,8 +149,6 @@ export interface ServerConfig {
   hostTokenSource: "cli" | "env" | "file" | "generated";
   logFormat: LogFormat;
   logRequests: boolean;
-  /** Server-owned MCP execution policy. */
-  mcpPolicy?: McpPolicyMode;
   /** In-memory secure key custody supplied by an embedding host such as OmniRush.ai Desktop. */
   localManagedMcpVaultKey?: LocalManagedMcpVaultKeyProvider;
   /** Desktop-owned account credentials. They remain in the embedding process and are never serialized. */

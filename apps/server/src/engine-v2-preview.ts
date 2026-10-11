@@ -18,8 +18,6 @@ import {
   isEngineGlobalRuntimeConfigId,
   onRuntimeOpencodeConfigWrite,
   readGlobalRuntimeOpencodeConfig,
-  readEffectiveRuntimeOpencodeConfig,
-  runtimeMcpMap,
   runtimeProviderMap,
 } from "./runtime-opencode-config-store.js";
 import type { EnvService } from "./env-file.js";
@@ -320,7 +318,7 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
   let mirrorDirty = false;
   const workspaceReadiness = new Map<string, Promise<void>>();
   let mirroredSpecs: OpencodeV2ProviderSpec[] = [];
-  const workspaceMcp = new Map<string, Map<string, string>>();
+  const mcpCleaned = new Set<string>();
   const mcpInFlight = new Map<string, Promise<void>>();
   const mcpWorkspaces = new Map<string, string>();
 
@@ -333,66 +331,33 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
       if (previous) await previous.catch(() => undefined);
       const active = sidecar;
       if (!active) throw new Error("OmniRush v2 is not running");
-      const runtime = runtimeMcpMap(await readEffectiveRuntimeOpencodeConfig(config, workspaceId));
-      const desired = new Map(Object.entries(runtime).flatMap(([name, value]) => {
-        const mapped = mapRuntimeMcpToV2(value);
-        return mapped ? [[name, mapped] as const] : [];
-      }));
-      const applied = workspaceMcp.get(directory) ?? new Map<string, string>();
-      workspaceMcp.set(directory, applied);
-      let changed = false;
-      // Remove first so a failed replacement cannot leave an old credential or
-      // revoked tool active. Only touch registrations owned by this mirror.
-      for (const [name, fingerprint] of applied) {
-        if (desired.has(name) && JSON.stringify(desired.get(name)) === fingerprint) continue;
+      if (mcpCleaned.has(directory)) return;
+
+      // The v2 daemon can discover MCPs from project/global files without a
+      // runtime-DB write. Enumerate the live location and remove every entry;
+      // this is intentionally removal-only because MCP is globally disabled.
+      const current = await active.fetchJson("/api/mcp", { directory, timeoutMs: 10_000 });
+      if (current.status !== 200 || !isRecord(current.json) || !Array.isArray(current.json.data)) {
+        throw new Error("OmniRush v2 MCP status is unavailable");
+      }
+      const entries = current.json.data;
+      const names = entries.flatMap((entry) => (
+        isRecord(entry) && typeof entry.name === "string" && entry.name.trim()
+          ? [entry.name]
+          : []
+      ));
+      await Promise.all(names.map(async (name) => {
         const result = await active.fetchJson(`/api/mcp/${encodeURIComponent(name)}`, {
           method: "DELETE", directory, timeoutMs: 15_000,
         });
         if (result.status !== 204 && result.status !== 404) throw new Error(`OmniRush v2 MCP removal failed (${result.status})`);
-        applied.delete(name);
-        changed = true;
-      }
-      for (const [name, mcpConfig] of desired) {
-        const fingerprint = JSON.stringify(mcpConfig);
-        if (applied.get(name) === fingerprint) continue;
-        const result = await active.fetchJson(`/api/mcp/${encodeURIComponent(name)}`, {
-          method: "PUT", body: { config: mcpConfig }, directory, timeoutMs: 30_000,
-        });
-        if (result.status !== 204) throw new Error(`OmniRush v2 MCP registration failed (${result.status})`);
-        applied.set(name, fingerprint);
-        changed = true;
-      }
-      if (changed) {
-        const deadline = Date.now() + 30_000;
-        while (true) {
-          const result = await active.fetchJson("/api/mcp", { directory, timeoutMs: 5_000 });
-          const entries = isRecord(result.json) ? result.json.data : undefined;
-          if (result.status !== 200 || !Array.isArray(entries)) throw new Error("OmniRush v2 MCP status is unavailable");
-          const pending = [...desired.keys()].some((name) => {
-            const entry = entries.find((entry) => isRecord(entry) && entry.name === name);
-            return !isRecord(entry) || !isRecord(entry.status) || entry.status.status === "pending";
-          });
-          if (!pending) break;
-          if (Date.now() >= deadline) {
-            // Retry readiness on the next request rather than cache an
-            // acknowledged registration as usable before its tools exist.
-            throw new Error("OmniRush v2 MCP connections did not settle");
-          }
-          await new Promise((resolve) => setTimeout(resolve, 100));
-        }
-        // The pinned beta batches MCP ToolsChanged events for 100ms after
-        // connection startup. Admission must follow that registry refresh,
-        // not merely the PUT acknowledgement or connected status.
-        await new Promise((resolve) => setTimeout(resolve, 250));
-      }
+      }));
+      mcpCleaned.add(directory);
     })();
     mcpInFlight.set(directory, pending);
     try { await pending; }
     catch (error) {
-      // Retain ownership for removals, but never cache a failed readiness
-      // attempt as an applied configuration.
-      const applied = workspaceMcp.get(directory);
-      if (applied) for (const name of applied.keys()) applied.set(name, "");
+      mcpCleaned.delete(directory);
       throw error;
     }
     finally { if (mcpInFlight.get(directory) === pending) mcpInFlight.delete(directory); }
@@ -471,7 +436,7 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
     const active = sidecar;
     workspaceReadiness.clear();
     sidecar = undefined;
-    workspaceMcp.clear();
+    mcpCleaned.clear();
     mcpWorkspaces.clear();
     running = false;
     version = undefined;
@@ -513,6 +478,7 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
         // locations while a conversation is active. Request admission joins
         // the same serialized reconciliation rather than racing it.
         for (const [directory, id] of mcpWorkspaces) {
+          mcpCleaned.delete(directory);
           if (global || id === workspaceId) void syncWorkspaceMcp(id, directory).catch((error) => {
             if (sidecar) lastError = `MCP: ${errorMessage(error)}`;
           });
