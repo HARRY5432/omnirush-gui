@@ -125,6 +125,13 @@ func main() {
 		fmt.Println(version)
 		return
 	}
+	// PID 1 with no init in front (`unshare --pid --fork`, a runtime without
+	// --init): be a tiny init that reaps orphans and run the daemon as its
+	// child, so a reaper never takes a command's exit status from the
+	// daemon's own Wait.
+	if os.Getpid() == 1 && os.Getenv("BOXD_INIT_CHILD") == "" {
+		os.Exit(runInit())
+	}
 	cfg := loadConfig()
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	log.SetPrefix("boxd ")
@@ -141,10 +148,6 @@ func main() {
 	ln, err := net.Listen("tcp", cfg.listen)
 	if err != nil {
 		log.Fatalf("listen: %v", err)
-	}
-	// Reap orphans when we are PID 1 (no --init).
-	if os.Getpid() == 1 {
-		go reap()
 	}
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
@@ -270,12 +273,42 @@ func ensureLine(file, needle, line string) {
 	_, _ = f.WriteString(line)
 }
 
-func reap() {
+// runInit is PID 1: start boxd as a child, forward signals to it, reap
+// every orphan, and exit with the daemon's status.
+func runInit() int {
+	self, err := os.Executable()
+	if err != nil {
+		self = "/proc/self/exe"
+	}
+	cmd := exec.Command(self, os.Args[1:]...)
+	cmd.Env = append(os.Environ(), "BOXD_INIT_CHILD=1")
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "boxd init: %v\n", err)
+		return 1
+	}
+	child := cmd.Process.Pid
+	sigs := make(chan os.Signal, 4)
+	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP, syscall.SIGQUIT)
+	go func() {
+		for sig := range sigs {
+			_ = cmd.Process.Signal(sig)
+		}
+	}()
 	for {
 		var status syscall.WaitStatus
 		pid, err := syscall.Wait4(-1, &status, 0, nil)
-		if err != nil || pid <= 0 {
-			time.Sleep(200 * time.Millisecond)
+		if err != nil {
+			if errors.Is(err, syscall.EINTR) {
+				continue
+			}
+			return 1
+		}
+		if pid == child {
+			if status.Signaled() {
+				return 128 + int(status.Signal())
+			}
+			return status.ExitStatus()
 		}
 	}
 }
