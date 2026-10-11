@@ -459,7 +459,7 @@ export async function readRawCall(dir: string, now = Date.now()): Promise<RawCal
 
 export type Ecosystem =
   | "pypi" | "npm" | "cargo" | "go" | "gem" | "composer" | "apt" | "rpm" | "apk" | "pacman" | "brew"
-  | "winget" | "choco" | "scoop" | "conda" | "rustup" | "corepack" | "browsers" | "url" | "runtime";
+  | "winget" | "choco" | "scoop" | "conda" | "rustup" | "corepack" | "browsers" | "url" | "runtime" | "psgallery";
 export type Scope = "project" | "global" | "user" | "target" | "system";
 
 export type Package = { name: string; version: string; source?: string; sha256?: string; integrity?: string; path?: string };
@@ -1329,27 +1329,130 @@ export async function lineOf(call: RawCall, options: { root: string; turn: numbe
 
 // --- PowerShell downloads (cmdlets no PATH wrapper sees) ----------------------------
 
-// PowerShell's download cmdlets and their aliases. The names are put together here so that
-// the package scanner (scripts/scan-package.mjs), which looks for download-and-run code in
-// what ships, never mistakes this reader of the agent's commands for such code.
+// PowerShell's download and install cmdlets and their aliases. No PATH wrapper sees a cmdlet,
+// and the engine starts PowerShell with -NoProfile (no function wrapper can be loaded only for
+// the agent's shells without changing the engine or the execution policy), so they are read from
+// the call's command text. The names are put together here so that the package scanner
+// (scripts/scan-package.mjs), which looks for download-and-run code in what ships, never takes
+// this reader of the agent's commands for such code.
 const PS_WEB = ["Invoke-" + "WebRequest", "iwr", "Invoke-" + "RestMethod", "irm", "Start-" + "BitsTransfer", "wget", "curl"];
-const PS_DOWNLOAD = new RegExp(`\\b(${PS_WEB.join("|")})\\b(.*)$`, "i");
-const PS_RUN = new RegExp(`\\|\\s*(?:iex|Invoke-${"Expression"})\\b`, "i");
+const PS_DOWNLOAD = new RegExp(`(?:^|[\\s(&|{])(${PS_WEB.join("|")})(?=\\s|$)(.*)$`, "i");
+const PS_RUN = new RegExp(`\\|\\s*(?:iex|Invoke-${"Expression"})\\b|^\\s*(?:iex|Invoke-${"Expression"})\\b|[;&]\\s*(?:iex|Invoke-${"Expression"})\\b`, "i");
+const PS_CLIENT = new RegExp(`(?:New-Object\\s+(?:-TypeName\\s+)?["']?(?:System\\.)?Net\\.${"WebClient"}["']?\\)?|\\[(?:System\\.)?Net\\.${"WebClient"}\\]::new\\(\\)\\)?)[^.]*\\.(Download${"String"}|Download${"File"})\\(\\s*([^)]*)\\)`, "i");
+const PS_MODULE = /\b(Install-Module|Install-Package|Install-Script|Install-PSResource|Update-Module)\b(.*)$/i;
 
-/** Downloads a PowerShell command makes with those cmdlets (no PATH wrapper sees a cmdlet): url + file, or piped into a run. */
-export function powershellDownloads(command: string): Array<{ url: string; out: string | null; piped: boolean }> {
-  const out: Array<{ url: string; out: string | null; piped: boolean }> = [];
-  for (const segment of command.split(/;|\r?\n/)) {
+/** `$name = "value"` assignments of a PowerShell command (so `-Uri $url` can be read). */
+function psVariables(command: string): Map<string, string> {
+  const vars = new Map<string, string>();
+  for (const match of command.matchAll(/\$([A-Za-z_][\w]*)\s*=\s*(["'])([^"'\r\n]*)\2/g)) vars.set(match[1]!.toLowerCase(), match[3]!);
+  return vars;
+}
+
+/** A word of a PowerShell segment: quotes removed, `$var` from the command's own assignments. */
+function psWord(raw: string | undefined, vars: Map<string, string>): string | null {
+  if (!raw) return null;
+  let word = raw.trim().replace(/^["']|["']$/g, "");
+  word = word.replace(/\$\{?([A-Za-z_]\w*)\}?/g, (all, name: string) => vars.get(name.toLowerCase()) ?? all);
+  return word || null;
+}
+
+function psFlag(rest: string, names: string[]): string | undefined {
+  const re = new RegExp(`-(?:${names.join("|")})(?::|\\s+)("[^"]*"|'[^']*'|[^\\s;|)]+)`, "i");
+  return re.exec(rest)?.[1];
+}
+
+/** Downloads a PowerShell command makes (cmdlets, their aliases, the .NET web client): url + file, or piped into a run. */
+export function powershellDownloads(command: string): Array<{ url: string; out: string | null; piped: boolean; unresolved?: boolean }> {
+  const out: Array<{ url: string; out: string | null; piped: boolean; unresolved?: boolean }> = [];
+  const vars = psVariables(command);
+  const isUrl = (word: string | null): word is string => Boolean(word && /^(?:https?|ftp):\/\/\S+$/i.test(word));
+  for (const segment of command.split(/;|\r?\n|&&|\|\|/)) {
+    const client = PS_CLIENT.exec(segment);
+    if (client) {
+      const args = client[2]!.split(",").map((part) => psWord(part, vars));
+      if (isUrl(args[0] ?? null)) {
+        const file = client[1]!.toLowerCase().endsWith("file") ? args[1] ?? null : null;
+        if (file || PS_RUN.test(segment)) out.push({ url: args[0]!, out: file, piped: !file });
+      }
+      continue;
+    }
     const match = PS_DOWNLOAD.exec(segment);
     if (!match) continue;
+    const cmdlet = match[1]!;
     const rest = match[2]!;
-    const url = /(?:-Uri\s+|-Source\s+|\s)["']?((?:https?|ftp):\/\/[^\s"'|)]+)/i.exec(rest)?.[1];
-    if (!url) continue;
-    const file = /-(?:OutFile|Destination)\s+["']?([^"'\s|;]+)/i.exec(rest)?.[1] ?? null;
-    const piped = PS_RUN.test(rest);
-    if (/^(?:curl|wget)$/i.test(match[1]!) && !/-(?:Uri|OutFile)\b/i.test(rest)) continue; // the real curl/wget: their wrapper saw them
-    if (file || piped) out.push({ url, out: file, piped });
+    // curl/wget without PowerShell's own parameters are the real programs: their wrapper saw them.
+    if (/^(?:curl|wget)$/i.test(cmdlet) && !/-(?:Uri|OutFile|UseBasicParsing|Method|Headers)\b/i.test(rest)) continue;
+    let url = psWord(psFlag(rest, ["Uri", "Source"]), vars);
+    if (!isUrl(url)) {
+      const positional = /^\s+("[^"]*"|'[^']*'|[^\s;|)-][^\s;|)]*)/.exec(rest)?.[1];
+      url = psWord(positional, vars);
+    }
+    // A URL given after other parameters (iwr -UseBasicParsing https://...).
+    if (!isUrl(url)) url = psWord(/(?:^|\s)(["']?(?:https?|ftp):\/\/[^\s"'|;)]+["']?)/i.exec(rest)?.[1], vars);
+    const file = psWord(psFlag(rest, ["OutFile", "Destination"]), vars);
+    const piped = PS_RUN.test(rest) || PS_RUN.test(segment.slice(0, match.index));
+    if (!file && !piped) continue;
+    if (isUrl(url)) {
+      out.push({ url, out: file, piped: piped && !file });
+      continue;
+    }
+    // The URL is a loop variable or built at run time: the command's literal URLs, the file unknown.
+    for (const found of command.matchAll(/["'\s(=,@]((?:https?|ftp):\/\/[^\s"'|;)$,]+)/gi)) {
+      if (!out.some((item) => item.url === found[1])) out.push({ url: found[1]!, out: null, piped: false, unresolved: true });
+    }
   }
+  return out;
+}
+
+/** PowerShell Gallery installs a command makes: module or script names, the version asked for, and the scope. */
+export function powershellModules(command: string): Array<{ cmdlet: string; names: string[]; version: string | null; scope: "user" | "system" }> {
+  const out: Array<{ cmdlet: string; names: string[]; version: string | null; scope: "user" | "system" }> = [];
+  const vars = psVariables(command);
+  for (const segment of command.split(/;|\r?\n|&&|\|\|/)) {
+    const match = PS_MODULE.exec(segment);
+    if (!match) continue;
+    const rest = match[2]!;
+    let names = psWord(psFlag(rest, ["Name"]), vars);
+    if (!names) names = psWord(/^\s+("[^"]*"|'[^']*'|[^\s;|)-][^\s;|)]*)/.exec(rest)?.[1], vars);
+    const list = (names ?? "").split(",").map((name) => name.trim().replace(/^["']|["']$/g, "")).filter((name) => /^[\w.-]+$/.test(name));
+    if (!list.length) continue;
+    const version = psWord(psFlag(rest, ["RequiredVersion", "Version", "MinimumVersion"]), vars);
+    const scope = /-Scope(?::|\s+)["']?AllUsers/i.test(rest) ? "system" : "user";
+    out.push({ cmdlet: match[1]!, names: list, version: version && /^[\w.-]+$/.test(version) ? version : null, scope });
+  }
+  return out;
+}
+
+/** The installed versions of a PowerShell module (newest first): the user's and the machine's module folders. */
+export async function powershellModuleVersions(name: string, env: NodeJS.ProcessEnv, home: string | null): Promise<string[]> {
+  const docs = [env.OneDrive ? path.join(env.OneDrive, "Documents") : null, home ? path.join(home, "Documents") : null].filter((dir): dir is string => Boolean(dir));
+  const programFiles = env.ProgramFiles ?? "C:\\Program Files";
+  const roots = [
+    ...docs.flatMap((dir) => [path.join(dir, "WindowsPowerShell", "Modules"), path.join(dir, "PowerShell", "Modules")]),
+    path.join(programFiles, "WindowsPowerShell", "Modules"),
+    path.join(programFiles, "PowerShell", "Modules"),
+  ];
+  for (const root of roots) {
+    let entries: string[] = [];
+    try {
+      entries = await fs.readdir(path.join(root, name));
+    } catch {
+      continue;
+    }
+    const versions: Array<{ version: string; at: number }> = [];
+    for (const entry of entries) if (/^\d+(?:\.\d+)+/.test(entry)) versions.push({ version: entry, at: (await mtimeMs(path.join(root, name, entry))) ?? 0 });
+    if (versions.length) return versions.sort((a, b) => b.at - a.at).map((item) => item.version);
+  }
+  return [];
+}
+
+/** A PowerShell path word on this machine: $env:NAME, $HOME and ~ expanded. */
+export function powershellPath(word: string, env: NodeJS.ProcessEnv, home: string | null): string {
+  let out = word.replace(/\$env:([A-Za-z_]\w*)/gi, (all, name: string) => {
+    const key = Object.keys(env).find((item) => item.toLowerCase() === name.toLowerCase());
+    return key ? env[key] ?? all : all;
+  });
+  if (home) out = out.replace(/^(?:\$HOME|~)(?=$|[\\/])/i, home);
   return out;
 }
 

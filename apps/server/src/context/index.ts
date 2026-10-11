@@ -36,6 +36,9 @@ import {
   matchCall,
   outsideWrites,
   powershellDownloads,
+  powershellModules,
+  powershellModuleVersions,
+  powershellPath,
   setInstallLogActive,
   sha256File,
   ENV_TURN_SCHEMA,
@@ -365,53 +368,77 @@ export class ContextCapture {
     });
   }
 
-  /** PowerShell downloads of the turn's calls (its download cmdlets are not programs: no PATH wrapper sees them). */
+  /** PowerShell downloads and Gallery installs of the turn's calls (cmdlets are not programs: no PATH wrapper sees them). */
   private async commandDownloads(state: SessionContext, calls: ToolCall[]): Promise<void> {
+    const tilde = (text: string) => this.options.scrub.text(tildeText(text, this.privacy));
+    const os = this.platform === "win32" ? "windows" : this.platform === "darwin" ? "darwin" : "linux";
+    const line = (call: ToolCall, fields: Partial<InstallLine>): InstallLine => {
+      const cwd = call.cwd || state.root;
+      const start = call.start ?? Date.now();
+      return {
+        v: 1,
+        schema: INSTALL_LOG_SCHEMA,
+        ts: new Date(start).toISOString(),
+        end: call.end ? new Date(call.end).toISOString() : null,
+        dur_ms: call.end ? Math.max(0, call.end - start) : null,
+        turn: state.turn,
+        call: call.callId,
+        tool: "powershell",
+        via: "command",
+        real: null,
+        argv: [],
+        cwd: tilde(cwd),
+        cwd_rel: relativeTo(state.root, cwd, this.platform),
+        exit: call.status === "completed" ? 0 : null,
+        os,
+        scope: "project",
+        ecosystem: "url",
+        target: null,
+        target_rel: null,
+        python: null,
+        requested: [],
+        resolved: [],
+        removed: [],
+        downloads: [],
+        lockfile: null,
+        lockfile_rel: null,
+        lockfile_sha256: null,
+        ...fields,
+      };
+    };
     for (const call of calls) {
       if (toolKind(call.tool) !== "shell" || !call.command) continue;
+      const cwd = call.cwd || state.root;
       for (const found of powershellDownloads(call.command)) {
-        const cwd = call.cwd || state.root;
-        const file = found.out ? (/^[A-Za-z]:[\\/]|^[\\/]/.test(found.out) ? found.out : `${cwd}${this.platform === "win32" ? "\\" : "/"}${found.out}`) : null;
+        const expanded = found.out ? powershellPath(found.out, this.env, this.privacy.home) : null;
+        const file = expanded ? (/^[A-Za-z]:[\\/]|^[\\/]/.test(expanded) ? expanded : `${cwd}${this.platform === "win32" ? "\\" : "/"}${expanded}`) : null;
         const hashed = file ? await sha256File(file) : null;
-        const tilde = (text: string) => this.options.scrub.text(tildeText(text, this.privacy));
-        const start = call.start ?? Date.now();
-        const line: InstallLine = {
-          v: 1,
-          schema: INSTALL_LOG_SCHEMA,
-          ts: new Date(start).toISOString(),
-          end: call.end ? new Date(call.end).toISOString() : null,
-          dur_ms: call.end ? Math.max(0, call.end - start) : null,
-          turn: state.turn,
-          call: call.callId,
-          tool: "powershell",
-          via: "command",
-          real: null,
-          argv: [],
-          cwd: tilde(cwd),
-          cwd_rel: relativeTo(state.root, cwd, this.platform),
-          exit: call.status === "completed" ? 0 : null,
-          os: this.platform === "win32" ? "windows" : this.platform === "darwin" ? "darwin" : "linux",
-          scope: "project",
-          ecosystem: "url",
-          target: null,
-          target_rel: null,
-          python: null,
-          requested: [],
-          resolved: [],
-          removed: [],
+        state.installs += 1;
+        this.emit(state.id, "context.install", line(call, {
           downloads: [{
             url: cleanUrl(found.url),
-            path: file ? tilde(file) : "(piped)",
+            path: file ? tilde(file) : found.unresolved ? "(unknown)" : "(piped)",
             path_rel: file ? relativeTo(state.root, file, this.platform) : null,
             ...(hashed?.sha256 ? { sha256: hashed.sha256 } : {}),
             ...(hashed ? { size: hashed.size } : {}),
           }],
-          lockfile: null,
-          lockfile_rel: null,
-          lockfile_sha256: null,
-        };
+        }));
+      }
+      for (const found of powershellModules(call.command)) {
+        const resolved = [];
+        for (const name of found.names.slice(0, 20)) {
+          const versions = await powershellModuleVersions(name, this.env, this.privacy.home);
+          const version = found.version && versions.includes(found.version) ? found.version : versions[0];
+          if (version) resolved.push({ name, version, source: "https://www.powershellgallery.com/api/v2" });
+        }
         state.installs += 1;
-        this.emit(state.id, "context.install", line);
+        this.emit(state.id, "context.install", line(call, {
+          ecosystem: "psgallery",
+          scope: found.scope,
+          argv: [found.cmdlet],
+          requested: found.names.map((name) => (found.version ? `${name}@${found.version}` : name)),
+          resolved,
+        }));
       }
     }
   }
