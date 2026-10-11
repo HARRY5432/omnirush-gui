@@ -18,9 +18,18 @@ import (
 // user namespace: 5.11+, with userxattr), else fuse-overlayfs when given.
 // Returns "kernel" or "fuse".
 func mountOverlay(lower, upper, work, merged, fuse string) (string, error) {
+	return mountOverlayMode(lower, upper, work, merged, fuse, false)
+}
+
+func mountOverlayMode(lower, upper, work, merged, fuse string, noKernel bool) (string, error) {
 	base := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", lower, upper, work)
 	var errs []string
-	for _, opts := range []string{base + ",userxattr", base} {
+	kernel := []string{base + ",userxattr", base}
+	if noKernel {
+		kernel = nil
+		errs = append(errs, "kernel overlay skipped")
+	}
+	for _, opts := range kernel {
 		err := syscall.Mount("overlay", merged, "overlay", 0, opts)
 		if err == nil {
 			return "kernel", nil
@@ -34,7 +43,7 @@ func mountOverlay(lower, upper, work, merged, fuse string) (string, error) {
 			if err == nil {
 				return "fuse", nil
 			}
-			errs = append(errs, "fuse-overlayfs: "+strings.TrimSpace(string(out)))
+			errs = append(errs, fmt.Sprintf("fuse-overlayfs: %v %s", err, strings.TrimSpace(string(out))))
 		} else {
 			errs = append(errs, "no /dev/fuse")
 		}
@@ -117,7 +126,7 @@ func stageInit(args []string) error {
 	if err := ensureDir(m); err != nil {
 		return err
 	}
-	overlay, err := mountOverlay(sp.Lower, sp.Upper, sp.Work, m, sp.Fuse)
+	overlay, err := mountOverlayMode(sp.Lower, sp.Upper, sp.Work, m, sp.Fuse, sp.NoKernel)
 	if err != nil {
 		return err
 	}

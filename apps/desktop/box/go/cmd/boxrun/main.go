@@ -557,7 +557,8 @@ type spec struct {
 	Env      []string   `json:"env"`
 	Hostname string     `json:"hostname"`
 	InitOut  string     `json:"init_out"`
-	Root     bool       `json:"root"` // unshare as real root (WSL distro): mount /dev and /sys from the host
+	Root     bool       `json:"root"`                        // unshare as real root (WSL distro): mount /dev and /sys from the host
+	NoKernel bool       `json:"no_kernel_overlay,omitempty"` // fuse-overlayfs only (a kernel without overlayfs in user namespaces, or a test of one)
 	AptRoot  bool       `json:"apt_root"`
 }
 
@@ -611,8 +612,11 @@ func alive(s *state) bool {
 	if err != nil {
 		return false
 	}
-	c := string(cmdline)
-	return strings.Contains(c, "bwrap") || strings.Contains(c, "unshare") || strings.Contains(c, "boxrun")
+	switch filepath.Base(strings.SplitN(string(cmdline), "\x00", 2)[0]) {
+	case "bwrap", "unshare", "boxrun":
+		return true
+	}
+	return false
 }
 
 func portOpen(port int) bool {
@@ -658,6 +662,7 @@ func cmdUp(args []string) error {
 	idmapAsked := fs.String("idmap", "auto", "auto|single|subuid")
 	foreground := fs.Bool("foreground", false, "stay attached (the WSL keeper): exit when stdin closes")
 	timeout := fs.Duration("timeout", 30*time.Second, "wait this long for boxd")
+	overlayMode := fs.String("overlay", "auto", "auto|fuse (fuse-overlayfs only)")
 	var binds, roBinds, envs multi
 	fs.Var(&binds, "bind", "SRC=DST (repeat)")
 	fs.Var(&roBinds, "ro-bind", "SRC=DST read-only (repeat)")
@@ -721,7 +726,17 @@ func cmdUp(args []string) error {
 		env = append(env, "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
 	}
 	env = append(env, envs...)
-	sp := spec{Hostname: "omnirush-box", Env: env, AptRoot: ids.Mode == "single" && !root}
+	sp := spec{Hostname: "omnirush-box", Env: env, AptRoot: ids.Mode == "single" && !root, NoKernel: *overlayMode == "fuse"}
+	if sp.NoKernel && fuseBin == "" {
+		return errors.New("--overlay fuse: fuse-overlayfs is not installed")
+	}
+	// /etc/hosts: this machine's (the network is shared) plus the box's own name, as a
+	// container runtime writes it (sudo looks its host name up).
+	hostsData, _ := os.ReadFile("/etc/hosts")
+	hostsText := strings.TrimRight(string(hostsData), "\n") + "\n127.0.1.1\tomnirush-box\n"
+	if err := os.WriteFile(filepath.Join(*box, "hosts"), []byte(hostsText), 0o644); err != nil {
+		return err
+	}
 	var cmd *exec.Cmd
 	if mode == "unshare" {
 		un := findTool("", "unshare")
@@ -731,7 +746,7 @@ func cmdUp(args []string) error {
 		sp.Lower, sp.Upper, sp.Work = st.RootFS(*image), filepath.Join(*box, "upper"), filepath.Join(*box, "work")
 		sp.Merged = filepath.Join(*box, "merged")
 		_ = os.MkdirAll(sp.Merged, 0o755)
-		sp.Fuse, sp.Boxd, sp.Resolv, sp.Hosts = fuseBin, *boxd, resolvFile(), "/etc/hosts"
+		sp.Fuse, sp.Boxd, sp.Resolv, sp.Hosts = fuseBin, *boxd, resolvFile(), filepath.Join(*box, "hosts")
 		sp.Binds, sp.InitOut, sp.Root = bs, filepath.Join(*box, "init.json"), true
 		if err := writeJSONFile(filepath.Join(*box, "spec.json"), sp); err != nil {
 			return err
@@ -760,10 +775,14 @@ func cmdUp(args []string) error {
 			bargs = append(bargs, "--ro-bind-try", r, "/.omni/resolv.conf")
 			sp.Resolv = "/.omni/resolv.conf"
 		}
-		bargs = append(bargs, "--ro-bind-try", "/etc/hosts", "/.omni/hosts")
-		sp.Hosts = "/.omni/hosts"
+		sp.Hosts = "/.omni/box/hosts"
 		if fuseBin != "" {
+			// fuse-overlayfs is a dynamic program: the host's libraries go in for the setup only
+			// (the root switch leaves them behind; the daemon keeps what it opened).
 			bargs = append(bargs, "--dev-bind-try", "/dev/fuse", "/dev/fuse", "--ro-bind", fuseBin, "/.omni/fuse-overlayfs")
+			for _, d := range []string{"/usr", "/lib", "/lib64", "/lib32", "/etc/ld.so.cache"} {
+				bargs = append(bargs, "--ro-bind-try", d, d)
+			}
 			sp.Fuse = "/.omni/fuse-overlayfs"
 		}
 		for i, b := range bs {

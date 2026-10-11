@@ -179,6 +179,8 @@ async function open(ctx: OpenContext): Promise<Opened> {
   const portFile = path.join(runFolder, "boxd.port");
   const idle = Number(env.OMNIRUSH_BOX_IDLE_MIN) > 0 ? Number(env.OMNIRUSH_BOX_IDLE_MIN) : IDLE_MINUTES;
   const args = upArgs({ box: boxDir(home, key), store: storeDir(home), image: meta.image, boxd, portFile, root, croot, runFolder, shims, pkglog, token: meta.token, bwrap: runtime.bwrap ?? null, idleMinutes: idle });
+  // OMNIRUSH_BOX_OVERLAY=fuse: fuse-overlayfs only (a kernel without overlayfs in user namespaces, or a test of one).
+  if (String(env.OMNIRUSH_BOX_OVERLAY || "").toLowerCase() === "fuse") args.push("--overlay", "fuse");
   const res = await run(runtime.bin, args, { timeoutMs: 45_000, env: { PATH: env.PATH || "/usr/bin:/bin", USER: env.USER || "" } });
   const out = parseOut(res.stdout);
   const port = num(out?.port);
