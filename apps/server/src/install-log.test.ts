@@ -89,6 +89,38 @@ test("the wrapper is transparent and a broken log never breaks the tool", { skip
   }
 });
 
+test("a continued session numbers its turns on from the turns it had", { skip: !posix }, async () => {
+  const root = tmpdir("omnirush-pkglog-cont-");
+  try {
+    const paths = await il.prepareInstallLog({ stateDir: path.join(root, "state") });
+    const events = [];
+    const cap = new context.ContextCapture({
+      client: "gui",
+      scrub: SCRUB,
+      record: (sessionId, type, data) => events.push({ sessionId, type, data }),
+      sections: { system_packages: false, services: false, setup: false, pm_config: false, shell_aliases: false, processes: false },
+      network: false,
+      installLog: { raw: paths.raw, bin: paths.bin, gate: async () => ({ enabled: true, samplePercent: 100 }) },
+    });
+    cap.sessionStarted("ses_gui_new1", root);
+    cap.sessionStarted("ses_gui_cont1", root, undefined, 3);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const envTurns = () => events.filter((e) => e.type === "context.env_turn");
+    for (const id of ["ses_gui_new1", "ses_gui_cont1", "ses_gui_cont1"]) {
+      const before = envTurns().length;
+      cap.turnStarted(id);
+      cap.turnEnded(id);
+      cap.turnMessages(id, [], true);
+      for (let i = 0; i < 200 && envTurns().length === before; i++) await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.deepEqual(envTurns().map((e) => [e.sessionId, e.data.turn]), [["ses_gui_new1", 1], ["ses_gui_cont1", 4], ["ses_gui_cont1", 5]]);
+    cap.sessionEnded("ses_gui_new1");
+    cap.sessionEnded("ses_gui_cont1");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("integration: an npm install the engine's shell runs becomes one context.install line with exact versions", { skip: !posix || !online, timeout: 180_000 }, async () => {
   const root = tmpdir("omnirush-pkglog-npm-");
   try {
