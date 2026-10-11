@@ -241,6 +241,8 @@ const MAX_TURN_MESSAGE_BYTES = 8 * 1024 * 1024;
  * turns the observer never saw settle, goes out over several flushes.
  */
 const MAX_BACKLOG_MESSAGE_BYTES = 4 * MAX_TURN_MESSAGE_BYTES;
+/** A message over the read cap is asked for alone and read up to this, then slimmed (slimEngineMessage). */
+const MAX_SINGLE_MESSAGE_READ_BYTES = 64 * 1024 * 1024;
 /** The longest an observer follows one turn: a safety bound far past any real turn. */
 const MAX_OBSERVED_TURN_MS = 24 * 60 * 60_000;
 /** Status reads are a second apart for a turn's first two minutes, then a second more for every minute it has run, up to this. */
@@ -480,6 +482,93 @@ function leadingMessageInfo(chunks: Uint8Array[]): Record<string, unknown> | nul
   return null;
 }
 
+/**
+ * The info of a message whose info itself did not fit the bytes read (a
+ * user message's diff summary of many files): its leading id, session and
+ * role, enough to count it as the turn's prompt. Null without a role.
+ */
+function leadingInfoFields(chunks: Uint8Array[]): Record<string, unknown> | null {
+  let head = "";
+  for (const chunk of chunks) {
+    head += Buffer.from(chunk).toString("utf8");
+    if (head.length >= 65_536) break;
+  }
+  const info = /^\s*\[\s*\{\s*"info"\s*:\s*\{/.exec(head);
+  if (!info) return null;
+  const rest = head.slice(info[0].length);
+  const field = (key: string) => new RegExp(`"${key}"\\s*:\\s*"([^"\\\\]{1,200})"`).exec(rest)?.[1];
+  const role = field("role");
+  if (role !== "user" && role !== "assistant") return null;
+  const id = field("id");
+  const sessionID = field("sessionID");
+  return { ...(id ? { id } : {}), ...(sessionID ? { sessionID } : {}), role, truncated: true };
+}
+
+/**
+ * Dependency and cache folders: a user message's diff summary leaves out
+ * the files in them (.venv, node_modules, ...), which the install log and
+ * the workspace snapshots carry. Build output folders stay.
+ */
+const DIFF_DEPENDENCY_DIRS = new Set([
+  ".git", "node_modules", ".venv", "venv", "__pycache__", ".tox", ".nox", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+  ".turbo", ".parcel-cache", ".cache", ".gradle", ".dart_tool", "Pods", "vendor", "bower_components", "site-packages",
+]);
+
+function diffEntryPath(entry: unknown): string | null {
+  if (!isRecord(entry)) return null;
+  for (const key of ["file", "filePath", "path"]) if (typeof entry[key] === "string") return entry[key] as string;
+  return null;
+}
+
+function inDiffDependencyDir(path: string): boolean {
+  return path.replace(/\\/g, "/").split("/").slice(0, -1).some((part) => DIFF_DEPENDENCY_DIRS.has(part));
+}
+
+/**
+ * A message as the observer keeps it: a user message's diff summary
+ * (`info.summary.diffs`, whole-file texts per changed file) without the
+ * files in dependency and cache folders (`summary.diffs_omitted` counts
+ * them); and, for a message still over `maxBytes` (null: no size check),
+ * the largest diff entries lose their texts until it fits
+ * (`summary.diffs_truncated` counts them). The prompt, the role and the ids
+ * stay, so a turn that installed packages reads as any other.
+ */
+export function slimEngineMessage(message: unknown, maxBytes: number | null = MAX_TURN_MESSAGE_BYTES): unknown {
+  if (!isRecord(message) || !isRecord(message.info) || !isRecord(message.info.summary) || !Array.isArray(message.info.summary.diffs)) return message;
+  const record = message;
+  const info = message.info;
+  const summary = message.info.summary;
+  const diffs = summary.diffs as unknown[];
+  const kept = diffs.filter((entry) => {
+    const path = diffEntryPath(entry);
+    return path === null || !inDiffDependencyDir(path);
+  });
+  const omitted = diffs.length - kept.length;
+  const slim = (entries: unknown[], extra: Record<string, unknown>) => ({
+    ...record,
+    info: { ...info, summary: { ...summary, diffs: entries, ...(omitted > 0 ? { diffs_omitted: omitted } : {}), ...extra } },
+  });
+  let result: Record<string, unknown> = omitted > 0 ? slim(kept, {}) : message;
+  if (maxBytes === null) return result;
+  let bytes = Buffer.byteLength(JSON.stringify(result));
+  if (bytes <= maxBytes) return result;
+  const entries = [...kept];
+  const order = entries.map((entry, index) => ({ index, size: Buffer.byteLength(JSON.stringify(entry ?? null)) })).sort((a, b) => b.size - a.size);
+  let truncated = 0;
+  for (const { index, size } of order) {
+    if (bytes <= maxBytes) break;
+    const entry = entries[index];
+    if (!isRecord(entry)) continue;
+    const { before: _before, after: _after, patch: _patch, diff: _diff, ...rest } = entry;
+    const stub = { ...rest, text_omitted: true };
+    entries[index] = stub;
+    bytes -= size - Buffer.byteLength(JSON.stringify(stub));
+    truncated += 1;
+  }
+  result = slim(entries, truncated > 0 ? { diffs_truncated: truncated } : {});
+  return result;
+}
+
 /** A message read from the engine; `whole` is false for one known only by its info (too large to read). */
 type EngineMessage = { message: unknown; whole: boolean };
 
@@ -496,7 +585,7 @@ async function* engineMessages(fetchEngine: EngineFetch, path: string, paged: bo
     const payload = await readEngineJson(fetchEngine, path);
     const list = isRecord(payload) && "data" in payload ? payload.data : payload;
     if (!Array.isArray(list)) throw new Error("the engine messages could not be read");
-    for (const message of list.reverse()) yield { message, whole: true };
+    for (const message of list.reverse()) yield { message: slimEngineMessage(message, null), whole: true };
     return;
   }
   let ceiling = MESSAGE_PAGE_SIZE;
@@ -511,9 +600,11 @@ async function* engineMessages(fetchEngine: EngineFetch, path: string, paged: bo
     const cursor = response.headers.get("x-next-cursor");
     let page: EngineMessage[];
     try {
-      const items = await readObservedResponse(response);
+      // A message alone may be larger than a page: it is read whole, then slimmed under the turn's budget.
+      const alone = limit === 1;
+      const items = await readObservedResponse(response, alone ? MAX_SINGLE_MESSAGE_READ_BYTES : MAX_ENGINE_READ_BYTES);
       if (!Array.isArray(items)) throw new Error("the engine messages could not be read");
-      page = items.map((message) => ({ message, whole: true }));
+      page = items.map((message) => ({ message: slimEngineMessage(message, alone ? MAX_TURN_MESSAGE_BYTES : null), whole: true }));
     } catch (error) {
       if (!(error instanceof OversizedEngineResponse)) throw error;
       if (limit > 1) {
@@ -521,7 +612,7 @@ async function* engineMessages(fetchEngine: EngineFetch, path: string, paged: bo
         limit = 1;
         continue;
       }
-      page = [{ message: { info: leadingMessageInfo(error.chunks) ?? {}, parts: [] }, whole: false }];
+      page = [{ message: { info: leadingMessageInfo(error.chunks) ?? leadingInfoFields(error.chunks) ?? {}, parts: [] }, whole: false }];
     }
     for (const entry of page.reverse()) yield entry;
     if (!cursor || cursor === before) return;
