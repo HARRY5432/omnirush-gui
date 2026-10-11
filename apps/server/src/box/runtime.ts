@@ -249,7 +249,9 @@ export async function probe(candidate: RuntimeCandidate, { run = runCommand, env
   const prefix = Array.isArray(candidate.prefix) ? candidate.prefix : [];
   const args = [...prefix, ...(name === "podman" ? ["info", "--format", "json"] : ["info", "--format", "{{json .}}"])];
   const result = await run(bin, args, { env, timeoutMs });
-  if (result.code !== 0) return { ok: false, name, bin, reason: explainFailure(name, result, { platform, env }) };
+  // A docker context (OrbStack, colima, Desktop) has its own socket: its words decide, not the default socket.
+  const ownSocket = prefix.includes("--context") ? { exists: () => true } : {};
+  if (result.code !== 0) return { ok: false, name, bin, reason: explainFailure(name, result, { platform, env, ...ownSocket }) };
   let info: Info;
   try {
     info = JSON.parse(result.stdout);
