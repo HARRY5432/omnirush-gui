@@ -88,3 +88,25 @@ func TestAlive(t *testing.T) {
 		t.Fatal("a pid that is not bwrap/unshare/boxrun counted as the box")
 	}
 }
+
+func TestRemoveTreeUnreadableFolders(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "probe")
+	deep := filepath.Join(root, "work", "work", "inner")
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deep, "f"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{deep, filepath.Join(root, "work", "work")} {
+		if err := os.Chmod(dir, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := removeTree(root); err != nil {
+		t.Fatalf("removeTree: %v", err)
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("%s is still there: %v", root, err)
+	}
+}
