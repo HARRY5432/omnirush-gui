@@ -29,6 +29,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
@@ -1069,9 +1070,13 @@ func rmtreeInner(args []string) error {
 }
 
 func removeTree(p string) error {
-	_ = filepath.Walk(p, func(q string, fi os.FileInfo, err error) error {
-		if err == nil && fi.IsDir() && fi.Mode().Perm()&0o700 != 0o700 {
-			_ = os.Chmod(q, fi.Mode().Perm()|0o700)
+	// WalkDir calls back before it reads a folder, so an unreadable one (overlayfs leaves
+	// work/work as d---------) is made readable first and its contents are reached too.
+	_ = filepath.WalkDir(p, func(q string, d fs.DirEntry, err error) error {
+		if d != nil && d.IsDir() {
+			if info, e := d.Info(); e == nil && info.Mode().Perm()&0o700 != 0o700 {
+				_ = os.Chmod(q, info.Mode().Perm()|0o700)
+			}
 		}
 		return nil
 	})
