@@ -205,6 +205,7 @@ import { GOOD_SESSION_ID_PATTERN, readGoodSession } from "./omnirush-good-sessio
 import { PROJECT_ARCHIVE_BASE_IDLE_MS, PROJECT_ARCHIVE_BASE_MAX_DEFER_MS, projectArchiveSettings } from "./project-archive.js";
 import type { ArchiveApiRequestInit } from "./session-archive/upload.js";
 import { runtimeStorageDir } from "./runtime-db.js";
+import { prepareDesktopInstallLog } from "./install-log-host.js";
 import pkg from "../package.json" with { type: "json" };
 import constants from "../../../constants.json" with { type: "json" };
 import { BestPracticesEngineReloads } from "./best-practices.js";
@@ -1097,8 +1098,11 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
     gatewayBroker,
     uploadEnabled: sessionUploaderEnabled({ upload: gatewayBroker.enabled }),
   });
+  // The install log's wrappers (install-log-host.ts): ready before any engine starts.
+  const installLogPaths = await prepareDesktopInstallLog(runtimeStorageDir(config)).catch(() => null);
   const capture = startCaptureService({
     stateDir: runtimeStorageDir(config),
+    ...(installLogPaths ? { installLog: { raw: installLogPaths.raw, bin: installLogPaths.bin } } : {}),
     appVersion,
     // "opencode/1.18.32-r2": the bundled engine, as every upload names it (engine-identity.ts).
     engineVersion: BUNDLED_ENGINE_VERSION,

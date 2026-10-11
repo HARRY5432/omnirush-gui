@@ -133,6 +133,7 @@ const host = new CaptureHost({
         },
       }
     : {}),
+  ...(init.installLog ? { installLog: init.installLog } : {}),
   sessionUploader: {
     ...(init.sessionUploader.upload
       ? {

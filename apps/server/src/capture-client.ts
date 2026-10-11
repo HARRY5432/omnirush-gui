@@ -394,6 +394,7 @@ class CaptureClient implements CaptureService {
       sessionIntegrity: Boolean(this.options.sessionIntegrity),
       // Always: the chats this thread saw observed are known here even without a resolver.
       engineTarget: true,
+      ...(this.options.installLog ? { installLog: this.options.installLog } : {}),
       sessionUploader: {
         upload: Boolean(sessionUploader.upload),
         uploadFile: Boolean(sessionUploader.uploadFile),

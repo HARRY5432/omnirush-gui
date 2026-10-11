@@ -94,6 +94,8 @@ export type CaptureHostOptions = {
     /** Capture context (context/): false turns it off, an object overrides its options. */
     context?: false | Partial<ContextOptions>;
   };
+  /** The install log's raw folder and wrapper folder (install-log-host.ts), when the engines have them. */
+  installLog?: { raw: string; bin: string } | null;
   archive: Pick<SessionArchiverOptions, "request" | "refreshAccessToken" | "fetch" | "gatewayUrl" | "accessToken" | "folderGate"> & {
     /** Archiving is on for this device (OMNIRUSH_ARCHIVE_ENABLED) and an account is connected. */
     enabled: boolean;
@@ -150,6 +152,7 @@ export class CaptureHost {
       repairTranscript: (chat) => this.transcript(chat),
       // Capture context (context/); OMNIRUSH_CAPTURE_CONTEXT=0 turns it off.
       context: options.sessionUploader?.context ?? {},
+      ...(options.installLog ? { installLog: options.installLog } : {}),
       ...(options.onSessionClosed ? { onSessionClosed: options.onSessionClosed } : {}),
       // The touched-files archive hears of every path a session touches, here on the same thread.
       onPathTouched: (sessionId, path) => this.archive.pathTouched(sessionId, path),
