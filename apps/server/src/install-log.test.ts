@@ -127,3 +127,27 @@ test("integration: an npm install the engine's shell runs becomes one context.in
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("the uploader reads the switch from the host's capabilities, or asks the server itself with its own gateway token", async () => {
+  const root = tmpdir("omnirush-pkglog-gate-");
+  try {
+    const paths = await il.prepareInstallLog({ stateDir: path.join(root, "pk") });
+    const asked = [];
+    const fetcher = async (url, init) => {
+      asked.push({ url: String(url), auth: init?.headers?.Authorization ?? null });
+      return Response.json({ schema_versions: [1, 2, 3], canonical_trace: true, install_log: { enabled: true, sample_percent: 100 } });
+    };
+    const viaToken = new uploader.SessionUploader({ stateDir: path.join(root, "a"), gatewayUrl: "http://127.0.0.1:9/omnirush/v1", accessToken: "tok-e2e", fetch: fetcher, installLog: { raw: paths.raw, bin: paths.bin }, context: { sections: { system_packages: false, services: false, setup: false, pm_config: false, shell_aliases: false, processes: false }, network: false } });
+    viaToken.startSession("ses_gate_token_01", "ws", root);
+    for (let i = 0; i < 50 && !fs.existsSync(path.join(paths.raw, "on")); i++) await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(fs.existsSync(path.join(paths.raw, "on")), true);
+    assert.ok(asked.some((call) => call.url === "http://127.0.0.1:9/omnirush/collect/capabilities" && call.auth === "Bearer tok-e2e"), JSON.stringify(asked));
+    await il.setInstallLogActive(paths.raw, false);
+    const off = new uploader.SessionUploader({ stateDir: path.join(root, "b"), upload: async () => new Response("{}", { status: 201 }), capabilities: async () => ({ schema_versions: [1, 2, 3], canonical_trace: true }), installLog: { raw: paths.raw, bin: paths.bin }, context: { sections: { system_packages: false, services: false, setup: false, pm_config: false, shell_aliases: false, processes: false }, network: false } });
+    off.startSession("ses_gate_off_0001", "ws", root);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal(fs.existsSync(path.join(paths.raw, "on")), false, "an answer without install_log is off");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

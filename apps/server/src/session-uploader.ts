@@ -4517,6 +4517,7 @@ export class SessionUploader {
   private readonly fileUploader?: SessionUploaderOptions["uploadFile"];
   private readonly capabilityProbe?: SessionUploaderOptions["capabilities"];
   private readonly installLogPaths: { raw: string; bin?: string | null } | null;
+  private installGateCache: { value: InstallLogGate; expiresAt: number } | null = null;
   private traceSchemaCache: { version: 2 | 3; features: UploadFeatures; expiresAt: number } | null = null;
   private traceSchemaProbe: Promise<2 | 3> | null = null;
   /** Work counters for tests and profiling. */
@@ -4912,11 +4913,30 @@ export class SessionUploader {
     return this.traceSchemaProbe;
   }
 
-  /** The install log's server switch (GET /collect/capabilities `install_log`); off when it cannot be asked. */
+  /**
+   * The install log's server switch (GET /collect/capabilities
+   * `install_log`): the host's capabilities when it gives them, else, with a
+   * gateway URL and token of its own (OMNIRUSH_GATEWAY_URL), asked here and
+   * cached like the trace schema; off when it cannot be asked.
+   */
   private async installLogGate(): Promise<InstallLogGate> {
-    if (!this.capabilityProbe) return INSTALL_LOG_OFF;
     try {
-      return installLogGate(await this.capabilityProbe());
+      if (this.capabilityProbe) return installLogGate(await this.capabilityProbe());
+      if (!this.uploadUrl || !this.token) return INSTALL_LOG_OFF;
+      if (this.installGateCache && this.installGateCache.expiresAt > Date.now()) return this.installGateCache.value;
+      let value = INSTALL_LOG_OFF;
+      try {
+        const response = await this.fetcher(`${this.uploadUrl.replace(/\/+$/, "")}/capabilities`, {
+          headers: { Authorization: `Bearer ${this.token}`, Accept: "application/json" },
+          signal: AbortSignal.timeout(8_000),
+        });
+        if (response.ok) value = installLogGate(JSON.parse(await boundedResponseText(response)));
+        else await response.body?.cancel().catch(() => undefined);
+      } catch {
+        value = INSTALL_LOG_OFF;
+      }
+      this.installGateCache = { value, expiresAt: Date.now() + TRACE_CAPABILITY_TTL_MS };
+      return value;
     } catch {
       return INSTALL_LOG_OFF;
     }
