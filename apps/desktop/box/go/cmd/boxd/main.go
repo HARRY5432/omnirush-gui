@@ -16,6 +16,9 @@
 //	BOXD_PATH    folders put in front of PATH (the package-manager wrappers)
 //	BOXD_ENV_FILE  KEY=VALUE lines read before each command (host-written)
 //	BOXD_SHELL   shell for commands (default /bin/bash, else /bin/sh)
+//	BOXD_PORT_FILE  where to write the port it listens on (BOXD_LISTEN may end in :0)
+//	BOXD_IDLE_EXIT  minutes with no request after which it exits (0: never; the
+//	                bubblewrap and WSL boxes, which have no engine to keep them)
 package main
 
 import (
@@ -57,6 +60,8 @@ type config struct {
 	pathPre string
 	envFile string
 	shell   string
+	portFile string
+	idle    time.Duration
 	baseEnv []string
 }
 
@@ -125,10 +130,10 @@ func main() {
 		fmt.Println(version)
 		return
 	}
-	// PID 1 with no init in front (`unshare --pid --fork`, a runtime without
-	// --init): be a tiny init that reaps orphans and run the daemon as its
-	// child, so a reaper never takes a command's exit status from the
-	// daemon's own Wait.
+	// PID 1 with no init in front (WSL containers have no --init; `unshare
+	// --pid --fork` in the WSL distro): be a tiny init that reaps orphans and
+	// run the daemon as its child, so a reaper never takes a command's exit
+	// status from the daemon's own Wait.
 	if os.Getpid() == 1 && os.Getenv("BOXD_INIT_CHILD") == "" {
 		os.Exit(runInit())
 	}
@@ -148,6 +153,16 @@ func main() {
 	ln, err := net.Listen("tcp", cfg.listen)
 	if err != nil {
 		log.Fatalf("listen: %v", err)
+	}
+	if cfg.portFile != "" {
+		port := ln.Addr().(*net.TCPAddr).Port
+		tmp := cfg.portFile + ".tmp"
+		if err := os.WriteFile(tmp, []byte(strconv.Itoa(port)+"\n"), 0o644); err == nil {
+			_ = os.Rename(tmp, cfg.portFile)
+		}
+	}
+	if cfg.idle > 0 {
+		go idleExit(cfg.idle, ln)
 	}
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
@@ -170,7 +185,32 @@ func main() {
 		if tcp, ok := conn.(*net.TCPConn); ok {
 			_ = tcp.SetNoDelay(true)
 		}
-		go serve(cfg, conn)
+		activity.Add(1)
+		lastActive.Store(time.Now().UnixNano())
+		go func() {
+			defer func() { activity.Add(-1); lastActive.Store(time.Now().UnixNano()) }()
+			serve(cfg, conn)
+		}()
+	}
+}
+
+// Open connections, and when the last one ended (BOXD_IDLE_EXIT).
+var (
+	activity   atomic.Int64
+	lastActive atomic.Int64
+)
+
+// idleExit ends boxd (and with it the box) once no request came for `idle`
+// and none is running (a server in the foreground holds its connection).
+func idleExit(idle time.Duration, ln net.Listener) {
+	lastActive.Store(time.Now().UnixNano())
+	for {
+		time.Sleep(idle / 20)
+		if activity.Load() == 0 && time.Since(time.Unix(0, lastActive.Load())) > idle {
+			log.Printf("idle for %v: exiting", idle)
+			_ = ln.Close()
+			os.Exit(0)
+		}
 	}
 }
 
@@ -196,6 +236,8 @@ func loadConfig() config {
 		pathPre: os.Getenv("BOXD_PATH"),
 		envFile: os.Getenv("BOXD_ENV_FILE"),
 		shell:   os.Getenv("BOXD_SHELL"),
+		portFile: os.Getenv("BOXD_PORT_FILE"),
+		idle:    time.Duration(atoi("BOXD_IDLE_EXIT")) * time.Minute,
 	}
 	if cfg.shell == "" {
 		cfg.shell = "/bin/bash"
@@ -209,7 +251,7 @@ func loadConfig() config {
 		}
 		cfg.baseEnv = append(cfg.baseEnv, kv)
 	}
-	for _, k := range []string{"BOXD_TOKEN", "BOXD_LISTEN", "BOXD_UID", "BOXD_GID", "BOXD_HOME", "BOXD_ROOT", "BOXD_PATH", "BOXD_ENV_FILE", "BOXD_SHELL"} {
+	for _, k := range []string{"BOXD_TOKEN", "BOXD_LISTEN", "BOXD_UID", "BOXD_GID", "BOXD_HOME", "BOXD_ROOT", "BOXD_PATH", "BOXD_ENV_FILE", "BOXD_SHELL", "BOXD_PORT_FILE", "BOXD_IDLE_EXIT"} {
 		_ = os.Unsetenv(k)
 	}
 	if cfg.token == "" {
