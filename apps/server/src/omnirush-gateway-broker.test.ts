@@ -121,10 +121,8 @@ describe("OmniRush gateway broker", () => {
       });
 
       const first = await Promise.all([broker.sessionUploadCapabilities(), broker.sessionUploadCapabilities()]);
-      expect(first).toEqual([
-        { schema_versions: [1, 2, 3], canonical_trace: true },
-        { schema_versions: [1, 2, 3], canonical_trace: true },
-      ]);
+      const v3 = { schema_versions: [1, 2, 3], canonical_trace: true, ...{ idempotency_key: false, body_sha256: false, integrity: false, integrity_summary: false, recovered_segments: false } };
+      expect(first).toEqual([v3, v3]);
       expect(probes).toBe(1);
 
       now += 5 * 60_000 + 1;
@@ -134,7 +132,7 @@ describe("OmniRush gateway broker", () => {
 
       broker.resetCapabilities();
       supported = true;
-      expect(await broker.sessionUploadCapabilities()).toEqual({ schema_versions: [1, 2, 3], canonical_trace: true });
+      expect(await broker.sessionUploadCapabilities()).toEqual(v3);
       expect(probes).toBe(3);
     } finally {
       Date.now = originalNow;
@@ -360,7 +358,10 @@ describe("upstream stream guard", () => {
 
   test("appends an error event when the upstream closes before a terminal event", async () => {
     const partial = 'event: response.function_call_arguments.delta\ndata: {"type":"response.function_call_arguments.delta","delta":"{\\"patch"}\n\n';
-    const response = await sseBroker([created, partial]).handle(gatewayRequest({ model: "gpt-6-astra", input: "hi", stream: true }), "responses");
+    const response = await sseBroker([created, partial]).handle(gatewayRequest(
+      { model: "gpt-6-astra", input: "hi", stream: true },
+      { "x-omnirush-client-request-id": "stream-correlation-1" },
+    ), "responses");
     const text = await readAll(response);
     expect(text.startsWith(created + partial)).toBe(true);
     const tailEvent = text.slice((created + partial).length);
@@ -369,6 +370,8 @@ describe("upstream stream guard", () => {
     expect(payload.type).toBe("error");
     expect(payload.error.code).toBe("upstream_stream_interrupted");
     expect(payload.error.message).toContain("omnirush.ai");
+    expect((payload.error as { client_request_id?: string }).client_request_id).toBe("stream-correlation-1");
+    expect(response.headers.get("x-omnirush-client-request-id")).toBe("stream-correlation-1");
   });
 
   test("treats response.failed and response.incomplete as terminal", async () => {
@@ -899,6 +902,32 @@ describe("upstream stream guard with recorded Muse streams", () => {
     }
   });
 
+  test("a queue timeout in the stream ends the turn with readable copy the engine does not retry", async () => {
+    const created = 'event: response.created\ndata: {"response":{"id":"resp_1"},"sequence_number":0,"type":"response.created"}\n\n';
+    for (const code of ["omni_queue_timeout", "upstream_omni_queue_timeout"]) {
+      const frame = `event: error\ndata: ${JSON.stringify({ type: "error", sequence_number: -1, error: { type: "server_error", code, message: "omnirush.ai: the turn waited too long (503)" } })}\n\n`;
+      const { text, reasons } = await replayStream(new TextEncoder().encode(created + frame), 50);
+      expect(reasons).toEqual([]);
+      const last = eventPayloads(text)[1] as { error: { type: string; code: string; message: string; param: string } };
+      expect(last).toMatchObject({ type: "error", sequence_number: -1, error: { type: "invalid_request_error", code: "invalid_prompt", param: "omni_queue_timeout" } });
+      // The engine's retry patterns (session/retry.ts) must not match the copy or the body.
+      // RETRYABLE_MESSAGE_PATTERNS of the engine (1.18.32).
+      const retryable = [
+        /429|500|502|503|504|524/i,
+        /rate increased too quickly|rate limit|rate-limit|rate_limit|too many requests/i,
+        /overloaded|service unavailable|service_unavailable|service-unavailable|internal error|internal_error|internal server error|server error|server_error|server-error|provider returned error|provider_returned_error|provider-returned-error/i,
+        /terminated|fetch failed|failed to fetch|network[-_\s]error|upstream connect|connection error|connection refused|connection lost|socket connection was closed|socket hang up|reset before headers|getaddrinfo|enotfound|eai_again|econnrefused|econnreset|etimedout/i,
+        /^timeout$|\b(?:request|response|connection|network|stream|read) (?:timeout|timed out|time out)\b/i,
+        /try your request again|retry your request|resource exhausted|resource_exhausted/i,
+        /\btry again (?:later|in\b)|\b(?:currently|temporarily) at capacity\b/i,
+      ];
+      for (const pattern of retryable) {
+        expect(pattern.test(last.error.message)).toBe(false);
+        expect(pattern.test(JSON.stringify(last))).toBe(false);
+      }
+    }
+  });
+
   test("a relay error frame that was not rewritten becomes one the engine parses", async () => {
     const created = 'event: response.created\ndata: {"response":{"id":"resp_1"},"sequence_number":0,"type":"response.created"}\n\n';
     const relay = 'event: error\ndata: {"error":{"code":"idle_timeout","message":"Upstream stopped sending data","request_id":"req_1","type":"timeout"}}\n\n';
@@ -981,6 +1010,39 @@ describe("readable gateway errors", () => {
       expect(payload.error.message).toStartWith("omnirush.ai: ");
       expect(payload.error.message).toContain(entry.copy);
     }
+  });
+
+  test("a streamed refusal (capped session, Windows cut-off) becomes a 403 the engine shows once, word for word", async () => {
+    const sse = { "content-type": "text/event-stream", "x-should-retry": "false" };
+    for (const [detail, message] of [
+      ["session_quality_cap", "omnirush.ai: this session is paused: it used a lot of tokens without becoming usable. Start a new session in a project folder: https://gateway.example/console/account"],
+      ["windows_cutoff", "omnirush.ai: sessions from native Windows are paused. Switch to WSL: https://omnirush.ai/console/wsl"],
+    ]) {
+      const frame = `event: error\ndata: ${JSON.stringify({ type: "error", sequence_number: -1, detail, error: { type: "invalid_request_error", code: "omnirush.ai", message } })}\n\n`;
+      const response = await refusingBroker(200, frame, sse).handle(gatewayRequest({ model: "gpt-6-astra", input: "hi", stream: true }), "responses");
+      expect(response.status).toBe(403);
+      expect(response.headers.get("x-should-retry")).toBe("false");
+      expect(response.headers.get("content-type")).toBe("application/json");
+      expect(await response.json()).toEqual({ error: { message, type: "invalid_request_error", code: detail } });
+    }
+  });
+
+  test("a stream marked not-to-retry that is not a single refusal frame passes unchanged", async () => {
+    const sse = { "content-type": "text/event-stream", "x-should-retry": "false" };
+    const created = 'event: response.created\ndata: {"response":{"id":"resp_1"},"sequence_number":0,"type":"response.created"}\n\n';
+    const done = 'event: response.completed\ndata: {"response":{"id":"resp_1"},"sequence_number":1,"type":"response.completed"}\n\n';
+    const streamed = await refusingBroker(200, created + done, sse).handle(gatewayRequest({ model: "gpt-6-astra", input: "hi", stream: true }), "responses");
+    expect(streamed.status).toBe(200);
+    expect(await streamed.text()).toBe(created + done);
+    // No `detail`: an ordinary stream error, normalized as before.
+    const plain = 'event: error\ndata: {"type":"error","sequence_number":4,"code":"server_error","message":"The server had an error while processing your request.","param":null}\n\n';
+    const errored = await refusingBroker(200, plain, sse).handle(gatewayRequest({ model: "gpt-6-astra", input: "hi", stream: true }), "responses");
+    expect(errored.status).toBe(200);
+    expect(await errored.text()).toBe(plain);
+    // Without the header the refusal frame streams through as before.
+    const frame = `event: error\ndata: ${JSON.stringify({ type: "error", sequence_number: -1, detail: "windows_cutoff", error: { type: "invalid_request_error", code: "omnirush.ai", message: "omnirush.ai: paused." } })}\n\n`;
+    const unmarked = await refusingBroker(200, frame, { "content-type": "text/event-stream" }).handle(gatewayRequest({ model: "gpt-6-astra", input: "hi", stream: true }), "responses");
+    expect(unmarked.status).toBe(200);
   });
 
   test("a spent grant says which limit ran out and when it resets, and is never resent", async () => {
@@ -1225,6 +1287,7 @@ describe("OmniRush gateway broker: sub-agent model fallback", () => {
     "x-omnirush-subagent-root": "ses_main",
     "x-omnirush-session-id": "ses_child",
     "x-omnirush-task-id": "msg_1",
+    "x-parent-session-id": "ses_main",
   };
   const refuse = (status: number, code: string) => Response.json({ detail: code }, { status });
 
@@ -1246,6 +1309,8 @@ describe("OmniRush gateway broker: sub-agent model fallback", () => {
     for (const call of calls) {
       expect([...call.headers.keys()].filter((name) => name.startsWith("x-omnirush-subagent"))).toEqual([]);
       expect(call.headers.get("x-omnirush-session-id")).toBe("ses_child");
+      // The main session goes upstream: the gateway files the request under it.
+      expect(call.headers.get("x-parent-session-id")).toBe("ses_main");
     }
     expect(events).toEqual([expect.objectContaining({
       sessionId: "ses_child",
@@ -1366,9 +1431,12 @@ describe("OmniRush gateway broker: connection failures never become a bare 500",
     const response = await broker.handle(request(), "responses");
     expect(response.status).toBe(503);
     expect(response.headers.get("retry-after")).toBe("2");
-    const body = (await response.json()) as { error: { code: string; message: string } };
+    const body = (await response.json()) as { error: { code: string; message: string; client_request_id: string } };
     expect(body.error.code).toBe("gateway_unreachable");
     expect(body.error.message).toContain("could not be reached (UND_ERR_SOCKET)");
+    expect(body.error.message).toContain("request id:");
+    expect(body.error.client_request_id).toMatch(/^[A-Za-z0-9]{32}$/);
+    expect(response.headers.get("x-omnirush-client-request-id")).toBe(body.error.client_request_id);
   });
 
   test("a refresh that cannot reach omnirush.ai keeps the session and answers every waiting request with a retryable 503", async () => {
@@ -1408,5 +1476,130 @@ describe("OmniRush gateway broker: connection failures never become a bare 500",
     const text = await new Response(guardEventStream(body)).text();
     expect(text).toContain("response.created");
     expect(text).toContain("upstream_stream_interrupted");
+  });
+});
+
+const INTEGRITY_FEATURES = { schema_versions: [1, 2, 3], canonical_trace: true, idempotency_key: true, body_sha256: true, integrity: true, integrity_summary: true };
+
+describe("OmniRush gateway broker upload keys, account and integrity", () => {
+  test("reads the backend's features (a missing key is false) and never calls the integrity route a backend lacks", async () => {
+    let features: Record<string, unknown> = { schema_versions: [1, 2, 3], canonical_trace: true };
+    const integrityCalls: string[] = [];
+    const make = () => new OmniRushGatewayBroker({
+      credentials,
+      engineToken: "local-engine-token",
+      fetch: async (input) => {
+        if (String(input).endsWith("/collect/capabilities")) return Response.json(features);
+        integrityCalls.push(String(input));
+        return Response.json({ integrity: "ok" });
+      },
+    });
+    const old = make();
+    expect(await old.sessionUploadCapabilities()).toMatchObject({ idempotency_key: false, integrity: false });
+    expect((await old.sessionIntegrity("ses_feature_1234", { summary: true })).status).toBe(404);
+    expect(integrityCalls).toEqual([]);
+    features = { ...INTEGRITY_FEATURES, integrity_summary: false, triggers: ["trace_flush", "start"] };
+    const partial = make();
+    expect(await partial.sessionUploadCapabilities()).toMatchObject({ idempotency_key: true, integrity: true, integrity_summary: false, triggers: ["trace_flush", "start"] });
+    expect((await partial.sessionIntegrity("ses_feature_1234", { summary: true })).status).toBe(200);
+    // No summary mode on this backend: the full record is read.
+    expect(integrityCalls).toEqual(["https://gateway.example/omnirush/me/sessions/ses_feature_1234/integrity"]);
+  });
+
+  const credentials = { gatewayUrl: "https://gateway.example/omnirush/v1", accessToken: "access-1", refreshToken: "refresh-1" };
+
+  test("uploadSession and uploadSessionFile send the Idempotency-Key they are given", async () => {
+    const keys: Array<string | null> = [];
+    const fileKeys: Array<string | undefined> = [];
+    const broker = new OmniRushGatewayBroker({
+      credentials,
+      engineToken: "local-engine-token",
+      fetch: async (_input, init) => {
+        keys.push(new Headers(init?.headers).get("idempotency-key"));
+        return Response.json({ ok: true }, { status: 201 });
+      },
+      uploadFile: async (_url, init) => {
+        fileKeys.push((init.headers as Record<string, string>)["Idempotency-Key"]);
+        return Response.json({ ok: true }, { status: 201 });
+      },
+    });
+    const key = "a".repeat(64);
+    await broker.uploadSession("session-key-1234", new Uint8Array([1, 2, 3]), undefined, { idempotencyKey: key });
+    await broker.uploadSession("session-key-1234", new Uint8Array([1, 2, 3]));
+    await broker.uploadSessionFile("session-key-1234", "/tmp/never-read.zst", 3, undefined, { idempotencyKey: key });
+    expect(keys).toEqual([key, null]);
+    expect(fileKeys).toEqual([key]);
+  });
+
+  test("accountId reads /device/me once and keeps the id; a failure is not remembered", async () => {
+    const urls: string[] = [];
+    let healthy = false;
+    const broker = new OmniRushGatewayBroker({
+      credentials,
+      engineToken: "local-engine-token",
+      fetch: async (input) => {
+        urls.push(String(input));
+        return healthy ? Response.json({ id: "user-1", email: "x@example.invalid" }) : Response.json({ detail: "down" }, { status: 503 });
+      },
+    });
+    expect(await broker.accountId()).toBeNull();
+    healthy = true;
+    expect(await broker.accountId()).toBe("user-1");
+    expect(await broker.accountId()).toBe("user-1");
+    expect(urls).toEqual(["https://gateway.example/omnirush/device/me", "https://gateway.example/omnirush/device/me"]);
+  });
+
+  test("sessionIntegrity reads the chat's integrity record with the device bearer", async () => {
+    const calls: Array<{ url: string; authorization: string | null }> = [];
+    const broker = new OmniRushGatewayBroker({
+      credentials,
+      engineToken: "local-engine-token",
+      fetch: async (input, init) => {
+        if (String(input).endsWith("/collect/capabilities")) return Response.json(INTEGRITY_FEATURES);
+        calls.push({ url: String(input), authorization: new Headers(init?.headers).get("authorization") });
+        return Response.json({ integrity: "ok" });
+      },
+    });
+    expect((await broker.sessionIntegrity("ses_abc/1", { turns: 3 })).status).toBe(200);
+    expect((await broker.sessionIntegrity("ses_abc/1", { summary: true })).status).toBe(200);
+    expect(calls).toEqual([
+      { url: "https://gateway.example/omnirush/me/sessions/ses_abc%2F1/integrity?turns=3", authorization: "Bearer access-1" },
+      { url: "https://gateway.example/omnirush/me/sessions/ses_abc%2F1/integrity?summary=1", authorization: "Bearer access-1" },
+    ]);
+  });
+
+  test("sessionIntegrity stays under the route's limit and honours its Retry-After", async () => {
+    let calls = 0;
+    let limited = false;
+    const broker = new OmniRushGatewayBroker({
+      credentials,
+      engineToken: "local-engine-token",
+      fetch: async (input) => {
+        if (String(input).endsWith("/collect/capabilities")) return Response.json(INTEGRITY_FEATURES);
+        calls += 1;
+        return limited ? Response.json({ detail: "rate_limited" }, { status: 429, headers: { "Retry-After": "30" } }) : Response.json({ integrity: "ok" });
+      },
+    });
+    const statuses: number[] = [];
+    for (let index = 0; index < 26; index += 1) statuses.push((await broker.sessionIntegrity("ses_limit_1234", { summary: true })).status);
+    expect(statuses.filter((status) => status === 200)).toHaveLength(24);
+    expect(statuses.slice(-2)).toEqual([429, 429]);
+    expect(calls).toBe(24);
+    const fresh = new OmniRushGatewayBroker({
+      credentials,
+      engineToken: "local-engine-token",
+      fetch: async (input) => {
+        if (String(input).endsWith("/collect/capabilities")) return Response.json(INTEGRITY_FEATURES);
+        calls += 1;
+        return Response.json({ detail: "rate_limited" }, { status: 429, headers: { "Retry-After": "30" } });
+      },
+    });
+    limited = true;
+    calls = 0;
+    expect((await fresh.sessionIntegrity("ses_limit_1234")).status).toBe(429);
+    const local = await fresh.sessionIntegrity("ses_limit_1234");
+    expect(local.status).toBe(429);
+    expect(Number(local.headers.get("retry-after"))).toBeGreaterThan(25);
+    expect(calls).toBe(1);
   });
 });

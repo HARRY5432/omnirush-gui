@@ -11,6 +11,7 @@ import { loopbackFetch } from "./server-fetch.js";
 import { isFinishedAssistantMessage, isPromptMessage, type ArchiveEngineReads, type ProjectArchiveLifecycle } from "./session-archive/lifecycle.js";
 import { MAX_UPLOAD_CHILD_SESSION_DEPTH, type UploadSessionModel, type SessionUploader } from "./session-uploader.js";
 import { recordTurnFiles, type TurnFilesInput } from "./session-archive/turn-files.js";
+import { watchToolCallEnds } from "./session-archive/files-used.js";
 import { watchToolStarts } from "./session-archive/tool-start.js";
 import { watchToolEvents } from "./context/tool-events.js";
 import type { ContextCapture } from "./context/index.js";
@@ -31,14 +32,21 @@ export type EngineTarget = {
  * snapshot is taken right as the prompt goes out, and its messages stop
  * before the prompt's own.
  */
-type FollowedTurn = { snapshotTaken: boolean; cutAt: number | null };
+type FollowedTurn = { snapshotTaken: boolean; cutAt: number | null; settled?: boolean };
 
 /**
  * A session being observed: the engine its latest captured request went to
  * (an engine that restarted may answer on another port), how many requests
  * asked for it while it was, the turn being followed, and the observation itself.
  */
-type ObservedSession = { target: EngineTarget; requests: number; turn: FollowedTurn | null; done: Promise<void> };
+type ObservedSession = {
+  target: EngineTarget;
+  requests: number;
+  turn: FollowedTurn | null;
+  done: Promise<void>;
+  /** Settles the turn being followed now, as the engine has it (an app quit); nothing when none is open. */
+  settleNow?: () => Promise<void>;
+};
 
 /** The engine that took over from a closed one: its base URL and its Authorization header. */
 export type EngineReplacement = { baseUrl: string; authorization: string | null };
@@ -135,6 +143,7 @@ export type ObservedUploader = Pick<
   | "childCheckpoints"
   | "childSessionIds"
   | "recordChildSession"
+  | "noteChildSessionIds"
   | "captureSnapshot"
   | "flushTrace"
 >;
@@ -223,6 +232,8 @@ const ENGINE_UNAVAILABLE_TRACE_MS = 60_000;
 const NEVER_BUSY_SETTLE_MS = 10 * 60_000;
 /** A turn ended by the next prompt waits at most this long for that prompt's message to show up in the engine before it settles as it is. */
 const CUT_PROMPT_WAIT_MS = 15_000;
+/** While a turn runs, the subagent sessions below it are listed (ids only) about this often. */
+const CHILD_IDS_INTERVAL_MS = 60_000;
 /** A settled turn whose messages the engine did not answer for (a timeout, a dropped connection) is read again after these waits. */
 const HISTORY_RETRY_DELAYS_MS = [2_000, 5_000];
 
@@ -321,6 +332,34 @@ async function captureChildSessions(input: {
     }
     await captureChildSessions({ ...input, parentSessionId: childId, depth: input.depth + 1 });
   }
+}
+
+/**
+ * The ids of the subagent sessions below `rootSessionId`, children first,
+ * at most MAX_UPLOAD_CHILD_SESSION_DEPTH layers down. A layer the engine
+ * cannot list (an error status) is left out.
+ */
+async function childSessionIdsBelow(fetchEngine: EngineFetch, rootSessionId: string): Promise<string[]> {
+  const ids: string[] = [];
+  const seen = new Set([rootSessionId]);
+  let layer = [rootSessionId];
+  for (let depth = 1; depth <= MAX_UPLOAD_CHILD_SESSION_DEPTH && layer.length > 0; depth += 1) {
+    const next: string[] = [];
+    for (const parent of layer) {
+      const children = await readEngineJson(fetchEngine, `/session/${encodeURIComponent(parent)}/children`, 1024 * 1024)
+        .catch(nullOnErrorStatus);
+      if (!Array.isArray(children)) continue;
+      for (const child of children.slice(0, 200)) {
+        const id = isRecord(child) && typeof child.id === "string" && child.id ? child.id : null;
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        ids.push(id);
+        next.push(id);
+      }
+    }
+    layer = next;
+  }
+  return ids;
 }
 
 function sum(values: readonly number[]): number {
@@ -679,6 +718,23 @@ function historyBefore(history: EngineHistory, cutAt: number): { history: Engine
 type MessagePart = { messages: unknown[]; bytes: number };
 
 /**
+ * A chat's whole transcript as the engine has it now (oldest first, cut into
+ * trace-sized parts), for re-sending what the server is missing; null when
+ * the engine cannot be read.
+ */
+export async function readSessionTranscript(target: EngineTarget, sessionId: string, signal: AbortSignal): Promise<unknown[][] | null> {
+  const fetchEngine = engineFetch(() => target, () => AbortSignal.any([signal, AbortSignal.timeout(20_000)]));
+  const v2 = target.engine === "v2";
+  const path = v2 ? `/api/session/${encodeURIComponent(sessionId)}/context` : `/session/${encodeURIComponent(sessionId)}/message`;
+  try {
+    const history = await readEngineHistory(engineMessages(fetchEngine, path, !v2), undefined, MAX_BACKLOG_MESSAGE_BYTES);
+    return messageParts(history.delta, history.sizes).map((part) => part.messages);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * A settled turn's messages (oldest first) cut into the parts its trace
  * flushes carry, oldest part first: the newest messages up to `maxBytes` make
  * the last part, and each earlier part takes the next older ones. One part,
@@ -754,7 +810,7 @@ export function projectArchiveEngineReads(target: EngineTarget | (() => EngineTa
  */
 export function observeUploadedSession(input: {
   sessionUploader: ObservedUploader;
-  archive: Pick<ProjectArchiveLifecycle, "turnFollowed" | "turnCompleted" | "turnIncomplete"> & Partial<Pick<ProjectArchiveLifecycle, "turnMessages">>;
+  archive: Pick<ProjectArchiveLifecycle, "turnFollowed" | "turnCompleted" | "turnIncomplete"> & Partial<Pick<ProjectArchiveLifecycle, "turnMessages" | "turnFilesUsed">>;
   /**
    * The session's workspace: each settled turn reports the files outside it
    * that the turn touched to the archive, and records the files it read
@@ -765,6 +821,12 @@ export function observeUploadedSession(input: {
   sessionId: string;
   target: EngineTarget;
   timing?: Partial<ObserverTiming>;
+  /**
+   * The turn was left open by a process that ended (a crash, a killed
+   * worker): an idle session settles at its first read, and the turn's end
+   * says it was recovered.
+   */
+  recovered?: boolean;
 }): Promise<void> {
   if (!input.sessionUploader.enabled) return Promise.resolve();
   const observer = input.observers;
@@ -840,7 +902,14 @@ export function observeUploadedSession(input: {
    * history when it was read already; a turn ended by the next prompt keeps
    * only the messages from before that prompt.
    */
+  let recovering = input.recovered === true;
   const settle = async (status: string, read?: EngineHistory): Promise<void> => {
+    // Once per turn: an app quit may settle it while the follow loop is about to.
+    const turn = turnState();
+    if (turn.settled) return;
+    turn.settled = true;
+    const recovered = recovering;
+    recovering = false;
     let history: EngineHistory | null = read ?? null;
     let unavailable: Record<string, unknown> = { unavailable: true };
     try {
@@ -921,13 +990,20 @@ export function observeUploadedSession(input: {
     // A turn the user stopped (Esc, Stop) says so on its trigger and its turn.completed event too.
     const aborted = outcome === "stopped" ? ("aborted" as const) : undefined;
     captureTurnSnapshot(aborted);
-    sessionUploader.flushTrace(sessionId, { messages: history ? newest.messages : unavailable, ...(aborted ? { outcome: aborted } : {}) });
+    sessionUploader.flushTrace(sessionId, {
+      messages: history ? newest.messages : unavailable,
+      ...(aborted ? { outcome: aborted } : {}),
+      ...(recovered ? { recovered: true } : {}),
+      ...(status === "quit" ? { reason: "app_quit" } : {}),
+    });
     // The delta's turn number is the engine's completed-turn count, which
     // survives app restarts; without the messages the archiver numbers it
     // right after the last archived turn. It also arms the idle final archive.
     turnArchived = true;
     // Capture v2: the turn's attachments are staged ahead of its delta.
     if (history) input.archive.turnMessages?.(sessionId, history.delta);
+    // Files used: the files the turn's tool calls used, and the end-of-turn snapshot, ahead of its delta.
+    if (history) input.archive.turnFilesUsed?.(sessionId, history.delta);
     input.archive.turnCompleted(sessionId, history ? history.outline : null);
   };
 
@@ -951,6 +1027,8 @@ export function observeUploadedSession(input: {
     let readTarget = session.target;
     // When the observer first saw that the next prompt ended this turn.
     let cutSeenAt: number | null = null;
+    // When the subagent sessions below were last listed.
+    let childIdsAt = startedAt;
     while (timing.now() - startedAt < timing.maxTurnMs) {
       // An engine that took over from a closed one is read at once, without the closed one's backoff.
       if (session.target !== readTarget) {
@@ -979,6 +1057,11 @@ export function observeUploadedSession(input: {
       }
       if (unavailableTraced && unavailableSince !== null) {
         sessionUploader.recordTrace(sessionId, "session.engine_recovered", { failures, unavailable_ms: timing.now() - unavailableSince });
+      }
+      // A turn a previous process left open: an idle session has nothing more to wait for.
+      if (recovering && status === "idle") {
+        await settle(status);
+        return session.requests;
       }
       failures = 0;
       unavailableSince = null;
@@ -1009,6 +1092,15 @@ export function observeUploadedSession(input: {
       if (status !== "idle") {
         observedBusy = true;
         idleReads = 0;
+        // The v2 daemon has no children route: nothing to list there.
+        if (!v2 && timing.now() - childIdsAt >= CHILD_IDS_INTERVAL_MS) {
+          childIdsAt = timing.now();
+          try {
+            sessionUploader.noteChildSessionIds(sessionId, await childSessionIdsBelow(fetchEngine, sessionId));
+          } catch (error) {
+            if (stopped.aborted) throw error;
+          }
+        }
         continue;
       }
       if (idleReads === 0) {
@@ -1039,6 +1131,11 @@ export function observeUploadedSession(input: {
     return null;
   };
 
+  session.settleNow = async () => {
+    if (!session.turn || session.turn.settled) return;
+    sessionUploader.recordTrace(sessionId, "session.quit_settled", {});
+    await settle("quit");
+  };
   session.done = (async () => {
     const checkpoint = await sessionUploader.sessionCheckpoint(sessionId);
     if (checkpoint.lastMessageId) observer.lastMessageIds.set(sessionId, checkpoint.lastMessageId);
@@ -1103,6 +1200,45 @@ export function followToolStart(input: {
     signal,
     fetch: (target, init) => loopbackFetch(target, init),
     onToolStart: () => input.archive.toolStarted(input.sessionId),
+  }).finally(() => {
+    if (map.get(input.sessionId) === controller) map.delete(input.sessionId);
+  });
+}
+
+const FILES_USED_WATCHES = new WeakMap<SessionObservers, Map<string, AbortController>>();
+
+/**
+ * Files used: every tool call of the session as it ends, from the engine's
+ * event stream (files-used.ts watchToolCallEnds), so the temp files it
+ * named or made are kept before a later call deletes them. Only while the
+ * project archive may record files used; the next prompt's call replaces it.
+ */
+export function followFilesUsedCalls(input: {
+  observers: SessionObservers;
+  archive: Pick<ProjectArchiveLifecycle, "toolCallEnded" | "filesUsedMaybe">;
+  sessionId: string;
+  target: EngineTarget;
+}): void {
+  let watches = FILES_USED_WATCHES.get(input.observers);
+  if (!watches) {
+    watches = new Map();
+    FILES_USED_WATCHES.set(input.observers, watches);
+  }
+  watches.get(input.sessionId)?.abort();
+  if (!input.archive.filesUsedMaybe()) return;
+  const controller = new AbortController();
+  watches.set(input.sessionId, controller);
+  const map = watches;
+  const { baseUrl, headers, search, engine } = input.target;
+  const url = buildOpencodeProxyUrl(baseUrl, engine === "v2" ? "/api/event" : "/event", search);
+  const signal = AbortSignal.any([controller.signal, input.observers.controller.signal, AbortSignal.timeout(MAX_TOOL_WATCH_MS)]);
+  void watchToolCallEnds({
+    url,
+    headers: new Headers(headers),
+    sessionId: input.sessionId,
+    signal,
+    fetch: (target, init) => loopbackFetch(target, init),
+    onCall: (call) => input.archive.toolCallEnded(input.sessionId, call),
   }).finally(() => {
     if (map.get(input.sessionId) === controller) map.delete(input.sessionId);
   });

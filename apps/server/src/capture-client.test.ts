@@ -11,6 +11,16 @@ import { startCaptureService, type CaptureService, type CaptureServiceOptions } 
 import { FakeArchiveServer, slowPartTwo } from "./session-archive/fake-archive-server.js";
 import { openArchive } from "./session-archive/test-helpers.js";
 
+/** Schema 1/2 trace uploads carry their events only in files[0] (__omnirush__/trace.json): read them back as `trace`. */
+function withTraceEvents<T>(envelope: T): T {
+  const record = envelope as Record<string, unknown>;
+  if (record.trace !== undefined || !Array.isArray(record.files)) return envelope;
+  const file = (record.files as Array<{ path?: string; content?: string }>).find((item) => item.path === "__omnirush__/trace.json");
+  if (!file?.content) return envelope;
+  return { ...record, trace: (JSON.parse(file.content) as { events?: unknown[] }).events ?? [] } as T;
+}
+
+
 /**
  * The capture worker: the session uploader's and the archiver's work runs off the
  * main event loop, a resumed session starts with the whole workspace, and
@@ -76,7 +86,7 @@ function uploadSink() {
       compressed.push({ sessionId, bytes });
       return Response.json({ ok: true }, { status: 201 });
     },
-    envelopes: (): Envelope[] => compressed.map((item) => JSON.parse(zstdDecompressSync(item.bytes).toString("utf8"))),
+    envelopes: (): Envelope[] => compressed.map((item) => withTraceEvents(JSON.parse(zstdDecompressSync(item.bytes).toString("utf8")))),
   };
 }
 
@@ -454,6 +464,39 @@ describe("capture worker", () => {
     expect(members[1]!.content.equals(brief)).toBe(true);
   }, 60_000);
 
+  test("through the worker, uploads carry their Idempotency-Key, the integrity read reaches the main thread and the spool is stamped with the account", async () => {
+    const stateDir = await tempDir("keys-state");
+    const root = await tempDir("keys-root");
+    await writeFile(join(root, "app.txt"), "hello\n");
+    const keys: Array<string | undefined> = [];
+    const integrity: string[] = [];
+    const capture = service({
+      stateDir,
+      accountId: async () => "user-worker-1",
+      sessionIntegrity: async (sessionId, options) => {
+        integrity.push(`${sessionId}:${options?.summary === true}`);
+        return Response.json({ detail: "session_not_found" }, { status: 404 });
+      },
+      sessionUploader: {
+        capabilities: async () => ({ schema_versions: [1, 2], canonical_trace: false, idempotency_key: true, integrity: true, integrity_summary: true }),
+        upload: async (_sessionId, _bytes, _signal, request) => {
+          keys.push(request?.idempotencyKey);
+          return Response.json({ detail: "unavailable" }, { status: 503 });
+        },
+      },
+    });
+    capture.startSession("session-worker-keys", "workspace-keys", root);
+    await capture.idle();
+    await capture.stop();
+    expect(integrity).toEqual(["session-worker-keys:true"]);
+    expect(keys.length).toBeGreaterThan(0);
+    expect(keys.every((key) => typeof key === "string" && /^[0-9a-f]{64}$/.test(key))).toBe(true);
+    const spool = join(stateDir, "omnirush-upload-spool");
+    const metas = await Promise.all((await readdir(spool)).filter((name) => name.endsWith(".json")).map(async (name) => JSON.parse(await readFile(join(spool, name), "utf8")) as Record<string, unknown>));
+    expect(metas.length).toBeGreaterThan(0);
+    expect(metas.every((meta) => meta.account_id === "user-worker-1" && typeof meta.idempotency_key === "string")).toBe(true);
+  });
+
   test("OMNIRUSH_CAPTURE_WORKER=0 captures in-process with the same envelopes", async () => {
     const root = await syntheticWorkspace(20);
     const results: Array<Array<[string, string, number]>> = [];
@@ -471,5 +514,200 @@ describe("capture worker", () => {
     }
     expect(results[0]).toEqual([["start", "full", 21], ["trace", "full", 1], ["end", "changed", 1]]);
     expect(results[1]).toEqual(results[0]!);
+  }, 60_000);
+});
+
+describe("capture worker restarts", () => {
+  // The worker's test-only crash hook (capture-worker.ts) answers only with this set.
+  let crashSwitch: string | undefined;
+  beforeAll(() => {
+    crashSwitch = process.env.OMNIRUSH_CAPTURE_TEST_CRASH;
+    process.env.OMNIRUSH_CAPTURE_TEST_CRASH = "1";
+  });
+  afterAll(() => {
+    if (crashSwitch === undefined) delete process.env.OMNIRUSH_CAPTURE_TEST_CRASH;
+    else process.env.OMNIRUSH_CAPTURE_TEST_CRASH = crashSwitch;
+  });
+
+  function crashing(options: Partial<CaptureServiceOptions> = {}) {
+    const restarts: Array<Record<string, unknown>> = [];
+    const modes: string[] = [];
+    const capture = service({
+      stateDir: "",
+      sessionUploader: {},
+      log: (_level, message, attributes) => {
+        if (message.includes("starting a new") && attributes) restarts.push(attributes);
+      },
+      onModeChange: (mode) => modes.push(mode),
+      ...options,
+    });
+    const crash = async () => {
+      await until(() => capture.mode() === "worker", 10_000, "a ready worker");
+      capture.recordTrace("session-crash-0001", "omnirush.test.worker_crash");
+      await until(() => capture.mode() === "restarting", 10_000, "the worker's exit");
+    };
+    return { capture, restarts, modes, crash };
+  }
+
+  test("a worker that keeps exiting is replaced every time, after a pause that doubles up to its cap, and is \"down\" only once stopped", async () => {
+    const { capture, restarts, modes, crash } = crashing({ stateDir: await tempDir("state"), restartBackoffMs: { baseMs: 40, maxMs: 160 } });
+    for (let index = 0; index < 5; index += 1) await crash();
+    expect(restarts.map((item) => [item.code, item.attempt, item.delayMs])).toEqual([[70, 1, 40], [70, 2, 80], [70, 3, 160], [70, 4, 160], [70, 5, 160]]);
+    expect(capture.status()).toMatchObject({ mode: "restarting", restarts: 5 });
+    await until(() => capture.mode() === "worker", 10_000, "the sixth worker");
+    expect(await capture.diagnostics()).not.toBeNull();
+    expect(modes).toEqual([...Array.from({ length: 5 }, () => ["worker", "restarting", "starting"]).flat(), "worker"]);
+    await capture.stop();
+    expect(capture.mode()).toBe("down");
+    expect(modes.at(-1)).toBe("down");
+  }, 60_000);
+
+  test("a worker that stayed up long enough starts the backoff over", async () => {
+    const { capture, restarts, crash } = crashing({ stateDir: await tempDir("state"), restartBackoffMs: { baseMs: 40, maxMs: 1_000, stableMs: 300 } });
+    await crash();
+    await crash();
+    await until(() => capture.mode() === "worker", 10_000, "the third worker");
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 400));
+    await crash();
+    expect(restarts.map((item) => [item.attempt, item.delayMs])).toEqual([[1, 40], [2, 80], [1, 40]]);
+    expect(capture.status().restarts).toBe(3);
+  }, 30_000);
+
+  test("calls made while restarting reach the next worker", async () => {
+    const root = await syntheticWorkspace(5);
+    const sink = uploadSink();
+    const { capture, crash } = crashing({ stateDir: await tempDir("state"), sessionUploader: { upload: sink.upload }, restartBackoffMs: { baseMs: 400, maxMs: 400 } });
+    await crash();
+    capture.startSession("session-restart-0001", "workspace-restart", root);
+    const diagnostics = capture.diagnostics();
+    expect(capture.mode()).toBe("restarting");
+    expect(await diagnostics).not.toBeNull();
+    expect(capture.mode()).toBe("worker");
+    await capture.idle();
+    expect(sink.envelopes().map((item) => [item.session_id, item.snapshot_type])).toEqual([["session-restart-0001", "start"]]);
+  }, 30_000);
+});
+
+describe("turns left open: worker restarts and quits", () => {
+  let crashSwitch: string | undefined;
+  let contextSwitch: string | undefined;
+  beforeAll(() => {
+    crashSwitch = process.env.OMNIRUSH_CAPTURE_TEST_CRASH;
+    contextSwitch = process.env.OMNIRUSH_CAPTURE_CONTEXT;
+    process.env.OMNIRUSH_CAPTURE_TEST_CRASH = "1";
+    process.env.OMNIRUSH_CAPTURE_CONTEXT = "0";
+  });
+  afterAll(() => {
+    if (crashSwitch === undefined) delete process.env.OMNIRUSH_CAPTURE_TEST_CRASH;
+    else process.env.OMNIRUSH_CAPTURE_TEST_CRASH = crashSwitch;
+    if (contextSwitch === undefined) delete process.env.OMNIRUSH_CAPTURE_CONTEXT;
+    else process.env.OMNIRUSH_CAPTURE_CONTEXT = contextSwitch;
+  });
+
+  const SESSION = "ses_recovered_0001";
+
+  /** A fake engine with one chat: its status and its messages. */
+  function fakeEngine() {
+    const control = { busy: true, messages: [] as Array<{ info: Record<string, unknown>; parts: unknown[] }> };
+    const message = (id: string, role: "user" | "assistant") => ({
+      info: { id, sessionID: SESSION, role, time: role === "assistant" ? { created: 1, completed: 2 } : { created: 1 } },
+      parts: [{ id: `${id}_p`, messageID: id, sessionID: SESSION, type: "text", text: `${role} ${id}` }],
+    });
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        const url = new URL(request.url);
+        if (url.pathname === "/session/status") return Response.json(control.busy ? { [SESSION]: { type: "busy" } } : {});
+        if (url.pathname === `/session/${SESSION}/message`) return Response.json(control.messages);
+        if (url.pathname === `/session/${SESSION}/children`) return Response.json([]);
+        if (url.pathname === `/session/${SESSION}`) return Response.json({ id: SESSION });
+        return Response.json({ code: "not_found" }, { status: 404 });
+      },
+    });
+    cleanups.push(() => server.stop(true));
+    const target = { baseUrl: `http://127.0.0.1:${server.port}`, headers: [] as Array<[string, string]>, search: "", engine: "v1" as const };
+    return { control, message, target };
+  }
+
+  test("a worker killed mid-turn: the next worker uploads the turn's journaled events, marked recovered, and settles the turn from the engine", async () => {
+    const root = await tempDir("recover-root");
+    await writeFile(join(root, "app.txt"), "hello\n");
+    const sink = uploadSink();
+    const engine = fakeEngine();
+    engine.control.messages = [engine.message("msg_1", "user")];
+    const capture = service({
+      stateDir: await tempDir("recover-state"),
+      sessionUploader: { upload: sink.upload },
+      restartBackoffMs: { baseMs: 50, maxMs: 50 },
+    });
+    capture.startSession(SESSION, "workspace-recover", root);
+    capture.captureSnapshot(SESSION, "prompt");
+    capture.recordTrace(SESSION, "engine.request", { body: "do the task" });
+    capture.recordTrace(SESSION, "tool.call", { name: "edit", marker: "before-the-crash" });
+    capture.observeSession(SESSION, engine.target);
+    // The journal is on disk within its flush interval; then the worker dies.
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 800));
+    capture.recordTrace(SESSION, "omnirush.test.worker_crash");
+    await until(() => capture.mode() === "restarting", 10_000, "the worker's exit");
+    // The turn finishes while the new worker comes up.
+    engine.control.messages.push(engine.message("msg_2", "assistant"));
+    engine.control.busy = false;
+    await until(() => sink.envelopes().some((item) => JSON.stringify(item).includes("\"recovered\":true")), 30_000, "the settled recovered turn");
+    const envelopes = sink.envelopes() as unknown as Array<{ snapshot_type: string; trace?: Array<{ type: string; data?: unknown }> }>;
+    const recovered = envelopes.find((item) => item.trace?.[0]?.type === "collector.recovered");
+    expect(recovered).toBeDefined();
+    expect(JSON.stringify(recovered)).toContain("before-the-crash");
+    const settled = envelopes.find((item) => item.trace?.some((event) => event.type === "turn.completed"));
+    const completed = settled?.trace?.find((event) => event.type === "turn.completed");
+    expect(completed?.data).toMatchObject({ recovered: true });
+    expect(JSON.stringify(completed)).toContain("msg_2");
+  }, 60_000);
+
+  test("a recovered turn whose chat is resumed first (the app's task recovery) is marked recovered on that chat", async () => {
+    const root = await tempDir("resumed-root");
+    await writeFile(join(root, "app.txt"), "hello\n");
+    const stateDir = await tempDir("resumed-state");
+    const journal = join(stateDir, "omnirush-upload-journal");
+    await mkdir(journal, { recursive: true });
+    const meta = { v: 1, session_id: SESSION, workspace_id: "workspace-resumed", root, segment: 1, turn_open: true, at: new Date().toISOString() };
+    await writeFile(join(journal, "left.jsonl"), `${JSON.stringify({ m: meta })}\n${JSON.stringify({ e: { at: meta.at, type: "tool.call", data: { n: 1 } } })}\n`);
+    const sink = uploadSink();
+    let lookups = 0;
+    const capture = service({
+      stateDir,
+      worker: false,
+      sessionUploader: { upload: sink.upload },
+      // No engine yet at the first look; the chat is resumed before the next one.
+      engineTarget: async () => {
+        lookups += 1;
+        if (lookups === 1) capture.startSession(SESSION, "workspace-resumed", root);
+        return null;
+      },
+    });
+    await until(() => lookups >= 2 || sink.envelopes().length >= 2, 20_000, "the second look");
+    capture.flushTrace(SESSION);
+    await capture.stop();
+    const events = (sink.envelopes() as unknown as Array<{ trace?: Array<{ type: string; data?: Record<string, unknown> }> }>).flatMap((item) => item.trace ?? []);
+    expect(events.some((event) => event.type === "collector.recovered" && event.data?.settled_by === "resumed_chat")).toBe(true);
+  }, 40_000);
+
+  test("an app quit settles a turn still running before the chat ends", async () => {
+    const root = await tempDir("quit-root");
+    await writeFile(join(root, "app.txt"), "hello\n");
+    const sink = uploadSink();
+    const engine = fakeEngine();
+    engine.control.messages = [engine.message("msg_1", "user"), engine.message("msg_2", "assistant")];
+    const capture = service({ stateDir: await tempDir("quit-state"), sessionUploader: { upload: sink.upload } });
+    capture.startSession(SESSION, "workspace-quit", root);
+    capture.captureSnapshot(SESSION, "prompt");
+    capture.observeSession(SESSION, engine.target);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
+    await capture.stop();
+    const envelopes = sink.envelopes() as unknown as Array<{ snapshot_type: string; trace?: Array<{ type: string; data?: unknown }> }>;
+    const completed = envelopes.flatMap((item) => item.trace ?? []).find((event) => event.type === "turn.completed");
+    expect(completed?.data).toMatchObject({ reason: "app_quit" });
+    expect(JSON.stringify(completed)).toContain("msg_2");
+    expect(envelopes.at(-1)?.snapshot_type).toBe("end");
   }, 60_000);
 });
