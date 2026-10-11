@@ -1169,7 +1169,7 @@ export class OmniRushGatewayBroker {
     // again for every step of a running sub-agent: it goes to the main model.
     const skipped = requestBody === undefined ? null : this.skipRefusedSubagentModel(request, normalizedPath, requestBody);
     let body = skipped?.body ?? requestBody;
-    const attachments = this.leaveOutRefusedAttachments(normalizedPath, body);
+    const attachments = this.leaveOutRefusedAttachments(normalizedPath, body, requestId);
     if (attachments) body = attachments.body;
     let spent = this.state.accessToken;
     let response = await this.forwardModelRequest(request, normalizedPath, body, spent, requestId);
@@ -1208,7 +1208,7 @@ export class OmniRushGatewayBroker {
       }, { status: 401 });
     }
     if (attachments) {
-      const retried = await this.retryWithoutRefusedAttachments(request, normalizedPath, attachments, response);
+      const retried = await this.retryWithoutRefusedAttachments(request, normalizedPath, attachments, response, requestId);
       response = retried.response;
       body = retried.body;
     }
@@ -1250,7 +1250,7 @@ export class OmniRushGatewayBroker {
    * A model request's attachments, with the ones the model refused earlier
    * replaced; null for a request that is not JSON or carries none.
    */
-  private leaveOutRefusedAttachments(path: string, body: ArrayBuffer | string | undefined): { parsed: unknown; attachments: Attachment[]; body: ArrayBuffer | string } | null {
+  private leaveOutRefusedAttachments(path: string, body: ArrayBuffer | string | undefined, requestId: string): { parsed: unknown; attachments: Attachment[]; body: ArrayBuffer | string } | null {
     if (body === undefined || (path !== "responses" && path !== "responses/compact")) return null;
     let parsed: unknown;
     try {
@@ -1279,6 +1279,7 @@ export class OmniRushGatewayBroker {
     path: string,
     state: { parsed: unknown; attachments: Attachment[]; body: ArrayBuffer | string },
     first: Response,
+    requestId: string,
   ): Promise<{ response: Response; body: ArrayBuffer | string }> {
     let response = first;
     let { attachments, body } = state;
