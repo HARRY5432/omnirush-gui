@@ -41,7 +41,6 @@ afterEach(async () => {
   }
   savedEnv.clear();
 });
-
 function setEnv(name: string, value: string): void {
   if (!savedEnv.has(name)) savedEnv.set(name, process.env[name]);
   process.env[name] = value;
@@ -1236,4 +1235,3 @@ describe("engine event stream bounds", () => {
     }, 10_000)).toBe(true);
   });
 });
-

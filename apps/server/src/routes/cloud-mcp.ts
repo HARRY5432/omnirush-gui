@@ -11,6 +11,7 @@ import {
   type CloudMcpLiveStatusObserver,
 } from "../cloud-mcp-health.js";
 import { ApiError } from "../errors.js";
+import { assertMcpAllowed } from "../mcp-policy.js";
 import type { ServerConfig, TokenScope, WorkspaceInfo } from "../types.js";
 import { addRoute, type RequestContext, type Route } from "./registry.js";
 
@@ -94,88 +95,15 @@ export function registerCloudMcpRoutes(options: RegisterCloudMcpRoutesOptions): 
     serverMetadata,
   } = options;
 
-  addRoute(routes, "GET", "/workspace/:id/mcp/omnirush-cloud/health", "client", async (ctx) => {
-    const workspace = await resolveWorkspace(config, ctx.params.id);
-    assertExactWorkspace(ctx.params.id, workspace);
-    const health = await readOmniRushCloudMcpHealth({
-      config,
-      workspace,
-      directory: resolveOpencodeDirectory(workspace),
-      providerModel: providerModelFromQuery(ctx.url),
-      serverMetadata,
-      probe: probeFromQuery(ctx.url),
-      createWorkspaceOpencodeClient,
-      refreshRegistrationFromLiveStatus,
-    });
-    return jsonResponse(health);
+  addRoute(routes, "GET", "/workspace/:id/mcp/omnirush-cloud/health", "client", async () => {
+    assertMcpAllowed(config);
   });
 
-  addRoute(routes, "POST", "/workspace/:id/mcp/omnirush-cloud/engine-refresh", "client", async (ctx) => {
-    ensureWritable(config);
-    requireClientScope(ctx, "collaborator");
-    const workspace = await resolveWorkspace(config, ctx.params.id);
-    assertExactWorkspace(ctx.params.id, workspace);
-    // The refresh needs no payload; an optional body may scope provider/model
-    // and name the trigger for the delivery ledger. An absent/empty body is
-    // fine, but malformed JSON stays a hard 400 — never silently ignored.
-    const raw = (await ctx.request.text()).trim();
-    let body: Record<string, unknown> = {};
-    if (raw) {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        throw new ApiError(400, "invalid_json", "Invalid JSON body");
-      }
-      if (!isRecord(parsed)) {
-        throw new ApiError(400, "invalid_payload", "JSON object body is required");
-      }
-      body = parsed;
-    }
-    assertStrictBody(body, workspace);
-    const result = await refreshOmniRushCloudMcpEngine({
-      config,
-      workspace,
-      directory: resolveOpencodeDirectory(workspace),
-      providerModel: providerModelFromBody(body),
-      serverMetadata,
-      createWorkspaceOpencodeClient,
-      registerRuntimeMcp,
-      refreshRegistrationFromLiveStatus,
-      trigger: typeof body.trigger === "string" ? body.trigger : undefined,
-    });
-    return jsonResponse(result);
+  addRoute(routes, "POST", "/workspace/:id/mcp/omnirush-cloud/engine-refresh", "client", async () => {
+    assertMcpAllowed(config);
   });
 
-  addRoute(routes, "POST", "/workspace/:id/mcp/omnirush-cloud/reconcile", "client", async (ctx) => {
-    ensureWritable(config);
-    requireClientScope(ctx, "collaborator");
-    const workspace = await resolveWorkspace(config, ctx.params.id);
-    assertExactWorkspace(ctx.params.id, workspace);
-    const body = await readJsonBody(ctx.request);
-    if (!isRecord(body)) {
-      throw new ApiError(400, "invalid_payload", "JSON object body is required");
-    }
-    assertStrictBody(body, workspace);
-    // Reconcile persists the account-global desired config (it reconfigures
-    // Connect for every workspace). Collaborator scope suffices only for
-    // trusted endpoints; anything else needs the owner.
-    const configBody = isRecord(body.config) ? body.config : body;
-    const endpointUrl = typeof configBody.url === "string" ? configBody.url : "";
-    if (!await isTrustedCloudMcpEndpointForGlobalPersist(endpointUrl)) {
-      requireClientScope(ctx, "owner");
-    }
-    const health = await reconcileOmniRushCloudMcp({
-      config,
-      workspace,
-      directory: resolveOpencodeDirectory(workspace),
-      body,
-      providerModel: providerModelFromBody(body),
-      serverMetadata,
-      createWorkspaceOpencodeClient,
-      registerRuntimeMcp,
-      refreshRegistrationFromLiveStatus,
-    });
-    return jsonResponse(health);
+  addRoute(routes, "POST", "/workspace/:id/mcp/omnirush-cloud/reconcile", "client", async () => {
+    assertMcpAllowed(config);
   });
 }

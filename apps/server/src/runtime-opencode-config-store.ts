@@ -31,9 +31,6 @@ export type RuntimeOpencodeConfig = {
 
 export const ENGINE_GLOBAL_RUNTIME_CONFIG_ID = "__omnirush_engine_global__";
 
-/** Reserved Connect MCP name; kept in sync with OMNIRUSH_CLOUD_MCP_NAME in cloud-mcp-health.ts. */
-const OMNIRUSH_CLOUD_MCP_RESERVED_NAME = "omnirush-cloud";
-
 export function isEngineGlobalRuntimeConfigId(workspaceId: string): boolean {
   return workspaceId === ENGINE_GLOBAL_RUNTIME_CONFIG_ID;
 }
@@ -61,6 +58,12 @@ function normalizeRuntimeOpencodeConfig(value: unknown): RuntimeOpencodeConfig {
     ...(externalDirectory ? { permission: { external_directory: externalDirectory } } : {}),
     ...(provider ? { provider } : {}),
   };
+}
+
+/** Remove MCP before a runtime config crosses an engine or diagnostics boundary. */
+export function withoutMcpRuntimeConfig(config: RuntimeOpencodeConfig): RuntimeOpencodeConfig {
+  const { mcp: _mcp, ...rest } = config;
+  return rest;
 }
 
 function parseRuntimeOpencodeConfig(configJson: string): RuntimeOpencodeConfig {
@@ -246,15 +249,6 @@ export function mergeRuntimeOpencodeConfigLayers(
     ...runtimeDisabledProviderList(base),
     ...runtimeDisabledProviderList(overlay),
   ]);
-  const mcp = {
-    ...runtimeMcpMap(base),
-    ...runtimeMcpMap(overlay),
-  };
-  // The Connect MCP is account-scoped: the global row is authoritative, so a
-  // stale legacy per-workspace copy must not shadow it. Mirrors
-  // OMNIRUSH_CLOUD_MCP_NAME in cloud-mcp-health.ts (import would be cyclic).
-  const globalCloudMcp = runtimeMcpMap(base)[OMNIRUSH_CLOUD_MCP_RESERVED_NAME];
-  if (globalCloudMcp) mcp[OMNIRUSH_CLOUD_MCP_RESERVED_NAME] = globalCloudMcp;
   const basePermission = isRecord(base.permission) ? base.permission : {};
   const overlayPermission = isRecord(overlay.permission) ? overlay.permission : {};
   const externalDirectory = {
@@ -279,7 +273,6 @@ export function mergeRuntimeOpencodeConfigLayers(
     ...(base.default_agent || overlay.default_agent ? { default_agent: overlay.default_agent ?? base.default_agent } : {}),
     ...(plugin.length ? { plugin } : {}),
     ...(disabledProviders.length ? { disabled_providers: disabledProviders } : {}),
-    ...(Object.keys(mcp).length ? { mcp } : {}),
     ...(Object.keys(permission).length ? { permission } : {}),
     ...(Object.keys(provider).length ? { provider } : {}),
   });
@@ -308,13 +301,13 @@ export async function readEffectiveRuntimeOpencodeConfig(
   workspaceId: string,
 ): Promise<RuntimeOpencodeConfig> {
   if (isEngineGlobalRuntimeConfigId(workspaceId)) {
-    return withoutRegistryOmniRushUiMcp(await readRuntimeOpencodeConfig(config, workspaceId));
+    return withoutMcpRuntimeConfig(withoutRegistryOmniRushUiMcp(await readRuntimeOpencodeConfig(config, workspaceId)));
   }
   const [globalRuntime, workspaceRuntime] = await Promise.all([
     readGlobalRuntimeOpencodeConfig(config),
     readRuntimeOpencodeConfig(config, workspaceId),
   ]);
-  return withoutRegistryOmniRushUiMcp(mergeRuntimeOpencodeConfigLayers(globalRuntime, workspaceRuntime));
+  return withoutMcpRuntimeConfig(withoutRegistryOmniRushUiMcp(mergeRuntimeOpencodeConfigLayers(globalRuntime, workspaceRuntime)));
 }
 
 /**
@@ -465,7 +458,7 @@ function inspectRuntimeConfigRow(
         return { status: "invalid-row", config: {} };
       }
     }
-    return { status: "available", config: normalizeRuntimeOpencodeConfig(parsed) };
+    return { status: "available", config: withoutMcpRuntimeConfig(normalizeRuntimeOpencodeConfig(parsed)) };
   } catch {
     return { status: "invalid-row", config: {} };
   }
@@ -587,7 +580,11 @@ function updateRuntimeConfig(
   const result = pending.catch(() => undefined).then(async () => {
     const row = await runtimeOpencodeConfigStore.getRow(config, workspaceId);
     const current = row?.value ?? {};
-    const next = refuseRegistryOmniRushUiMcp(current, normalizeRuntimeOpencodeConfig(updater(current)));
+    // MCP is never persisted by a runtime write. Existing rows are allowed to
+    // be read by cleanup code, but the next write removes every registration.
+    const next = withoutMcpRuntimeConfig(
+      refuseRegistryOmniRushUiMcp(current, normalizeRuntimeOpencodeConfig(updater(current))),
+    );
     const configJson = runtimeOpencodeConfigStore.serialize(next);
     if (row?.valueJson === configJson) return { config: next, changed: false };
     await runtimeOpencodeConfigStore.setSerialized(config, workspaceId, configJson, Date.now());
@@ -634,10 +631,7 @@ export function mergeOpencodeConfigs(
       ...(Array.isArray(persisted.disabled_providers) ? persisted.disabled_providers.filter((item) => typeof item === "string") : []),
       ...runtimeDisabledProviderList(runtime),
     ].filter((item, index, list) => list.indexOf(item) === index),
-    mcp: {
-      ...(isRecord(persisted.mcp) ? persisted.mcp : {}),
-      ...runtimeMcpMap(runtime),
-    },
+    mcp: {},
     permission: {
       ...persistedPermission,
       external_directory: {

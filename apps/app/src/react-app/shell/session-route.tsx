@@ -588,6 +588,7 @@ export function SessionRoute() {
       }
     : undefined, [local.prefs.defaultModel?.modelID, local.prefs.defaultModel?.providerID]);
   const sessionMcpMaintenance = useSessionMcpMaintenance({
+    enabled: false,
     cloudSignedIn: denAuth.isSignedIn,
     client: selectedWorkspaceEndpoint?.client ?? null,
     workspaceId: selectedWorkspaceEndpoint?.workspaceId ?? null,
@@ -601,6 +602,7 @@ export function SessionRoute() {
     submit: submitWithCloudMcpReadiness,
     clearFailure: clearCloudMcpSubmissionFailure,
   } = useCloudMcpSubmitReadiness({
+    enabled: false,
     cloudAuthStatus: denAuth.status,
     client: selectedWorkspaceEndpoint?.client ?? null,
     workspaceId: selectedWorkspaceEndpoint?.workspaceId ?? null,
@@ -1306,6 +1308,7 @@ export function SessionRoute() {
     // local server's, and remote workspaces silently end up calling the
     // local server with the local `rem_*` id.
     return {
+      mcpDisabled: true,
       workspaceRoot: selectedWorkspaceRoot,
       draftScope: sessionDraftScope,
       developerMode,

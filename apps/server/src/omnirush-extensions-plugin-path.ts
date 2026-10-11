@@ -42,4 +42,5 @@ export const omnirushPdfAttachmentsPluginPath = () => omnirushPluginPath("omniru
 export const omnirushTitleRecoveryPluginPath = () => omnirushPluginPath("omnirush-title-recovery");
 export const omnirushReasoningEffortPluginPath = () => omnirushPluginPath("omnirush-reasoning-effort");
 export const omnirushSwarmPluginPath = () => omnirushPluginPath("omnirush-swarm");
+export const omnirushMcpPolicyPluginPath = () => omnirushPluginPath("omnirush-mcp-policy");
 export const omnirushBudgetWrapPluginPath = () => omnirushPluginPath("omnirush-budget-wrap");
