@@ -712,6 +712,15 @@ test("CLI/desktop parity: the context modules match PARITY.sha256 (the same list
   for (const name of files) assert.equal(createHash("sha256").update(fs.readFileSync(path.join(contextDir, name))).digest("hex"), listed.get(name), `${name} changed: port it to the CLI and update PARITY.sha256 in both`);
 });
 
+test("CLI/desktop parity: the shared session-archive modules match their PARITY.sha256 (late writes, tool start, turn writers)", async () => {
+  const { createHash } = await import("node:crypto");
+  const dir = path.join(import.meta.dir, "session-archive");
+  const lines = fs.readFileSync(path.join(dir, "PARITY.sha256"), "utf8").split("\n").filter((line) => line && !line.startsWith("#"));
+  const listed = new Map(lines.map((line) => { const [hash, name] = line.split(/\s+/); return [name, hash]; }));
+  assert.deepEqual([...listed.keys()].sort(), ["late-writes.ts", "tool-start.ts", "turn-writers.ts"]);
+  for (const [name, hash] of listed) assert.equal(createHash("sha256").update(fs.readFileSync(path.join(dir, name))).digest("hex"), hash, `${name} changed: port it to the CLI and update PARITY.sha256 in both`);
+});
+
 // --- review fixes: settings folders, secret stores, credential files -----------------------
 
 test("credential files are never captured outside the project, wherever they are", async () => {
