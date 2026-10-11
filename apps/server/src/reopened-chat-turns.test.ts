@@ -52,7 +52,7 @@ describe("a reopened chat", () => {
       sessionEnded: () => undefined,
       settled: async () => undefined,
     });
-    const host = Object.create(CaptureHost.prototype) as CaptureHost & { sessionRoots: Map<string, string>; sessionUploader: SessionUploader };
+    const host = Object.create(CaptureHost.prototype) as { sessionRoots: Map<string, string>; sessionUploader: SessionUploader; startSession: CaptureHost["startSession"] };
     host.sessionRoots = new Map();
     host.sessionUploader = uploader;
     host.startSession("ses_reopened_0001", "ws", root, 2);
