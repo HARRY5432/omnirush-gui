@@ -28,6 +28,7 @@ export type CaptureEfficiencyAttempt = {
   traceFileEventTypes: string[];
   traceFileCount: number;
   actorMarkers: string[];
+  events: Array<{ type: string; data: unknown }>;
 };
 
 export type CaptureEfficiencyWitness = {
@@ -98,6 +99,12 @@ function authorized(request: IncomingMessage, token: string): boolean {
   return request.headers.authorization === `Bearer ${token}`;
 }
 
+function traceEvents(value: unknown): Array<{ type: string; data: unknown }> {
+  if (isRecord(value) && Array.isArray(value.events)) return traceEvents(value.events);
+  if (!Array.isArray(value)) return [];
+  return value.flatMap(event => isRecord(event) && typeof event.type === "string" ? [{ type: event.type, data: event.data }] : []);
+}
+
 function traceSummary(value: unknown): { types: string[]; actors: string[] } {
   if (isRecord(value) && Array.isArray(value.events)) return traceSummary(value.events);
   if (!Array.isArray(value)) return { types: [], actors: [] };
@@ -125,7 +132,8 @@ function summarizeEnvelope(sessionId: string, status: number, envelope: JsonReco
   const workspace = isRecord(envelope.workspace) ? envelope.workspace : null;
   const workspaceRoot = workspace ? optionalString(workspace.root_name) : null;
   const files = filePaths(envelope.files);
-  const trace = traceSummary(envelope.trace);
+  let events = traceEvents(envelope.trace);
+  let trace = traceSummary(envelope.trace);
   const traceFiles = files.filter((file) => file.path === "__omnirush__/trace.json");
   let traceFileEventTypes: string[] = [];
   for (const traceFile of traceFiles) {
@@ -133,6 +141,7 @@ function summarizeEnvelope(sessionId: string, status: number, envelope: JsonReco
     try {
       const parsed: unknown = JSON.parse(traceFile.content);
       traceFileEventTypes = traceSummary(parsed).types;
+      if (events.length === 0) { events = traceEvents(parsed); trace = traceSummary(parsed); }
     } catch {
       traceFileEventTypes = [];
     }
@@ -148,6 +157,7 @@ function summarizeEnvelope(sessionId: string, status: number, envelope: JsonReco
     traceFileEventTypes,
     traceFileCount: traceFiles.length,
     actorMarkers: trace.actors,
+    events,
   };
 }
 
@@ -186,7 +196,7 @@ async function startCaptureEfficiencyLabRuntime(): Promise<CaptureEfficiencyLab>
 
   const attempts: CaptureEfficiencyAttempt[] = [];
   const capabilityCalls: Record<Actor, number> = { "actor-a": 0, "actor-b": 0 };
-  const sessions = new Map<string, { actor: Actor; service: CaptureService }>();
+  const sessions = new Map<string, { actor: Actor; service: CaptureService; root: string; workspace: string }>();
   const rejectedSchema3 = new Set(["session-a-0001"]);
   let collectorUrl = "";
   let stopped = false;
@@ -258,7 +268,7 @@ async function startCaptureEfficiencyLabRuntime(): Promise<CaptureEfficiencyLab>
         const root = join(workspaceRoot, actor, workspace);
         await mkdir(root, { recursive: true });
         await writeFile(join(root, `notes-${actor.slice(-1)}.txt`), `synthetic ${actor}\n`, "utf8");
-        sessions.set(requestedSessionId, { actor, service });
+        sessions.set(requestedSessionId, { actor, service, root, workspace });
         service.startSession(requestedSessionId, workspace, root);
         await service.idle();
         sendJson(response, 202, { ok: true });
@@ -268,6 +278,31 @@ async function startCaptureEfficiencyLabRuntime(): Promise<CaptureEfficiencyLab>
       const session = sessions.get(requestedSessionId);
       if (!session) {
         sendJson(response, 404, { error: "unknown synthetic session" });
+        return;
+      }
+      if (path === "/control/write") {
+        // A fixed synthetic path: the test control cannot escape its workspace.
+        await writeFile(join(session.root, "cli.py"), stringValue(body, "content"), "utf8");
+        sendJson(response, 202, { ok: true });
+        return;
+      }
+      if (path === "/control/turn") {
+        const action = stringValue(body, "action");
+        if (action === "begin") {
+          if (!await session.service.promptStartGate(requestedSessionId, session.workspace, session.root)) {
+            sendJson(response, 503, { error: "baseline unavailable" });
+            return;
+          }
+        } else if (action === "pause") {
+          await session.service.pauseTurn(requestedSessionId);
+          session.service.captureSnapshot(requestedSessionId, "turn_completed", "aborted");
+        } else if (action === "complete") {
+          session.service.captureSnapshot(requestedSessionId, "turn_completed");
+        } else throw new Error("unknown turn action");
+        const finalTrace = isRecord(body) ? body.finalTrace : undefined;
+        session.service.flushTrace(requestedSessionId, finalTrace);
+        await session.service.idle();
+        sendJson(response, 202, { ok: true });
         return;
       }
       if (path === "/control/trace") {
@@ -387,6 +422,7 @@ async function readWitness(baseUrl: string, controlToken: string): Promise<Captu
         : [],
       traceFileCount: numberValue(attempt, "traceFileCount") ?? 0,
       actorMarkers: Array.isArray(attempt.actorMarkers) ? attempt.actorMarkers.filter((actor): actor is string => typeof actor === "string") : [],
+      events: traceEvents(attempt.events),
     });
   }
   const calls: Record<Actor, number> = {

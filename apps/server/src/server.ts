@@ -202,6 +202,7 @@ import { sessionUploaderEnabled } from "./session-uploader.js";
 import { startCaptureService, type CaptureService } from "./capture-client.js";
 import type { LateWritesGate } from "./capture-host.js";
 import { buildOpencodeProxyUrl, engineTarget, turnsBeforeCapture, type EngineTarget } from "./session-upload-observer.js";
+import { SerializedTurnGate, type SerializedTurnCapture, type TurnTicket } from "./serialized-turn-gate.js";
 import { OmniRushGatewayBroker } from "./omnirush-gateway-broker.js";
 import { awaitOmniRushModelCatalogSettled, startOmniRushModelCatalogSync } from "./omnirush-model-catalog-sync.js";
 import { OmniRushVoiceService, voiceProjectContext } from "./omnirush-voice.js";
@@ -230,6 +231,7 @@ const agentDiagnosticsLastRunByServer = new WeakMap<ServerConfig, Map<string, nu
 const agentDiagnosticsInFlightByServer = new WeakMap<ServerConfig, Set<string>>();
 const commandAdmissionsByServer = new WeakMap<ServerConfig, Map<string, { fingerprint: string; admittedAt: number }>>();
 const captureServicesByServer = new WeakMap<ServerConfig, CaptureService>();
+const serializedTurnGatesByServer = new WeakMap<ServerConfig, SerializedTurnGate>();
 /** Voice dictation's broker hop (omnirush-voice.ts), per server. */
 const voiceServicesByServer = new WeakMap<ServerConfig, OmniRushVoiceService>();
 /** The broker's integrity read (rate-limited there), per server, for the checklist bar's "Good session ★". */
@@ -237,6 +239,22 @@ const sessionIntegrityByServer = new WeakMap<ServerConfig, OmniRushGatewayBroker
 
 /** Recent gateway fallbacks per sub-agent session, for the swarm plugin's task-result note. */
 const subagentGatewayFallbacks = new WeakMap<ServerConfig, Map<string, Array<Record<string, unknown>>>>();
+
+function serializedTurnGateFor(config: ServerConfig): SerializedTurnGate {
+  const existing = serializedTurnGatesByServer.get(config);
+  if (existing) return existing;
+  const gate = new SerializedTurnGate();
+  serializedTurnGatesByServer.set(config, gate);
+  return gate;
+}
+
+function supportsSerializedTurns(capture: CaptureService | undefined): capture is CaptureService & SerializedTurnCapture {
+  return Boolean(capture?.uploadEnabled
+    && "promptStartGate" in capture
+    && "pauseTurn" in capture
+    && "hasOpenTurn" in capture
+    && "settleTurn" in capture);
+}
 
 /**
  * Records a sub-agent model fallback: a "subagent.model_fallback" trace event
@@ -818,6 +836,7 @@ function admitSessionCommand(
   config: ServerConfig,
   scope: string,
   admission: { messageId: string; fingerprint: string },
+  reserve = true,
 ): "accepted" | "duplicate" | "conflict" {
   const now = Date.now();
   const admissions = commandAdmissionsByServer.get(config) ?? new Map<string, { fingerprint: string; admittedAt: number }>();
@@ -831,6 +850,7 @@ function admitSessionCommand(
   const existing = admissions.get(key);
   if (existing) return existing.fingerprint === admission.fingerprint ? "duplicate" : "conflict";
 
+  if (!reserve) return "accepted";
   if (admissions.size >= COMMAND_ADMISSION_CAPACITY) {
     const oldest = admissions.keys().next().value;
     if (oldest) admissions.delete(oldest);
@@ -846,7 +866,7 @@ function isPromptAsyncProxyRequest(method: string, proxyPath: string) {
 // A prompt dispatch (v1 prompt_async, v2 prompt, or a slash command) is the
 // session uploader's "prompt" milestone: the workspace is captured as the turn begins.
 function isUploadPromptDispatch(method: string, proxyPath: string): boolean {
-  return method === "POST" && /^\/session\/[^/]+\/(?:prompt_async|prompt|command)$/.test(normalizeOpencodeProxyPath(proxyPath));
+  return method === "POST" && /^\/session\/[^/]+\/(?:prompt_async|prompt|message|command|shell)$/.test(normalizeOpencodeProxyPath(proxyPath));
 }
 
 /**
@@ -915,7 +935,7 @@ export function createLocalWorkflowPromptDispatcher(config: ServerConfig): Local
 // route path exactly as the engine reads its `:id` parameter. Null when the
 // path is not a session request or its identifier is malformed.
 function uploadSessionId(proxyPath: string): string | null {
-  const match = normalizeOpencodeProxyPath(proxyPath).match(/^\/session\/([^/]+)\/(?:prompt_async|prompt|command|abort|interrupt)$/);
+  const match = normalizeOpencodeProxyPath(proxyPath).match(/^\/session\/([^/]+)\/(?:prompt_async|prompt|message|command|shell|abort|interrupt)$/);
   return match?.[1] ? decodeEngineRouteParam(match[1]) : null;
 }
 
@@ -1756,6 +1776,7 @@ export async function proxyOpencodeV2Request(input: {
     throw new ApiError(403, "engine_instructions_managed", "OmniRush.ai instructions are managed by the server");
   }
 
+  const prepareV2Instructions = async () => {
   if (method === "POST" && sessionId && /^\/api\/session\/[^/]+\/(?:prompt|command|generate)$/.test(routePath)) {
     // Session ownership was verified above. Replace one native instruction
     // entry immediately before admission; never append to conversation text.
@@ -1775,6 +1796,8 @@ export async function proxyOpencodeV2Request(input: {
     });
     if (!synced.ok) throw new ApiError(502, "engine_instruction_sync_failed", "OmniRush.ai instructions could not be updated");
   }
+
+  };
 
   const requestBody = method === "GET" || method === "HEAD"
     ? undefined
@@ -1803,25 +1826,54 @@ export async function proxyOpencodeV2Request(input: {
   const deletedUploadedSessionId = capture?.uploadEnabled && method === "DELETE" && sessionId && /^\/api\/session\/[^/]+$/.test(routePath)
     ? sessionId
     : null;
-  const engine = capture && uploadedSessionId ? engineTarget(input.connection.url, headers, target.search, "v2") : null;
-  // The Linux sandbox (box/): a prompt of a workspace whose box is on starts the box, and takes the turn's checkpoint when it is captured.
-  const boxInfo = promptDispatch && sessionId
-    ? await boxServiceFor(input.config).beforePrompt(sessionId, input.workspace, { capture: Boolean(uploadedSessionId && engine) })
-    : null;
-  if (capture && uploadedSessionId && engine) {
-    // The turn before's background processes finish writing (at most 10 s after it ended), then
-    // capture v2's session-start manifest is taken before the prompt reaches the engine (at most about 3 s).
-    await capture.archiveStartGate(uploadedSessionId, input.workspace.path, lateWritesGate(input.workspace));
-    capture.boxSession(uploadedSessionId, boxInfo);
-    capture.startSession(uploadedSessionId, input.workspace.id, input.workspace.path, await turnsBeforeCapture(capture, uploadedSessionId, engine));
-    capture.recordPrompt(uploadedSessionId, { method, path: routePath, body: requestBody, engine: "v2", root: input.workspace.path, attachments: true, dispatchedAt: Date.now() });
-    capture.captureSnapshot(uploadedSessionId, "prompt");
-    capture.archiveSessionStarted(uploadedSessionId, input.workspace.path, engine);
+  const engine = capture && sessionId ? engineTarget(input.connection.url, headers, target.search, "v2") : null;
+  const prepareCapture = async () => {
+    const boxInfo = promptDispatch && sessionId
+      ? await boxServiceFor(input.config).beforePrompt(sessionId, input.workspace, { capture: Boolean(uploadedSessionId && engine) })
+      : null;
+    if (capture && uploadedSessionId && engine) {
+      await capture.archiveStartGate(uploadedSessionId, input.workspace.path, lateWritesGate(input.workspace));
+      capture.boxSession(uploadedSessionId, boxInfo);
+      capture.startSession(uploadedSessionId, input.workspace.id, input.workspace.path, await turnsBeforeCapture(capture, uploadedSessionId, engine));
+    }
+  };
+  let ticket: TurnTicket | undefined;
+  const mutableSession = method !== "GET" && method !== "HEAD" && sessionId;
+  // Internal task recovery is already serialized by task-recovery.ts and resumes the persisted capture group.
+  if (supportsSerializedTurns(capture) && !input.recoverySignal && mutableSession && engine) {
+    const gate = serializedTurnGateFor(input.config);
+    const admissionInput = {
+      key: input.workspace.id, sessionId, workspaceId: input.workspace.id,
+      root: input.workspace.path, target: engine, capture, prepare: prepareCapture,
+    };
+    if (/^\/api\/session\/[^/]+\/(?:abort|interrupt)$/.test(routePath)) {
+      await gate.stop(admissionInput);
+      return jsonResponse({ data: true });
+    }
+    const edit = /\/(?:revert|unrevert|message(?:\/|$))/.test(routePath) && !promptDispatch;
+    if (promptDispatch || edit) ticket = await gate.admit(admissionInput, edit);
   }
-  const response = await loopbackFetch(target.toString(), { method, headers, body, signal: input.recoverySignal });
-  if (capture && uploadedSessionId && engine) {
-    capture.recordTrace(uploadedSessionId, "engine.response", { method, path: routePath, status: response.status });
-    if (response.ok) capture.observeSession(uploadedSessionId, engine);
+  let response: Response;
+  try {
+    ticket?.check();
+    await prepareV2Instructions();
+    if (!ticket && promptDispatch) await prepareCapture();
+    if (capture && uploadedSessionId && engine) {
+      ticket?.check();
+      if (!ticket) capture.captureSnapshot(uploadedSessionId, "prompt");
+      capture.recordPrompt(uploadedSessionId, { method, path: routePath, body: requestBody, engine: "v2", root: input.workspace.path, attachments: true, dispatchedAt: Date.now() });
+      capture.archiveSessionStarted(uploadedSessionId, input.workspace.path, engine);
+    }
+    ticket?.check();
+    response = await loopbackFetch(target.toString(), { method, headers, body, signal: input.recoverySignal });
+    if (capture && uploadedSessionId && engine) {
+      capture.recordTrace(uploadedSessionId, "engine.response", { method, path: routePath, status: response.status });
+      if (response.ok) capture.observeSession(uploadedSessionId, engine);
+    }
+    await ticket?.finish(response.ok);
+  } catch (error) {
+    await ticket?.finish(null);
+    throw error;
   }
   if (capture && deletedUploadedSessionId && response.ok) capture.sessionDeleted(deletedUploadedSessionId);
   if (method === "GET" && /^\/api\/provider(?:\/|$)/.test(decodedPath) && response.ok) {
@@ -2169,40 +2221,72 @@ export async function proxyOpencodeRequest(input: {
   const body = method === "GET" || method === "HEAD"
     ? undefined
     : await input.request.arrayBuffer().then((buf) => (buf.byteLength > 0 ? buf : undefined));
+  if (isSessionCommandProxyRequest(method, proxyPath)) {
+    const commandAdmission = commandAdmissionFromBody(body);
+    if (commandAdmission) {
+      const admissionTarget = workspace ? `workspace\0${workspace.id}` : `engine\0${baseUrl}`;
+      const admission = admitSessionCommand(
+        input.config,
+        `${admissionTarget}\0${normalizeOpencodeProxyPath(proxyPath)}`,
+        commandAdmission,
+        false,
+      );
+      if (admission === "duplicate") return jsonResponse({ ok: true, accepted: true });
+      if (admission === "conflict") {
+        return jsonResponse({
+          code: "command_admission_conflict",
+          message: "This command message ID was already admitted with different input",
+        }, 409);
+      }
+    }
+  }
   const capture = workspace ? captureServicesByServer.get(input.config) : undefined;
   const uploadedSessionId = uploadSessionId(proxyPath);
   const deletedUploadedSessionId = uploadDeletedSessionId(method, proxyPath);
-  // A chat the engine does not have (a stale tab, a deleted chat) is not
-  // started: its prompt is refused, and it would only leave an empty start
-  // and end snapshot behind.
+  const promptDispatch = isUploadPromptDispatch(method, proxyPath);
   const captured = Boolean(capture?.uploadEnabled && uploadedSessionId && workspace && workspace.workspaceType !== "remote"
     && (capture.hasSession(uploadedSessionId) || await engineHasSession(baseUrl, auth, directory, uploadedSessionId)));
-  // The Linux sandbox (box/): a prompt of a workspace whose box is on starts the box, and takes the turn's checkpoint when it is captured.
-  const boxInfo = workspace && uploadedSessionId && isUploadPromptDispatch(method, proxyPath)
-    ? await boxServiceFor(input.config).beforePrompt(uploadedSessionId, workspace, { capture: captured })
-    : null;
-  if (capture && captured && uploadedSessionId && workspace) {
-    const promptDispatch = isUploadPromptDispatch(method, proxyPath);
-    // The turn before's background processes finish writing (at most 10 s after it ended), then
-    // capture v2's session-start manifest is taken before the prompt reaches the engine (at most about 3 s).
-    if (promptDispatch) await capture.archiveStartGate(uploadedSessionId, workspace.path, lateWritesGate(workspace, pool?.snapshot().generations.map((generation) => generation.pid) ?? []));
-    if (promptDispatch) capture.boxSession(uploadedSessionId, boxInfo);
-    capture.startSession(uploadedSessionId, workspace.id, workspace.path, promptDispatch ? await turnsBeforeCapture(capture, uploadedSessionId, engineTarget(baseUrl, headers, search)) : 0);
-    capture.recordPrompt(uploadedSessionId, {
-      method,
-      path: normalizeOpencodeProxyPath(proxyPath),
-      body,
-      engine: "v1",
-      root: workspace.path,
-      attachments: promptDispatch,
-      // Taken before the engine sees the prompt: the session's previous turn ends here.
-      ...(promptDispatch ? { dispatchedAt: Date.now() } : {}),
-    });
-    if (promptDispatch) {
-      capture.captureSnapshot(uploadedSessionId, "prompt");
-      capture.archiveSessionStarted(uploadedSessionId, workspace.path, engineTarget(baseUrl, headers, search));
+  const prepareCapture = async () => {
+    const boxInfo = workspace && uploadedSessionId && promptDispatch
+      ? await boxServiceFor(input.config).beforePrompt(uploadedSessionId, workspace, { capture: captured })
+      : null;
+    if (capture && captured && uploadedSessionId && workspace) {
+      if (promptDispatch) await capture.archiveStartGate(uploadedSessionId, workspace.path, lateWritesGate(workspace, pool?.snapshot().generations.map((generation) => generation.pid) ?? []));
+      if (promptDispatch) capture.boxSession(uploadedSessionId, boxInfo);
+      capture.startSession(uploadedSessionId, workspace.id, workspace.path, promptDispatch ? await turnsBeforeCapture(capture, uploadedSessionId, engineTarget(baseUrl, headers, search)) : 0);
     }
+  };
+  let ticket: TurnTicket | undefined;
+  const normalizedRoute = normalizeOpencodeProxyPath(proxyPath);
+  const routeSession = normalizedRoute.match(/^\/session\/([^/]+)(?:\/|$)/)?.[1];
+  const mutableSession = routeSession ? decodeEngineRouteParam(routeSession) : null;
+  // Internal task recovery is already serialized by task-recovery.ts and resumes the persisted capture group.
+  if (supportsSerializedTurns(capture) && !input.recoverySignal && mutableSession && workspace && workspace.workspaceType !== "remote"
+    && method !== "GET" && method !== "HEAD") {
+    const gate = serializedTurnGateFor(input.config);
+    const admissionInput = {
+      key: workspace.id, sessionId: mutableSession, workspaceId: workspace.id,
+      root: workspace.path, target: engineTarget(baseUrl, headers, search), capture, prepare: prepareCapture,
+    };
+    if (/\/(?:abort|interrupt)$/.test(normalizedRoute)) {
+      await gate.stop(admissionInput);
+      return jsonResponse(true);
+    }
+    const edit = /\/(?:revert|unrevert|message(?:\/|$))/.test(normalizedRoute) && !promptDispatch;
+    if (promptDispatch || edit) ticket = await gate.admit(admissionInput, edit);
   }
+  try {
+    if (!ticket) await prepareCapture();
+    if (capture && captured && uploadedSessionId && workspace) {
+      ticket?.check();
+      if (promptDispatch && !ticket) capture.captureSnapshot(uploadedSessionId, "prompt");
+      capture.recordPrompt(uploadedSessionId, {
+        method, path: normalizedRoute, body, engine: "v1", root: workspace.path,
+        attachments: promptDispatch, ...(promptDispatch ? { dispatchedAt: Date.now() } : {}),
+      });
+      if (promptDispatch) capture.archiveSessionStarted(uploadedSessionId, workspace.path, engineTarget(baseUrl, headers, search));
+    }
+  } catch (error) { await ticket?.finish(false); throw error; }
   if (pool && method === "GET" && isEngineEventPath(proxyPath)) {
     // An open engine event stream means this workspace is visible somewhere in
     // the UI; hold its instance so the idle reaper leaves it alone until the
@@ -2262,25 +2346,15 @@ export async function proxyOpencodeRequest(input: {
     const commandAdmission = commandAdmissionFromBody(body);
     if (commandAdmission) {
       const admissionTarget = workspace ? `workspace\0${workspace.id}` : `engine\0${baseUrl}`;
-      const admission = admitSessionCommand(
-        input.config,
-        `${admissionTarget}\0${normalizeOpencodeProxyPath(proxyPath)}`,
-        commandAdmission,
-      );
-      if (admission === "duplicate") return jsonResponse({ ok: true, accepted: true });
-      if (admission === "conflict") {
-        return jsonResponse({
-          code: "command_admission_conflict",
-          message: "This command message ID was already admitted with different input",
-        }, 409);
-      }
+      admitSessionCommand(input.config, `${admissionTarget}\0${normalizeOpencodeProxyPath(proxyPath)}`, commandAdmission);
     }
     const release = pool?.beginRequest(baseUrl, { method, proxyPath: decodeEngineRoutePath(proxyPath) });
+    ticket?.check();
     void loopbackFetch(targetUrl, {
       method,
       headers,
       body,
-    }).finally(() => release?.()).then((response) => {
+    }).finally(() => release?.()).then(async (response) => {
       enginePoolForConfig(input.config)?.reportRequestSuccess(baseUrl);
       if (capture?.uploadEnabled && uploadedSessionId) {
         capture.recordTrace(uploadedSessionId, "engine.response", {
@@ -2289,8 +2363,11 @@ export async function proxyOpencodeRequest(input: {
           status: response.status,
         });
         if (workspace && response.ok) capture.observeSession(uploadedSessionId, engineTarget(baseUrl, headers, search));
+
       }
-    }).catch((error: unknown) => {
+      await ticket?.finish(response.ok);
+    }).catch(async (error: unknown) => {
+      await ticket?.finish(null);
       if (workspace) enginePoolForConfig(input.config)?.reportRequestFailure(baseUrl, error, workspace);
       if (capture?.uploadEnabled && uploadedSessionId) {
         capture.recordTrace(uploadedSessionId, "engine.error", {
@@ -2306,6 +2383,7 @@ export async function proxyOpencodeRequest(input: {
   const forward = async () => {
     let response: Response;
     for (let attempt = 0; ; attempt += 1) {
+      ticket?.check();
       const release = pool?.beginRequest(served.baseUrl, { method, proxyPath: decodeEngineRoutePath(proxyPath) });
       try {
         response = attempt === 0
@@ -2365,6 +2443,7 @@ export async function proxyOpencodeRequest(input: {
   };
 
   const forwardAndUpload = async () => {
+    try {
     const response = await forward();
     if (capture?.uploadEnabled && uploadedSessionId) {
       capture.recordTrace(uploadedSessionId, "engine.response", {
@@ -2373,9 +2452,12 @@ export async function proxyOpencodeRequest(input: {
         status: response.status,
       });
       if (workspace && response.ok) capture.observeSession(uploadedSessionId, engineTarget(served.baseUrl, served.headers, search));
+
     }
     if (capture?.uploadEnabled && deletedUploadedSessionId && response.ok) capture.sessionDeleted(deletedUploadedSessionId);
+    await ticket?.finish(response.ok);
     return response;
+    } catch (error) { await ticket?.finish(null); throw error; }
   };
 
   if (deletedUploadedSessionId && workspace && workspace.workspaceType !== "remote") {
