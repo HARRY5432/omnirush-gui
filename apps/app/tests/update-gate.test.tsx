@@ -9,6 +9,7 @@ import {
   formatUpdateCountdown,
   normalizeUpdateGateState,
   requiredUpdateAction,
+  requiredUpdateUnreachable,
   shouldStartBackgroundDownload,
   updateBannerText,
   updateButtonLabel,
@@ -189,6 +190,51 @@ describe("Update now", () => {
     expect(shouldStartBackgroundDownload({ supported: true, installMode: "manual-dmg", gate: required, updaterState: null })).toBe(false);
     // A package lands in Downloads: it waits for a click.
     expect(shouldStartBackgroundDownload({ supported: true, installMode: "package", gate: required, updaterState: null })).toBe(false);
+  });
+});
+
+describe("required version the feed does not offer", () => {
+  // 3.3.8 was published after 3.4.1 and marked Latest while the server
+  // required 3.4.1: the check found nothing newer, the button spun and stopped.
+  const gated: UpdateGateState = { ...blocked, current: "3.3.8", minimum: "3.4.1" };
+
+  test("a finished check with nothing newer is a dead end the gate names", () => {
+    const message = requiredUpdateUnreachable({ gate: gated, updaterState: "idle", checkedAt: NOW, feedVersion: "3.3.8" });
+    expect(message).toContain("3.4.1 or newer is required");
+    expect(message).toContain("nothing newer than 3.3.8");
+    expect(message).toContain("newest published release is 3.3.8");
+    expect(message).toContain("download page");
+  });
+
+  test("is not reported before a check finished, while it runs, or without a gate", () => {
+    expect(requiredUpdateUnreachable({ gate: gated, updaterState: "idle", checkedAt: null })).toBeNull();
+    expect(requiredUpdateUnreachable({ gate: gated, updaterState: null, checkedAt: NOW })).toBeNull();
+    expect(requiredUpdateUnreachable({ gate: gated, updaterState: "checking", checkedAt: NOW })).toBeNull();
+    expect(requiredUpdateUnreachable({ gate: gated, updaterState: "available", checkedAt: NOW })).toBeNull();
+    expect(requiredUpdateUnreachable({ gate: NO_UPDATE_GATE, updaterState: "idle", checkedAt: NOW })).toBeNull();
+  });
+
+  test("the button opens the download page instead of retrying a check that cannot help", () => {
+    const action = requiredUpdateAction({ supported: true, installMode: "in-place", updaterState: "idle", unreachable: true });
+    expect(action).toBe("open-download");
+    expect(updateButtonLabel({ action })).toBe("Open download page");
+    expect(requiredUpdateAction({ supported: true, installMode: "package", packageKind: "deb", updaterState: "idle", unreachable: true })).toBe("open-download");
+    // A newer release appearing later turns the button back into the update.
+    expect(requiredUpdateAction({ supported: true, installMode: "in-place", updaterState: "available", unreachable: false })).toBe("download-then-install");
+  });
+
+  test("the blocked view shows why instead of an idle button", () => {
+    const message = requiredUpdateUnreachable({ gate: gated, updaterState: "idle", checkedAt: NOW, feedVersion: "3.3.8" });
+    const html = renderToStaticMarkup(
+      <UpdateRequiredView gate={gated} appName="OmniRush.ai" update={fakeUpdate({ detail: message, label: "Open download page" })} />,
+    );
+    expect(html).toContain("nothing newer than 3.3.8");
+    expect(html).toContain("Open download page");
+  });
+
+  test("an install request ends when the check finds nothing", () => {
+    const hook = read("../src/react-app/shell/update-gate.tsx");
+    expect(hook).toContain('(updaterState === "idle" && status?.lastCheckedAt)');
   });
 });
 

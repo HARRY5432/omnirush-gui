@@ -279,9 +279,11 @@ async function applyElectronUpdaterFeed(
       }
     : updaterChannelState(app, channel, null, feedOptions);
   updater.allowPrerelease = state.channel === "alpha";
-  // Moving from alpha back to stable can be a semver downgrade; still show
-  // the latest stable so users can return to the stable channel deliberately.
-  updater.allowDowngrade = state.channel === "stable" && (!targetVersion || allowOlder);
+  // Only a recovery install (an explicit, verified older version) may go
+  // backwards. The feed's Latest release can be a lower version than this app
+  // (a lower version number published after a higher one); electron-updater
+  // must then report "no update" rather than treat that release as installable.
+  updater.allowDowngrade = Boolean(targetVersion && allowOlder);
   // Select the manifest through the generic provider's own `channel` option
   // rather than AppUpdater#channel: that setter is a no-op unless the instance
   // was constructed with a channel, which would silently leave a custom
@@ -1238,7 +1240,12 @@ export function registerUpdaterIpc({
         throw new Error(`Target update manifest did not resolve to v${targetVersion}.`);
       }
       const available = recordCheckedUpdate(info, channelState, targetVersion, installMode);
-      if (!available) clearDownloadedUpdate();
+      if (!available) {
+        clearDownloadedUpdate();
+        if (info?.version && compareVersions(info.version, currentVersion) < 0) {
+          console.warn(`[updater] the update feed offers v${info.version}, older than the installed v${currentVersion}; nothing to install`);
+        }
+      }
       return {
         available,
         currentVersion,
@@ -1272,9 +1279,11 @@ export function registerUpdaterIpc({
         checkedUpdateChannel ?? undefined,
       );
       const currentVersion = resolveAppVersion(app);
+      let feedVersion = null;
       if (!checkedUpdateVersion || !isVersionNewer(checkedUpdateVersion, currentVersion)) {
         const result = await updater.checkForUpdates();
         const info = result?.updateInfo ?? null;
+        feedVersion = typeof info?.version === "string" ? info.version : null;
         if (
           checkedUpdateTargetVersion &&
           compareVersions(info?.version ?? "", checkedUpdateTargetVersion) !== 0
@@ -1284,7 +1293,12 @@ export function registerUpdaterIpc({
         recordCheckedUpdate(info, channelState, checkedUpdateTargetVersion, installMode);
       }
       if (!checkedUpdateVersion) {
-        return { ok: false, reason: "No update available." };
+        // Said plainly: a bare "no update" left a required update spinning
+        // and stopping with nothing to act on.
+        return {
+          ok: false,
+          reason: `No update available: the update feed offers nothing newer than ${currentVersion}${feedVersion ? ` (its newest release is ${feedVersion})` : ""}.`,
+        };
       }
       await cacheCurrentHealthyRelease().catch((error) => {
         console.warn("[updater] could not cache the current healthy installer", error);

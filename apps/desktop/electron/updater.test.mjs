@@ -1055,7 +1055,10 @@ describe("installing the newest published release", () => {
       feed.version = "2.2.0";
       const checked = await handlers.get("omnirush:updater:check")(null, "stable");
       assert.equal(checked.available, false);
-      assert.deepEqual(await handlers.get("omnirush:updater:download")(), { ok: false, reason: "No update available." });
+      assert.deepEqual(await handlers.get("omnirush:updater:download")(), {
+        ok: false,
+        reason: "No update available: the update feed offers nothing newer than 2.2.0 (its newest release is 2.2.0).",
+      });
       assert.deepEqual(await handlers.get("omnirush:updater:installAndRestart")(), { ok: false, reason: "update-not-downloaded" });
       assert.deepEqual(downloaded, []);
       assert.deepEqual(installs, []);
@@ -1162,6 +1165,83 @@ describe("installing the newest published release", () => {
       await handlers.get("omnirush:updater:download")();
       updater.checkForUpdates = () => new Promise(() => {});
       assert.equal(await prepareInstallOnQuit(), null);
+      assert.deepEqual(installs, []);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("older builds and the release marked Latest", () => {
+  // v3.3.8 was published from code newer than v3.4.1, with a lower version
+  // number, and was marked Latest while the server required 3.4.1. These are
+  // the versions installed in the field; each must take the next release.
+  async function installedHarness(installed, latest) {
+    const harness = await publishingFeedHarness();
+    harness.app.getVersion = () => installed;
+    harness.feed.version = latest;
+    return harness;
+  }
+
+  for (const installed of ["3.3.7", "3.3.8", "3.4.0", "3.4.1"]) {
+    it(`${installed} downloads 3.4.2 from the Latest feed and installs it in place`, async () => {
+      const { tempDir, handlers, feeds, downloaded, installs, updater } = await installedHarness(installed, "3.4.2");
+      try {
+        const checked = await handlers.get("omnirush:updater:check")(null, "stable");
+        assert.equal(checked.available, true);
+        assert.equal(checked.latestVersion, "3.4.2");
+        assert.equal(feeds.at(-1).url, STABLE_FEED, "the public feed follows the release marked Latest");
+        assert.equal(updater.allowDowngrade, false);
+        assert.deepEqual(await handlers.get("omnirush:updater:download")(), { ok: true, mode: "in-place" });
+        assert.deepEqual(await handlers.get("omnirush:updater:installAndRestart")(), { ok: true, mode: "in-place" });
+        assert.deepEqual(downloaded, ["3.4.2"]);
+        assert.deepEqual(installs, [{ version: "3.4.2", isSilent: false, isForceRunAfter: true }]);
+      } finally {
+        await rm(tempDir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  it("3.3.8 with 3.3.8 marked Latest has nothing to install and says why", async () => {
+    const { tempDir, handlers, downloaded, installs } = await installedHarness("3.3.8", "3.3.8");
+    try {
+      const checked = await handlers.get("omnirush:updater:check")(null, "stable");
+      assert.equal(checked.available, false);
+      assert.equal(checked.latestVersion, "3.3.8");
+      const download = await handlers.get("omnirush:updater:download")();
+      assert.equal(download.ok, false);
+      assert.match(download.reason, /nothing newer than 3\.3\.8/);
+      assert.deepEqual(downloaded, []);
+      assert.deepEqual(installs, []);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("a lower version marked Latest is never offered or downloaded as a downgrade", async () => {
+    const { tempDir, handlers, downloaded, installs, updater } = await installedHarness("3.4.1", "3.3.8");
+    try {
+      const checked = await handlers.get("omnirush:updater:check")(null, "stable");
+      assert.equal(checked.available, false);
+      assert.equal(updater.allowDowngrade, false, "electron-updater itself must not treat 3.3.8 as installable");
+      const download = await handlers.get("omnirush:updater:download")();
+      assert.equal(download.ok, false);
+      assert.match(download.reason, /its newest release is 3\.3\.8/);
+      assert.deepEqual(downloaded, []);
+      assert.deepEqual(installs, []);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("a staged update is dropped when the Latest release moves below this version", async () => {
+    const { tempDir, handlers, feed, downloaded, installs } = await installedHarness("3.4.0", "3.4.1");
+    try {
+      await handlers.get("omnirush:updater:check")(null, "stable");
+      assert.deepEqual(await handlers.get("omnirush:updater:download")(), { ok: true, mode: "in-place" });
+      feed.version = "3.3.8";
+      assert.deepEqual(await handlers.get("omnirush:updater:installAndRestart")(), { ok: false, reason: "update-not-downloaded" });
+      assert.deepEqual(downloaded, ["3.4.1"]);
       assert.deepEqual(installs, []);
     } finally {
       await rm(tempDir, { recursive: true, force: true });
