@@ -10,7 +10,7 @@ on:
       next_version:
         description: "Version the updater end-to-end build is stamped with (above every published release)"
         type: string
-        default: "3.4.2"
+        default: "3.4.3"
   push:
     branches:
       - electron-notary-test
@@ -203,6 +203,7 @@ jobs:
           - { from: "3.3.8", label: next, feed: local }
           - { from: "3.4.0", label: next, feed: local }
           - { from: "3.4.1", label: next, feed: local }
+          - { from: "3.4.2", label: next, feed: local }
           # The public feed as it is now (whatever release is marked Latest).
           - { from: "3.3.8", label: public-latest, feed: public }
           # The dead end: 3.3.8's own manifest as the feed.
@@ -245,14 +246,20 @@ jobs:
               node scripts/release/windows-updater-e2e.mjs --from "$FROM" --expect none --feed same ;;
           esac
 
+      - name: Collect app logs
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p updater-e2e/app-logs
+          cp -r "$APPDATA/ai.omnirush.desktop/logs/." updater-e2e/app-logs/ 2>/dev/null || true
+          rm -f updater-e2e/*.exe
+
       - name: Upload app logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: updater-e2e-logs-${{ matrix.from }}-${{ matrix.label }}
-          path: |
-            ${{ runner.temp }}/updater-e2e/*.log
-            ~/AppData/Roaming/ai.omnirush.desktop/logs/**
+          path: updater-e2e/
           if-no-files-found: ignore
 
   electron-macos-notarization-smoke:

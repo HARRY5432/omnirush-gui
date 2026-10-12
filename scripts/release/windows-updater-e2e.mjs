@@ -6,7 +6,7 @@
  * required-update screen call (check, download, installAndRestart). Then waits
  * for the installed version to change and checks the app data is still there.
  *
- *   node scripts/release/windows-updater-e2e.mjs --from 3.3.8 --expect 3.4.2 --feed <dir>
+ *   node scripts/release/windows-updater-e2e.mjs --from 3.3.8 --expect 3.4.3 --feed <dir>
  *   node scripts/release/windows-updater-e2e.mjs --from 3.3.8 --expect 3.4.1        (the public Latest feed)
  *   node scripts/release/windows-updater-e2e.mjs --from 3.3.8 --expect none --feed <dir with 3.3.8's latest.yml>
  *
@@ -32,7 +32,7 @@ function argValue(name) {
 const from = argValue("--from");
 const expect = argValue("--expect");
 const feedDir = argValue("--feed");
-const workDir = path.resolve(argValue("--work") ?? path.join(process.env.RUNNER_TEMP ?? process.cwd(), "updater-e2e"));
+const workDir = path.resolve(argValue("--work") ?? path.join(process.cwd(), "updater-e2e"));
 if (!from || !expect) {
   console.error("Usage: windows-updater-e2e.mjs --from X.Y.Z --expect X.Y.Z|none [--feed dir] [--work dir]");
   process.exit(2);
@@ -143,6 +143,24 @@ async function bridgePage(deadlineMs) {
   throw new Error("the app window never exposed the updater bridge");
 }
 
+function appProcesses() {
+  try {
+    const out = execFileSync("tasklist", ["/FI", "IMAGENAME eq OmniRush.ai.exe", "/FO", "CSV", "/NH"], { encoding: "utf8" });
+    return out.split(/\r?\n/).filter((line) => line.startsWith('"OmniRush.ai.exe"')).length;
+  } catch {
+    return 0;
+  }
+}
+
+async function waitForProcess(timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (appProcesses() > 0) return true;
+    await sleep(2_000);
+  }
+  return false;
+}
+
 function stopApp() {
   try {
     execFileSync("taskkill", ["/F", "/T", "/IM", "OmniRush.ai.exe"], { stdio: "ignore" });
@@ -219,7 +237,7 @@ async function main() {
   log("executable version", version);
   if (readFileSync(path.join(userData, "updater-e2e-marker.txt"), "utf8") !== "kept") throw new Error("app data was lost");
   // The updated app relaunches by itself (quitAndInstall forceRunAfter).
-  const relaunched = await bridgePage(180_000).then(() => true).catch(() => false);
+  const relaunched = await waitForProcess(120_000);
   log("relaunched", relaunched);
   stopApp();
   feed?.server.close();

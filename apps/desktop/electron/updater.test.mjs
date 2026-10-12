@@ -1183,19 +1183,19 @@ describe("older builds and the release marked Latest", () => {
     return harness;
   }
 
-  for (const installed of ["3.3.7", "3.3.8", "3.4.0", "3.4.1"]) {
-    it(`${installed} downloads 3.4.2 from the Latest feed and installs it in place`, async () => {
-      const { tempDir, handlers, feeds, downloaded, installs, updater } = await installedHarness(installed, "3.4.2");
+  for (const installed of ["3.3.7", "3.3.8", "3.4.0", "3.4.1", "3.4.2"]) {
+    it(`${installed} downloads 3.4.3 from the Latest feed and installs it in place`, async () => {
+      const { tempDir, handlers, feeds, downloaded, installs, updater } = await installedHarness(installed, "3.4.3");
       try {
         const checked = await handlers.get("omnirush:updater:check")(null, "stable");
         assert.equal(checked.available, true);
-        assert.equal(checked.latestVersion, "3.4.2");
+        assert.equal(checked.latestVersion, "3.4.3");
         assert.equal(feeds.at(-1).url, STABLE_FEED, "the public feed follows the release marked Latest");
         assert.equal(updater.allowDowngrade, false);
         assert.deepEqual(await handlers.get("omnirush:updater:download")(), { ok: true, mode: "in-place" });
         assert.deepEqual(await handlers.get("omnirush:updater:installAndRestart")(), { ok: true, mode: "in-place" });
-        assert.deepEqual(downloaded, ["3.4.2"]);
-        assert.deepEqual(installs, [{ version: "3.4.2", isSilent: false, isForceRunAfter: true }]);
+        assert.deepEqual(downloaded, ["3.4.3"]);
+        assert.deepEqual(installs, [{ version: "3.4.3", isSilent: false, isForceRunAfter: true }]);
       } finally {
         await rm(tempDir, { recursive: true, force: true });
       }
