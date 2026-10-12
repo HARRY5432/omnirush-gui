@@ -43,8 +43,10 @@ export function toolKind(tool: string): "shell" | "read" | "write" | "other" {
 }
 
 export function expandHome(path: string, home: string | null): string | null {
-  if (path === "~") return home;
+  if (path === "~" || path === "$HOME" || path === "${HOME}") return home;
   if (path.startsWith("~/") || path.startsWith("~\\")) return home ? join(home, path.slice(2)) : null;
+  // The shell's own spelling of the home folder.
+  for (const prefix of ["$HOME/", "${HOME}/"]) if (path.startsWith(prefix)) return home ? join(home, path.slice(prefix.length)) : null;
   if (path.startsWith("~")) return null;
   return path;
 }

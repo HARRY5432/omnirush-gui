@@ -168,7 +168,7 @@ describe("capture v2", () => {
     const sessionId = "ses_v2_states_1";
     await archiver.startManifest(sessionId, root);
     expect((await open(await archiver.captureBase(sessionId, root, 0))).state!.state.kind).toBe("start");
-    expect(await archiver.captureState(sessionId, 1)).toEqual({ status: "skipped", reason: "unchanged" });
+    expect(await archiver.captureState(sessionId, 1)).toMatchObject({ status: "skipped", reason: "unchanged" });
     write(join(root, "src", "app.py"), "print('edited between turns')\n");
     const pre = await open(await archiver.captureState(sessionId, 1));
     expect([pre.manifest.trigger, pre.manifest.turn]).toEqual(["pre_tool", 0]);

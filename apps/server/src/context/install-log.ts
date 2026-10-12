@@ -1586,8 +1586,41 @@ const SKIP_NAMES = new Set([
   ".ssh", ".gnupg", ".aws", ".kube", ".docker", "keyrings", "Microsoft", "Packages", "fontconfig", "gvfs-metadata", "recently-used.xbel", "tracker3", "nvim", ".local/state",
 ]);
 
-/** Files written outside the project during a turn (path, size, sha256; never content), within a time and entry budget. */
-export async function outsideWrites(options: { root: string; since: number; until: number; home: string | null; platform: NodeJS.Platform; env: NodeJS.ProcessEnv; privacy: PrivacyContext; scrub: Scrubber; exclude: string[]; maxEntries?: number; maxFiles?: number; budgetMs?: number }): Promise<{ files: EnvTurn["outside_writes"]; truncated: boolean; scanned: number }> {
+/** One file or symlink scanOutside found written in a turn's window. */
+export type OutsideEntry = {
+  /** Absolute. */
+  absolute: string;
+  kind: "file" | "symlink";
+  size: number;
+  /** The newer of the content change and the inode change (an extracted or copied file keeps an old mtime). */
+  changedMs: number;
+  mtimeMs: number;
+};
+
+export type OutsideScanOptions = {
+  root: string;
+  since: number;
+  until: number;
+  home: string | null;
+  platform: NodeJS.Platform;
+  env: NodeJS.ProcessEnv;
+  exclude: string[];
+  /** More folders to look in (a turn's command targets), each with its depth; scanned before the temp folders. */
+  extraRoots?: Array<[string, number]>;
+  /** Also symlinks (`ln -s`), and files changed by inode time (`unzip`, `tar -x`, `cp -p` keep old mtimes). */
+  inodeTimes?: boolean;
+  maxEntries?: number;
+  maxFiles?: number;
+  budgetMs?: number;
+};
+
+/**
+ * Files written outside the project during a turn, within a time and entry
+ * budget: the home's dotfiles and config, ~/.local and ~/bin, /usr/local and
+ * /opt, the temp folders (and `extraRoots`). Caches, package trees, app and
+ * editor state, and credential files and folders are never listed.
+ */
+export async function scanOutside(options: OutsideScanOptions): Promise<{ entries: OutsideEntry[]; truncated: boolean; scanned: number }> {
   const started = Date.now();
   const maxEntries = options.maxEntries ?? 4000;
   const maxFiles = options.maxFiles ?? 200;
@@ -1602,13 +1635,14 @@ export async function outsideWrites(options: { root: string; since: number; unti
     } else roots.push([path.join(home, ".local", "share"), 2]);
   }
   if (options.platform !== "win32") roots.push(["/usr/local/bin", 1], ["/usr/local/lib", 2], ["/opt", 2]);
+  for (const extra of options.extraRoots ?? []) roots.push(extra);
   // Temp folders last: they are the busiest, and each root has its own share of the entry budget.
   const tmp = tmpdir();
   roots.push([tmp, 2]);
   if (options.platform !== "win32" && tmp !== "/tmp") roots.push(["/tmp", 2]);
   const excluded = [path.resolve(options.root), ...options.exclude.map((dir) => path.resolve(dir))];
   const isExcluded = (file: string) => excluded.some((dir) => file === dir || file.startsWith(dir + path.sep));
-  const files: EnvTurn["outside_writes"] = [];
+  const entries: OutsideEntry[] = [];
   const seen = new Set<string>();
   let scanned = 0;
   let truncated = false;
@@ -1616,17 +1650,27 @@ export async function outsideWrites(options: { root: string; since: number; unti
   const perRoot = Math.max(200, Math.floor(maxEntries / 4));
   let rootScanned = 0;
   let rootDone = false;
+  const inWindow = (ms: number) => ms >= options.since - 1_000 && ms <= options.until + 1_000;
+  let freshOnly = false;
+  const changedSince = async (dir: string) => {
+    try {
+      const info = await fs.stat(dir);
+      return Math.max(info.mtimeMs, info.ctimeMs) >= options.since - 1_000;
+    } catch {
+      return false;
+    }
+  };
   const walk = async (dir: string, depth: number): Promise<void> => {
     if (rootDone) return;
-    let entries: import("node:fs").Dirent[];
+    let listed: import("node:fs").Dirent[];
     try {
-      entries = await fs.readdir(dir, { withFileTypes: true });
+      listed = await fs.readdir(dir, { withFileTypes: true });
     } catch {
       return;
     }
-    for (const entry of entries) {
+    for (const entry of listed) {
       scanned += 1;
-      if (++rootScanned > perRoot || scanned > maxEntries || Date.now() - started > budget || files.length >= maxFiles) {
+      if (++rootScanned > perRoot || scanned > maxEntries || Date.now() - started > budget || entries.length >= maxFiles) {
         truncated = true;
         rootDone = true;
         return;
@@ -1635,29 +1679,44 @@ export async function outsideWrites(options: { root: string; since: number; unti
       if (seen.has(full) || isExcluded(full) || SKIP_NAMES.has(entry.name) || entry.name.startsWith("omnirush")) continue;
       seen.add(full);
       if (entry.isDirectory()) {
-        if (depth > 1 && !isSecretFolder(full)) await walk(full, depth - 1);
+        // A busy temp folder: only folders that changed in the window are looked into (with inode times).
+        if (depth > 1 && !isSecretFolder(full) && (!freshOnly || (await changedSince(full)))) await walk(full, depth - 1);
         if (rootDone) return;
         continue;
       }
-      if (!entry.isFile() || isSecretFile(full)) continue;
+      const link = entry.isSymbolicLink();
+      if ((!entry.isFile() && !(link && options.inodeTimes)) || isSecretFile(full)) continue;
       let stat: import("node:fs").Stats;
       try {
-        stat = await fs.stat(full);
+        stat = link ? await fs.lstat(full) : await fs.stat(full);
       } catch {
         continue;
       }
-      if (stat.mtimeMs < options.since - 1_000 || stat.mtimeMs > options.until + 1_000) continue;
-      const hashed = stat.size <= 4 * 1024 * 1024 ? await sha256File(full, 4 * 1024 * 1024) : null;
-      files.push({ path: options.scrub.text(tildeText(full, options.privacy)), size: stat.size, sha256: hashed?.sha256 || null, mtime: new Date(stat.mtimeMs).toISOString() });
+      const changedMs = options.inodeTimes ? Math.max(stat.mtimeMs, stat.ctimeMs) : stat.mtimeMs;
+      if (!inWindow(changedMs)) continue;
+      entries.push({ absolute: full, kind: link ? "symlink" : "file", size: stat.size, changedMs, mtimeMs: stat.mtimeMs });
     }
   };
+  const temps = new Set([path.resolve(tmp), "/tmp"]);
   for (const [root, depth] of roots) {
     rootScanned = 0;
     rootDone = false;
+    freshOnly = Boolean(options.inodeTimes) && temps.has(path.resolve(root));
     await walk(root, depth);
-    if (scanned > maxEntries || Date.now() - started > budget || files.length >= maxFiles) break;
+    if (scanned > maxEntries || Date.now() - started > budget || entries.length >= maxFiles) break;
   }
-  return { files, truncated, scanned };
+  return { entries, truncated, scanned };
+}
+
+/** Files written outside the project during a turn (path, size, sha256; never content), within a time and entry budget. */
+export async function outsideWrites(options: { root: string; since: number; until: number; home: string | null; platform: NodeJS.Platform; env: NodeJS.ProcessEnv; privacy: PrivacyContext; scrub: Scrubber; exclude: string[]; maxEntries?: number; maxFiles?: number; budgetMs?: number }): Promise<{ files: EnvTurn["outside_writes"]; truncated: boolean; scanned: number }> {
+  const scan = await scanOutside(options);
+  const files: EnvTurn["outside_writes"] = [];
+  for (const entry of scan.entries) {
+    const hashed = entry.size <= 4 * 1024 * 1024 ? await sha256File(entry.absolute, 4 * 1024 * 1024) : null;
+    files.push({ path: options.scrub.text(tildeText(entry.absolute, options.privacy)), size: entry.size, sha256: hashed?.sha256 || null, mtime: new Date(entry.mtimeMs).toISOString() });
+  }
+  return { files, truncated: scan.truncated, scanned: scan.scanned };
 }
 
 // --- the per-instance reader -------------------------------------------------------

@@ -2,5 +2,6 @@
 # and omnirush-gui (apps/server/src/session-archive/). A change to one must be ported to the other and this list updated in both.
 8fd84683b5542236f0c88750e3d9bd756e15a304d263141b57998b17c4a1ab9c  late-writes.ts
 4d9a13a5df136cd6e13d0aeb67983249ca4a6913b66c5a8f768daa63da511dda  tool-start.ts
+38dc65a461de6905134c22837f5230d03383ec0bdd6df35090dd269160446edf  turn-overlap.ts
 1906cab8c93370abd1d024d3552fe919a0006af9ebef084ada7b64c290d1bc95  turn-writers.ts
 402d175a7cffb8fdac490a97430b7590d72f4dde637e134e0a8de7c88ba06687  turn-prompts.ts

@@ -10,6 +10,9 @@ import { FakeArchiveServer, slowPartTwo } from "./fake-archive-server.js";
 import { ARCHIVE_STATE_DIRECTORY, POLICY_TTL_MS, SessionArchiver, type SessionArchiverOptions } from "./index.js";
 import { cleanupTempDirs, manifestOf, openArchive, tempDir } from "./test-helpers.js";
 
+/** A capture result without its `detail` (the reason it was skipped, more precisely). */
+const reasonOf = (result: { status: string; reason?: string }) => ("reason" in result ? { status: result.status, reason: result.reason } : result);
+
 const execFileAsync = promisify(execFile);
 
 afterEach(cleanupTempDirs);
@@ -122,7 +125,7 @@ describe("SessionArchiver", () => {
     expect(deltaMembers.find((member) => member.name === "src/app.ts")!.content.toString()).toBe("export const app = 2;\n");
 
     // Nothing changed: no archive and no sequence number used.
-    expect(await subject.captureDelta("ses_whole_folder", root, 2)).toEqual({ status: "skipped", reason: "unchanged" });
+    expect(await subject.captureDelta("ses_whole_folder", root, 2)).toMatchObject({ status: "skipped", reason: "unchanged" });
     expect(await subject.captureDelta("ses_whole_folder", root, 1)).toEqual({ status: "skipped", reason: "stale_turn" });
     expect(await subject.captureBase("ses_whole_folder", root)).toEqual({ status: "skipped", reason: "exists" });
     await writeFile(join(root, "src/app.ts"), "export const app = 3;\n");
@@ -158,7 +161,7 @@ describe("SessionArchiver", () => {
       await writeFile(join(root, "notes.md"), "hello");
       const state = await tempDir("state");
       const subject = archiver(server, state, { folderGate: { homeDir: home } });
-      expect(await subject.captureBase("ses_plain_folder", root)).toEqual({ status: "skipped", reason: "not_archivable" });
+      expect(await subject.captureBase("ses_plain_folder", root)).toMatchObject({ status: "skipped", reason: "not_archivable" });
       expect(await subject.captureDelta("ses_plain_folder", root, 1)).toEqual({ status: "skipped", reason: "no_base" });
       expect(server.callPaths()).toEqual(["GET archives/key 200"]);
       expect(await readdir(join(state, ARCHIVE_STATE_DIRECTORY, "sessions"))).toEqual([]);
@@ -173,7 +176,7 @@ describe("SessionArchiver", () => {
     await mkdir(userData, { recursive: true });
     const subject = archiver(server, await tempDir("state"), { folderGate: { homeDir: home, userDataDir: userData } });
     for (const root of [home, userData, join(home, "Library"), "/usr"]) {
-      expect({ root, result: await subject.captureBase("ses_refused_folder", root) }).toEqual({ root, result: { status: "skipped", reason: "not_archivable" } });
+      expect({ root, result: reasonOf(await subject.captureBase("ses_refused_folder", root)) }).toEqual({ root, result: { status: "skipped", reason: "not_archivable" } });
     }
     expect(server.calls).toEqual([]);
   });
@@ -244,7 +247,7 @@ describe("SessionArchiver", () => {
 
     const detectors = [gitMarkerDetector, (dir: string) => gitParentDetector(dir, { systemDirs: [], homeDir: home })];
     const subject = archiver(server, await tempDir("state"), { detectors });
-    expect(await subject.captureBase("ses_empty_git", root)).toEqual({ status: "skipped", reason: "not_archivable" });
+    expect(await subject.captureBase("ses_empty_git", root)).toMatchObject({ status: "skipped", reason: "not_archivable" });
     // At most the all-folders policy is asked (it is off); nothing is created.
     expect(server.calls.filter((call) => call.path !== "archives/key")).toEqual([]);
 
@@ -347,7 +350,7 @@ describe("SessionArchiver", () => {
     const roots = [...new Set(Object.keys(files).map((path) => join(home, path, "..")))];
     roots.push(join(home, ".aws"), join(home, ".config"), join(home, ".local"), join(home, "Library"), join(home, "AppData"));
     for (const [index, root] of roots.entries()) {
-      expect({ root, result: await subject.captureBase(`ses_credential_${index}`, root) }).toEqual({ root, result: { status: "skipped", reason: "not_archivable" } });
+      expect({ root, result: reasonOf(await subject.captureBase(`ses_credential_${index}`, root)) }).toEqual({ root, result: { status: "skipped", reason: "not_archivable" } });
     }
     expect(server.calls).toEqual([]);
     expect(await readdir(join(state, ARCHIVE_STATE_DIRECTORY, "sessions"))).toEqual([]);
@@ -381,7 +384,7 @@ describe("SessionArchiver", () => {
       });
       const started = Date.now();
       for (const dir of ["notes", "drafts", "scratch"]) {
-        expect({ name, result: await subject.captureBase(`ses_${dir}_folder`, join(home, dir)) }).toEqual({ name, result: { status: "skipped", reason: "not_archivable" } });
+        expect({ name, result: reasonOf(await subject.captureBase(`ses_${dir}_folder`, join(home, dir))) }).toEqual({ name, result: { status: "skipped", reason: "not_archivable" } });
       }
       expect(Date.now() - started).toBeLessThan(2_000);
       // One probe for the burst, kept as off; nothing slept, refreshed, written or switched off.
@@ -410,12 +413,12 @@ describe("SessionArchiver", () => {
     const creates = () => server.calls.filter((call) => call.method === "POST" && call.path === "archives").length;
 
     // Off: a burst of folder sessions sends one probe.
-    for (const dir of ["a", "b"]) expect(await subject.captureBase(`ses_ttl_${dir}_folder`, join(home, dir))).toEqual({ status: "skipped", reason: "not_archivable" });
+    for (const dir of ["a", "b"]) expect(await subject.captureBase(`ses_ttl_${dir}_folder`, join(home, dir))).toMatchObject({ status: "skipped", reason: "not_archivable" });
     expect(keyReads()).toBe(1);
     // Turned on for this user: not seen until the kept answer is POLICY_TTL_MS old.
     server.policy = { all_folders: true };
     clock += POLICY_TTL_MS - 1;
-    expect(await subject.captureBase("ses_ttl_c_folder", join(home, "c"))).toEqual({ status: "skipped", reason: "not_archivable" });
+    expect(await subject.captureBase("ses_ttl_c_folder", join(home, "c"))).toMatchObject({ status: "skipped", reason: "not_archivable" });
     expect(keyReads()).toBe(1);
     clock += 1;
     expect(await subject.captureBase("ses_ttl_d_folder", join(home, "d"))).toMatchObject({ status: "queued", kind: "base" });
@@ -430,13 +433,13 @@ describe("SessionArchiver", () => {
 
     // Turned off again: that full fetch sees it, the folder is not archived, and the answer is kept as off.
     server.policy = { all_folders: false };
-    expect(await subject.captureBase("ses_ttl_f_folder", join(home, "f"))).toEqual({ status: "skipped", reason: "not_archivable" });
-    expect(await subject.captureBase("ses_ttl_g_folder", join(home, "g"))).toEqual({ status: "skipped", reason: "not_archivable" });
+    expect(await subject.captureBase("ses_ttl_f_folder", join(home, "f"))).toMatchObject({ status: "skipped", reason: "not_archivable" });
+    expect(await subject.captureBase("ses_ttl_g_folder", join(home, "g"))).toMatchObject({ status: "skipped", reason: "not_archivable" });
     expect(keyReads()).toBe(4);
     // A folder session's deltas pause while it is off, and catch up once it is on again.
     await writeFile(join(home, "d", "notes.md"), "d, edited\n");
     const createsBefore = creates();
-    expect(await subject.captureDelta("ses_ttl_d_folder", join(home, "d"), 1)).toEqual({ status: "skipped", reason: "not_archivable" });
+    expect(await subject.captureDelta("ses_ttl_d_folder", join(home, "d"), 1)).toMatchObject({ status: "skipped", reason: "not_archivable" });
     expect(creates()).toBe(createsBefore);
     server.policy = { all_folders: true };
     clock += POLICY_TTL_MS;
@@ -477,8 +480,8 @@ describe("SessionArchiver", () => {
     const { root } = await project();
     const state = await tempDir("state");
     const subject = archiver(server, state);
-    expect(await subject.captureBase("ses_no_consent", root)).toEqual({ status: "skipped", reason: "disabled" });
-    expect(await subject.captureDelta("ses_no_consent", root, 1)).toEqual({ status: "skipped", reason: "disabled" });
+    expect(await subject.captureBase("ses_no_consent", root)).toMatchObject({ status: "skipped", reason: "disabled" });
+    expect(await subject.captureDelta("ses_no_consent", root, 1)).toMatchObject({ status: "skipped", reason: "disabled" });
     expect(await readdir(join(state, ARCHIVE_STATE_DIRECTORY, "pending"))).toEqual([]);
     expect(server.calls.map((call) => call.path)).toEqual(["archives/key"]);
     server.gate = null;
@@ -496,7 +499,7 @@ describe("SessionArchiver", () => {
     expect(await readdir(join(state, ARCHIVE_STATE_DIRECTORY, "pending"))).toEqual([]);
     server.gate = null;
     await writeFile(join(root, "src/app.ts"), "changed");
-    expect(await subject.captureDelta("ses_withdrawn", root, 1)).toEqual({ status: "skipped", reason: "disabled" });
+    expect(await subject.captureDelta("ses_withdrawn", root, 1)).toMatchObject({ status: "skipped", reason: "disabled" });
     // A new session re-checks consent and starts over with a new base; the old chain stays stopped.
     expect((await subject.captureBase("ses_after_consent", root)).status).toBe("queued");
     expect(await subject.captureDelta("ses_withdrawn", root, 2)).toEqual({ status: "skipped", reason: "stopped" });
@@ -704,7 +707,7 @@ describe("SessionArchiver final archives", () => {
     expect(await subject.captureFinal(id, "idle")).toEqual({ status: "skipped", reason: "no_base" });
     expect((await subject.captureBase(id, root)).status).toBe("queued");
     // Nothing changed since the base: no archive, no request.
-    expect(await subject.captureFinal(id, "idle")).toEqual({ status: "skipped", reason: "unchanged" });
+    expect(await subject.captureFinal(id, "idle")).toMatchObject({ status: "skipped", reason: "unchanged" });
     await writeFile(join(root, "src/app.ts"), "export const app = 2;\n");
     expect(await subject.captureDelta(id, root, 3)).toMatchObject({ status: "queued", sequence: 1 });
 
@@ -733,7 +736,7 @@ describe("SessionArchiver final archives", () => {
     expect(manifests[3]).toMatchObject({ archive_id: archiveIdOf(quit), deleted: ["src/user.ts"] });
 
     // The server took a final archive: the chain point kept for a refusal is gone, one baseline is left.
-    expect(await subject.captureFinal(id, "idle")).toEqual({ status: "skipped", reason: "unchanged" });
+    expect(await subject.captureFinal(id, "idle")).toMatchObject({ status: "skipped", reason: "unchanged" });
     expect(await readdir(join(state, ARCHIVE_STATE_DIRECTORY, "baselines"))).toHaveLength(1);
   });
 
@@ -756,7 +759,7 @@ describe("SessionArchiver final archives", () => {
     server.policy = { all_folders: false };
     now += POLICY_TTL_MS;
     await writeFile(join(root, "chapter.md"), "three\n");
-    expect(await subject.captureFinal("ses_folder_final", "app_quit")).toEqual({ status: "skipped", reason: "not_archivable" });
+    expect(await subject.captureFinal("ses_folder_final", "app_quit")).toMatchObject({ status: "skipped", reason: "not_archivable" });
   });
 
   test("a server without final archives: the refused final is dropped once, the chain goes back, and the turn delta queued behind it is captured again", async () => {
@@ -842,7 +845,7 @@ describe("SessionArchiver final archives", () => {
     hang = false;
     const second = archiver(server, state, { detectors });
     expect(await second.startFinalCandidates()).toEqual(expect.arrayContaining(["ses_quit_fast_01", "ses_quit_slow_01"]));
-    expect(await second.captureFinal("ses_quit_fast_01", "app_start")).toEqual({ status: "skipped", reason: "unchanged" });
+    expect(await second.captureFinal("ses_quit_fast_01", "app_start")).toMatchObject({ status: "skipped", reason: "unchanged" });
     expect(await second.captureFinal("ses_quit_slow_01", "app_start")).toMatchObject({ status: "queued", sequence: 1 });
     expect(await second.drain()).toMatchObject({ uploaded: 2, pending: 0 });
     const finals = await Promise.all(server.objects().slice(2).map(async (object) => [object.request.session_id, object.request.turn, manifestOf(await openArchive(object.object!)).reason]));
@@ -936,7 +939,7 @@ describe("SessionArchiver final archives", () => {
     clock += day;
     expect(await third.captureDelta(id, root, 2)).toMatchObject({ status: "queued", sequence: 3 });
     clock += 2 * day;
-    expect(await third.captureDelta(id, root, 3)).toEqual({ status: "skipped", reason: "unchanged" });
+    expect(await third.captureDelta(id, root, 3)).toMatchObject({ status: "skipped", reason: "unchanged" });
     await writeFile(join(root, "outside.txt"), "day 15\n");
     expect(await third.captureFinal(id, "idle")).toMatchObject({ status: "queued", sequence: 4 });
     expect(await third.drain()).toMatchObject({ uploaded: 2, pending: 0 });
@@ -1007,7 +1010,7 @@ describe("SessionArchiver final archives", () => {
     expect((await subject.captureBase("ses_deleted_gone", root)).status).toBe("queued");
     await subject.drain();
     await rm(root, { recursive: true, force: true });
-    expect(await subject.captureFinal("ses_deleted_gone", "session_deleted")).toEqual({ status: "skipped", reason: "not_archivable" });
+    expect(await subject.captureFinal("ses_deleted_gone", "session_deleted")).toMatchObject({ status: "skipped", reason: "not_archivable" });
     expect(await subject.startFinalCandidates()).toEqual([]);
     expect(server.objects()).toHaveLength(1);
   });
@@ -1049,7 +1052,7 @@ describe("SessionArchiver touched files", () => {
     const id = "ses_touched_files";
 
     // Session start registers the session; nothing is packed yet.
-    expect(await subject.captureBase(id, root)).toEqual({ status: "skipped", reason: "unchanged" });
+    expect(await subject.captureBase(id, root)).toMatchObject({ status: "skipped", reason: "unchanged" });
     expect(server.callPaths()).toEqual(["GET archives/key 200"]);
     // The agent reads the PDF, writes a binary, and names a credential file and a link out of the folder.
     subject.recordTouched(id, "brief.pdf");
@@ -1095,7 +1098,7 @@ describe("SessionArchiver touched files", () => {
 
     // Nothing touched changed: nothing is sent, even though an untouched file did.
     await writeFile(join(root, "notes.txt"), "edited by the user, never touched by the agent\n");
-    expect(await subject.captureDelta(id, root, 3)).toEqual({ status: "skipped", reason: "unchanged" });
+    expect(await subject.captureDelta(id, root, 3)).toMatchObject({ status: "skipped", reason: "unchanged" });
     for (const object of server.objects()) {
       expect(await names(object)).not.toContain("notes.txt");
       expect(object.object!.includes(Buffer.from("OUTSIDE_MARKER"))).toBe(false);
@@ -1128,7 +1131,7 @@ describe("SessionArchiver touched files", () => {
     for (const policy of [undefined, { touched_files: false }, { touched_files: "true" }, { all_folders: false }]) {
       const { server, root, state, subject } = await touchedSetup({ policy });
       await writeFile(join(root, "brief.pdf"), randomBytes(1024));
-      expect(await subject.captureBase("ses_touched_off", root)).toEqual({ status: "skipped", reason: "not_archivable" });
+      expect(await subject.captureBase("ses_touched_off", root)).toMatchObject({ status: "skipped", reason: "not_archivable" });
       subject.recordTouched("ses_touched_off", "brief.pdf");
       expect(await subject.captureDelta("ses_touched_off", root, 1)).toEqual({ status: "skipped", reason: "no_base" });
       expect(await subject.captureFinal("ses_touched_off", "app_quit")).toEqual({ status: "skipped", reason: "no_base" });
@@ -1144,7 +1147,7 @@ describe("SessionArchiver touched files", () => {
     for (const dir of [".ssh", "work/OmniRush.ai/workdir", "Library/Application Support/x"]) await mkdir(join(home, dir), { recursive: true });
     const subject = make({ folderGate: { homeDir: home, userDataDir: userData } });
     for (const root of [home, join(home, ".ssh"), userData, join(userData, "workdir"), join(home, "Library/Application Support/x"), "/usr/share", join(state, ARCHIVE_STATE_DIRECTORY)]) {
-      expect({ root, result: await subject.captureBase("ses_touched_refused", root) }).toEqual({ root, result: { status: "skipped", reason: "not_archivable" } });
+      expect({ root, result: reasonOf(await subject.captureBase("ses_touched_refused", root)) }).toEqual({ root, result: { status: "skipped", reason: "not_archivable" } });
     }
     expect(server.calls).toEqual([]);
   });
@@ -1155,9 +1158,9 @@ describe("SessionArchiver touched files", () => {
     const first = make();
     const id = "ses_touched_final";
     const unbased = "ses_touched_nobase";
-    expect(await first.captureBase(id, root, 4)).toEqual({ status: "skipped", reason: "unchanged" });
+    expect(await first.captureBase(id, root, 4)).toMatchObject({ status: "skipped", reason: "unchanged" });
     // A final archive with nothing touched yet: nothing, and still no base.
-    expect(await first.captureFinal(id, "idle")).toEqual({ status: "skipped", reason: "unchanged" });
+    expect(await first.captureFinal(id, "idle")).toMatchObject({ status: "skipped", reason: "unchanged" });
     await writeFile(join(root, "draft.md"), "draft one\n");
     first.recordTouched(id, "draft.md");
     // The idle final is the first capture with a touched file: the base, numbered with the turns seen.
@@ -1167,7 +1170,7 @@ describe("SessionArchiver touched files", () => {
     expect(await first.captureFinal(id, "app_quit")).toMatchObject({ status: "queued", kind: "delta", sequence: 1 });
     // Another session on the folder touches a file, and the app quits before any capture of it.
     now += 1_000;
-    expect(await first.captureBase(unbased, root, 0)).toEqual({ status: "skipped", reason: "unchanged" });
+    expect(await first.captureBase(unbased, root, 0)).toMatchObject({ status: "skipped", reason: "unchanged" });
     await writeFile(join(root, "table.csv"), "a,b\n");
     first.recordTouched(unbased, "table.csv");
     await first.stop();
@@ -1210,7 +1213,7 @@ describe("SessionArchiver touched files", () => {
     const { server, root, state, make } = await touchedSetup({ now: () => new Date(now) });
     const first = make();
     const id = "ses_touched_offline";
-    expect(await first.captureBase(id, root, 0)).toEqual({ status: "skipped", reason: "unchanged" });
+    expect(await first.captureBase(id, root, 0)).toMatchObject({ status: "skipped", reason: "unchanged" });
     await writeFile(join(root, "draft.md"), "draft\n");
     first.recordTouched(id, "draft.md");
     await first.stop();
@@ -1223,11 +1226,11 @@ describe("SessionArchiver touched files", () => {
     expect((await second.captureFinal(id, "app_start")).status).toBe("skipped");
     // The session is resumed: its registration asks nothing again and drops nothing, and what it touches now is kept too.
     const calls = server.calls.length;
-    expect(await second.captureBase(id, root, 1)).toEqual({ status: "skipped", reason: "unchanged" });
+    expect(await second.captureBase(id, root, 1)).toMatchObject({ status: "skipped", reason: "unchanged" });
     expect(server.calls.length).toBe(calls);
     await writeFile(join(root, "chart.svg"), "<svg/>\n");
     second.recordTouched(id, "chart.svg");
-    expect(await second.captureDelta(id, root, 2)).toEqual({ status: "skipped", reason: "not_archivable" });
+    expect(await second.captureDelta(id, root, 2)).toMatchObject({ status: "skipped", reason: "not_archivable" });
     await second.stop();
     expect(await readdir(join(state, ARCHIVE_STATE_DIRECTORY, "touched"))).toHaveLength(1);
 
@@ -1253,8 +1256,8 @@ describe("SessionArchiver touched files", () => {
     server.policy = { touched_files: false };
     now += POLICY_TTL_MS;
     await writeFile(join(root, "a.bin"), randomBytes(512));
-    expect(await subject.captureDelta(id, root, 2)).toEqual({ status: "skipped", reason: "not_archivable" });
-    expect(await subject.captureFinal(id, "idle")).toEqual({ status: "skipped", reason: "not_archivable" });
+    expect(await subject.captureDelta(id, root, 2)).toMatchObject({ status: "skipped", reason: "not_archivable" });
+    expect(await subject.captureFinal(id, "idle")).toMatchObject({ status: "skipped", reason: "not_archivable" });
     server.policy = TOUCHED_ON;
     now += POLICY_TTL_MS;
     expect(await subject.captureDelta(id, root, 3)).toMatchObject({ status: "queued", kind: "delta", sequence: 1 });
@@ -1283,10 +1286,10 @@ describe("SessionArchiver touched files", () => {
     expect(await subject.drain()).toMatchObject({ uploaded: 0, dropped: 0, pending: 0 });
     // The kept policy is off for touched files now: another folder session is not archivable, without a request.
     const calls = server.calls.length;
-    expect(await subject.captureBase("ses_touched_other", root, 0)).toEqual({ status: "skipped", reason: "not_archivable" });
+    expect(await subject.captureBase("ses_touched_other", root, 0)).toMatchObject({ status: "skipped", reason: "not_archivable" });
     expect(server.calls.length).toBe(calls);
     now += POLICY_TTL_MS;
-    expect(await subject.captureBase("ses_touched_later", root, 0)).toEqual({ status: "skipped", reason: "not_archivable" });
+    expect(await subject.captureBase("ses_touched_later", root, 0)).toMatchObject({ status: "skipped", reason: "not_archivable" });
     expect(server.callPaths().at(-1)).toBe("GET archives/key 200");
   });
 });

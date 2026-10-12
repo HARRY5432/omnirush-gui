@@ -22,6 +22,18 @@ const UPLOAD_REASONS: Readonly<Record<string, string>> = Object.freeze({
   sequence_gaps: "parts of the session are missing",
   segment_start_missing: "parts of the session are missing",
   no_trace: "parts of the session are missing",
+  end_missing: "the end of the session never arrived",
+  archive_missing: "no starting copy of the project was uploaded",
+});
+
+/** The delivery's own codes (the status block's `delivery.reasons`): their reason and fix (the CLI's VERDICT_REASONS, word for word). */
+const DELIVERY_REASONS: Readonly<Record<string, { reason: string; fix: string }>> = Object.freeze({
+  qc_reject: { reason: QUALITY_FALLBACK, fix: FIX_QUALITY },
+  filter_hit: { reason: "a turn did not pass the content checks", fix: FIX_QUALITY },
+  truncated: { reason: "the last turn was cut off", fix: "Let the last turn finish." },
+  one_turn: { reason: "it had only one turn", fix: "Ask a follow-up: test, refine or extend the work." },
+  os: { reason: "sessions from this system are not being delivered right now", fix: "Nothing to fix on your side." },
+  pending_qc: { reason: "the quality check has not run yet", fix: "It is checked soon." },
 });
 
 export type GoodSessionCopy =
@@ -33,6 +45,8 @@ export type GoodSessionCopy =
 function reasonCopy(code: string | undefined, messages: Readonly<Record<string, string>> | undefined): { reason: string; fix: string } {
   const upload = code ? UPLOAD_REASONS[code] : undefined;
   if (upload) return { reason: upload, fix: FIX_UPLOADS };
+  const delivery = code ? DELIVERY_REASONS[code] : undefined;
+  if (delivery) return delivery;
   // The server's sentence, without its own full stop (the line adds one).
   const human = code ? messages?.[code]?.trim().replace(/[.\s]+$/, "") : undefined;
   return { reason: human || QUALITY_FALLBACK, fix: FIX_QUALITY };

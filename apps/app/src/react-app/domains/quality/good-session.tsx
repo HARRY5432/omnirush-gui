@@ -27,6 +27,9 @@ import {
   FINISH_GUARD_PROMPT,
   FINISH_GUARD_QUIT,
   FINISH_GUARD_TITLE,
+  FOLLOW_UP_HINT,
+  FOLLOW_UP_OFF_KEY,
+  FOLLOW_UP_QUIET_MS,
   GOOD_SESSION_GUIDE,
   GOOD_SESSION_GUIDE_LINK,
   NUDGE_TITLE,
@@ -37,10 +40,12 @@ import {
   autoRetryMessage,
   checklistHeading,
   finishGuardKind,
+  followUpHintDue,
   goodSessionChecklist,
   goodSessionNudge,
   messageFacts,
   oneMoreTurnHint,
+  promptsInTranscript,
   serverStatusUsable,
   sessionStatusPollMs,
   shouldNudge,
@@ -96,6 +101,7 @@ function CheckMark({ check }: { check: GoodSessionCheck }) {
 }
 
 const NUDGED_STORAGE_KEY = "omnirush.goodSession.nudged.v1";
+const FOLLOW_UP_STORAGE_KEY = "omnirush.goodSession.followUp.v1";
 const NUDGED_KEEP = 200;
 
 function nudgedSessions(): string[] {
@@ -391,8 +397,29 @@ export function GoodSessionChecklistBar(props: GoodSessionChecklistBarProps) {
   useEffect(() => {
     if (!depthHint || rememberedSessions(ONE_MORE_TURN_STORAGE_KEY).includes(props.sessionId)) return;
     rememberSession(ONE_MORE_TURN_STORAGE_KEY, props.sessionId);
+    // The server's own nudge showed: the follow-up hint is not added on top.
+    rememberSession(FOLLOW_UP_STORAGE_KEY, props.sessionId);
     toast(NUDGE_TITLE, { id: `good-session-depth:${props.sessionId}`, description: depthHint, duration: 12_000 });
   }, [depthHint, props.sessionId]);
+
+  // The follow-up hint: one finished turn, then a quiet minute; a quiet line in the bar, once per session.
+  const prompts = useMemo(() => promptsInTranscript(props.messages), [props.messages]);
+  const [followUpFor, setFollowUpFor] = useState<string | null>(null);
+  const [followUpOff, setFollowUpOff] = useState(() => readPref(FOLLOW_UP_OFF_KEY) === "1");
+  const serverFollowUpOff = serverStatusUsable(server) && server.client?.oneMoreTurn === false;
+  useEffect(() => {
+    const sessionId = props.sessionId;
+    // The server's switch only (a fresh status read every poll must not restart the quiet minute).
+    const quiet = { prompts, running: props.turnRunning, off: followUpOff || serverFollowUpOff };
+    if (!followUpHintDue({ ...quiet, quitting: true, shown: rememberedSessions(FOLLOW_UP_STORAGE_KEY).includes(sessionId) })) return;
+    const timer = window.setTimeout(() => {
+      if (!followUpHintDue({ ...quiet, quietMs: FOLLOW_UP_QUIET_MS, shown: rememberedSessions(FOLLOW_UP_STORAGE_KEY).includes(sessionId) })) return;
+      rememberSession(FOLLOW_UP_STORAGE_KEY, sessionId);
+      setFollowUpFor(sessionId);
+    }, FOLLOW_UP_QUIET_MS);
+    return () => window.clearTimeout(timer);
+  }, [followUpOff, prompts, props.sessionId, props.turnRunning, serverFollowUpOff]);
+  const followUpShown = followUpFor === props.sessionId && !followUpOff && prompts === 1;
 
   const onFinishIt = props.onFinishIt;
   useEffect(() => {
@@ -450,12 +477,29 @@ export function GoodSessionChecklistBar(props: GoodSessionChecklistBarProps) {
           ) : null}
         </div>
       ) : null}
-      {checklist.message || checklist.reasons.length ? (
+      {checklist.message || checklist.reasons.length || checklist.delivery ? (
         <div className="mx-auto max-w-[800px] pb-1 text-[11px] leading-4 text-muted-foreground" data-testid="good-session-server-message">
           {checklist.message ? (
             <p className={cn("font-medium", checklist.messageTone ? TONE_TEXT[checklist.messageTone] : "text-foreground")}>{checklist.message}</p>
           ) : null}
           {checklist.reasons.map((reason) => <p key={reason} className="text-amber-11">{reason}</p>)}
+          {checklist.delivery ? <p data-testid="good-session-delivery">{checklist.delivery}</p> : null}
+        </div>
+      ) : null}
+      {followUpShown ? (
+        <div className="mx-auto flex max-w-[800px] items-center gap-2 pb-1 text-[11px] leading-4 text-muted-foreground" data-testid="good-session-follow-up" role="status">
+          <span className="min-w-0 flex-1">{FOLLOW_UP_HINT}</span>
+          <button
+            type="button"
+            data-testid="good-session-follow-up-off"
+            className="shrink-0 underline-offset-2 hover:text-foreground hover:underline"
+            onClick={() => {
+              writePref(FOLLOW_UP_OFF_KEY, "1");
+              setFollowUpOff(true);
+            }}
+          >
+            Don't show again
+          </button>
         </div>
       ) : null}
       {props.client ? <GoodSessionLine result={goodSession} /> : null}

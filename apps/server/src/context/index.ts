@@ -27,6 +27,7 @@ import { toolCallsOf, commandEffects, toolKind, type ToolCall } from "./commands
 import { resolveEphemeral, type ResolveEphemeralOptions } from "./ephemeral.js";
 import { attributeConnections, defaultSampler, NetworkObserver, socketDiffConnections, socketPairs, type HostResolver, type Root, type Sampler } from "./network.js";
 import { OutsideTracker } from "./outside.js";
+import { outsideFilesEnabled, outsideFilesOfTurn } from "./outside-files.js";
 import {
   envFingerprint,
   inInstallLogSample,
@@ -74,7 +75,8 @@ export type ContextEventType =
   | "context.outside_folder"
   | "context.outside_file"
   | "context.install"
-  | "context.env_turn";
+  | "context.env_turn"
+  | "context.outside_files";
 
 /** Whether capture context is on: OMNIRUSH_CAPTURE_CONTEXT=0 (or false/off/no) turns it off. */
 export function captureContextEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -129,6 +131,8 @@ export type ContextOptions = {
   installLog?: InstallLogHost | null;
   /** Tests: the install log's command runner (version probes). */
   installRun?: Runner;
+  /** The app's own state folders: never listed as files a turn wrote. */
+  appDirs?: string[];
 };
 
 /** Shell call windows kept per session for matching the install log's noted calls. */
@@ -169,6 +173,8 @@ export type ContextTimings = { session_start: number[]; turn_start: number[]; tu
 
 /** Active turns across every capture in this process: an unmatched tool shell is only a turn's when one turn runs. */
 const activeTurns = new Set<string>();
+/** Sessions whose turn runs now (every session, not only those with a network observer): a shared window for outside files. */
+const runningTurns = new Set<string>();
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
   let resolve: () => void = () => undefined;
@@ -188,6 +194,8 @@ export type ToolEvent = {
   at?: number;
 };
 
+/** How long a turn's outside files wait for the turn's last messages (its shell calls' windows). */
+const OUTSIDE_FILES_MESSAGES_WAIT_MS = 1_500;
 /** How long a turn's network attribution waits for the turn's last messages. */
 const FINAL_MESSAGES_WAIT_MS = 5_000;
 
@@ -445,6 +453,53 @@ export class ContextCapture {
     }
   }
 
+  /**
+   * The turn's end: the files its commands wrote outside the project's
+   * tracked files (`context.outside_files`, outside-files.ts), whatever the
+   * install log's switch; off with OMNIRUSH_OUTSIDE_FILES=0.
+   */
+  private outsideFilesTurnEnded(state: SessionContext): void {
+    if (!outsideFilesEnabled(this.env) || state.turn < 1) return;
+    const turn = state.turn;
+    const since = state.turnStartedAt;
+    const until = Date.now();
+    const finalMessages = state.finalMessages.promise;
+    const sharedWindow = [...runningTurns].some((id) => id !== state.id);
+    const live = state.liveCalls;
+    this.track(state, (async () => {
+      // The turn's calls are known once its last messages arrived (a short wait: they only attribute files).
+      await withTimeout(finalMessages, OUTSIDE_FILES_MESSAGES_WAIT_MS);
+      const shells = [...state.calls.values(), ...[...live.values()].filter((call) => !state.calls.has(call.callId ?? ""))]
+        .filter((call) => toolKind(call.tool) === "shell");
+      const calls = shells.map((call) => ({ callId: call.callId, start: call.start, end: call.end }));
+      const effects = shells.filter((call) => call.command).map((call) => {
+        try {
+          return commandEffects(call.command!, call.cwd ?? state.root, this.privacy.home);
+        } catch {
+          return { folders: [], writes: [] };
+        }
+      });
+      const host = this.options.installLog;
+      const event = await outsideFilesOfTurn({
+        root: state.root,
+        turn,
+        since,
+        until,
+        home: this.privacy.home,
+        platform: this.platform,
+        env: this.env,
+        privacy: this.privacy,
+        scrub: this.options.scrub,
+        exclude: [...(host ? [host.raw, ...(host.bin ? [host.bin] : []), ...(host.appDirs ?? [])] : []), ...(this.options.cacheDir ? [this.options.cacheDir] : []), ...(this.options.appDirs ?? [])],
+        commandFolders: [...state.outside.folderPaths(), ...effects.flatMap((effect) => effect.folders.filter((folder) => folder.created).map((folder) => folder.path))],
+        commandFiles: effects.flatMap((effect) => effect.writes),
+        calls,
+        sharedWindow,
+      });
+      if (event) this.emit(state.id, "context.outside_files", event);
+    })());
+  }
+
   /** The turn's end: its noted calls, its PowerShell downloads, then `context.env_turn`. */
   private installTurnEnded(state: SessionContext): void {
     const host = this.options.installLog;
@@ -612,6 +667,7 @@ export class ContextCapture {
     state.socketsAtStart = new Map();
     state.diffRoots = [];
     state.finalMessages = deferred();
+    runningTurns.add(sessionId);
     if (state.observer) {
       activeTurns.add(sessionId);
       state.observer.start();
@@ -714,7 +770,11 @@ export class ContextCapture {
   /** The turn ended: the network observer stops and its connections are attributed to the turn's calls. */
   turnEnded(sessionId: string): void {
     const found = this.sessions.get(sessionId);
-    if (found && !found.ended) this.installTurnEnded(found);
+    if (found && !found.ended) {
+      this.installTurnEnded(found);
+      this.outsideFilesTurnEnded(found);
+    }
+    runningTurns.delete(sessionId);
     const state = found;
     if (!state || !state.observer) return;
     const observer = state.observer;
@@ -769,6 +829,7 @@ export class ContextCapture {
     if (state.observer && activeTurns.has(sessionId)) this.turnEnded(sessionId);
     state.finalMessages.resolve();
     state.ended = true;
+    runningTurns.delete(sessionId);
     if (this.installReader) {
       this.track(state, this.drainInstalls(true));
       const host = this.options.installLog;

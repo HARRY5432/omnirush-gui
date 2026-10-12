@@ -16,6 +16,10 @@ import {
   awaitsUser,
   checklistText,
   createQuitGuard,
+  deliveryLine,
+  FOLLOW_UP_HINT,
+  followUpHintDue,
+  promptsInTranscript,
   endsOnMenu,
   finishGuardKey,
   finishGuardKind,
@@ -694,5 +698,40 @@ describe("coding starter cards", () => {
     ]);
     expect(CODING_STARTER_CARDS[0]!.prompt).toBe("There's a bug in this project: {describe the symptom}. Reproduce it with a failing test or command first, find the root cause, fix it, and run the tests until they pass.");
     expect(CODING_STARTER_CARDS.every((card) => card.prompt.includes("this project"))).toBe(true);
+  });
+});
+
+describe("why not delivered", () => {
+  test("the server's reasons in plain words, its own message first; nothing when delivered or pending", () => {
+    const status = serverStatus({ delivery: { state: "not_delivered", reasons: [{ code: "end_missing", message: null }, { code: "one_turn", message: "Only one turn." }, { code: "brand_new", message: null }] } });
+    expect(deliveryLine(status)).toBe("Not delivered: the end of the session never arrived (keep the app open a moment after the last turn); Only one turn.; brand new");
+    expect(shownChecklist({ local: goodSessionChecklist({ calls: [], workspaceRoot: "/w", turnRunning: false, lastTurn: "pass" }), server: status, sessionId: "ses_1" }).delivery).toBe(deliveryLine(status));
+    expect(deliveryLine(serverStatus({ delivery: { state: "delivered", reasons: [] } }))).toBeNull();
+    expect(deliveryLine(serverStatus({ delivery: { state: "pending", reasons: [{ code: "pending_qc", message: null }] } }))).toBeNull();
+    expect(deliveryLine(serverStatus())).toBeNull();
+    expect(deliveryLine(serverStatus({ delivery: { state: "not_delivered", message: "Kept back: the end never arrived.", reasons: [{ code: "end_missing", message: null }] } }))).toBe("Not delivered: Kept back: the end never arrived.");
+    expect(deliveryLine(serverStatus({ delivery: { state: "not_delivered", reasons: [{ code: "archive_gap", message: null }] } }))).toBe("Not delivered: the project copy is incomplete");
+  });
+});
+
+describe("the follow-up hint", () => {
+  test("one finished turn and a quiet minute; never while running, after a follow-up, twice, or when switched off", () => {
+    expect(followUpHintDue({ prompts: 1, quietMs: 60_000 })).toBe(true);
+    expect(followUpHintDue({ prompts: 1, quietMs: 30_000 })).toBe(false);
+    expect(followUpHintDue({ prompts: 2, quietMs: 60_000 })).toBe(false);
+    expect(followUpHintDue({ prompts: 1, quietMs: 60_000, running: true })).toBe(false);
+    expect(followUpHintDue({ prompts: 1, quietMs: 60_000, shown: true })).toBe(false);
+    expect(followUpHintDue({ prompts: 1, quietMs: 60_000, off: true })).toBe(false);
+    expect(followUpHintDue({ prompts: 1, quietMs: 60_000, server: serverStatus({ client: { autoRetry: null, finishGuard: true, oneMoreTurn: false } }) })).toBe(false);
+    expect(FOLLOW_UP_HINT).toBe("Sessions with a follow-up count more: ask the agent to test, refine or extend its work.");
+  });
+
+  test("prompts in the transcript: synthetic notices are no prompt", () => {
+    const user = (id: string, parts: unknown[]): UIMessage => ({ id, role: "user", parts: parts as UIMessage["parts"] });
+    expect(promptsInTranscript([
+      user("u1", [{ type: "text", text: "build it" }]),
+      assistant("a1", [{ type: "text", text: "done" }]),
+      user("u2", [{ type: "text", text: "notice", synthetic: true }]),
+    ])).toBe(1);
   });
 });

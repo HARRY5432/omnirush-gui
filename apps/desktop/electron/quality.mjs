@@ -335,6 +335,34 @@ function parseVerdict(value) {
   };
 }
 
+const DELIVERY_STATES = ["delivered", "not_delivered", "pending"];
+
+function deliveryReason(value) {
+  const reason = value && typeof value === "object" && !Array.isArray(value) ? value : { code: value };
+  const code = text(reason.code);
+  const message = text(reason.message);
+  return code || message ? { code: code ?? "", message } : null;
+}
+
+/**
+ * Whether the session was delivered, and why not (`delivery`); on servers
+ * without that block, a not_usable verdict's reason codes; null when the
+ * server says nothing.
+ */
+export function parseDelivery(value, verdict) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return {
+      state: oneOf(value.state, DELIVERY_STATES, "pending"),
+      reasons: Array.isArray(value.reasons) ? value.reasons.map(deliveryReason).filter((reason) => reason !== null) : [],
+      message: text(value.message),
+    };
+  }
+  if (verdict?.state === "not_usable" && verdict.reasons.length) {
+    return { state: "not_delivered", reasons: verdict.reasons.map((code) => ({ code, message: null })), message: null };
+  }
+  return null;
+}
+
 /**
  * The block's `client` switches (contract revision 2); null when absent:
  * no auto-retry, the finish guard and the one-more-turn nudge on.
@@ -366,6 +394,7 @@ export function parseSessionStatus(value) {
   const sessionId = text(value.session_id);
   if (!sessionId) return null;
   const poll = Number(value.poll_seconds);
+  const verdict = parseVerdict(value.verdict);
   return {
     sessionId,
     status: oneOf(value.status, SESSION_STATUSES, "unknown"),
@@ -376,7 +405,8 @@ export function parseSessionStatus(value) {
       : [],
     message: text(value.message),
     dock: parseDock(value.dock),
-    verdict: parseVerdict(value.verdict),
+    verdict,
+    delivery: parseDelivery(value.delivery, verdict),
     checklist: Array.isArray(value.checklist)
       ? value.checklist
         .filter((item) => item && typeof item === "object" && text(item.id) && text(item.label))

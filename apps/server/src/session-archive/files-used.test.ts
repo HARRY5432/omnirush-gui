@@ -473,7 +473,7 @@ describe("a files-used chain", () => {
     expect(archiver.filesUsedMaybe()).toBe(false);
     const result = await archiver.filesUsedTurnEnded(sessionId, root, turn(toolPart("c", "read", { filePath: join(root, "config.local.yaml") })));
     expect(result.items).toBe(0);
-    expect(await archiver.captureDelta(sessionId, root, 1)).toEqual({ status: "skipped", reason: "unchanged" });
+    expect(await archiver.captureDelta(sessionId, root, 1)).toMatchObject({ status: "skipped", reason: "unchanged" });
   });
 
   test("caps: a used file over the per-file cap is listed with its size only, never copied", async () => {

@@ -111,7 +111,7 @@ describe("reproducible-task capture", () => {
 
     // The next turn changes nothing the agent touched: the touched file stays in the chain.
     await writeFile(join(root, "outputs/untouched.txt"), "edited, still never touched\n");
-    expect(await subject.captureDelta(id, root, 2)).toEqual({ status: "skipped", reason: "unchanged" });
+    expect(await subject.captureDelta(id, root, 2)).toMatchObject({ status: "skipped", reason: "unchanged" });
     for (const object of server.objects()) {
       const names = (await openArchive(object.object!)).map((member) => member.name);
       expect(names).not.toContain("outputs/untouched.txt");
@@ -124,7 +124,7 @@ describe("reproducible-task capture", () => {
     await restarted.start();
     expect(await readdir(join(state, ARCHIVE_STATE_DIRECTORY, "touched"))).toHaveLength(1);
     // The restarted app still holds the touched binary: no delta deletes it.
-    expect(await restarted.captureDelta(id, root, 3)).toEqual({ status: "skipped", reason: "unchanged" });
+    expect(await restarted.captureDelta(id, root, 3)).toMatchObject({ status: "skipped", reason: "unchanged" });
     await restarted.stop();
   });
 
@@ -138,7 +138,7 @@ describe("reproducible-task capture", () => {
     const subject = archiver(server, await tempDir("state"), { folderGate: { homeDir: home } });
     const id = "ses_repro_touched";
 
-    expect(await subject.captureBase(id, root)).toEqual({ status: "skipped", reason: "unchanged" });
+    expect(await subject.captureBase(id, root)).toMatchObject({ status: "skipped", reason: "unchanged" });
     subject.recordTouched(id, "outputs/plot.png");
     subject.recordTouched(id, "node_modules/dep/index.js");
     subject.recordTouched(id, "node_modules/dep/package-lock.json");

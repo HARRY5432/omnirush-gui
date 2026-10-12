@@ -63,7 +63,31 @@ export type ProjectArchiveLifecycleOptions = {
   now?: () => number;
   /** A pre_tool state took files written after the turn before ended (the session uploader records them). */
   onLateWrites?: (late: LateWrites) => void;
+  /**
+   * What became of a session's base (its starting project copy): archived
+   * (or held from an earlier run), deferred (touched-files mode: taken with
+   * the first edit), or skipped with the reason. The session uploader
+   * records it in the session's upload, so no missing base goes unexplained.
+   */
+  onProjectArchive?: (sessionId: string, outcome: ProjectArchiveOutcome) => void;
 };
+
+export type ProjectArchiveOutcome = {
+  status: "archived" | "deferred" | "skipped";
+  /** Skipped: why (a CaptureSkipReason, or archive_off, consent_off, root_missing, disk_budget). */
+  reason?: string;
+  /** More precisely (the gate's reason, the server's code, the bytes it needed). */
+  detail?: string;
+};
+
+/** A base's capture result as a ProjectArchiveOutcome; null for a result that says nothing yet (unavailable is retried). */
+export function projectArchiveOutcome(result: CaptureResult): ProjectArchiveOutcome | null {
+  if (result.status === "queued") return { status: "archived" };
+  if (result.status === "paused") return { status: "skipped", reason: "disk_budget", detail: `needs_${result.requiredBytes}_bytes` };
+  if (result.reason === "exists") return { status: "archived", detail: "earlier_run" };
+  if (result.reason === "unchanged") return { status: "deferred", reason: "touched_files_lazy" };
+  return { status: "skipped", reason: result.reason, ...(result.detail ? { detail: result.detail } : {}) };
+}
 
 const DEFAULT_CONSENT_RECHECK_MS = 10 * 60_000;
 /** The quiet window after a turn: with no new prompt by then, the session gets a final archive. */
@@ -170,12 +194,17 @@ export class ProjectArchiveLifecycle {
   private readonly quitBudgetMs: number;
   private readonly now: () => number;
   private readonly onLateWrites: ((late: LateWrites) => void) | undefined;
+  private readonly onProjectArchive: ((sessionId: string, outcome: ProjectArchiveOutcome) => void) | undefined;
   private readonly enabled: boolean;
   private readonly accountMissing: boolean;
   private signedOut = false;
   private stopped = false;
   /** Archiving is off for the account until then (428 / 503 archive_disabled). */
   private consentOffUntil = 0;
+  /** The run is ending: bases stop waiting for their quiet period (baseSettled). */
+  private hurried = false;
+  /** Sessions told their base is off for this run (archive_off, consent_off): once each. */
+  private readonly offReported = new Set<string>();
   /** Sessions handed to captureBase in this app run. */
   private readonly sessions = new Map<string, SessionRecord>();
   private readonly tails = new Map<string, Promise<void>>();
@@ -203,6 +232,16 @@ export class ProjectArchiveLifecycle {
     this.quitBudgetMs = Math.max(0, options.quitBudgetMs ?? QUIT_FINAL_BUDGET_MS);
     this.now = options.now ?? Date.now;
     this.onLateWrites = options.onLateWrites;
+    this.onProjectArchive = options.onProjectArchive;
+  }
+
+  private reportArchive(sessionId: string, outcome: ProjectArchiveOutcome | null): void {
+    if (!outcome) return;
+    try {
+      this.onProjectArchive?.(sessionId, outcome);
+    } catch (error) {
+      this.warn("report", error);
+    }
   }
 
   private get active(): boolean {
@@ -244,7 +283,13 @@ export class ProjectArchiveLifecycle {
   sessionStarted(input: { sessionId: string; root: string; engine: ArchiveEngineReads }): void {
     const known = this.sessions.get(input.sessionId);
     if (known) this.cancelIdleFinal(known);
-    if (!this.active || this.consentOff) return;
+    if (!this.active || this.consentOff) {
+      if (!known && !this.stopped && !this.offReported.has(input.sessionId)) {
+        this.offReported.add(input.sessionId);
+        this.reportArchive(input.sessionId, { status: "skipped", reason: this.consentOff ? "consent_off" : this.signedOut ? "signed_out" : "archive_off" });
+      }
+      return;
+    }
     const promptedAt = this.now();
     this.lastPromptAt = promptedAt;
     if (known) {
@@ -513,6 +558,20 @@ export class ProjectArchiveLifecycle {
     await this.archiver.stop(finals.length > 0 ? { finals, budgetMs: this.quitBudgetMs } : {}).catch((error: unknown) => this.warn("stop", error));
   }
 
+  /**
+   * The run is ending: a base still waiting for its quiet period is taken
+   * now. Resolves once the session's queued steps ran (callers bound the
+   * wait), so its outcome (onProjectArchive) is known before its end goes out.
+   */
+  async baseSettled(sessionId: string): Promise<void> {
+    const record = this.sessions.get(sessionId);
+    // Nothing waiting (resolved) and nothing running.
+    if (!record || (!record.start && !record.starting)) return;
+    this.hurried = true;
+    this.wakeSleepers();
+    await this.tails.get(sessionId)?.catch(() => undefined);
+  }
+
   /** Resolves once every scheduled step and drain has finished (tests). */
   async settled(): Promise<void> {
     while (this.tails.size > 0 || this.background.size > 0) await Promise.all([...this.tails.values(), ...this.background]);
@@ -539,6 +598,7 @@ export class ProjectArchiveLifecycle {
     const root = await realpath(start.root).catch(() => null);
     if (!root) {
       record.start = null;
+      this.reportArchive(sessionId, { status: "skipped", reason: "root_missing" });
       return true;
     }
     const count = turns ?? completedTurnCount(await start.engine.messages().catch(() => null));
@@ -547,6 +607,7 @@ export class ProjectArchiveLifecycle {
     record.start = null;
     record.root = root;
     const result = await this.archiver.captureBase(sessionId, root, count);
+    this.reportArchive(sessionId, projectArchiveOutcome(result));
     if (result.status === "paused") {
       record.start = { root, engine: start.engine };
       this.unresolved(sessionId, record, `archive paused: ${result.reason}`);
@@ -703,7 +764,7 @@ export class ProjectArchiveLifecycle {
    */
   private async quietPeriod(since: number): Promise<void> {
     if (this.baseIdleMs === 0) return;
-    while (this.active) {
+    while (this.active && !this.hurried) {
       const now = this.now();
       const wait = Math.min(this.lastPromptAt + this.baseIdleMs, since + this.baseMaxDeferMs) - now;
       if (wait <= 0) return;

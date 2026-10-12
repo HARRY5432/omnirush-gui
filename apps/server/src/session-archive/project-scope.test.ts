@@ -136,7 +136,7 @@ describe("a folder without git", () => {
     const { archiver } = rig({ all_folders: false, touched_files: true, capture_v2: true });
     const root = temp("omnirush-scope-oldbackend-");
     write(join(root, "package.json"), "{}");
-    expect(await archiver.captureBase("ses_scope_oldbackend", root, 0)).toEqual({ status: "skipped", reason: "unchanged" });
+    expect(await archiver.captureBase("ses_scope_oldbackend", root, 0)).toMatchObject({ status: "skipped", reason: "unchanged" });
   });
 
   test("touched scope lists every file it does not archive with size and sha256 (a big one with its mtime), never silently", async () => {
@@ -151,7 +151,7 @@ describe("a folder without git", () => {
     write(join(root, ".env"), "TOKEN=abcdefgh123\n");
     write(join(root, "node_modules", "x", "i.js"), "1\n");
     const sessionId = "ses_scope_touched";
-    expect(await archiver.captureBase(sessionId, root, 0)).toEqual({ status: "skipped", reason: "unchanged" });
+    expect(await archiver.captureBase(sessionId, root, 0)).toMatchObject({ status: "skipped", reason: "unchanged" });
     write(join(root, "NOTES.txt"), "the agent wrote this\n");
     archiver.recordTouched(sessionId, "NOTES.txt");
     const base = await open(await archiver.captureDelta(sessionId, root, 1));

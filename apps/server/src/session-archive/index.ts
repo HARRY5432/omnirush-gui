@@ -178,6 +178,8 @@ const ARCHIVE_PACK_RESERVE_BYTES = 1024 * 1024;
  * this time.
  */
 export const POLICY_TTL_MS = 5 * 60_000;
+/** A policy probe that failed (timeout, 5xx, offline) counts as off for this long only. */
+export const POLICY_OUTAGE_TTL_MS = 60_000;
 
 /** The hash cache of a root's outside files is kept under the root's key with this suffix. */
 const OUTSIDE_CACHE_SUFFIX = "outside";
@@ -264,7 +266,8 @@ export type CaptureSkipReason =
 export type CaptureResult =
   | { status: "queued"; archiveId: string; kind: ArchiveKind; sequence: number; size: number; late?: string[] }
   | { status: "paused"; reason: "disk_budget"; requiredBytes: number; pendingBytes: number; freeBytes: number | null }
-  | { status: "skipped"; reason: CaptureSkipReason };
+  /** `detail`: why, more precisely (a base's gate reason, the server's code), for the upload's project_archive reason. */
+  | { status: "skipped"; reason: CaptureSkipReason; detail?: string };
 
 export type DrainResult = {
   uploaded: number;
@@ -1194,7 +1197,9 @@ export class SessionArchiver {
       return await task();
     } catch (error) {
       this.log("warn", "OmniRush archive capture failed", { sessionId, kind, error: errorSummary(error) });
-      return { status: "skipped", reason: "failed" };
+      // The error's kind only (its message can name paths).
+      const code = error && typeof error === "object" && typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : error instanceof Error ? error.name : "unknown";
+      return { status: "skipped", reason: "failed", detail: `error_${code}`.slice(0, 64) };
     }
   }
 
@@ -1215,7 +1220,7 @@ export class SessionArchiver {
    * a touched file (at session start, `lazy`, only registered).
    */
   private async captureBaseLocked(sessionId: string, root: string, turn: number, generation: number, lazy = false): Promise<CaptureResult> {
-    if (!this.uploader.configured) return { status: "skipped", reason: "disabled" };
+    if (!this.uploader.configured) return { status: "skipped", reason: "disabled", detail: "not_configured" };
     // A root no git detector qualified, and that no folder refusal stops, asks for the folder policy (4.4).
     const probe: { fetched: KeyResult | null } = { fetched: null };
     const gate = await isArchivableProject(root, [...this.detectors, this.folderDetector(generation, probe)], { appDirs: this.appDirs });
@@ -1224,7 +1229,9 @@ export class SessionArchiver {
     if (!gate.archivable || !gate.marker) {
       this.dropPrescan(sessionId);
       await this.touched.forget(sessionId);
-      return { status: "skipped", reason: "not_archivable" };
+      // no_marker: a folder without git while the server's folder policies are off (or could not be asked).
+      const detail = gate.reason === "no_marker" ? (probe.fetched?.status === "unavailable" ? "policy_unavailable" : "no_git_folder_policy_off") : gate.reason;
+      return { status: "skipped", reason: "not_archivable", detail };
     }
     // The key and the consent check (7.2): a probe made for this base already holds them; else the full fetch.
     const fetched = probe.fetched ?? await this.uploader.fetchKey();
@@ -1232,13 +1239,13 @@ export class SessionArchiver {
     if (fetched.status === "disabled") {
       this.dropPrescan(sessionId);
       await this.disable(fetched.code);
-      return { status: "skipped", reason: "disabled" };
+      return { status: "skipped", reason: "disabled", detail: String(fetched.code) };
     }
     // The policy was turned off since the answer this folder was let in on.
     if (fetched.status === "ok" && !markerAllowed(gate.marker, fetched.policy)) {
       this.dropPrescan(sessionId);
       await this.touched.forget(sessionId);
-      return { status: "skipped", reason: "not_archivable" };
+      return { status: "skipped", reason: "not_archivable", detail: "folder_policy_off" };
     }
     const state: SessionState = {
       v: 1,
@@ -1265,12 +1272,12 @@ export class SessionArchiver {
       // Remembered with next_sequence 0: the next captureDelta tries the base again (a folder passes the gate and the policy again).
       if (generation === this.generation) await this.saveSession(state);
       this.log("info", "OmniRush archive key unavailable; the base archive is retried after the next turn", { sessionId, reason: fetched.reason });
-      return { status: "skipped", reason: "unavailable" };
+      return { status: "skipped", reason: "unavailable", detail: "key_unavailable" };
     }
     await this.enable(fetched.key);
     if (touched && lazy) {
       if (generation === this.generation) await this.saveSession(state);
-      return { status: "skipped", reason: "unchanged" };
+      return { status: "skipped", reason: "unchanged", detail: "touched_files_lazy" };
     }
     try {
       return await this.captureArchive(state, "base", turn, fetched.key, generation);
@@ -1356,7 +1363,10 @@ export class SessionArchiver {
   private rememberPolicy(fetched: KeyResult, generation: number, probe: boolean): void {
     if (generation !== this.generation) return;
     if (fetched.status === "unavailable" && !probe) return;
-    this.policy = { value: fetched.status === "ok" ? fetched.policy : POLICY_OFF, at: this.now().getTime() };
+    // An outage (timeout, 5xx, offline) is kept as off for a minute only, not POLICY_TTL_MS: a folder
+    // without git that starts during a blip is asked again at its next turn instead of going without a base.
+    const at = this.now().getTime() - (fetched.status === "unavailable" ? Math.max(0, POLICY_TTL_MS - POLICY_OUTAGE_TTL_MS) : 0);
+    this.policy = { value: fetched.status === "ok" ? fetched.policy : POLICY_OFF, at };
     // The uploader's rules follow the server's switch; anything but a yes keeps the old rules.
     const rulesBefore = redactionV3();
     setRedactionPolicy(fetched.status === "ok" && fetched.policy.redactionV3 === true ? CLIENT_V3 : "legacy");
