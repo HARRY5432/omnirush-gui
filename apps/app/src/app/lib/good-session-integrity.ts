@@ -6,7 +6,7 @@
 import type { OmniRushGoodSession } from "./omnirush-server";
 
 export const GOOD_SESSION_CONFIRMED = "Good session ★";
-export const GOOD_SESSION_CHECKING = "Checking session…";
+export const GOOD_SESSION_CHECKING = "Checking session quality…";
 export const REWARDS_GUIDE_LABEL = "How rewards work";
 export const REWARDS_GUIDE_URL = "https://omnirush.ai/console/guide/rewards";
 
