@@ -6,6 +6,7 @@ import {
   connectUpdateGate,
   refreshUpdateGate,
   requiredUpdateAction,
+  requiredUpdateUnreachable,
   shouldStartBackgroundDownload,
   updateBannerText,
   updateButtonLabel,
@@ -103,10 +104,23 @@ function useRequiredUpdate(gate: UpdateGateState) {
       void updater.downloadUpdate();
       return;
     }
-    if (updaterState === "error" || updaterState === "blocked" || updaterState === "installer-opened") finish();
-  }, [installMode, installRequested, updater, updaterState]);
+    // "idle" after a check: the feed has nothing newer, so nothing will
+    // download. Ending the request here keeps the button from waiting forever.
+    if (
+      updaterState === "error"
+      || updaterState === "blocked"
+      || updaterState === "installer-opened"
+      || (updaterState === "idle" && status?.lastCheckedAt)
+    ) finish();
+  }, [installMode, installRequested, status?.lastCheckedAt, updater, updaterState]);
 
-  const action = requiredUpdateAction({ supported, installMode, updaterState, packageKind });
+  const unreachable = requiredUpdateUnreachable({
+    gate,
+    updaterState,
+    checkedAt: status?.lastCheckedAt,
+    feedVersion: status?.version,
+  });
+  const action = requiredUpdateAction({ supported, installMode, updaterState, packageKind, unreachable: Boolean(unreachable) });
 
   const updateNow = useCallback(() => {
     switch (action) {
@@ -147,12 +161,12 @@ function useRequiredUpdate(gate: UpdateGateState) {
   const progress = updaterState === "downloading" && status?.totalBytes
     ? Math.min(100, Math.round(((status.downloadedBytes ?? 0) / status.totalBytes) * 100))
     : null;
-  const version = status?.version ?? gate.minimum;
+  const version = unreachable ? gate.minimum : status?.version ?? gate.minimum;
   const label = copied
     ? "Copied"
     : updateButtonLabel({ action, version, progress, updaterState, packageKind, restarting: status?.restarting });
   const working = action === "wait" || Boolean(status?.restarting);
-  const detail = updaterState === "error" && status?.message
+  const detail = unreachable ?? (updaterState === "error" && status?.message
     ? `The update did not finish: ${status.message}`
     : updaterState === "ready" && installMode === "package" && status?.installCommand
       ? "Downloaded. Run the install command in a terminal, then open the app again."
@@ -160,7 +174,7 @@ function useRequiredUpdate(gate: UpdateGateState) {
         ? "Downloaded. The app closes and reopens on the new version."
         : updaterState === "installer-opened"
           ? "The installer is open. Replace the app from it, then open it again."
-          : null;
+          : null);
   const command = installMode === "package" && updaterState === "ready" ? status?.installCommand ?? null : null;
   // A restart that did not go through: offer the manual download next to the retry.
   const installFailed = updaterState === "error" && status?.failedAction === "install";

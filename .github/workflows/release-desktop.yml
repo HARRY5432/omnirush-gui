@@ -59,6 +59,22 @@ jobs:
         shell: bash
         run: node scripts/box/check-pins.mjs apps/server/src/box/images.json apps/server/src/box/wsl.json
 
+      # Installed apps take only a version higher than their own, from the
+      # release marked Latest. A tag at or below an existing release (v3.3.8
+      # published after v3.4.1) is refused before anything is built.
+      - name: Release version is above every published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          GUARD_MODE: ${{ github.event_name == 'push' && 'fresh' || 'recovery' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 --force --quiet origin 'refs/tags/v*:refs/tags/v*'
+          node scripts/release/verify-tag.mjs --tag "$RELEASE_TAG" --mode "$GUARD_MODE"
+          node scripts/release/latest-guard.mjs --version "$RELEASE_VERSION" --mode "$GUARD_MODE"
+
       - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -312,9 +328,59 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --clobber
 
+      - name: Check out release scripts
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          fetch-depth: 1
+          sparse-checkout: scripts/release
+
+      # Latest is the update feed. It moves only forward: a rebuild of an
+      # older tag is published without taking Latest from a newer release.
+      - name: Decide whether this release becomes Latest
+        id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        shell: bash
+        run: node scripts/release/latest-guard.mjs --version "$RELEASE_VERSION" --mode recovery >> "$GITHUB_OUTPUT"
+
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          MARK_LATEST: ${{ steps.latest.outputs.mark_latest }}
         shell: bash
-        run: gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+        run: gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest="$MARK_LATEST"
+
+      # What installed apps will read: every Latest manifest names this
+      # version, and every file it lists is an asset of this release.
+      - name: Verify the update feed
+        if: steps.latest.outputs.mark_latest == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          assets="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          for manifest in latest.yml latest-mac.yml latest-linux.yml latest-linux-arm64.yml; do
+            ok=""
+            for attempt in 1 2 3 4 5 6 7 8 9 10; do
+              body="$(curl -fsSL "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/$manifest?attempt=$attempt" || true)"
+              if [ "$(printf '%s\n' "$body" | sed -n 's/^version: *//p' | tr -d "'\"\r")" = "$RELEASE_VERSION" ]; then ok=1; break; fi
+              sleep 15
+            done
+            if [ -z "$ok" ]; then
+              echo "releases/latest/download/$manifest does not name $RELEASE_VERSION; installed apps would not find this release." >&2
+              exit 1
+            fi
+            for file in $(printf '%s\n' "$body" | sed -n 's/^ *- url: *//p'); do
+              if ! printf '%s\n' "$assets" | grep -qxF "$file"; then
+                echo "$manifest lists $file, which is not an asset of $RELEASE_TAG." >&2
+                exit 1
+              fi
+            done
+            echo "$manifest: $RELEASE_VERSION"
+          done

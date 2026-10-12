@@ -64,6 +64,18 @@ git push origin v1.0.5
 
 The workflow creates a draft release, stamps the version into the package manifests, builds each platform, verifies and uploads the installers and update manifests, generates `SHA256SUMS.txt`, and publishes the release as the latest one. Installed apps pick it up on their next check. See `docs/RELEASING.md` for rebuilding an existing tag and local packaging.
 
+### Version order and the Latest release
+
+The release marked Latest on GitHub is the update feed, and an installed app only installs a version higher than its own. A release must therefore carry a version above every published release. v3.3.8 was tagged after v3.4.1 (from newer code) and published as Latest: apps on 3.4.x had nothing to update to, and apps the server required to reach 3.4.1 checked, found nothing newer than 3.3.8, and stopped. The workflow now refuses such a tag (`scripts/release/verify-tag.mjs` and `scripts/release/latest-guard.mjs` in the prepare job), marks a rebuild Latest only when it is not below the current Latest, and after publishing checks that every `releases/latest/download/latest*.yml` names the new version.
+
+Raise the server's required version only after the release that satisfies it is published and marked Latest. When the feed has nothing newer than a required version, the required-update screen says so and its button opens the download page.
+
+The Windows in-app updater can be exercised end to end with **Build Electron Desktop** (`workflow_dispatch`, `updater_e2e_only`): it installs published releases on a Windows runner and drives their own updater to a build stamped `next_version` (`scripts/release/windows-updater-e2e.mjs`).
+
+### Installing over an existing install
+
+Running a newer installer over the installed app updates it in place: on Windows the NSIS installer reuses the install folder and keeps `%APPDATA%\ai.omnirush.desktop`, which holds the chats (`engine-data\omnirush\opencode.db`), settings and the credentials vault key; uninstalling does not delete app data either (`deleteAppDataOnUninstall` is off). On macOS replace the app in Applications; data lives in `~/Library/Application Support/ai.omnirush.desktop`.
+
 ## Release notes
 
 - 1.0.8: update-path check release. No functional change over 1.0.7; used to verify the in-app updater end to end (check, download, install or open installer) on all three platforms.

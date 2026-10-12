@@ -112,8 +112,11 @@ export function requiredUpdateAction(input: {
   installMode: UpdaterInstallMode | null;
   updaterState: string | null | undefined;
   packageKind?: string | null;
+  /** The feed has nothing newer to install (requiredUpdateUnreachable). */
+  unreachable?: boolean;
 }): RequiredUpdateAction {
   if (!input.supported || input.installMode === "manual-dmg") return "open-download";
+  if (input.unreachable) return "open-download";
   if (input.installMode === "package") {
     if (!input.packageKind) return "open-download";
     switch (input.updaterState) {
@@ -140,6 +143,28 @@ export function requiredUpdateAction(input: {
     default:
       return "download-then-install";
   }
+}
+
+/**
+ * The server requires a version the update feed does not offer: a check
+ * finished ("idle" with a check time) and found nothing newer than this app.
+ * That happens when the release marked Latest on GitHub is this version or an
+ * older one (a lower version number published after the required one), or
+ * when the required release is not published yet. Retrying the check cannot
+ * help, so the gate says so and offers the download page instead of a button
+ * that spins and stops. Returns the message, or null.
+ */
+export function requiredUpdateUnreachable(input: {
+  gate: UpdateGateState;
+  updaterState: string | null | undefined;
+  checkedAt?: number | null;
+  feedVersion?: string | null;
+}): string | null {
+  if (input.gate.status === "none" || input.updaterState !== "idle" || !input.checkedAt) return null;
+  const required = input.gate.minimum ? `Version ${input.gate.minimum} or newer` : "A newer version";
+  const newest = input.feedVersion ? ` (the newest published release is ${input.feedVersion})` : "";
+  const current = input.gate.current ? ` than ${input.gate.current}` : "";
+  return `${required} is required, but the update service offers nothing newer${current}${newest}. Download the latest installer from the download page and run it; your chats and settings are kept.`;
 }
 
 const PACKAGE_LABELS: Record<string, string> = { deb: ".deb", rpm: ".rpm", pacman: ".pacman", appimage: "AppImage" };
