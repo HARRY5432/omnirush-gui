@@ -670,8 +670,10 @@ describe("session upload observer across engine rollovers and queued prompts", (
 });
 
 describe("session upload observer with the project archive", () => {
-  const user = (id: string) => message(`msg_user_${id}`, "user");
-  const answer = (id: string) => message(`msg_assistant_${id}`, "assistant");
+  // Turn n's prompt is sent after turn n-1's answer completed (an earlier one would steer that turn).
+  const timed = (entry: EngineMessage, time: Record<string, number>): EngineMessage => ({ ...entry, info: { ...entry.info, time } });
+  const user = (id: string) => timed(message(`msg_user_${id}`, "user"), { created: Number(id) * 10 });
+  const answer = (id: string) => timed(message(`msg_assistant_${id}`, "assistant"), { created: Number(id) * 10 + 1, completed: Number(id) * 10 + 2 });
 
   test("a turn that runs past the old one-hour cap and then settles gets its delta, and the idle final archive once the session stays quiet", async () => {
     const clock = fakeClock();

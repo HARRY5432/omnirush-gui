@@ -69,6 +69,8 @@ export type PromptRecord = {
    * engine saw it): a turn of the session still being followed ends here.
    */
   dispatchedAt?: number;
+  /** A prompt that started a turn while the engine was not plainly idle: why (turn-steer.ts), on its "engine.request" event. */
+  turnStart?: string;
 };
 
 export type CaptureHostOptions = {
@@ -276,6 +278,7 @@ export class CaptureHost {
       method: prompt.method,
       path: prompt.path,
       body: prompt.engine === "v2" ? v2PromptBodyForTrace(payload) : promptBodyForTrace(payload),
+      ...(prompt.turnStart ? { turn_start: prompt.turnStart } : {}),
     });
     if (!prompt.attachments) return;
     void readPromptAttachments(payload, prompt.root).then((attachments) => {
@@ -285,6 +288,22 @@ export class CaptureHost {
 
   captureSnapshot(sessionId: string, trigger: "prompt" | "turn_completed", outcome?: "aborted"): void {
     this.sessionUploader.captureSnapshot(sessionId, trigger, outcome);
+  }
+
+  /** A prompt steered the running turn (turn-steer.ts): its "turn.steer" event. */
+  steerTurn(sessionId: string, steer: Record<string, unknown>): void {
+    this.sessionUploader.steerTurn(sessionId, steer);
+  }
+
+  /**
+   * The engine took a steer: the running turn goes on, followed by its
+   * observer. A turn no observer follows (its observation ended) is followed
+   * from here; a followed one is left as it is, so the steer never counts as
+   * a request of its own (a turn after this one).
+   */
+  followSteer(sessionId: string, target: EngineTarget): void {
+    if (this.observers.sessions.has(sessionId)) return;
+    this.observeSession(sessionId, target);
   }
 
   recordWebVisit(sessionId: string, visit: UploadWebVisit): boolean {

@@ -24,6 +24,8 @@ export type CaptureCalls = {
   finishSession: [sessionId: string, finalTrace?: unknown];
   recordPrompt: [sessionId: string, prompt: PromptRecord];
   captureSnapshot: [sessionId: string, trigger: "prompt" | "turn_completed", outcome?: "aborted"];
+  steerTurn: [sessionId: string, steer: Record<string, unknown>];
+  followSteer: [sessionId: string, target: EngineTarget];
   recordWebVisit: [sessionId: string, visit: UploadWebVisit];
   archiveSessionStarted: [sessionId: string, root: string, target: EngineTarget];
   archiveStartGate: [sessionId: string, root: string, lateWrites?: LateWritesGate | null];
@@ -177,6 +179,10 @@ export function invokeCapture(host: CaptureHost, call: CaptureCall): unknown {
       return host.recordPrompt(...call.args);
     case "captureSnapshot":
       return host.captureSnapshot(...call.args);
+    case "steerTurn":
+      return host.steerTurn(...call.args);
+    case "followSteer":
+      return host.followSteer(...call.args);
     case "recordWebVisit":
       return host.recordWebVisit(...call.args);
     case "archiveSessionStarted":

@@ -2251,6 +2251,9 @@ export function SessionSurface(props: SessionSurfaceProps) {
     // Immediate sends and queued sends share the same slot across all panes.
     dispatchQueuedDrain(props.sessionId, { type: "user_retry" });
     if (!claimQueuedSend(props.sessionId, nextDraft.messageId, true)) return;
+    // A steer joins the run the engine reports busy: that run's end is this
+    // send's end too, so a draft queued behind it goes out once it is idle.
+    if (liveStatus.type !== "idle") dispatchQueuedDrain(props.sessionId, { type: "busy_observed" });
     const sentAttachments = sourceAttachments;
     const composerCheckpoint = useComposerStateStore.getState().sessions[props.sessionId];
     const savedComposer = sourceComposer ?? composerCheckpoint;
@@ -2340,7 +2343,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
     } finally {
       setAttachmentsUploading(false);
     }
-  }, [attachments, baseRenderedMessages, buildDraft, clearComposer, draft, persistedDraftKey, props.onDraftChange, props.sessionId, sendDraft, sessionOwner]);
+  }, [attachments, baseRenderedMessages, buildDraft, clearComposer, draft, liveStatus.type, persistedDraftKey, props.onDraftChange, props.sessionId, sendDraft, sessionOwner]);
 
   // One-step run from the empty-state hero: the route keeps the continuation
   // in this session's composer and marks the submitted snapshot for auto-send.

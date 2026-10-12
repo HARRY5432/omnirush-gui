@@ -89,6 +89,10 @@ export type CaptureService = {
   /** The "engine.request" event of a captured request (its body parsed off the main thread), plus a prompt's attachments. */
   recordPrompt(sessionId: string, prompt: Omit<PromptRecord, "body"> & { body: ArrayBuffer | undefined }): void;
   captureSnapshot(sessionId: string, trigger: "prompt" | "turn_completed", outcome?: "aborted"): void;
+  /** A prompt steered the running turn: its "turn.steer" event (turn-steer.ts steerRecord). */
+  steerTurn(sessionId: string, steer: Record<string, unknown>): void;
+  /** The engine took a steer: its turn is followed (if no observer follows it already). */
+  followSteer(sessionId: string, target: EngineTarget): void;
   /** Whether the visit is recorded (a tracked session and an uploadable URL). */
   recordWebVisit(sessionId: string, visit: UploadWebVisit): boolean;
   archiveSessionStarted(sessionId: string, root: string, target: EngineTarget): void;
@@ -222,6 +226,17 @@ class CaptureClient implements CaptureService {
 
   captureSnapshot(sessionId: string, trigger: "prompt" | "turn_completed", outcome?: "aborted"): void {
     this.send({ kind: "call", id: null, method: "captureSnapshot", args: outcome ? [sessionId, trigger, outcome] : [sessionId, trigger] });
+  }
+
+  steerTurn(sessionId: string, steer: Record<string, unknown>): void {
+    this.send({ kind: "call", id: null, method: "steerTurn", args: [sessionId, steer] });
+  }
+
+  followSteer(sessionId: string, target: EngineTarget): void {
+    this.observedTargets.delete(sessionId);
+    this.observedTargets.set(sessionId, target);
+    if (this.observedTargets.size > MAX_OBSERVED_TARGETS) this.observedTargets.delete(this.observedTargets.keys().next().value as string);
+    this.send({ kind: "call", id: null, method: "followSteer", args: [sessionId, target] });
   }
 
   recordWebVisit(sessionId: string, visit: UploadWebVisit): boolean {

@@ -202,6 +202,7 @@ import { sessionUploaderEnabled } from "./session-uploader.js";
 import { startCaptureService, type CaptureService } from "./capture-client.js";
 import type { LateWritesGate } from "./capture-host.js";
 import { buildOpencodeProxyUrl, engineTarget, turnsBeforeCapture, type EngineTarget } from "./session-upload-observer.js";
+import { claimSteerId, claimedSteerIds, createSteerTracker, steerRecord } from "./turn-steer.js";
 import { OmniRushGatewayBroker } from "./omnirush-gateway-broker.js";
 import { awaitOmniRushModelCatalogSettled, startOmniRushModelCatalogSync } from "./omnirush-model-catalog-sync.js";
 import { OmniRushVoiceService, voiceProjectContext } from "./omnirush-voice.js";
@@ -2178,11 +2179,23 @@ export async function proxyOpencodeRequest(input: {
   // and end snapshot behind.
   const captured = Boolean(capture?.uploadEnabled && uploadedSessionId && workspace && workspace.workspaceType !== "remote"
     && (capture.hasSession(uploadedSessionId) || await engineHasSession(baseUrl, auth, directory, uploadedSessionId)));
+  // Steering (turn-steer.ts): a prompt sent while the agent works goes into
+  // the running turn, which the engine hands to the model at the agent's next
+  // step. Classified before anything is taken for it, with two small reads at
+  // most; it goes through at once and opens no turn: no late-writes settle, no
+  // box checkpoint, no start snapshot, no context turn, no archive start, and
+  // the running turn is not cut. The turn records it as "turn.steer".
+  const steerSentAt = Date.now();
+  const turnKind = capture && captured && uploadedSessionId && workspace && isUploadPromptDispatch(method, proxyPath)
+    ? await createSteerTracker(engineTarget(baseUrl, headers, search)).classify(uploadedSessionId)
+    : null;
+  const steer = Boolean(turnKind?.steer && uploadedSessionId && capture?.hasSession(uploadedSessionId));
+  if (steer) createServerLogger(input.config).log("info", "Prompt steers the running turn.", { "turn.steer.reason": turnKind?.reason ?? "" });
   // The Linux sandbox (box/): a prompt of a workspace whose box is on starts the box, and takes the turn's checkpoint when it is captured.
   const boxInfo = workspace && uploadedSessionId && isUploadPromptDispatch(method, proxyPath)
-    ? await boxServiceFor(input.config).beforePrompt(uploadedSessionId, workspace, { capture: captured })
+    ? await boxServiceFor(input.config).beforePrompt(uploadedSessionId, workspace, { capture: captured && !steer })
     : null;
-  if (capture && captured && uploadedSessionId && workspace) {
+  if (capture && captured && uploadedSessionId && workspace && !steer) {
     const promptDispatch = isUploadPromptDispatch(method, proxyPath);
     // The turn before's background processes finish writing (at most 10 s after it ended), then
     // capture v2's session-start manifest is taken before the prompt reaches the engine (at most about 3 s).
@@ -2198,12 +2211,24 @@ export async function proxyOpencodeRequest(input: {
       attachments: promptDispatch,
       // Taken before the engine sees the prompt: the session's previous turn ends here.
       ...(promptDispatch ? { dispatchedAt: Date.now() } : {}),
+      // A turn started while the engine was not plainly idle says why.
+      ...(turnKind && turnKind.reason !== "idle" ? { turnStart: turnKind.reason } : {}),
     });
     if (promptDispatch) {
       capture.captureSnapshot(uploadedSessionId, "prompt");
       capture.archiveSessionStarted(uploadedSessionId, workspace.path, engineTarget(baseUrl, headers, search));
     }
   }
+  // The engine took a steer: its turn goes on (followed as before), and the steer's record is found in the background.
+  const steered = (service: CaptureService, sessionId: string, target: EngineTarget) => {
+    service.followSteer(sessionId, target);
+    const reason = turnKind?.reason ?? "working";
+    const known = claimedSteerIds(sessionId);
+    void createSteerTracker(target).describe(sessionId, steerSentAt, { known }).then((found) => {
+      if (found) claimSteerId(known, found.message_id);
+      service.steerTurn(sessionId, steerRecord(found, steerSentAt, reason));
+    }).catch(() => service.steerTurn(sessionId, steerRecord(null, steerSentAt, reason)));
+  };
   if (pool && method === "GET" && isEngineEventPath(proxyPath)) {
     // An open engine event stream means this workspace is visible somewhere in
     // the UI; hold its instance so the idle reaper leaves it alone until the
@@ -2283,7 +2308,9 @@ export async function proxyOpencodeRequest(input: {
       body,
     }).finally(() => release?.()).then((response) => {
       enginePoolForConfig(input.config)?.reportRequestSuccess(baseUrl);
-      if (capture?.uploadEnabled && uploadedSessionId) {
+      if (capture?.uploadEnabled && uploadedSessionId && steer) {
+        if (response.ok) steered(capture, uploadedSessionId, engineTarget(baseUrl, headers, search));
+      } else if (capture?.uploadEnabled && uploadedSessionId) {
         capture.recordTrace(uploadedSessionId, "engine.response", {
           method,
           path: normalizeOpencodeProxyPath(proxyPath),
@@ -2367,7 +2394,9 @@ export async function proxyOpencodeRequest(input: {
 
   const forwardAndUpload = async () => {
     const response = await forward();
-    if (capture?.uploadEnabled && uploadedSessionId) {
+    if (capture?.uploadEnabled && uploadedSessionId && steer) {
+      if (workspace && response.ok) steered(capture, uploadedSessionId, engineTarget(served.baseUrl, served.headers, search));
+    } else if (capture?.uploadEnabled && uploadedSessionId) {
       capture.recordTrace(uploadedSessionId, "engine.response", {
         method,
         path: normalizeOpencodeProxyPath(proxyPath),

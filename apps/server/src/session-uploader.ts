@@ -5765,6 +5765,24 @@ export class SessionUploader {
   }
 
   /**
+   * A prompt steered the running turn: the user sent it while the agent
+   * worked, and the engine hands it to the model at the agent's next step.
+   * It opens no turn: no start snapshot is taken, and the turn keeps the
+   * baseline its first prompt found until it ends (with its steers). Recorded
+   * as a "turn.steer" event (schema 1): the steer's message id and when it
+   * was sent, the tool calls running then and the last one started before it.
+   */
+  steerTurn(sessionId: string, steer: Record<string, unknown>): void {
+    const state = this.sessions.get(sessionId);
+    if (!state || state.finished) return;
+    this.appendTrace(state, "turn.steer", {
+      schema: 1,
+      ...steer,
+      turn_started_at: state.turnStartedAt !== null ? new Date(state.turnStartedAt).toISOString() : null,
+    });
+  }
+
+  /**
    * Captures a change snapshot for an engine milestone: right as a prompt is
    * dispatched, or once a turn completes. When nothing changed since the last
    * snapshot only the trigger is recorded in the trace, so the backend still

@@ -15,6 +15,7 @@ import { realpath } from "node:fs/promises";
 
 import { attachmentsFromMessages } from "./attachments.js";
 import type { StartCapture } from "./capture-v2.js";
+import { completedTurnCount, promptTurnAt } from "./turn-prompts.js";
 import type { CaptureResult, DrainResult, FilesUsedStatus, FinalReason, SessionArchiver } from "./index.js";
 import type { UsedToolCall } from "./files-used.js";
 
@@ -96,82 +97,7 @@ export function isFinishedAssistantMessage(message: Record<string, unknown>): bo
   return parts.some((part) => isRecord(part) && ["step-finish", "finish", "error"].includes(String(part.type)));
 }
 
-/**
- * A user message that is a prompt someone sent: not a compaction's request
- * (a "compaction" part, or the 2.x adapter's compaction agent) and not
- * synthetic text alone (a user-run shell command's notice, an activated
- * skill, a background job's report, the engine's own continue nudge). A
- * message without parts (an outline from before parts were kept) is one.
- */
-export function isPromptMessage(message: Record<string, unknown>): boolean {
-  const info = messageInfo(message);
-  if ((info.role ?? info.type) !== "user") return false;
-  if (info.agent === "compaction") return false;
-  const parts = (Array.isArray(message.parts) ? message.parts : []).filter(isRecord);
-  if (parts.some((part) => part.type === "compaction")) return false;
-  const content = parts.filter((part) => part.type === "text" || part.type === "file" || part.type === "agent" || part.type === "subtask");
-  return !(content.length > 0 && content.every((part) => part.type === "text" && part.synthetic === true));
-}
-
-/**
- * Completed turns in an engine message list: the prompts that ended,
- * answered by an assistant message that ended (several assistant steps of
- * one turn count once) or followed by the next prompt (stopped before any
- * answer). A compaction's request and summary, and synthetic notices with
- * the replies they woke, are no turn: the count is the number of prompts the
- * session finished, as the trace's prompt milestones number them. Each
- * completed turn adds one, so the number strictly increases from one turn to
- * the next and survives app restarts. Null when the list could not be read.
- */
-export function completedTurnCount(messages: unknown): number | null {
-  if (!Array.isArray(messages)) return null;
-  let turns = 0;
-  let awaitingReply = false;
-  for (const message of messages) {
-    if (!isRecord(message)) continue;
-    const info = messageInfo(message);
-    const role = info.role ?? info.type;
-    if (isPromptMessage(message)) {
-      // The prompt before ended without an answer (stopped right away): it was a turn too.
-      if (awaitingReply) turns += 1;
-      awaitingReply = true;
-    } else if (role === "assistant" && awaitingReply && isFinishedAssistantMessage(message)) {
-      turns += 1;
-      awaitingReply = false;
-    }
-  }
-  return turns;
-}
-
-function createdAtMs(message: Record<string, unknown>): number | null {
-  const info = messageInfo(message);
-  const time = isRecord(info.time) ? info.time.created : info.createdAt ?? info.created_at;
-  if (typeof time === "number" && Number.isFinite(time)) return time;
-  if (typeof time === "string") {
-    const parsed = Date.parse(time);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  return null;
-}
-
-/**
- * The turn a tool call that started at `at` belongs to: the number of prompts
- * sent up to then (the first prompt is turn 1), counting a prompt without a
- * creation time as sent. A prompt sent before the previous turn settled (a
- * quick follow-up, or one typed into a running turn) is its own turn, as the
- * converter numbers them. Null when the list could not be read or holds no
- * prompt.
- */
-export function promptTurnAt(messages: unknown, at: number): number | null {
-  if (!Array.isArray(messages)) return null;
-  let turns = 0;
-  for (const message of messages) {
-    if (!isRecord(message) || !isPromptMessage(message)) continue;
-    const created = createdAtMs(message);
-    if (created === null || created <= at) turns += 1;
-  }
-  return turns > 0 ? turns : null;
-}
+export { completedTurnCount, isPromptMessage, promptTurnAt, steerPrompts } from "./turn-prompts.js";
 
 /** The parent of a session record: a string for a child (sub-agent) session, null for a root one, undefined when unreadable. */
 function parentSessionId(session: unknown): string | null | undefined {
