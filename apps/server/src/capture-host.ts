@@ -269,7 +269,7 @@ export class CaptureHost {
 
   /** The "engine.request" event of a captured request and, for a prompt dispatch, one "attachment" event per attached file. */
   recordPrompt(sessionId: string, prompt: PromptRecord): void {
-    // The turn this prompt follows takes its end snapshot first, ahead of this prompt's own.
+    // Admission has settled the prior turn before this request is forwarded.
     if (prompt.dispatchedAt !== undefined) promptDispatched(this.observers, this.sessionUploader, sessionId, prompt.dispatchedAt);
     const payload = requestPayload(prompt.body);
     this.sessionUploader.recordTrace(sessionId, "engine.request", {
@@ -283,8 +283,29 @@ export class CaptureHost {
     }).catch(() => undefined);
   }
 
-  captureSnapshot(sessionId: string, trigger: "prompt" | "turn_completed", outcome?: "aborted"): void {
+  captureSnapshot(sessionId: string, trigger: "prompt" | "turn_completed", outcome?: "aborted" | "error" | "incomplete"): void {
     this.sessionUploader.captureSnapshot(sessionId, trigger, outcome);
+  }
+
+  async promptStartGate(sessionId: string, workspaceId: string, root: string): Promise<boolean> {
+    if (!this.sessionUploader.hasSession(sessionId)) this.startSession(sessionId, workspaceId, root);
+    return this.sessionUploader.beginTurn(sessionId);
+  }
+
+  async pauseTurn(sessionId: string, reason?: string): Promise<boolean> {
+    await this.sessionUploader.pauseTurn(sessionId, reason);
+    return true;
+  }
+
+  async hasOpenTurn(sessionId: string): Promise<boolean> {
+    await this.sessionUploader.sessionCheckpoint(sessionId);
+    return this.sessionUploader.hasOpenTurn(sessionId);
+  }
+
+  async settleTurn(sessionId: string): Promise<boolean> {
+    await this.observers.sessions.get(sessionId)?.done;
+    await this.sessionUploader.idle(sessionId);
+    return true;
   }
 
   recordWebVisit(sessionId: string, visit: UploadWebVisit): boolean {
@@ -382,9 +403,7 @@ export class CaptureHost {
   /** The session was deleted in the engine. */
   sessionDeleted(sessionId: string): void {
     this.sessionUploader.recordTrace(sessionId, "session.deleted");
-    this.sessionUploader.finishSession(sessionId);
-    this.archive.sessionEnded(sessionId);
-    this.forgetSession(sessionId);
+    this.finishSession(sessionId);
   }
 
   /** The account is gone: queued archives and spooled uploads are deleted, nothing more is archived. */

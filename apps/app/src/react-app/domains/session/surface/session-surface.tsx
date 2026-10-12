@@ -2061,9 +2061,8 @@ export function SessionSurface(props: SessionSurfaceProps) {
     }
   };
 
-  // Core sender shared by initial send and steered follow-ups. OpenCode
-  // accepts follow-up user turns mid-run (steering) — the running loop picks
-  // up the new message — so this is safe to call while the agent is busy.
+  // Core sender for a logical turn. A running turn owns its filesystem
+  // baseline until it naturally completes or is stopped and resumed.
   const sendDraft = useCallback(async (nextDraft: ComposerDraft, itemId: string, onPrepared?: () => void): Promise<CloudMcpSubmissionResult | { outcome: "unknown" }> => {
     const messageId = nextDraft.messageId ?? createPromptMessageID();
     const generation = getQueuedSendGeneration(props.sessionId);
@@ -2123,8 +2122,11 @@ export function SessionSurface(props: SessionSurfaceProps) {
     const sourceAttachments = sourceComposer?.attachments ?? attachments;
     const text = originalDraft.trim();
     if (!text && sourceAttachments.length === 0) return;
+    // Editing a prior user message is an additive correction. Do not carry
+    // the destructive revert cursor into a serialized turn: the original
+    // prompt and baseline must remain part of the same captured group.
     const nextDraft = {
-      ...buildDraft(text, sourceAttachments, sourceComposer),
+      ...withoutRevertTarget(buildDraft(text, sourceAttachments, sourceComposer))!,
       messageId: createPromptMessageID(),
     };
     // Immediate sends and queued sends share the same slot across all panes.
@@ -2242,10 +2244,9 @@ export function SessionSurface(props: SessionSurfaceProps) {
     void handleSend();
   }, [attachments.length, autoSendPayload, chatStreaming, draft, handleSend, model.transitionState, sessionModelUnavailable, props.sessionId, sessionOwner]);
 
-  const handleSteer = useCallback(async () => {
-    setSteering(true);
-    await handleSend();
-  }, [handleSend]);
+  const handleSteer = useCallback(() => {
+    toast.info("Stop the current turn before sending another message.");
+  }, []);
 
   const handleRetryCloudSubmission = useCallback(() => {
     if (draft.trim() || attachments.length > 0) {
@@ -2257,17 +2258,11 @@ export function SessionSurface(props: SessionSurfaceProps) {
     setCloudQueueRetryVersion((version) => version + 1);
   }, [attachments.length, draft, handleSend, props.sessionId]);
 
-  // Queue: hold the draft locally and clear the composer. The drain effect
-  // sends it once the session reports idle.
+  // Kept as a compatibility callback for older composer surfaces. New
+  // prompts are held in the visible draft until the running turn is stopped.
   const handleQueue = useCallback(() => {
-    if ([...pendingSendsRef.current.values()].includes(sessionOwner)) return;
-    const text = draft.trim();
-    if (!text && attachments.length === 0) return;
-    const queuedDraft = withoutRevertTarget(buildDraft(text, attachments));
-    if (!queuedDraft) return;
-    appendQueuedDraft(props.sessionId, queuedDraft);
-    clearComposer();
-  }, [appendQueuedDraft, attachments, buildDraft, clearComposer, draft, props.sessionId, sessionOwner]);
+    toast.info("Stop the current turn before sending another message.");
+  }, []);
 
   const removeQueuedDraft = useCallback((id: string) => {
     const target = queuedItems.find((item) => item.id === id);

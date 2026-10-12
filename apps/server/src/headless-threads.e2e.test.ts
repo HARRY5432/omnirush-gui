@@ -102,8 +102,9 @@ function startMockOpencode() {
       if (url.pathname === "/session" && request.method === "POST") return Response.json(session);
       if (url.pathname === "/session" && request.method === "GET") return Response.json([session]);
       if (url.pathname === `/session/${SESSION_ID}`) return Response.json(session);
-      if (url.pathname === `/session/${SESSION_ID}/message`) return Response.json(current.messages);
+      if (url.pathname === `/session/${SESSION_ID}/message`) return Response.json(prompts.length === 0 ? [] : current.messages);
       if (url.pathname === `/session/${SESSION_ID}/todo`) return Response.json([]);
+      if (url.pathname === `/session/${SESSION_ID}/children`) return Response.json([]);
       if (url.pathname === "/session/status") {
         return Response.json(current.busy ? { [SESSION_ID]: { type: "busy" } } : {});
       }
