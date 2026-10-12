@@ -3,7 +3,7 @@ import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRe
 import type { UIMessage } from "ai";
 import { useQuery } from "@tanstack/react-query";
 import type { SessionStatus } from "@opencode-ai/sdk/v2/client";
-import { Check, CirclePause, LoaderCircle, Minimize2 } from "lucide-react";
+import { Check, CircleAlert, CirclePause, Info, LoaderCircle, Minimize2 } from "lucide-react";
 import { toast } from "@/components/ui/sonner";
 
 import { captureAnalyticsEvent } from "@/app/lib/analytics";
@@ -774,6 +774,127 @@ function AssistantWaitingCard({ label = t("session.assistant_thinking") }: { lab
         </div>
         <span>{label}</span>
       </div>
+    </div>
+  );
+}
+
+type SessionRunStatusProps = {
+  activityStatus: SessionActivityStatus;
+  busy: boolean;
+  preparing: boolean;
+  sending: boolean;
+  acceptanceUnknown: boolean;
+  queuedCount: number;
+  retryMessage?: string;
+  onCheckAcceptance: () => void;
+  onStop: () => void | Promise<void>;
+};
+
+/**
+ * A readable, sticky explanation of the state behind the composer. The
+ * transcript can be scrolled away and the circular action button is too easy
+ * to mistake for a loading spinner, so the user should always have a plain
+ * language answer to "what is happening and what can I do?" beside the input.
+ */
+function SessionRunStatus(props: SessionRunStatusProps) {
+  const [stopPending, setStopPending] = useState(false);
+  if (!props.busy && !props.preparing && !props.acceptanceUnknown && props.activityStatus !== "waiting" && props.activityStatus !== "compacting") {
+    return null;
+  }
+
+  const stop = async () => {
+    if (stopPending) return;
+    setStopPending(true);
+    try {
+      await props.onStop();
+    } finally {
+      setStopPending(false);
+    }
+  };
+
+  let title = t("session.run_status_working");
+  let detail = t("session.run_status_working_detail");
+  let tone = "border-dls-border bg-dls-hover/50";
+  let Icon = LoaderCircle;
+  let iconClass = "animate-spin text-dls-secondary";
+  const action = props.busy && props.activityStatus !== "waiting" && props.activityStatus !== "compacting"
+    ? (
+      <button
+        type="button"
+        className="shrink-0 rounded-md border border-dls-border px-2.5 py-1 text-xs font-medium text-dls-text transition-colors hover:bg-dls-hover disabled:cursor-wait disabled:opacity-60"
+        onClick={() => void stop()}
+        disabled={stopPending}
+      >
+        {stopPending ? t("session.run_status_stopping_action") : t("composer.stop")}
+      </button>
+    )
+    : null;
+
+  if (props.acceptanceUnknown) {
+    title = t("session.run_status_acceptance_title");
+    detail = t("session.run_status_acceptance_detail");
+    tone = "border-amber-7/50 bg-amber-2/30";
+    Icon = CircleAlert;
+    iconClass = "text-amber-11";
+  } else if (props.preparing || props.sending) {
+    title = t("session.run_status_preparing");
+    detail = t("session.run_status_preparing_detail");
+  } else if (props.activityStatus === "waiting") {
+    title = t("session.run_status_waiting");
+    detail = t("session.run_status_waiting_detail");
+    Icon = Info;
+    iconClass = "text-amber-11";
+    tone = "border-amber-7/50 bg-amber-2/30";
+  } else if (props.activityStatus === "compacting") {
+    title = t("session.run_status_compacting");
+    detail = t("session.run_status_compacting_detail");
+  } else if (props.activityStatus === "responding") {
+    title = t("session.run_status_responding");
+    detail = t("session.run_status_responding_detail");
+  } else if (props.retryMessage) {
+    title = t("session.run_status_retrying");
+    detail = props.retryMessage;
+    tone = "border-amber-7/50 bg-amber-2/30";
+    Icon = CircleAlert;
+    iconClass = "text-amber-11";
+  }
+
+  return (
+    <div
+      data-testid="session-run-status"
+      role={props.acceptanceUnknown ? "alert" : "status"}
+      aria-live="polite"
+      className={`mx-3 mb-2 flex items-start gap-3 rounded-xl border px-3 py-2.5 text-xs ${tone}`}
+    >
+      <Icon aria-hidden="true" className={`mt-0.5 size-4 shrink-0 ${iconClass}`} />
+      <div className="min-w-0 flex-1">
+        <p className="font-medium text-dls-text">{title}</p>
+        <p className="mt-0.5 text-dls-secondary">{detail}</p>
+        {props.queuedCount > 0 ? (
+          <p className="mt-1 text-dls-secondary">
+            {t("session.run_status_queued", { count: props.queuedCount })}
+          </p>
+        ) : null}
+      </div>
+      {props.acceptanceUnknown ? (
+        <div className="flex shrink-0 items-center gap-2">
+          <button
+            type="button"
+            className="rounded-md border border-dls-border px-2.5 py-1 font-medium text-dls-text transition-colors hover:bg-dls-hover"
+            onClick={props.onCheckAcceptance}
+          >
+            {t("session.run_status_check_action")}
+          </button>
+          <button
+            type="button"
+            className="rounded-md px-2 py-1 font-medium text-dls-secondary transition-colors hover:bg-dls-hover hover:text-dls-text"
+            onClick={() => void stop()}
+            disabled={stopPending}
+          >
+            {stopPending ? t("session.run_status_stopping_action") : t("composer.stop")}
+          </button>
+        </div>
+      ) : action}
     </div>
   );
 }
@@ -3148,16 +3269,6 @@ export function SessionSurface(props: SessionSurfaceProps) {
           {/* Chat column: tighter than the composer (800px) so messages
                keep a comfortable reading width and don't feel "too big". */}
           <div ref={contentRef} className="mx-auto w-full max-w-[720px]">
-            {queuedDrainState.phase.kind === "admission_unknown" ? (
-              <div role="alert" className="mb-4 rounded-xl border border-dls-border bg-dls-hover/60 px-4 py-3 text-sm">
-                <p className="font-medium">Message acceptance is unknown</p>
-                <p className="mt-1 text-dls-secondary">It may already be running. Sending is paused to avoid duplicates. Check acceptance or stop the run; Stop does not resend the message.</p>
-                <div className="mt-3 flex gap-3">
-                  <button type="button" className="underline" onClick={() => void checkUnknownAdmission(true)}>Check acceptance</button>
-                  <button type="button" className="underline" onClick={() => void handleAbort()}>Stop</button>
-                </div>
-              </div>
-            ) : null}
             {revertMessageId ? (
               <RevertedMessagesBanner
                 hiddenCount={revertedMessageCount}
@@ -3334,6 +3445,17 @@ export function SessionSurface(props: SessionSurfaceProps) {
             {attachment.name}{sending ? " · Uploading…" : ""}
           </div>
         )))}
+        <SessionRunStatus
+          activityStatus={effectiveActivityStatus}
+          busy={chatStreaming}
+          preparing={preparingCloudTools}
+          sending={sending || autoSending}
+          acceptanceUnknown={queuedDrainState.phase.kind === "admission_unknown"}
+          queuedCount={queuedItems.length}
+          retryMessage={liveStatus.type === "retry" ? liveStatus.message : undefined}
+          onCheckAcceptance={() => void checkUnknownAdmission(true)}
+          onStop={async () => { await handleAbort(); }}
+        />
         <GoodSessionChecklistBar
           sessionId={props.sessionId}
           messages={renderedMessages}
