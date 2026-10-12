@@ -910,16 +910,46 @@ export type ShownChecklist = GoodSessionChecklist & {
   reasons: string[];
   /** The escalation line (warn → surcharge → cap), or null. */
   dock: { tone: GoodSessionTone; message: string; link: string | null } | null;
+  /** "Not delivered: …" (deliveryLine), or null. */
+  delivery: string | null;
 };
 
 function localShown(local: GoodSessionChecklist): ShownChecklist {
-  return { ...local, source: "local", message: null, messageTone: null, reasons: [], dock: null };
+  return { ...local, source: "local", message: null, messageTone: null, reasons: [], dock: null, delivery: null };
 }
 
 /** Whether the server block is missing or says nothing yet: the local checklist shows then, exactly as without it. */
 export function serverStatusUsable(status: OmniRushSessionStatus | null | undefined): status is OmniRushSessionStatus {
   if (!status) return false;
-  return !(status.status === "unknown" && status.checklist.length === 0);
+  return !(status.status === "unknown" && status.checklist.length === 0 && !status.delivery?.reasons.length);
+}
+
+/**
+ * Why a session was not delivered, in plain words (the CLI's
+ * good-session-lib.js DELIVERY_REASON_TEXT, word for word). The server's own
+ * message wins; an unknown code is shown as is.
+ */
+export const DELIVERY_REASON_TEXT: Readonly<Record<string, string>> = Object.freeze({
+  end_missing: "the end of the session never arrived (keep the app open a moment after the last turn)",
+  archive_missing: "no starting copy of the project was uploaded",
+  sequence_gaps: "some uploads are missing",
+  one_turn: "it had only one turn (ask a follow-up next time)",
+  filter_hit: "a turn did not pass the content checks",
+  truncated: "the last turn was cut off",
+  os: "sessions from this system are not being delivered right now",
+  windows: "sessions from this system are not being delivered right now",
+  qc_reject: "it did not pass the quality check",
+  pending_qc: "the quality check has not run yet",
+});
+
+/** "Not delivered: <reason>; <reason>", or null when delivered, pending or unexplained. */
+export function deliveryLine(status: OmniRushSessionStatus | null | undefined): string | null {
+  const delivery = status?.delivery;
+  if (!delivery || delivery.state !== "not_delivered") return null;
+  const reasons = delivery.reasons
+    .map((reason) => reason.message ?? DELIVERY_REASON_TEXT[reason.code] ?? (reason.code ? reason.code.replace(/_/g, " ") : null))
+    .filter((reason): reason is string => Boolean(reason));
+  return reasons.length ? `Not delivered: ${reasons.join("; ")}` : null;
 }
 
 /**
@@ -957,6 +987,7 @@ export function shownChecklist({ local, server, sessionId, serverGood = false }:
     message: server.message ? goodSessionWording(server.message) : null,
     messageTone: server.status === "failing" ? "red" : server.status === "at_risk" ? "amber" : null,
     reasons: server.reasons.map((reason) => reason.message),
+    delivery: deliveryLine(server),
     dock: dock?.message && (dock.stage !== "none" || dock.capped)
       ? { tone: dockTone, message: dock.message, link: dock.link }
       : null,
@@ -1022,6 +1053,43 @@ export function oneMoreTurnHint(server: OmniRushSessionStatus | null | undefined
   const depth = server.checklist.find((item) => item.id === "depth");
   if (!depth || (depth.state !== "warn" && depth.state !== "fail") || !depth.hint) return null;
   return goodSessionWording(depth.hint);
+}
+
+/**
+ * The follow-up hint (the CLI's follow-up-hint.js, word for word): a
+ * session with one finished turn counts for more with a second. Shown once
+ * per session as a quiet line in the bar after the user has been quiet for
+ * FOLLOW_UP_QUIET_MS; never while a turn runs, never after the server's own
+ * one-more-turn nudge, off with "Don't show again" (FOLLOW_UP_OFF_KEY) or
+ * the server's `client.one_more_turn: false`.
+ */
+export const FOLLOW_UP_HINT = "Sessions with a follow-up count more: ask the agent to test, refine or extend its work.";
+export const FOLLOW_UP_QUIET_MS = 60_000;
+export const FOLLOW_UP_OFF_KEY = "omnirush.goodSession.followUpHint.off";
+
+export function followUpHintDue({ prompts, running = false, quietMs = 0, quitting = false, shown = false, off = false, server = null }: {
+  prompts: number;
+  running?: boolean;
+  quietMs?: number;
+  quitting?: boolean;
+  shown?: boolean;
+  off?: boolean;
+  server?: OmniRushSessionStatus | null;
+}): boolean {
+  if (off || shown || running || prompts !== 1) return false;
+  if (serverStatusUsable(server) && server.client?.oneMoreTurn === false) return false;
+  return quitting || quietMs >= FOLLOW_UP_QUIET_MS;
+}
+
+/** Prompts someone sent in the app's transcript: user messages that are not only synthetic text (the shared turn rule). */
+export function promptsInTranscript(messages: readonly UIMessage[]): number {
+  return messages.filter((message) => {
+    if (message.role !== "user") return false;
+    const parts = (message.parts ?? []) as ReadonlyArray<Record<string, unknown>>;
+    if (parts.some((part) => part.type === "compaction" || part.type === "data-compaction")) return false;
+    const text = parts.filter((part) => part.type === "text");
+    return !(text.length > 0 && text.length === parts.length && text.every((part) => part.synthetic === true || (part.providerMetadata as { opencode?: { synthetic?: boolean } } | undefined)?.opencode?.synthetic === true));
+  }).length;
 }
 
 /** The key the guard asks once for: one session, one state. */

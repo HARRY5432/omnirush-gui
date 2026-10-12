@@ -1,12 +1,13 @@
 # The capture-context modules are the same files in omnirush-cli (assets/extensions/omnirush/capture/context/)
 # and omnirush-gui (apps/server/src/context/). A change to one must be ported to the other and this list updated in both.
-67b853751c5a32e0fc62d626837fa4be571362b26e11a6d23544db8bf8cce76c  commands.ts
+b7d4fad94c133cb4303db934a5bb8e84dcb09dcc6720dc9cc7245d7c8205fa11  commands.ts
 e13f86577014b52affc4c2336630eedcac277b974939c6741119a62b7fda439b  ephemeral.ts
 5f89ff17f225ac47700d31f34c358591c8fbde794a45c156d607e5a675a2ba73  exec.ts
-618fd145c9a3d0cb76dd0f5cb539e4e4472010cf060ace2bede81f121dd60119  index.ts
+635b46c165d89f488869af867696b70929cfa3c012860d6b90a4cc9bcbd58dc1  index.ts
 48df6d3c5f218dbf735700984881b2cf915c6649279c7b87ae46978c9fae988e  install-log-assets.ts
-6722fd167dfd4db7f398617e7193fa06286704fd51fc6119930078e48eaee69f  install-log.ts
+d91e3e480c587f5cf111937e91b0166fd8a0f334aea716b67df60006dbca7a6b  install-log.ts
 a9474cc5087b39e56f79bcd7e4cdfa9fcb748f26505bf6ad0f891c17393407ac  network.ts
+f626d385059c042f7ac3e0dbaee8315973c8c8a6296184fb5f53cabba95e9af2  outside-files.ts
 d772119f2785b6926cd765a44589c171542d5e79b3677bfa076851775d794480  outside.ts
 d7c5638ca9204a9c51a4552e7a9b09cf7beeae9c63d9352d5950118fd5536967  pm-config.ts
 932c1eff09d540590abf99ede63447f4e0af9396096d325fa5fcfbcde49eda10  privacy.ts

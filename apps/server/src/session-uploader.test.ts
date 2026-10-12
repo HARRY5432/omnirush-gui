@@ -404,6 +404,78 @@ describe("session uploader privacy", () => {
     expect(envelopes.slice(2).map((item) => [item.snapshot_type, item.session_segment, item.sequence])).toEqual([["start", 2, 3], ["trace", 2, 4], ["end", 2, 5]]);
   }, 20_000);
 
+  test("an app that went away after a finished turn: the next launch sends the chat's end (marked recovered), once", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-endrec-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-endrec-state-"));
+    roots.push(root, stateDir);
+    await writeFile(join(root, "app.txt"), "hello\n");
+    const envelopes: Array<Record<string, unknown>> = [];
+    const upload = async (_sessionId: string, compressed: Uint8Array) => {
+      envelopes.push(withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as Record<string, unknown>);
+      return Response.json({ ok: true }, { status: 201 });
+    };
+    const crashed = new SessionUploader({ stateDir, upload, fallbackScanMs: 60_000 });
+    const sessionId = "session-endrec-1234";
+    crashed.startSession(sessionId, "workspace-endrec", root);
+    crashed.captureSnapshot(sessionId, "prompt");
+    crashed.recordTrace(sessionId, "tool.call", { n: 1 });
+    crashed.captureSnapshot(sessionId, "turn_completed");
+    crashed.flushTrace(sessionId, { messages: [] });
+    await crashed.idle(sessionId);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    // The app dies here (a crash, a kill, a power cut): no stop(), so no end.
+    expect(envelopes.map((item) => item.snapshot_type)).not.toContain("end");
+
+    const next = new SessionUploader({ stateDir, upload, fallbackScanMs: 60_000 });
+    for (let waited = 0; waited < 5_000 && !envelopes.some((item) => item.snapshot_type === "end"); waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
+    const end = envelopes.find((item) => item.snapshot_type === "end");
+    expect(end).toMatchObject({ session_id: sessionId, trigger: "session_end" });
+    const marked = envelopes.filter((item) => item.snapshot_type === "trace").flatMap((item) => (item.trace as Array<{ type: string }>) ?? []).map((event) => event.type);
+    expect(marked).toContain("session.end_recovered");
+    for (let waited = 0; waited < 3_000 && (await readdir(join(stateDir, "omnirush-upload-journal"))).length > 0; waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(await readdir(join(stateDir, "omnirush-upload-journal"))).toEqual([]);
+    await next.stop();
+    // A third launch finds nothing to send.
+    const count = envelopes.length;
+    const third = new SessionUploader({ stateDir, upload, fallbackScanMs: 60_000 });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await third.stop();
+    expect(envelopes.length).toBe(count);
+  }, 20_000);
+
+  test("the base's outcome rides along (collector.project_archive, workspace.project_archive); two chats on one folder mark turn.overlap", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-gaps-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-gaps-state-"));
+    roots.push(root, stateDir);
+    await writeFile(join(root, "app.txt"), "hello\n");
+    const envelopes: Array<Record<string, unknown>> = [];
+    const upload = async (_sessionId: string, compressed: Uint8Array) => {
+      envelopes.push(withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as Record<string, unknown>);
+      return Response.json({ ok: true }, { status: 201 });
+    };
+    const uploader = new SessionUploader({ stateDir, upload, fallbackScanMs: 60_000 });
+    const a = "session-gaps-a-1234";
+    const b = "session-gaps-b-1234";
+    uploader.startSession(a, "ws", root);
+    uploader.startSession(b, "ws", root);
+    await Promise.all([uploader.idle(a), uploader.idle(b)]);
+    uploader.recordProjectArchive(a, { status: "skipped", reason: "not_archivable", detail: "no_git_folder_policy_off" });
+    uploader.captureSnapshot(a, "prompt");
+    uploader.captureSnapshot(b, "prompt");
+    await Promise.all([uploader.idle(a), uploader.idle(b)]);
+    await writeFile(join(root, "from-b.txt"), "b wrote this\n");
+    uploader.captureSnapshot(a, "turn_completed");
+    await uploader.idle(a);
+    await uploader.stop();
+    const traceOf = (id: string) => envelopes.filter((item) => item.session_id === id && item.snapshot_type === "trace").flatMap((item) => (item.trace as Array<{ type: string; data: Record<string, unknown> }>) ?? []);
+    expect(traceOf(a).find((event) => event.type === "collector.project_archive")?.data).toEqual({ status: "skipped", reason: "not_archivable", detail: "no_git_folder_policy_off" });
+    const end = envelopes.find((item) => item.session_id === a && item.snapshot_type === "end") as { workspace: Record<string, unknown> };
+    expect(end.workspace.project_archive).toEqual({ status: "skipped", reason: "not_archivable", detail: "no_git_folder_policy_off" });
+    const overlap = traceOf(a).find((event) => event.type === "turn.overlap");
+    expect(overlap?.data.other_session_ids).toEqual([b]);
+    expect(overlap?.data.not_written_here).toEqual(["from-b.txt"]);
+  }, 20_000);
+
   test("the journal holds only what is not yet handed to an upload, and is gone once the chat ends", async () => {
     const root = await mkdtemp(join(tmpdir(), "omnirush-upload-journal2-"));
     const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-journal2-state-"));

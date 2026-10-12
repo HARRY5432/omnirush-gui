@@ -717,7 +717,7 @@ test("CLI/desktop parity: the shared session-archive modules match their PARITY.
   const dir = path.join(import.meta.dir, "session-archive");
   const lines = fs.readFileSync(path.join(dir, "PARITY.sha256"), "utf8").split("\n").filter((line) => line && !line.startsWith("#"));
   const listed = new Map(lines.map((line) => { const [hash, name] = line.split(/\s+/); return [name, hash]; }));
-  assert.deepEqual([...listed.keys()].sort(), ["late-writes.ts", "tool-start.ts", "turn-prompts.ts", "turn-writers.ts"]);
+  assert.deepEqual([...listed.keys()].sort(), ["late-writes.ts", "tool-start.ts", "turn-overlap.ts", "turn-prompts.ts", "turn-writers.ts"]);
   for (const [name, hash] of listed) assert.equal(createHash("sha256").update(fs.readFileSync(path.join(dir, name))).digest("hex"), hash, `${name} changed: port it to the CLI and update PARITY.sha256 in both`);
 });
 

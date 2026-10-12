@@ -207,6 +207,8 @@ export class CaptureHost {
       log: options.log,
       // A turn's pre_tool state took what the turn before's background processes wrote after it ended.
       onLateWrites: (late) => this.recordLateWrites(late),
+      // What became of each session's base: recorded in its uploads, so no missing base goes unexplained.
+      onProjectArchive: (sessionId, outcome) => this.sessionUploader.recordProjectArchive(sessionId, outcome),
       ...(baseIdleMs !== undefined ? { baseIdleMs } : {}),
       ...(baseMaxDeferMs !== undefined ? { baseMaxDeferMs } : {}),
     });

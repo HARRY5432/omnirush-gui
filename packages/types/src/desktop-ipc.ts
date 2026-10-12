@@ -303,6 +303,12 @@ export type OmniRushSessionStatus = {
     link: string | null;
   } | null;
   verdict: { state: "pending" | "usable" | "not_usable"; reasons: string[]; rewardWeight: number | null } | null;
+  /**
+   * Whether the session was delivered and, when not, why (`delivery`; on
+   * servers without it, read from a not_usable verdict's reasons). A reason
+   * without the server's message has `message: null` (the app words it).
+   */
+  delivery?: { state: "delivered" | "not_delivered" | "pending"; reasons: { code: string; message: string | null }[] } | null;
   /** In order; ids may grow. */
   checklist: { id: string; state: "pass" | "fail" | "warn" | "pending"; label: string; hint: string }[];
   evaluatedAt: string | null;

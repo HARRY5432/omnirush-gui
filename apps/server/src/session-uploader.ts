@@ -21,6 +21,7 @@ import {
   removeLegacyUploadContent,
 } from "./session-upload-state.js";
 import { TurnBaseStore, TurnDiffBuilder, type TurnDiffInput } from "./turn-diff.js";
+import { TurnWindows, turnOverlapEvent } from "./session-archive/turn-overlap.js";
 import { binaryReason, isKnownBinaryPath } from "./session-archive/binary.js";
 import { captureGitEnv } from "./session-archive/repos.js";
 import { SUBAGENT_MODEL_FALLBACK_TRACE } from "./omnirush-swarm.js";
@@ -589,6 +590,12 @@ type SessionState = {
   turnStartedAt: number | null;
   /** A prompt was dispatched and its turn has not completed (its turn_completed milestone ends it). */
   turnInProgress: boolean;
+  /** When the current turn's window began (its prompt), for parallel chats on the folder (turn-overlap.ts). */
+  turnWindowStart: number | null;
+  /** The paths this session's own tools wrote in the current turn (its trace's tool evidence; not the watchers'). */
+  turnToolWrites: Set<string>;
+  /** What became of the session's base (the project archive lifecycle's onProjectArchive), sent with its later uploads. */
+  projectArchive: { status: string; reason?: string; detail?: string } | null;
   /**
    * Edits were made on this session's root while it had no turn in progress
    * and another session on the root had one: they are that turn's, and this
@@ -4484,6 +4491,8 @@ export class SessionUploader {
   private ledger: SessionLedger = { version: 1, sessions: {} };
   private ledgerWriteTail: Promise<void> = Promise.resolve();
   private readonly sessions = new Map<string, SessionState>();
+  /** Turn windows per folder, shared by the app's processes on this machine (turn-overlap.ts). */
+  private readonly turnWindows: TurnWindows;
   private readonly changeDebounceMs: number;
   private readonly fallbackScanMs: number;
   private readonly appVersion?: string;
@@ -4591,6 +4600,7 @@ export class SessionUploader {
     this.log = options.log ?? (() => undefined);
     const stateDir = options.stateDir ? resolve(options.stateDir) : null;
     this.stateDir = stateDir;
+    this.turnWindows = new TurnWindows(stateDir);
     this.uploadFormat = new UploadFormat<TraceCapabilities>({
       file: stateDir ? join(stateDir, UPLOAD_FORMAT_FILE) : null,
       // The broker's gateway when uploads go through it (one per install).
@@ -5104,6 +5114,7 @@ export class SessionUploader {
       turnManifest: null,
       turnStartedAt: null,
       turnInProgress: false,
+      turnWindowStart: null, turnToolWrites: new Set(), projectArchive: null,
       changesHeld: false,
       turnSkipped: new Map(),
       turnWrittenPaths: new Map(),
@@ -5536,6 +5547,27 @@ export class SessionUploader {
     };
   }
 
+  /**
+   * What became of the session's base (its starting project copy): a
+   * `collector.project_archive` trace event when it changed, and
+   * `workspace.project_archive` on the session's later uploads, so a missing
+   * base always says why. Additive: a server that does not know a reason
+   * drops it.
+   */
+  recordProjectArchive(sessionId: string, outcome: { status: string; reason?: string; detail?: string }): void {
+    const state = this.sessions.get(sessionId);
+    if (!state || state.finished) return;
+    const next = {
+      status: outcome.status,
+      ...(outcome.reason ? { reason: outcome.reason.slice(0, 64) } : {}),
+      ...(outcome.detail ? { detail: outcome.detail.slice(0, 120) } : {}),
+    };
+    const previous = state.projectArchive;
+    if (previous && previous.status === next.status && previous.reason === next.reason && previous.detail === next.detail) return;
+    state.projectArchive = next;
+    this.recordTrace(sessionId, "collector.project_archive", next);
+  }
+
   recordTrace(sessionId: string, type: string, data?: unknown): void {
     const state = this.sessions.get(sessionId);
     if (!state || state.finished) return;
@@ -5576,7 +5608,10 @@ export class SessionUploader {
     this.reportTouched(state, path);
     const current = state.relevance.get(path);
     if (current === undefined || relevance < current) state.relevance.set(path, relevance);
-    if (relevance === 0 && state.turnStartedAt !== null) state.turnWrittenPaths.set(path, Date.now());
+    if (relevance === 0 && state.turnStartedAt !== null) {
+      state.turnWrittenPaths.set(path, Date.now());
+      state.turnToolWrites.add(path);
+    }
     if (isUploadPathDenied(path) || state.touchedPaths.has(path)) return;
     state.touchedPaths.add(path);
     this.markDirty(state, path);
@@ -5834,6 +5869,9 @@ export class SessionUploader {
         // A file nothing saw from before the next turn keeps its entry here.
         return this.recordTurnDiff(state, new Map([...taken].map(([path, entry]) => [path, entry ?? current.get(path)!])), next);
       }
+      // The turn's window, noted for parallel chats on the folder (turn-overlap.ts).
+      state.turnWindowStart = startedAt ?? Date.now();
+      void this.turnWindows.started(state.root, state.id, state.turnWindowStart);
       // The turn is measured from the workspace as its prompt found it.
       const forcePaths = new Set(
         [...state.turnWrittenPaths].filter(([, at]) => startedAt === null || at >= startedAt).map(([path]) => path),
@@ -5856,6 +5894,15 @@ export class SessionUploader {
   private async recordTurnDiff(state: SessionState, after: Manifest | null, next: number | null): Promise<void> {
     const before = state.turnManifest;
     const skipped = state.turnSkipped;
+    // Parallel chats on the folder: this turn's window, and the paths this session's own tools wrote.
+    const windowStart = state.turnWindowStart;
+    const ownWrites = state.turnToolWrites;
+    const windowEnd = Date.now();
+    if (windowStart !== null) {
+      state.turnWindowStart = null;
+      state.turnToolWrites = new Set();
+      void this.turnWindows.ended(state.root, state.id, windowStart, windowEnd);
+    }
     state.turnManifest = after;
     state.turnSkipped = new Map(next === null ? [] : [...skipped].filter(([, at]) => at >= next));
     state.turnWrittenPaths = new Map(next === null ? [] : [...state.turnWrittenPaths].filter(([, at]) => at >= next));
@@ -5872,6 +5919,7 @@ export class SessionUploader {
       if ((next === null || at < next) && !after.has(path) && !before.has(path)) changes.push({ path, before: null, after: null, unseen: false });
     }
     changes.sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
+    if (windowStart !== null) await this.recordTurnOverlap(state, windowStart, windowEnd, changes.map((change) => change.path), ownWrites);
     const builder = new TurnDiffBuilder();
     const pool = new ReadPool(1);
     const ancestors: AncestorCache = new Map();
@@ -6103,6 +6151,21 @@ export class SessionUploader {
     }
     const captured = await this.uploadWorkspace(state, "change", trigger);
     if (milestone) this.appendTrace(state, "collector.trigger", { trigger, captured, ...(outcome ? { outcome } : {}) });
+  }
+
+  /**
+   * A turn whose window met another session's on the same folder (in this
+   * process, or another one on this machine, turn-overlap.ts) is marked
+   * `turn.overlap`: its diff may hold that session's writes.
+   */
+  private async recordTurnOverlap(state: SessionState, start: number, end: number, changed: string[], ownWrites: ReadonlySet<string>): Promise<void> {
+    const others = new Set<string>();
+    for (const other of this.sessions.values()) {
+      if (other !== state && !other.finished && other.cache === state.cache && other.turnInProgress) others.add(other.id);
+    }
+    for (const id of await this.turnWindows.overlapping(state.root, state.id, start, end).catch(() => [] as string[])) others.add(id);
+    const event = turnOverlapEvent({ others: [...others], changed, ownWrites, start, end });
+    if (event) this.appendTrace(state, "turn.overlap", event);
   }
 
   /** Whether another live session on `state`'s root has a turn in progress. */
@@ -6427,7 +6490,8 @@ export class SessionUploader {
       const extras: Record<string, unknown> = {
         workspace: { root_name: rootName, git, ...(gitDeferred ? { git_deferred: "session_end" } : {}),
           ...(git || gitDeferred ? {} : await gitSkippedField()),
-          ...(type === "start" && !git ? await projectArchiveField(state.root) : {}) },
+          ...(type === "start" && !git ? await projectArchiveField(state.root) : {}),
+          ...(type !== "start" && state.projectArchive ? { project_archive: state.projectArchive } : {}) },
         environment,
         touched_paths: touchedPaths,
         files_scope: filesScope,
@@ -7218,7 +7282,8 @@ export class SessionUploader {
       try {
         const file = await stat(path);
         const parsed = Date.now() - file.mtimeMs > this.spoolMaxAgeMs ? null : parseJournal(await readFile(path, "utf8"));
-        if (!parsed || (parsed.events.length === 0 && !parsed.meta.turn_open)) {
+        // A chat the app never ended (it quit hard, crashed or was killed) still gets its end: kept even with no events.
+        if (!parsed || (parsed.events.length === 0 && !parsed.meta.turn_open && !this.endMissing(parsed.meta))) {
           await rm(path, { force: true });
           continue;
         }
@@ -7243,10 +7308,17 @@ export class SessionUploader {
     void Promise.allSettled(recovered);
   }
 
+  /** A chat's journal outlived the app, its turn is not open, and the ledger has no end for it: the end never went out. */
+  private endMissing(meta: JournalMeta): boolean {
+    const record = this.ledger.sessions[meta.session_id];
+    return !meta.turn_open && Boolean(record) && !record?.endedAt && !this.sessions.has(meta.session_id);
+  }
+
   private async recoverJournal(journal: { path: string; meta: JournalMeta; events: TraceEvent[] }): Promise<void> {
     const { meta, events } = journal;
     const record = this.ledger.sessions[meta.session_id];
-    if (events.length > 0) {
+    const endMissing = this.endMissing(meta);
+    if (events.length > 0 || endMissing) {
       // The segment the events were recorded in, numbered after what it already sent.
       const state = this.newSessionState(meta.session_id, meta.workspace_id, meta.root, new FileHashCache());
       state.journal.off = true;
@@ -7274,12 +7346,22 @@ export class SessionUploader {
         type: "collector.recovered",
         data: { reason: "restart", turn_open: meta.turn_open, events: events.length, journal_at: meta.at, session_segment: state.segment },
       };
+      // The end that follows was taken at this launch, not when the app went away.
+      const endMarker: TraceEvent[] = endMissing
+        ? [{ at: marker.at, type: "session.end_recovered", data: { reason: "run_ended_without_end", last_message_id: state.lastMessageId ?? null } }]
+        : [];
       try {
-        await this.uploadTrace(state, [marker, ...events]);
+        await this.uploadTrace(state, [marker, ...events, ...endMarker]);
       } catch (error) {
         // Refused (a 422): recovered data is never dropped; the next start tries again, up to the age limit.
         this.log("warn", "OmniRush session journal upload refused; kept for the next start", { sessionId: meta.session_id, error: error instanceof Error ? error.message : "unknown" });
         return;
+      }
+      if (endMissing) {
+        // Sent, or spooled for a retry: either way the end exists now.
+        if (await this.uploadWorkspace(state, "end", "session_end").catch(() => false)) state.endedAt = new Date().toISOString();
+        this.log("info", "OmniRush session end recovered", { sessionId: meta.session_id, sent: Boolean(state.endedAt) });
+        await this.persistSession(state).catch(() => undefined);
       }
       this.log("info", "OmniRush session journal recovered", { sessionId: meta.session_id, events: events.length, turnOpen: meta.turn_open });
     }
