@@ -39,7 +39,7 @@ function reasonCopy(code: string | undefined, messages: Readonly<Record<string, 
 }
 
 /**
- * The line for one chat: "Good session ★" (true), "Checking session…"
+ * The line for one chat: "Good session ★" (true), "Checking session quality…"
  * (pending, unknown, 404, 429, offline) or "Not a good session: <main
  * reason>. <one fix>" with the rewards guide (false). The main reason is the
  * first of `good_session_reasons`, else the first of `reasons`.

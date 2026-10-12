@@ -20,7 +20,7 @@ function bigPrompt(id: string, text: string, files: Array<{ file: string; bytes:
       id,
       sessionID: "ses_big",
       role: "user",
-      time: { created: 1 },
+      time: { created: 4 },
       summary: { diffs: files.map(({ file, bytes }) => ({ file, before: "", after: blob(bytes, file), additions: 1, deletions: 0, status: "added" })) },
     },
     parts: [{ type: "text", text }],

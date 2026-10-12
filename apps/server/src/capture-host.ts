@@ -69,6 +69,8 @@ export type PromptRecord = {
    * engine saw it): a turn of the session still being followed ends here.
    */
   dispatchedAt?: number;
+  /** A prompt that started a turn while the engine was not plainly idle: why (turn-steer.ts), on its "engine.request" event. */
+  turnStart?: string;
 };
 
 export type CaptureHostOptions = {
@@ -269,13 +271,14 @@ export class CaptureHost {
 
   /** The "engine.request" event of a captured request and, for a prompt dispatch, one "attachment" event per attached file. */
   recordPrompt(sessionId: string, prompt: PromptRecord): void {
-    // Admission has settled the prior turn before this request is forwarded.
+    // The turn this prompt follows takes its end snapshot first, ahead of this prompt's own.
     if (prompt.dispatchedAt !== undefined) promptDispatched(this.observers, this.sessionUploader, sessionId, prompt.dispatchedAt);
     const payload = requestPayload(prompt.body);
     this.sessionUploader.recordTrace(sessionId, "engine.request", {
       method: prompt.method,
       path: prompt.path,
       body: prompt.engine === "v2" ? v2PromptBodyForTrace(payload) : promptBodyForTrace(payload),
+      ...(prompt.turnStart ? { turn_start: prompt.turnStart } : {}),
     });
     if (!prompt.attachments) return;
     void readPromptAttachments(payload, prompt.root).then((attachments) => {
@@ -283,29 +286,24 @@ export class CaptureHost {
     }).catch(() => undefined);
   }
 
-  captureSnapshot(sessionId: string, trigger: "prompt" | "turn_completed", outcome?: "aborted" | "error" | "incomplete"): void {
+  captureSnapshot(sessionId: string, trigger: "prompt" | "turn_completed", outcome?: "aborted"): void {
     this.sessionUploader.captureSnapshot(sessionId, trigger, outcome);
   }
 
-  async promptStartGate(sessionId: string, workspaceId: string, root: string): Promise<boolean> {
-    if (!this.sessionUploader.hasSession(sessionId)) this.startSession(sessionId, workspaceId, root);
-    return this.sessionUploader.beginTurn(sessionId);
+  /** A prompt steered the running turn (turn-steer.ts): its "turn.steer" event. */
+  steerTurn(sessionId: string, steer: Record<string, unknown>): void {
+    this.sessionUploader.steerTurn(sessionId, steer);
   }
 
-  async pauseTurn(sessionId: string, reason?: string): Promise<boolean> {
-    await this.sessionUploader.pauseTurn(sessionId, reason);
-    return true;
-  }
-
-  async hasOpenTurn(sessionId: string): Promise<boolean> {
-    await this.sessionUploader.sessionCheckpoint(sessionId);
-    return this.sessionUploader.hasOpenTurn(sessionId);
-  }
-
-  async settleTurn(sessionId: string): Promise<boolean> {
-    await this.observers.sessions.get(sessionId)?.done;
-    await this.sessionUploader.idle(sessionId);
-    return true;
+  /**
+   * The engine took a steer: the running turn goes on, followed by its
+   * observer. A turn no observer follows (its observation ended) is followed
+   * from here; a followed one is left as it is, so the steer never counts as
+   * a request of its own (a turn after this one).
+   */
+  followSteer(sessionId: string, target: EngineTarget): void {
+    if (this.observers.sessions.has(sessionId)) return;
+    this.observeSession(sessionId, target);
   }
 
   recordWebVisit(sessionId: string, visit: UploadWebVisit): boolean {
@@ -403,7 +401,9 @@ export class CaptureHost {
   /** The session was deleted in the engine. */
   sessionDeleted(sessionId: string): void {
     this.sessionUploader.recordTrace(sessionId, "session.deleted");
-    this.finishSession(sessionId);
+    this.sessionUploader.finishSession(sessionId);
+    this.archive.sessionEnded(sessionId);
+    this.forgetSession(sessionId);
   }
 
   /** The account is gone: queued archives and spooled uploads are deleted, nothing more is archived. */

@@ -356,7 +356,7 @@ test("composer focus and optimistic sends preserve drafts through snapshots and 
     await waitFor(() => container.textContent?.split("Uncertain send").length === 3, "the unrelated same-text turn beside the pending bubble");
     expect(Object.values(useComposerStateStore.getState().pendingMessages).flat()).toHaveLength(1);
     const checkAcceptance = () => {
-      const button = [...container.querySelectorAll<HTMLButtonElement>("button")].find((item) => item.textContent === "Check acceptance");
+      const button = [...container.querySelectorAll<HTMLButtonElement>("button")].find((item) => item.textContent === "Check message");
       if (!button) throw new Error("Expected the read-only acceptance check");
       button.click();
     };

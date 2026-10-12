@@ -251,7 +251,7 @@ function useGoodSession(
   return read.sessionId === sessionId ? read.result : null;
 }
 
-/** "Good session ★", "Checking session…" (muted) or why not, with the rewards guide. */
+/** "Good session ★", "Checking session quality…" (muted) or why not, with the rewards guide. */
 export function GoodSessionLine({ result }: { result: OmniRushGoodSession | null }) {
   const copy = goodSessionCopy(result);
   return (

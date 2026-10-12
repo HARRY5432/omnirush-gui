@@ -112,7 +112,7 @@ function messagePage(url: URL, list: EngineMessage[]): Response {
  * the synchronous prompt route on the "ses_workflow" session it creates. The
  * root session can start with an earlier `history`.
  */
-function startMockEngine(input: { provider: string; model: string; history?: EngineMessage[] }) {
+function startMockEngine(input: { provider: string; model: string; history?: EngineMessage[]; steerable?: boolean }) {
   let turn = 0;
   let busy = false;
   let workflowBusy = false;
@@ -184,6 +184,28 @@ function startMockEngine(input: { provider: string; model: string; history?: Eng
       if (pathname === "/session/ses_workflow/abort" && request.method === "POST") return Response.json(true);
       if (pathname === "/session/ses_root/prompt_async" && request.method === "POST") {
         prompts.push(await request.json().catch(() => null));
+        if (input.steerable) {
+          // Real clock times: a prompt into a busy session joins the running step,
+          // whose assistant message stays open (no completion) until the session goes idle.
+          if (busy) {
+            const steer = message("ses_root", `user_steer_${turn}_${root.length}`, "user", "steer");
+            steer.info = { ...steer.info, time: { created: Date.now() } };
+            root.push(steer);
+            return new Response(null, { status: 204 });
+          }
+          turn += 1;
+          busy = true;
+          const user = message("ses_root", `user_${turn}`, "user", `prompt ${turn}`);
+          user.info = { ...user.info, time: { created: Date.now() } };
+          const answer = message("ses_root", `assistant_${turn}`, "assistant", `answer ${turn}`);
+          answer.info = { ...answer.info, time: { created: Date.now() + 1 } };
+          root.push(user, answer);
+          setTimeout(() => {
+            answer.info = { ...answer.info, finish: "stop", time: { created: (answer.info.time as { created: number }).created, completed: Date.now() } };
+            busy = false;
+          }, control.busyMs);
+          return new Response(null, { status: 204 });
+        }
         turn += 1;
         busy = true;
         root.push(message("ses_root", `user_${turn}`, "user", `prompt ${turn}`), message("ses_root", `assistant_${turn}`, "assistant", `answer ${turn}`));
@@ -238,7 +260,6 @@ function startMockV2Engine(input: { provider: string; model: string }) {
         return Response.json({ error: "unauthorized" }, { status: 401 });
       }
       if (pathname === "/api/session/active") return Response.json({ data: busy ? { ses_v2root: { type: "running" } } : {} });
-      if (pathname === "/api/session") return Response.json({ data: [{ id: "ses_v2root" }] });
       if (pathname === "/api/mcp" || pathname === "/api/skill") return Response.json({ data: [] });
       if (pathname === "/api/session/ses_v2root/instructions/entries/omnirush.context" && request.method === "PUT") return Response.json({ data: {} });
       if (pathname === "/api/session/ses_v2root/prompt" && request.method === "POST") {
@@ -525,10 +546,10 @@ describe("session uploader server integration", () => {
     expect(childEvents(turnOne)).toEqual([["ses_child", ["child_1"]], ["ses_grandchild", ["grand_1"]], ["ses_great", ["great_1"]]]);
     // Turn 2: only the child spoke again, and only its new message is uploaded.
     expect(childEvents(turnTwo)).toEqual([["ses_child", ["child_2"]]]);
-    const secondMessages = events(turnTwo).find((event) => event.type === "turn.completed")?.data?.messages;
-    expect(Array.isArray(secondMessages)).toBe(true);
-    expect(secondMessages).toHaveLength(2);
-    expect(JSON.stringify(secondMessages)).toContain('"id":"assistant_2"');
+    expect(events(turnTwo).find((event) => event.type === "turn.completed")?.data).toEqual({
+      messages: expect.arrayContaining([expect.objectContaining({ info: expect.objectContaining({ id: "assistant_2" }) })]),
+    });
+    expect((events(turnTwo).find((event) => event.type === "turn.completed")?.data?.messages as unknown[]).length).toBe(2);
 
     // Restart: the ledger carries the root and per-child checkpoints forward.
     const second = await startOmniRush({ ...config, startedAt: Date.now() });
@@ -544,6 +565,47 @@ describe("session uploader server integration", () => {
     expect((events(turnThree).find((event) => event.type === "turn.completed")?.data?.messages as unknown[]).length).toBe(2);
     expect(events(turnThree).map((event) => event.type)).toContain("session.resumed");
   }, 90_000);
+
+  test("a prompt sent while the agent works steers the turn: it goes through, takes no snapshot and is recorded as turn.steer", async () => {
+    const { root, stateDir } = await createWorkspace();
+    const engine = startMockEngine({ provider: "openai", model: "gpt-5.4", steerable: true });
+    engine.control.busyMs = 2_500;
+    const gateway = startMockGateway();
+    const omnirush = await startOmniRush(serverConfig({ root, stateDir, engineBaseUrl: engine.baseUrl, gatewayUrl: gateway.gatewayUrl, appVersion: "2.3.4" }));
+    expect((await prompt(omnirush.base)).status).toBe(204);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const statusReads = engine.received.filter((request) => request === "GET /session/status").length;
+    const messageReads = () => engine.received.filter((request) => request === "GET /session/ses_root/message").length;
+    const steerSent = Date.now();
+    expect((await prompt(omnirush.base, { parts: [{ type: "text", text: "use port 8080" }] })).status).toBe(204);
+    // The steer went to the engine at once: no hold behind the running turn.
+    expect(Date.now() - steerSent).toBeLessThan(2_000);
+    expect(engine.prompts).toHaveLength(2);
+    expect(engine.received.filter((request) => request === "GET /session/status").length).toBeGreaterThan(statusReads);
+    expect(messageReads()).toBeGreaterThan(0);
+    const steerTrace = await waitFor(() => traces(gateway.uploads).find((envelope) => events(envelope).some((event) => event.type === "turn.completed")));
+    // The next prompt, once idle, is a turn of its own.
+    expect((await prompt(omnirush.base, { parts: [{ type: "text", text: "next task" }] })).status).toBe(204);
+    await waitFor(() => (traces(gateway.uploads).filter((envelope) => events(envelope).some((event) => event.type === "turn.completed")).length >= 2 ? true : undefined));
+    await omnirush.stop();
+
+    const all = traces(gateway.uploads).flatMap((envelope) => events(envelope));
+    const steer = all.find((event) => event.type === "turn.steer")?.data;
+    expect(steer).toMatchObject({ schema: 1, message_id: expect.stringMatching(/^user_steer_1_/), delivery: "next_step", classified: "working" });
+    expect(typeof steer?.sent_at).toBe("string");
+    expect(typeof steer?.created_at).toBe("string");
+    expect(typeof steer?.turn_started_at).toBe("string");
+    expect(Array.isArray(steer?.running)).toBe(true);
+    expect(all.filter((event) => event.type === "turn.steer")).toHaveLength(1);
+    // Two turns: two prompts traced (the steer is not), one prompt milestone each, one turn.completed each.
+    expect(all.filter((event) => event.type === "engine.request")).toHaveLength(2);
+    expect(all.filter((event) => event.type === "engine.request").every((event) => event.data?.turn_start === undefined)).toBe(true);
+    expect(all.filter((event) => event.type === "collector.trigger" && event.data?.trigger === "prompt")).toHaveLength(2);
+    expect(all.filter((event) => event.type === "turn.completed")).toHaveLength(2);
+    // The steered turn holds its first prompt, its step and the steer.
+    const firstTurn = events(steerTrace).find((event) => event.type === "turn.completed")?.data?.messages as Array<{ info: { id: string } }>;
+    expect(firstTurn.map((entry) => entry.info.id)).toEqual(["user_1", "assistant_1", steer?.message_id as string]);
+  }, 60_000);
 
   test("a prompt to a chat the engine does not have starts nothing: no start or end snapshot", async () => {
     const { root, stateDir } = await createWorkspace();

@@ -25,9 +25,9 @@ describe("goodSessionCopy", () => {
     expect(goodSessionCopy(result({ good_session: true, integrity: "ok" }))).toEqual({ state: "good", text: "Good session ★" });
   });
 
-  test("pending, unknown, 404, 429 and offline read Checking session…", () => {
+  test("pending, unknown, 404, 429 and offline read Checking session quality…", () => {
     for (const value of [result({ good_session: "pending", reasons: ["archive_uploading"] }), null, undefined]) {
-      expect(goodSessionCopy(value)).toEqual({ state: "pending", text: "Checking session…" });
+      expect(goodSessionCopy(value)).toEqual({ state: "pending", text: "Checking session quality…" });
     }
   });
 
@@ -76,7 +76,7 @@ describe("goodSessionCopy", () => {
   test("the line renders each state", () => {
     expect(renderToStaticMarkup(<GoodSessionLine result={result({ good_session: true })} />)).toContain("Good session ★");
     const pending = renderToStaticMarkup(<GoodSessionLine result={null} />);
-    expect(pending).toContain("Checking session…");
+    expect(pending).toContain("Checking session quality…");
     expect(pending).toContain("text-muted-foreground");
     expect(pending).not.toContain("<svg");
     const bad = renderToStaticMarkup(<GoodSessionLine result={result({ good_session: false, good_session_reasons: ["no_trace"] })} />);
