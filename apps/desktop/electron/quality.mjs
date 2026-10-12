@@ -354,10 +354,11 @@ export function parseDelivery(value, verdict) {
     return {
       state: oneOf(value.state, DELIVERY_STATES, "pending"),
       reasons: Array.isArray(value.reasons) ? value.reasons.map(deliveryReason).filter((reason) => reason !== null) : [],
+      message: text(value.message),
     };
   }
   if (verdict?.state === "not_usable" && verdict.reasons.length) {
-    return { state: "not_delivered", reasons: verdict.reasons.map((code) => ({ code, message: null })) };
+    return { state: "not_delivered", reasons: verdict.reasons.map((code) => ({ code, message: null })), message: null };
   }
   return null;
 }

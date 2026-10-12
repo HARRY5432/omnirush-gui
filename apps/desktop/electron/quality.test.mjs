@@ -366,9 +366,10 @@ test("session status: GET /me/sessions/{id}/status with the device credential; n
 
 test("session status: the delivery block, or a not_usable verdict's reasons on older servers", () => {
   const status = parseSessionStatus({ ...SESSION_STATUS, delivery: { state: "not_delivered", reasons: [{ code: "end_missing" }, { code: "one_turn", message: "Only one turn." }, "brand_new"] } });
-  assert.deepEqual(status.delivery, { state: "not_delivered", reasons: [{ code: "end_missing", message: null }, { code: "one_turn", message: "Only one turn." }, { code: "brand_new", message: null }] });
-  assert.deepEqual(parseSessionStatus({ ...SESSION_STATUS, delivery: { state: "odd" } }).delivery, { state: "pending", reasons: [] });
+  assert.deepEqual(status.delivery, { state: "not_delivered", reasons: [{ code: "end_missing", message: null }, { code: "one_turn", message: "Only one turn." }, { code: "brand_new", message: null }], message: null });
+  assert.deepEqual(parseSessionStatus({ ...SESSION_STATUS, delivery: { state: "odd" } }).delivery, { state: "pending", reasons: [], message: null });
+  assert.equal(parseSessionStatus({ ...SESSION_STATUS, delivery: { state: "not_delivered", reasons: [], message: "Kept back.", reward_basis: "x" } }).delivery.message, "Kept back.");
   const older = parseSessionStatus({ ...SESSION_STATUS, verdict: { state: "not_usable", reasons: ["archive_missing"], reward_weight: 0 } });
-  assert.deepEqual(older.delivery, { state: "not_delivered", reasons: [{ code: "archive_missing", message: null }] });
+  assert.deepEqual(older.delivery, { state: "not_delivered", reasons: [{ code: "archive_missing", message: null }], message: null });
   assert.equal(parseSessionStatus({ ...SESSION_STATUS, verdict: { state: "usable", reasons: [] } }).delivery, null);
 });

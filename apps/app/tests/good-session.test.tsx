@@ -709,6 +709,8 @@ describe("why not delivered", () => {
     expect(deliveryLine(serverStatus({ delivery: { state: "delivered", reasons: [] } }))).toBeNull();
     expect(deliveryLine(serverStatus({ delivery: { state: "pending", reasons: [{ code: "pending_qc", message: null }] } }))).toBeNull();
     expect(deliveryLine(serverStatus())).toBeNull();
+    expect(deliveryLine(serverStatus({ delivery: { state: "not_delivered", message: "Kept back: the end never arrived.", reasons: [{ code: "end_missing", message: null }] } }))).toBe("Not delivered: Kept back: the end never arrived.");
+    expect(deliveryLine(serverStatus({ delivery: { state: "not_delivered", reasons: [{ code: "archive_gap", message: null }] } }))).toBe("Not delivered: the project copy is incomplete");
   });
 });
 

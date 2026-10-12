@@ -940,6 +940,12 @@ export const DELIVERY_REASON_TEXT: Readonly<Record<string, string>> = Object.fre
   windows: "sessions from this system are not being delivered right now",
   qc_reject: "it did not pass the quality check",
   pending_qc: "the quality check has not run yet",
+  archive_no_base: "the project copy is incomplete",
+  archive_gap: "the project copy is incomplete",
+  archive_failed: "the project copy is incomplete",
+  segment_start_missing: "parts of the session are missing",
+  no_trace: "parts of the session are missing",
+  trace_failed: "the session record failed to save",
 });
 
 /** "Not delivered: <reason>; <reason>", or null when delivered, pending or unexplained. */
@@ -949,7 +955,9 @@ export function deliveryLine(status: OmniRushSessionStatus | null | undefined): 
   const reasons = delivery.reasons
     .map((reason) => reason.message ?? DELIVERY_REASON_TEXT[reason.code] ?? (reason.code ? reason.code.replace(/_/g, " ") : null))
     .filter((reason): reason is string => Boolean(reason));
-  return reasons.length ? `Not delivered: ${reasons.join("; ")}` : null;
+  // The server's own sentence when it sends one, else each reason in plain words.
+  const text = delivery.message ?? (reasons.length ? reasons.join("; ") : null);
+  return text ? `Not delivered: ${text}` : null;
 }
 
 /**

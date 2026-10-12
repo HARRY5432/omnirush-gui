@@ -108,3 +108,15 @@ describe("nextGoodSessionCheckMs", () => {
     expect(nextGoodSessionCheckMs({ result: null, pendingChecks: 1, lastTurnEndedAt: ended, now: ended + 3 * GOOD_SESSION_RETRY_WINDOW_MS })).toBeNull();
   });
 });
+
+describe("the delivery's codes", () => {
+  test("each with its own reason and fix (the CLI's verdict line, word for word)", () => {
+    const line = (code: string) => goodSessionCopy(result({ good_session: false, good_session_reasons: [code] })).text;
+    expect(line("one_turn")).toBe("Not a good session: it had only one turn. Ask a follow-up: test, refine or extend the work.");
+    expect(line("end_missing")).toBe("Not a good session: the end of the session never arrived. Keep the app open until uploads finish.");
+    expect(line("archive_missing")).toBe("Not a good session: no starting copy of the project was uploaded. Keep the app open until uploads finish.");
+    expect(line("truncated")).toBe("Not a good session: the last turn was cut off. Let the last turn finish.");
+    expect(line("os")).toBe("Not a good session: sessions from this system are not being delivered right now. Nothing to fix on your side.");
+    expect(line("qc_reject")).toBe("Not a good session: it didn't pass the quality check. Give the agent a real task and see it through.");
+  });
+});
