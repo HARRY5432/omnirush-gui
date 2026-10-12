@@ -11,5 +11,3 @@ export * from "./mock-planetscale.ts";
 export * from "./mock-atlassian.ts";
 export * from "./mock-inference.ts";
 export * from "./capture-efficiency.ts";
-
-export * from "./serialized-turns.ts";

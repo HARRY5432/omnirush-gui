@@ -85,22 +85,23 @@ test("capture worker uploads ordered, scoped trace artifacts at the HTTP collect
       within: 20_000,
       intervalMs: 100,
       label: "capture worker collector requests",
-      until: (current) => [SESSION_A, SESSION_B].every(id => current.attempts.some(attempt => attempt.sessionId === id && attempt.snapshotType === "end" && attempt.status === 201)),
+      until: (current) => current.attempts.length === 7
+        && current.attempts.filter((attempt) => attempt.status === 201).length === 6,
     });
 
     expect(witness.modes).toEqual(["worker", "worker"]);
     const traceA = acceptedTrace(witness, SESSION_A);
     const traceB = acceptedTrace(witness, SESSION_B);
-    const traceAttemptsA = attemptsFor(witness, SESSION_A).filter((attempt) => attempt.snapshotType === "trace" && attempt.traceTypes.includes("engine.request"));
-    const traceAttemptsB = attemptsFor(witness, SESSION_B).filter((attempt) => attempt.snapshotType === "trace" && attempt.traceTypes.includes("engine.request"));
+    const traceAttemptsA = attemptsFor(witness, SESSION_A).filter((attempt) => attempt.snapshotType === "trace");
+    const traceAttemptsB = attemptsFor(witness, SESSION_B).filter((attempt) => attempt.snapshotType === "trace");
 
     expect(traceAttemptsA.map((attempt) => [attempt.status, attempt.schemaVersion])).toEqual([[422, 3], [201, 2]]);
     expect(traceAttemptsB.map((attempt) => [attempt.status, attempt.schemaVersion])).toEqual([[201, 3]]);
     expect(traceB.filePaths).toEqual([]);
     expect(traceB.traceFileCount).toBe(0);
-    expect(traceB.traceTypes.filter(type => ["engine.request", "turn.completed"].includes(type))).toEqual(["engine.request", "turn.completed"]);
+    expect(traceB.traceTypes).toEqual(["engine.request", "turn.completed"]);
     expect(traceA.schemaVersion).toBe(2);
-    expect(traceA.traceTypes.filter(type => ["engine.request", "turn.messages", "turn.completed"].includes(type))).toEqual(["engine.request", "turn.messages", "turn.completed"]);
+    expect(traceA.traceTypes).toEqual(["engine.request", "turn.messages", "turn.completed"]);
     expect(traceA.traceFileCount).toBe(1);
     expect(traceA.traceFileEventTypes).toEqual(traceA.traceTypes);
     evidence.recordAssertionEvidence(
@@ -116,11 +117,8 @@ test("capture worker uploads ordered, scoped trace artifacts at the HTTP collect
 
     const actorAAttempts = attemptsFor(witness, SESSION_A).filter((attempt) => attempt.status === 201);
     const actorBAttempts = attemptsFor(witness, SESSION_B).filter((attempt) => attempt.status === 201);
-    for (const attempts of [actorAAttempts, actorBAttempts]) {
-      expect(attempts[0]?.snapshotType).toBe("start");
-      expect(attempts.at(-1)?.snapshotType).toBe("end");
-      expect(attempts.slice(1, -1).every(attempt => attempt.snapshotType === "trace")).toBe(true);
-    }
+    expect(actorAAttempts.map((attempt) => attempt.snapshotType)).toEqual(["start", "trace", "end"]);
+    expect(actorBAttempts.map((attempt) => attempt.snapshotType)).toEqual(["start", "trace", "end"]);
     expect(actorAAttempts.every((attempt) => attempt.workspaceRoot === "workspace-a")).toBe(true);
     expect(actorBAttempts.every((attempt) => attempt.workspaceRoot === "workspace-b")).toBe(true);
     expect(actorAAttempts.every((attempt) => attempt.actorMarkers.every((actor) => actor === "actor-a"))).toBe(true);
@@ -134,64 +132,10 @@ test("capture worker uploads ordered, scoped trace artifacts at the HTTP collect
     expect(witness.capabilityCalls).toEqual({ "actor-a": 1, "actor-b": 1 });
     evidence.recordAssertionEvidence(
       "Capture records preserve completion order and actor/workspace scope",
-      "Each synthetic session produced start, trace batches, and end in order; trace markers and workspace roots stayed within their owning actor, with one capability probe per worker.",
+      "Each synthetic session produced start, trace, and end in order; trace markers and workspace roots stayed within their owning actor, with one capability probe per worker.",
       true,
     );
   } finally {
     await lab.stop();
   }
-});
-
-
-test("capture worker retains the original turn baseline across Stop and correction", { timeout: 60_000 }, async ({ evidence }) => {
-  needs({ placement: "local", commands: ["bun"] });
-  const lab = await startCaptureEfficiencyLab();
-  const sessionId = "session-logical-turn-0001";
-  const record = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
-  try {
-    await postControl(lab, "/control/start", { sessionId, actor: "actor-b", workspace: "workspace-b" });
-    await postControl(lab, "/control/turn", { sessionId, action: "begin" });
-    await postControl(lab, "/control/write", { sessionId, content: "print('partial')\n" });
-    await postControl(lab, "/control/turn", { sessionId, action: "pause",
-      finalTrace: { messages: [{ info: { id: "user-original", role: "user" }, parts: [{ type: "text", text: "Build the invoice CLI." }] }] },
-    });
-    await postControl(lab, "/control/turn", { sessionId, action: "begin" });
-    await postControl(lab, "/control/write", { sessionId, content: "print('complete')\n" });
-    await postControl(lab, "/control/turn", { sessionId, action: "complete",
-      finalTrace: { messages: [{ info: { id: "user-correction", role: "user" }, parts: [{ type: "text", text: "Continue with JSON output." }] }] },
-    });
-    await postControl(lab, "/control/turn", { sessionId, action: "begin" });
-    const accepted = attemptsFor(await lab.witness(), sessionId).filter(attempt => attempt.status === 201);
-    const events = accepted.flatMap(attempt => attempt.events);
-    const groups = events.filter(event => event.type === "collector.replay_group").map(event => event.data).filter(record);
-    const starts = groups.filter(group => group.phase === "start");
-    expect(starts).toHaveLength(2);
-    expect(starts[0]?.group_id).not.toBe(starts[1]?.group_id);
-    expect(starts[0]?.baseline_snapshot).toBeDefined();
-    const resumed = groups.find(group => group.phase === "resumed");
-    const completed = groups.find(group => group.phase === "completed");
-    expect(resumed?.group_id).toBe(starts[0]?.group_id);
-    expect(completed?.group_id).toBe(starts[0]?.group_id);
-    expect(resumed?.baseline_snapshot).toEqual(starts[0]?.baseline_snapshot);
-    expect(completed?.baseline_snapshot).toEqual(starts[0]?.baseline_snapshot);
-    expect(completed?.message_ids).toEqual(["user-original", "user-correction"]);
-    expect(completed?.prompt_count).toBe(2);
-    const diffs = events.filter(event => event.type === "turn.diff").map(event => event.data).filter(record);
-    const groupedDiffs = diffs.filter(diff => diff.replay_group_id === starts[0]?.group_id);
-    expect(groupedDiffs).toHaveLength(2);
-    // Both partial and final diffs still describe cli.py as added to the ORIGINAL baseline.
-    for (const diff of groupedDiffs) {
-      expect(JSON.stringify(diff)).toContain('"path":"cli.py"');
-      expect(JSON.stringify(diff)).toContain('"status":"added"');
-    }
-    expect(accepted.some(attempt => attempt.filePaths.includes("cli.py"))).toBe(true);
-    const transcript = JSON.stringify(events.filter(event => event.type === "turn.completed"));
-    expect(transcript).toContain("Build the invoice CLI.");
-    expect(transcript).toContain("Continue with JSON output.");
-    evidence.recordAssertionEvidence(
-      "Stop and correction retain one original capture baseline and both prompts",
-      "Worker uploads kept one group and baseline pointer through Stop/resume, cli.py remained added in both diffs, and both original and correction text survived. Only natural completion allowed the next distinct group.",
-      true,
-    );
-  } finally { await lab.stop(); }
 });

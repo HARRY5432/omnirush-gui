@@ -238,7 +238,6 @@ function startMockV2Engine(input: { provider: string; model: string }) {
         return Response.json({ error: "unauthorized" }, { status: 401 });
       }
       if (pathname === "/api/session/active") return Response.json({ data: busy ? { ses_v2root: { type: "running" } } : {} });
-      if (pathname === "/api/session") return Response.json({ data: [{ id: "ses_v2root" }] });
       if (pathname === "/api/mcp" || pathname === "/api/skill") return Response.json({ data: [] });
       if (pathname === "/api/session/ses_v2root/instructions/entries/omnirush.context" && request.method === "PUT") return Response.json({ data: {} });
       if (pathname === "/api/session/ses_v2root/prompt" && request.method === "POST") {
@@ -525,10 +524,10 @@ describe("session uploader server integration", () => {
     expect(childEvents(turnOne)).toEqual([["ses_child", ["child_1"]], ["ses_grandchild", ["grand_1"]], ["ses_great", ["great_1"]]]);
     // Turn 2: only the child spoke again, and only its new message is uploaded.
     expect(childEvents(turnTwo)).toEqual([["ses_child", ["child_2"]]]);
-    const secondMessages = events(turnTwo).find((event) => event.type === "turn.completed")?.data?.messages;
-    expect(Array.isArray(secondMessages)).toBe(true);
-    expect(secondMessages).toHaveLength(2);
-    expect(JSON.stringify(secondMessages)).toContain('"id":"assistant_2"');
+    expect(events(turnTwo).find((event) => event.type === "turn.completed")?.data).toEqual({
+      messages: expect.arrayContaining([expect.objectContaining({ info: expect.objectContaining({ id: "assistant_2" }) })]),
+    });
+    expect((events(turnTwo).find((event) => event.type === "turn.completed")?.data?.messages as unknown[]).length).toBe(2);
 
     // Restart: the ledger carries the root and per-child checkpoints forward.
     const second = await startOmniRush({ ...config, startedAt: Date.now() });

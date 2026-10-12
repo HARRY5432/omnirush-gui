@@ -360,10 +360,9 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
     if (escapeTimerRef.current) clearTimeout(escapeTimerRef.current);
   }, []);
 
-  // Editor submit (Enter). While idle this sends normally. During a running
-  // turn, keep the draft in the composer until the user stops the turn; this
-  // prevents a queued prompt from creating a premature filesystem baseline.
-  // Auto-send after dictation follows the same admission rule.
+  // Editor submit (Enter). While idle this sends normally; while busy
+  // Enter queues until the agent finishes, and Cmd/Ctrl+Enter steers.
+  // Auto-send after dictation waits until the dictated text has reached the draft.
   const [voiceAutoSendPrompt, setVoiceAutoSendPrompt] = useState<string | null>(null);
   const voice = useVoiceDictation({
     client: props.voiceClient ?? null,
@@ -385,12 +384,12 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
     if (!hasContent) return;
     if (props.submissionPreparing) return;
     if (props.busy) {
-      // Serialized capture has one logical turn at a time. The draft remains
-      // editable, but it is not dispatched or moved into a background queue.
+      if (options.queue) void props.onSteer();
+      else void props.onQueue();
       return;
     }
     void props.onSend();
-  }, [props.busy, props.draft, props.attachments, props.onSend, props.submissionPreparing, voice.active, voice.stop]);
+  }, [props.busy, props.draft, props.attachments, props.onSend, props.onSteer, props.onQueue, props.submissionPreparing, voice.active, voice.stop]);
 
   useEffect(() => {
     if (voiceAutoSendPrompt === null || props.draft !== voiceAutoSendPrompt) return;

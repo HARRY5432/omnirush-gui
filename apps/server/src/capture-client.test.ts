@@ -711,27 +711,3 @@ describe("turns left open: worker restarts and quits", () => {
     expect(envelopes.at(-1)?.snapshot_type).toBe("end");
   }, 60_000);
 });
-
-describe("logical turn worker acknowledgements", () => {
-  for (const worker of [false, true]) {
-    test(`requires explicit capture replies (worker=${worker})`, async () => {
-      const root = await tempDir("turn-ack-workspace");
-      const sink = uploadSink();
-      const capture = service({
-        stateDir: await tempDir("turn-ack-state"), worker,
-        sessionUploader: { upload: sink.upload, context: false },
-      });
-      const sessionId = "session-turn-ack-0001";
-      expect(await capture.promptStartGate(sessionId, "workspace-ack", root)).toBe(true);
-      expect(await capture.hasOpenTurn(sessionId)).toBe(true);
-      await capture.pauseTurn(sessionId);
-      await capture.settleTurn(sessionId);
-      expect(await capture.promptStartGate(sessionId, "workspace-ack", root)).toBe(true);
-      await capture.stop();
-      expect(await capture.promptStartGate(sessionId, "workspace-ack", root)).toBe(false);
-      await expect(capture.pauseTurn(sessionId)).rejects.toThrow("acknowledge");
-      await expect(capture.settleTurn(sessionId)).rejects.toThrow("acknowledge");
-      await expect(capture.hasOpenTurn(sessionId)).rejects.toThrow("unavailable");
-    });
-  }
-});

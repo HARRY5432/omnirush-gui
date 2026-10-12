@@ -79,7 +79,7 @@ function startMockOpencode(input?: { holdCommand?: Promise<void>; foreignSession
         if (url.pathname === "/session/status") return Response.json(input.recovery.active ? { ses_1: { type: "busy" } } : {});
         if (["/permission", "/question"].includes(url.pathname)) return Response.json([]);
         if (url.pathname === "/api/session/ses_1/permission") return Response.json({ data: [] });
-        if (url.pathname === "/session/ses_1/message") return Response.json(input.recovery.turn === 0 ? [] : [
+        if (url.pathname === "/session/ses_1/message") return Response.json([
           { info: { id: `user-${input.recovery.turn}`, role: "user", sessionID: "ses_1", model: { providerID: "test", modelID: "test" } }, parts: [] },
           { info: { id: `assistant-${input.recovery.turn}`, role: "assistant", sessionID: "ses_1", time: {} }, parts: [] },
         ]);
@@ -111,10 +111,6 @@ function startMockOpencode(input?: { holdCommand?: Promise<void>; foreignSession
 
       if (url.pathname === "/session/status") {
         return Response.json({ ses_1: { type: "busy" } });
-      }
-
-      if (url.pathname === "/session/ses_1/children") {
-        return Response.json([]);
       }
 
       if (url.pathname === "/session/ses_1") {
@@ -615,7 +611,7 @@ describe("workspace OpenCode proxy", () => {
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toMatchObject({
       code: "opencode_unconfigured",
-      message: "OmniRush base URL is missing for this workspace",
+      message: "OpenCode base URL is missing for this workspace",
     });
   });
 });

@@ -144,8 +144,7 @@ export function engineReplaced(observers: SessionObservers, closedBaseUrl: strin
  * the new prompt's own snapshot, so both turns keep their turn.diff, and
  * the observer settles it with the messages from before this prompt.
  */
-export function promptDispatched(observers: SessionObservers, sessionUploader: Pick<ObservedUploader, "captureSnapshot" | "hasOpenTurn">, sessionId: string, at: number): void {
-  if (sessionUploader.hasOpenTurn?.(sessionId)) return; // Serialized prompts never cut an active baseline.
+export function promptDispatched(observers: SessionObservers, sessionUploader: Pick<ObservedUploader, "captureSnapshot">, sessionId: string, at: number): void {
   const turn = observers.sessions.get(sessionId)?.turn;
   if (!turn || turn.cutAt !== null) return;
   turn.cutAt = at;
@@ -168,7 +167,7 @@ export type ObservedUploader = Pick<
   | "noteChildSessionIds"
   | "captureSnapshot"
   | "flushTrace"
-> & { hasOpenTurn?: (sessionId: string) => boolean; isTurnPaused?: (sessionId: string) => boolean };
+>;
 
 /** An engine target from a proxied request's headers, without the body headers of that request. */
 export function engineTarget(baseUrl: string, headers: Headers, search: string, engine: "v1" | "v2" = "v1"): EngineTarget {
@@ -323,7 +322,6 @@ async function captureChildSessions(input: {
   parentSessionId: string;
   depth: number;
   fetchEngine: EngineFetch;
-  v2: boolean;
   checkpoints: Record<string, string>;
   known: Set<string>;
   visited: Set<string>;
@@ -332,18 +330,14 @@ async function captureChildSessions(input: {
   onChild?: (childId: string, depth: number, messages: readonly unknown[]) => void;
 }): Promise<void> {
   if (input.depth > MAX_UPLOAD_CHILD_SESSION_DEPTH) return;
-  const children = await readChildRecords({ fetchEngine: input.fetchEngine, parentSessionId: input.parentSessionId, v2: input.v2 })
-    .catch(error => { if (input.sessionUploader.hasOpenTurn?.(input.rootSessionId)) throw error; return nullOnErrorStatus(error); });
+  const children = await readEngineJson(input.fetchEngine, `/session/${encodeURIComponent(input.parentSessionId)}/children`, 1024 * 1024)
+    .catch(nullOnErrorStatus);
   if (!Array.isArray(children)) return;
   for (const child of children.slice(0, 200)) {
-    const childId = sessionRecordId(child);
+    const childId = isRecord(child) && typeof child.id === "string" && child.id ? child.id : null;
     if (!childId || childId === input.rootSessionId || input.visited.has(childId)) continue;
     input.visited.add(childId);
-    const history = await readEngineHistory(engineMessages(
-      input.fetchEngine,
-      input.v2 ? `/api/session/${encodeURIComponent(childId)}/context` : `/session/${encodeURIComponent(childId)}/message`,
-      !input.v2,
-    ), input.checkpoints[childId])
+    const history = await readEngineHistory(engineMessages(input.fetchEngine, `/session/${encodeURIComponent(childId)}/message`, true), input.checkpoints[childId])
       .catch(nullOnErrorStatus);
     const newMessages = history?.delta ?? [];
     if (newMessages.length > 0) input.onChild?.(childId, input.depth, newMessages);
@@ -356,7 +350,7 @@ async function captureChildSessions(input: {
         childSessionId: childId,
         parentSessionId: input.parentSessionId,
         depth: input.depth,
-        title: optionalTraceString(sessionRecordInfo(child)?.title),
+        title: isRecord(child) ? optionalTraceString(child.title) : null,
         agent: turnModelFromMessages(history?.outline ?? [])?.agent ?? null,
         messages: newMessages,
         lastMessageId: traceMessageId(history?.outline.at(-1)),
@@ -371,19 +365,18 @@ async function captureChildSessions(input: {
  * at most MAX_UPLOAD_CHILD_SESSION_DEPTH layers down. A layer the engine
  * cannot list (an error status) is left out.
  */
-async function childSessionIdsBelow(fetchEngine: EngineFetch, rootSessionId: string, v2: boolean): Promise<string[]> {
+async function childSessionIdsBelow(fetchEngine: EngineFetch, rootSessionId: string): Promise<string[]> {
   const ids: string[] = [];
   const seen = new Set([rootSessionId]);
   let layer = [rootSessionId];
-  const v2Sessions = v2 ? await readV2SessionList(fetchEngine) : undefined;
   for (let depth = 1; depth <= MAX_UPLOAD_CHILD_SESSION_DEPTH && layer.length > 0; depth += 1) {
     const next: string[] = [];
     for (const parent of layer) {
-      const children = await readChildRecords({ fetchEngine, parentSessionId: parent, v2, ...(v2Sessions ? { v2Sessions } : {}) })
+      const children = await readEngineJson(fetchEngine, `/session/${encodeURIComponent(parent)}/children`, 1024 * 1024)
         .catch(nullOnErrorStatus);
       if (!Array.isArray(children)) continue;
       for (const child of children.slice(0, 200)) {
-        const id = sessionRecordId(child);
+        const id = isRecord(child) && typeof child.id === "string" && child.id ? child.id : null;
         if (!id || seen.has(id)) continue;
         seen.add(id);
         ids.push(id);
@@ -454,149 +447,6 @@ async function readEngineJson(fetchEngine: EngineFetch, path: string, maxBytes?:
     throw new EngineReadError(response.status);
   }
   return readObservedResponse(response, maxBytes);
-}
-
-function enginePayload(payload: unknown, v2: boolean): unknown {
-  return v2 && isRecord(payload) && "data" in payload ? payload.data : payload;
-}
-
-function sessionRecordInfo(record: unknown): Record<string, unknown> | null {
-  if (!isRecord(record)) return null;
-  return isRecord(record.info) ? record.info : record;
-}
-
-function sessionRecordId(record: unknown): string | null {
-  const info = sessionRecordInfo(record);
-  return typeof info?.id === "string" && info.id ? info.id : null;
-}
-
-function sessionRecordParentId(record: unknown): string | null {
-  const info = sessionRecordInfo(record);
-  const parent = info?.parentID ?? info?.parentId ?? info?.parent_id;
-  return typeof parent === "string" && parent ? parent : null;
-}
-
-async function readStatusPayload(fetchEngine: EngineFetch, v2: boolean): Promise<Record<string, unknown>> {
-  const payload = enginePayload(await readEngineJson(fetchEngine, v2 ? "/api/session/active" : "/session/status", 1024 * 1024), v2);
-  if (!isRecord(payload)) throw new Error("the engine status map could not be read");
-  return payload;
-}
-
-function statusBusy(statuses: Record<string, unknown>, sessionId: string): boolean | null {
-  const status = statuses[sessionId];
-  if (status === undefined) return false;
-  if (!isRecord(status) || typeof status.type !== "string") return null;
-  if (!["idle", "busy", "retry", "running"].includes(status.type)) return null;
-  return status.type !== "idle";
-}
-
-async function readV2SessionList(fetchEngine: EngineFetch): Promise<unknown[]> {
-  const payload = enginePayload(await readEngineJson(fetchEngine, "/api/session", 1024 * 1024), true);
-  if (!Array.isArray(payload)) throw new Error("the engine session list could not be read");
-  return payload;
-}
-
-async function readChildRecords(input: { fetchEngine: EngineFetch; parentSessionId: string; v2: boolean; v2Sessions?: readonly unknown[] }): Promise<unknown[]> {
-  if (input.v2) {
-    const sessions = input.v2Sessions ?? await readV2SessionList(input.fetchEngine);
-    return sessions.filter((record) => sessionRecordParentId(record) === input.parentSessionId).slice(0, 200);
-  }
-  const children = await readEngineJson(input.fetchEngine, `/session/${encodeURIComponent(input.parentSessionId)}/children`, 1024 * 1024);
-  if (!Array.isArray(children)) throw new Error("the engine child session list could not be read");
-  return children.slice(0, 200);
-}
-
-export type SessionTreeQuiescence =
-  | { known: true; busy: boolean; sessionIds: string[]; histories: Map<string, unknown[]> }
-  | { known: false; error: string; sessionIds: string[] };
-
-async function readSessionTreeIds(input: { fetchEngine: EngineFetch; rootSessionId: string; v2: boolean }): Promise<string[]> {
-  const sessions = input.v2 ? await readV2SessionList(input.fetchEngine) : null;
-  const ids = new Set([input.rootSessionId]);
-  const queue = [input.rootSessionId];
-  for (const parent of queue) {
-    const children = sessions
-      ? sessions.filter(record => sessionRecordParentId(record) === parent)
-      : await readEngineJson(input.fetchEngine, `/session/${encodeURIComponent(parent)}/children`, 1024 * 1024);
-    if (!Array.isArray(children)) throw new Error("delegated session list is unavailable");
-    for (const child of children) {
-      const id = sessionRecordId(child);
-      if (!id || sessionRecordParentId(child) !== parent || ids.has(id)) throw new Error("invalid delegated session tree");
-      if (ids.size >= 256) throw new Error("too many delegated sessions to confirm quiescence");
-      ids.add(id); queue.push(id);
-    }
-  }
-  return [...ids];
-}
-
-export async function readEngineSessionRoot(target: EngineTarget, sessionId: string, signal?: AbortSignal): Promise<string> {
-  const fetchEngine = engineFetch(() => target, () => signal ?? AbortSignal.timeout(10_000));
-  const visited = new Set<string>();
-  let id = sessionId;
-  for (;;) {
-    if (visited.has(id) || visited.size >= 256) throw new Error("invalid session ancestry");
-    visited.add(id);
-    const raw = enginePayload(await readEngineJson(fetchEngine,
-      `${target.engine === "v2" ? "/api" : ""}/session/${encodeURIComponent(id)}`, 1024 * 1024), target.engine === "v2");
-    if (sessionRecordId(raw) !== id) throw new Error("session ancestry is unavailable");
-    const parent = sessionRecordParentId(raw);
-    if (!parent) return id;
-    id = parent;
-  }
-}
-
-export async function stopEngineSession(target: EngineTarget, sessionId: string, signal: AbortSignal): Promise<void> {
-  const url = new URL(buildOpencodeProxyUrl(target.baseUrl,
-    `${target.engine === "v2" ? "/api" : ""}/session/${encodeURIComponent(sessionId)}/${target.engine === "v2" ? "interrupt" : "abort"}`, target.search));
-  const response = await loopbackFetch(url.toString(), { method: "POST", headers: new Headers(target.headers), signal });
-  await response.body?.cancel().catch(() => undefined);
-  if (!response.ok) throw new Error("the engine did not acknowledge Stop");
-}
-
-export function latestPromptId(history: readonly unknown[]): string | null {
-  for (const message of [...history].reverse()) {
-    if (isRecord(message) && isPromptMessage(message)) return traceMessageId(message);
-  }
-  return null;
-}
-
-export async function readSessionTreeQuiescence(target: EngineTarget, rootSessionId: string, signal?: AbortSignal): Promise<SessionTreeQuiescence> {
-  const fetchEngine = engineFetch(() => target, () => signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000));
-  let sessionIds = [rootSessionId];
-  try {
-    const v2 = target.engine === "v2";
-    sessionIds = await readSessionTreeIds({ fetchEngine, rootSessionId, v2 });
-    const statuses = await readStatusPayload(fetchEngine, v2);
-    let busy = false;
-    for (const id of sessionIds) {
-      const status = statusBusy(statuses, id);
-      if (status === null) throw new Error("the engine status map had an unknown shape");
-      busy ||= status;
-    }
-    const histories = new Map<string, unknown[]>();
-    // Fast path while running: full histories are only checked at a boundary.
-    if (busy) return { known: true, busy, sessionIds, histories };
-    let bytes = 0;
-    for (const id of sessionIds) {
-      const history: unknown[] = [];
-      for await (const entry of engineMessages(fetchEngine,
-        v2 ? `/api/session/${encodeURIComponent(id)}/context` : `/session/${encodeURIComponent(id)}/message`, !v2)) {
-        if (!entry.whole) throw new Error("tool activity could not be verified from the complete transcript");
-        bytes += JSON.stringify(entry.message).length;
-        if (bytes > 64 * 1024 * 1024) throw new Error("tool activity exceeds the boundary read budget");
-        history.push(entry.message);
-        if (!isRecord(entry.message)) throw new Error("invalid engine message");
-        const info = sessionRecordInfo(entry.message);
-        const parts = Array.isArray(entry.message.parts) ? entry.message.parts : Array.isArray(info?.content) ? info.content : [];
-        if (parts.some(part => isRecord(part) && part.type === "tool" && isRecord(part.state)
-          && ["pending", "running", "streaming"].includes(String(part.state.status)))) busy = true;
-      }
-      histories.set(id, history.reverse());
-    }
-    return { known: true, busy, sessionIds, histories };
-  } catch (error) {
-    return { known: false, error: errorMessage(error), sessionIds };
-  }
 }
 
 /**
@@ -833,7 +683,7 @@ export function turnOutcome(outline: readonly unknown[]): TurnOutcome | null {
     const name = isRecord(error) ? error.name ?? error.type : error;
     return name === "MessageAbortedError" || name === "aborted" ? "stopped" : "error";
   }
-  return info.finish !== "tool-calls" && info.finish !== "unknown" && isFinishedAssistantMessage(last) ? "completed" : "incomplete";
+  return isFinishedAssistantMessage(last) ? "completed" : "incomplete";
 }
 
 async function messageOutlines(messages: AsyncIterable<EngineMessage>): Promise<unknown[]> {
@@ -1115,8 +965,6 @@ export function observeUploadedSession(input: {
     ...input.timing,
   };
   const stopped = observer.controller.signal;
-  const serialized = sessionUploader.hasOpenTurn?.(sessionId) === true;
-  let forcedIncomplete = false;
   const v2 = input.target.engine === "v2";
   const target = () => session.target;
   const fetchStatus = engineFetch(target, () => AbortSignal.any([stopped, AbortSignal.timeout(timing.statusTimeoutMs)]));
@@ -1134,7 +982,7 @@ export function observeUploadedSession(input: {
   let turnArchived = false;
   const turnState = (): FollowedTurn => (session.turn ??= { snapshotTaken: false, cutAt: null });
   /** The followed turn's turn_completed snapshot, unless it was taken already ("aborted": the user stopped it). */
-  const captureTurnSnapshot = (outcome?: "aborted" | "error" | "incomplete"): void => {
+  const captureTurnSnapshot = (outcome?: "aborted"): void => {
     const turn = turnState();
     if (turn.snapshotTaken) return;
     turn.snapshotTaken = true;
@@ -1184,7 +1032,7 @@ export function observeUploadedSession(input: {
     try {
       history ??= await readHistory();
       const cutAt = session.turn?.cutAt ?? null;
-      if (!serialized && cutAt !== null) history = historyBefore(history, cutAt).history;
+      if (cutAt !== null) history = historyBefore(history, cutAt).history;
     } catch (error) {
       if (stopped.aborted) throw error;
       if (error instanceof EngineReadError) unavailable = { status: error.status, unavailable: true };
@@ -1230,25 +1078,25 @@ export function observeUploadedSession(input: {
       pending += bytes;
     };
     const children: WriterSessionMessages[] = [];
-    let childCaptureFailed = false;
-    try {
-      await captureChildSessions({
-        onChild: (childId, depth, childMessages) => children.push({ sessionId: childId, role: "child", depth, messages: childMessages }),
-        sessionUploader,
-        rootSessionId: sessionId,
-        parentSessionId: sessionId,
-        depth: 1,
-        fetchEngine,
-        v2,
-        checkpoints: await sessionUploader.childCheckpoints(sessionId),
-        known: new Set(await sessionUploader.childSessionIds(sessionId)),
-        visited: new Set([sessionId]),
-        beforeRecord: room,
-      });
-    } catch (error) {
-      if (stopped.aborted) throw error;
-      childCaptureFailed = true;
-      sessionUploader.recordTrace(sessionId, "session.children_failed", { error: errorMessage(error) });
+    // The v2 daemon has no subagent children route; only its root turn is captured.
+    if (!v2) {
+      try {
+        await captureChildSessions({
+          onChild: (childId, depth, childMessages) => children.push({ sessionId: childId, role: "child", depth, messages: childMessages }),
+          sessionUploader,
+          rootSessionId: sessionId,
+          parentSessionId: sessionId,
+          depth: 1,
+          fetchEngine,
+          checkpoints: await sessionUploader.childCheckpoints(sessionId),
+          known: new Set(await sessionUploader.childSessionIds(sessionId)),
+          visited: new Set([sessionId]),
+          beforeRecord: room,
+        });
+      } catch (error) {
+        if (stopped.aborted) throw error;
+        sessionUploader.recordTrace(sessionId, "session.children_failed", { error: errorMessage(error) });
+      }
     }
     // Sub-agents that wrote files in the workspace: who wrote what, and the files the root and a sub-agent (or two) both wrote.
     if (history && children.length > 0 && input.turnFiles) {
@@ -1264,9 +1112,7 @@ export function observeUploadedSession(input: {
     // The turn snapshot runs first so the artifacts it discovers are part of
     // the trace flushed right behind it.
     // A turn the user stopped (Esc, Stop) says so on its trigger and its turn.completed event too.
-    const aborted = outcome === "stopped" || (serialized && sessionUploader.isTurnPaused?.(sessionId)) ? ("aborted" as const)
-      : serialized && (forcedIncomplete || !history || childCaptureFailed || outcome !== "completed") ? ("incomplete" as const)
-        : undefined;
+    const aborted = outcome === "stopped" ? ("aborted" as const) : undefined;
     captureTurnSnapshot(aborted);
     sessionUploader.flushTrace(sessionId, {
       messages: history ? newest.messages : unavailable,
@@ -1282,8 +1128,7 @@ export function observeUploadedSession(input: {
     if (history) input.archive.turnMessages?.(sessionId, history.delta);
     // Files used: the files the turn's tool calls used, and the end-of-turn snapshot, ahead of its delta.
     if (history) input.archive.turnFilesUsed?.(sessionId, history.delta);
-    if (serialized && aborted) input.archive.turnIncomplete(sessionId);
-    else input.archive.turnCompleted(sessionId, history ? history.outline : null);
+    input.archive.turnCompleted(sessionId, history ? history.outline : null);
   };
 
   /**
@@ -1338,7 +1183,7 @@ export function observeUploadedSession(input: {
         sessionUploader.recordTrace(sessionId, "session.engine_recovered", { failures, unavailable_ms: timing.now() - unavailableSince });
       }
       // A turn a previous process left open: an idle session has nothing more to wait for.
-      if (!serialized && recovering && status === "idle") {
+      if (recovering && status === "idle") {
         await settle(status);
         return session.requests;
       }
@@ -1346,7 +1191,7 @@ export function observeUploadedSession(input: {
       unavailableSince = null;
       unavailableTraced = false;
       const cutAt = session.turn?.cutAt ?? null;
-      if (!serialized && cutAt !== null) {
+      if (cutAt !== null) {
         // The next prompt went out before this turn settled. The turn ends
         // with the messages from before that prompt once they are all there:
         // its answer finished (the session may be busy with the next turn),
@@ -1373,10 +1218,10 @@ export function observeUploadedSession(input: {
         idleReads = 0;
         turnState().idleAt = null;
         // The v2 daemon has no children route: nothing to list there.
-        if (timing.now() - childIdsAt >= CHILD_IDS_INTERVAL_MS) {
+        if (!v2 && timing.now() - childIdsAt >= CHILD_IDS_INTERVAL_MS) {
           childIdsAt = timing.now();
           try {
-            sessionUploader.noteChildSessionIds(sessionId, await childSessionIdsBelow(fetchEngine, sessionId, v2));
+            sessionUploader.noteChildSessionIds(sessionId, await childSessionIdsBelow(fetchEngine, sessionId));
           } catch (error) {
             if (stopped.aborted) throw error;
           }
@@ -1387,14 +1232,6 @@ export function observeUploadedSession(input: {
         idleSince = timing.now();
         requestsWhenIdle = session.requests;
         turnState().idleAt = idleSince;
-      }
-      if (serialized) {
-        const tree = await readSessionTreeQuiescence(session.target, sessionId, stopped);
-        if (!tree.known || tree.busy) {
-          idleReads = 0;
-          if (!tree.known) failures += 1;
-          continue;
-        }
       }
       idleReads += 1;
       if (idleReads < 2 || reads < 4) continue;
@@ -1412,7 +1249,7 @@ export function observeUploadedSession(input: {
     // No longer followed, the turn still gets its snapshot and turn.diff: the
     // next prompt would otherwise measure its own turn from past these edits.
     // Its messages are left after the checkpoint for the next settled turn.
-    captureTurnSnapshot(serialized ? "incomplete" : undefined);
+    captureTurnSnapshot();
     sessionUploader.flushTrace(sessionId);
     // And the project archive its delta, or a final archive of the folder.
     turnArchived = true;
@@ -1423,10 +1260,6 @@ export function observeUploadedSession(input: {
   session.settleNow = async () => {
     if (!session.turn || session.turn.settled) return;
     sessionUploader.recordTrace(sessionId, "session.quit_settled", {});
-    if (serialized) {
-      const tree = await readSessionTreeQuiescence(session.target, sessionId, stopped);
-      forcedIncomplete = !tree.known || tree.busy;
-    }
     await settle("quit");
   };
   session.done = (async () => {
@@ -1445,7 +1278,7 @@ export function observeUploadedSession(input: {
   })().catch((error: unknown) => {
     if (!stopped.aborted) {
       sessionUploader.recordTrace(sessionId, "session.observer_failed", { error: errorMessage(error) });
-      if (!session.turn?.snapshotTaken) sessionUploader.captureSnapshot(sessionId, "turn_completed", serialized ? "incomplete" : undefined);
+      if (!session.turn?.snapshotTaken) sessionUploader.captureSnapshot(sessionId, "turn_completed");
       sessionUploader.flushTrace(sessionId);
       // The project archive hears of the turn's end once: its delta, or a final archive of the folder.
       if (!turnArchived) input.archive.turnIncomplete(sessionId);
