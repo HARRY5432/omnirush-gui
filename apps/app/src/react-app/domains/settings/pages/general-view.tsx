@@ -10,15 +10,12 @@ import {
   ShieldCheck,
   Sparkles,
   Terminal,
-  Box,
   Wrench,
   UserRoundCheck,
 } from "lucide-react";
 
 import type { OmniRushAccountSignOutReason } from "@omnirush/types/desktop-ipc";
 
-import { Button } from "@/components/ui/button";
-import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { t } from "../../../../i18n";
 import type { SettingsTab } from "../../../../app/types";
@@ -27,7 +24,7 @@ import {
   omnirushAccountSignOut,
   omnirushAccountStatus,
 } from "../../../../app/lib/desktop";
-import type { OmniRushRuntimeApprovals, OmniRushWorkspaceBox } from "../../../../app/lib/omnirush-server";
+import type { OmniRushRuntimeApprovals } from "../../../../app/lib/omnirush-server";
 import { omnirushUsageSummary } from "../../../../app/lib/omnirush-usage";
 import { isElectronRuntime } from "../../../../app/utils";
 import {
@@ -38,7 +35,8 @@ import {
 } from "../approval-mode";
 import { DiagnosticsSection } from "./diagnostics-section";
 import { BEST_PRACTICES_HELP, useBestPractices, type BestPracticesClient } from "../best-practices";
-import { LINUX_SANDBOX_HELP, linuxSandboxBackendLine, linuxSandboxOthersLine, linuxSandboxStatusLine, useLinuxSandbox, type LinuxSandboxClient } from "../linux-sandbox";
+import { useLinuxSandbox, type LinuxSandboxClient } from "../linux-sandbox";
+import { LinuxSandboxCard } from "../linux-sandbox-card";
 
 export type GeneralSettingsViewProps = {
   onNavigateTab: (tab: SettingsTab) => void;
@@ -218,85 +216,6 @@ export function BestPracticesCard(props: {
   );
 }
 
-/**
- * Settings > General > Linux sandbox (beta): the selected project's choice,
- * what the sandbox is doing, and Reset (removes its container and installs).
- */
-export function LinuxSandboxCard(props: {
-  box: OmniRushWorkspaceBox | null;
-  busy: boolean;
-  status: string;
-  onToggle: (enabled: boolean) => void;
-  onReset: () => void;
-  onBackend?: (backend: string) => void;
-}) {
-  const box = props.box;
-  const backendItems = box?.backendSetting.choices.map((choice) => ({ value: choice.id, label: choice.label })) ?? [];
-  const others = box ? linuxSandboxOthersLine(box) : null;
-  return (
-    <div className="space-y-3">
-      <div className="text-[11px] font-semibold uppercase tracking-[0.15em] text-dls-secondary">Linux sandbox</div>
-      <div className="flex items-center gap-4 rounded-2xl border border-dls-border bg-dls-surface p-4">
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-dls-border bg-dls-hover">
-          <Box size={17} className="text-dls-secondary" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="text-[13px] font-medium text-dls-text">Run commands in a Linux sandbox (beta)</div>
-          <div id="linux-sandbox-help" className="text-[11px] text-dls-secondary">{LINUX_SANDBOX_HELP}</div>
-          {/* TODO(Sam): data-collection wording for sandboxed chats goes here (what uploads record about the
-              sandbox: Linux as the OS, the container image, per-turn changes outside the project). No copy yet. */}
-          {box ? (
-            <div className="mt-0.5 text-[11px] text-dls-secondary" role="status" data-testid="linux-sandbox-state">{linuxSandboxStatusLine(box)}</div>
-          ) : null}
-          {box ? (
-            <div className="mt-0.5 text-[11px] text-dls-secondary" data-testid="linux-sandbox-backend">
-              {linuxSandboxBackendLine(box)}
-              {box.backend?.why ? <span className="block">{box.backend.why}</span> : null}
-              {others ? <span className="block">{others}</span> : null}
-            </div>
-          ) : null}
-          {props.status ? (
-            <div className="mt-0.5 text-[11px] text-dls-secondary" data-testid="linux-sandbox-status">{props.status}</div>
-          ) : null}
-        </div>
-        {box && props.onBackend ? (
-          <div className="w-44 shrink-0">
-            <Select
-              value={box.backendSetting.value}
-              items={backendItems}
-              onValueChange={(value) => {
-                if (typeof value === "string") props.onBackend?.(value);
-              }}
-              disabled={props.busy || box.backendSetting.source === "env"}
-            >
-              <SelectTrigger className="w-full" aria-label="Sandbox backend">
-                <SelectValue placeholder="Automatic" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  {backendItems.map((item) => (
-                    <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
-                  ))}
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-          </div>
-        ) : null}
-        {box?.on && box.container?.exists ? (
-          <Button variant="outline" size="xs" disabled={props.busy} onClick={props.onReset}>Reset sandbox</Button>
-        ) : null}
-        <Switch
-          aria-label="Run commands in a Linux sandbox"
-          aria-describedby="linux-sandbox-help"
-          checked={box?.on === true}
-          disabled={props.busy || !box || box.source === "env"}
-          onCheckedChange={props.onToggle}
-        />
-      </div>
-    </div>
-  );
-}
-
 export function GeneralSettingsView(props: GeneralSettingsViewProps) {
   const [account, setAccount] = useState<NativeAccountStatus | null>(null);
   const [accountBusy, setAccountBusy] = useState(false);
@@ -466,9 +385,11 @@ export function GeneralSettingsView(props: GeneralSettingsViewProps) {
       {linuxSandboxClient && props.sandboxWorkspaceId ? (
         <LinuxSandboxCard
           box={linuxSandbox.box}
-          busy={linuxSandbox.busy}
-          status={linuxSandbox.status}
+          pending={linuxSandbox.pending}
+          problem={linuxSandbox.problem}
+          notice={linuxSandbox.notice}
           onToggle={(enabled) => void linuxSandbox.setEnabled(enabled)}
+          onRetry={() => void linuxSandbox.retry()}
           onReset={() => void linuxSandbox.reset()}
           onBackend={(backend) => void linuxSandbox.setBackend(backend)}
         />

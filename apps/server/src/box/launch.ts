@@ -18,7 +18,7 @@
 // background, and a shell call waits for it (boxsh).
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { boxKey, containerName, gcBoxes, installShell, openBox, recordFile, savedTurns, type Box, type BoxInstallLog, type BoxLabel, type BoxLog, type BoxRuntime, type CheckpointSummary } from "./box.js";
@@ -133,8 +133,13 @@ export function resolveMode({ env = process.env, project, server, offered = fals
 
 // --- background download ---------------------------------------------------------------
 
-function pullMarker(home: string, runtime: Pick<BoxRuntime, "backend" | "name">, image: string): string {
+export function pullMarker(home: string, runtime: Pick<BoxRuntime, "backend" | "name">, image: string): string {
   return path.join(home, "pulls", `${runtime.backend ?? runtime.name}-${image.replace(/[^a-zA-Z0-9._-]+/g, "_")}.pid`);
+}
+
+/** The detached download's output (Desktop: its progress, pull-progress.ts). */
+export function pullLog(marker: string): string {
+  return marker.replace(/\.pid$/, ".log");
 }
 
 /** Downloads running in this process (a backend with no detached command: the WSL distro). */
@@ -159,7 +164,7 @@ export function pulling(home: string, runtime: Pick<BoxRuntime, "backend" | "nam
  * per image. A backend without a detached command (the WSL distro, whose
  * download imports the distro first) downloads in this process instead.
  */
-export function pullInBackground(runtime: BoxRuntime, image: BoxImage, home: string, { spawnImpl = spawn, env = process.env, log = () => {} }: { spawnImpl?: (command: string, args: string[], options: { detached: boolean; stdio: "ignore"; windowsHide: boolean }) => Pick<ChildProcess, "pid" | "unref">; env?: NodeJS.ProcessEnv; log?: BoxLog } = {}): { started: boolean; pid: number | undefined } {
+export function pullInBackground(runtime: BoxRuntime, image: BoxImage, home: string, { spawnImpl = spawn, env = process.env, log = () => {} }: { spawnImpl?: (command: string, args: string[], options: { detached: boolean; stdio: "ignore" | ["ignore", number, number]; windowsHide: boolean }) => Pick<ChildProcess, "pid" | "unref">; env?: NodeJS.ProcessEnv; log?: BoxLog } = {}): { started: boolean; pid: number | undefined } {
   const marker = pullMarker(home, runtime, image.pull);
   if (inProcess.has(marker)) return { started: false, pid: process.pid };
   try {
@@ -177,7 +182,15 @@ export function pullInBackground(runtime: BoxRuntime, image: BoxImage, home: str
       .finally(() => inProcess.delete(marker));
     return { started: true, pid: process.pid };
   }
-  const child = spawnImpl(cmd.bin, cmd.args, { detached: true, stdio: "ignore", windowsHide: true });
+  // Its output goes to a log next to the marker (the Settings card reads its progress there).
+  let out: number | null = null;
+  try { out = openSync(pullLog(marker), "w", 0o600); } catch { /* no progress then */ }
+  let child: Pick<ChildProcess, "pid" | "unref">;
+  try {
+    child = spawnImpl(cmd.bin, cmd.args, { detached: true, stdio: out === null ? "ignore" : ["ignore", out, out], windowsHide: true });
+  } finally {
+    if (out !== null) closeSync(out);
+  }
   child.unref?.();
   try { writeFileSync(marker, String(child.pid ?? "")); } catch { /* best effort */ }
   return { started: true, pid: child.pid };
@@ -195,6 +208,8 @@ export type ReadyPlan = {
    * POSIX wrappers), mounted into a new box and put on its PATH.
    */
   start: (options?: { pkglog?: BoxInstallLog | null }) => Promise<Box>;
+  /** What the box start is doing ("starting", "pulling", "ready", "failed"; null before it starts). */
+  readonly phase: string | null;
 };
 export type NativePlan = { box: null; notice: string | null; runtime: RuntimeResult | null; image?: BoxImage; downloading?: boolean };
 export type BoxPlan = ReadyPlan | NativePlan;
@@ -231,14 +246,16 @@ export async function planBox({ env = process.env, home, root, log = () => {}, r
   }
   if (env.OMNIRUSH_BOX_GC !== "off") setTimeout(() => gcInBackground(runtime, home, { log }), 30_000).unref?.();
   let opening: Promise<Box> | null = null;
+  let phase: string | null = null;
   return {
     box: { key, home, root, runtime },
     notice: null,
     shell,
     start: ({ pkglog = null } = {}) => {
-      opening ??= openBox({ root, runtime, env, home, log, pull: false, shims, pkglog });
+      opening ??= openBox({ root, runtime, env, home, log, pull: false, shims, pkglog, onState: (state) => { phase = state; } });
       return opening;
     },
+    get phase() { return phase; },
   };
 }
 
@@ -337,9 +354,24 @@ export function boxRun(plan: ReadyPlan, { log = () => {}, readyWaitMs = 30_000, 
     log("warn", "box off for this project", { reason });
     onNative(reason);
   };
+  // The time limit counts while the box starts, not while its image downloads (the CLI's
+  // first --sandbox run on a slow link; here a box opens only once its image is in, so
+  // this only matters if a start ever downloads).
+  let settled = false;
+  opening.finally(() => { settled = true; }).catch(() => {});
+  const limit = () => new Promise<null>((resolve) => {
+    let from = Date.now();
+    const tick = () => {
+      if (settled) return resolve(null);
+      if (plan.phase === "pulling") from = Date.now();
+      if (Date.now() - from >= readyWaitMs) return resolve(null);
+      setTimeout(tick, Math.min(250, readyWaitMs)).unref?.();
+    };
+    tick();
+  });
   const ready = async (): Promise<Box | null> => {
     if (native) return null;
-    const opened = await Promise.race([opening, new Promise<null>((resolve) => setTimeout(() => resolve(null), readyWaitMs))]);
+    const opened = await Promise.race([opening, limit()]);
     if (opened?.ready) return opened;
     if ([...checkpoints.values()].every((count) => count === 0)) goNative(opened?.error || "the sandbox did not start in time");
     return null;

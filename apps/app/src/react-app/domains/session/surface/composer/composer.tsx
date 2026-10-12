@@ -128,6 +128,8 @@ type ComposerProps = {
   fullPermissionsControl?: ReactNode;
   /** The "Sub-agents" model and effort menu, shown right after the model selector. */
   subagentModelControl?: ReactNode;
+  /** The Linux sandbox indicator (only while the project's sandbox is on or offered), after Full permissions. */
+  sandboxControl?: ReactNode;
   /** Voice dictation's local server hop; without it there is no mic button. */
   voiceClient?: VoiceClient | null;
   /** The workspace whose repository and branch hint the transcription. */
@@ -1819,6 +1821,7 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
                 />
                 {props.subagentModelControl}
                 {props.fullPermissionsControl}
+                {props.sandboxControl}
                 {props.modelUnavailable ? props.onRefreshOrganizationModels ? (
                   <button
                     type="button"

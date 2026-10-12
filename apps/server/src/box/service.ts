@@ -28,9 +28,10 @@ import { boxHome, boxKey, boxSnapshotsDir, containerName, installShell, listBoxe
 import { LABELS, OPT_IN, backendsFor, driverFor } from "./backends/index.js";
 import type { BoxExec } from "./backends/types.js";
 import { detectStack, imageFor } from "./images.js";
-import { askedBackend, boxRun, planBox, pulling, pullInBackground, resolveMode, saveBackend, serverBackends, serverDefault, shimsDir, type BoxRun, type ProjectBoxMode, type ServerBoxDefault } from "./launch.js";
+import { askedBackend, boxRun, planBox, pullLog, pullMarker, pulling, pullInBackground, resolveMode, saveBackend, serverBackends, serverDefault, shimsDir, type BoxRun, type ProjectBoxMode, type ServerBoxDefault } from "./launch.js";
 import type { BoxInstallLogPaths } from "./install-log.js";
 import { DESKTOP_PROJECTS_FILE } from "./plugin-lib.js";
+import { layerSizes, pullProgress, type PullProgress } from "./pull-progress.js";
 import { detectRuntime, type BackendAlternative, type DetectOptions, type RuntimeResult } from "./runtime.js";
 
 /** What the capture side needs of a chat's box (plain data: it crosses to the capture worker). */
@@ -68,7 +69,11 @@ export type BoxStatus = {
   /** The machine's backend setting and the values it takes here. */
   backendSetting: { value: string; source: "env" | "setting" | "auto"; choices: Array<{ id: string; label: string }> };
   image: { ref: string; stack: string; present: boolean | null; downloading: boolean } | null;
+  /** How far the image download is (while it downloads, when the runtime's output says). */
+  progress: PullProgress | null;
   container: { name: string; exists: boolean; running: boolean } | null;
+  /** The server's OS (the card's next step when no backend works). */
+  platform: NodeJS.Platform;
   /** One line for the user (why it is off, that it is downloading). */
   notice: string | null;
   error: string | null;
@@ -106,7 +111,8 @@ export type BoxServiceOptions = {
   env?: NodeJS.ProcessEnv;
 };
 
-type Project = { run: BoxRun | null; notice: string | null; planning: Promise<BoxRun | null> | null; nextPlanAt: number };
+/** `waitingImage`: planned while its image was downloading (planned again as soon as the image is here). */
+type Project = { run: BoxRun | null; notice: string | null; planning: Promise<BoxRun | null> | null; nextPlanAt: number; waitingImage: boolean };
 
 /** A project whose image is downloading is planned again at most this often. */
 const REPLAN_MS = 15_000;
@@ -222,7 +228,7 @@ export class BoxService {
     if (workspace.workspaceType !== "local") return Promise.resolve(null);
     const root = boxRoot(workspace);
     const key = boxKey(root);
-    const project = this.projects.get(key) ?? { run: null, notice: null, planning: null, nextPlanAt: 0 };
+    const project = this.projects.get(key) ?? { run: null, notice: null, planning: null, nextPlanAt: 0, waitingImage: false };
     this.projects.set(key, project);
     if (project.planning) return project.planning;
     project.planning = (async () => {
@@ -236,6 +242,7 @@ export class BoxService {
       if (project.run && !project.run.native) return project.run;
       if (Date.now() < project.nextPlanAt) return null;
       const plan = await planBox({ env: this.env, home: this.home, root, log: this.log, shims: shimsDir(this.env), ...this.detectOptions() });
+      project.waitingImage = !plan.box && plan.downloading === true;
       if (!plan.box) {
         project.run = null;
         project.notice = plan.notice;
@@ -314,7 +321,7 @@ export class BoxService {
     const base = { mode: settings.mode, serverDefault: server, on, source, offer, error: null };
     const backendSetting = { ...askedBackend({ env: this.env, stateDir: this.options.stateDir }), choices: backendChoices() };
     const setting = { value: backendSetting.backend, source: backendSetting.source, choices: backendSetting.choices };
-    if (workspace.workspaceType !== "local") return { ...base, on: false, offer: false, state: "off", runtime: null, backend: null, backendSetting: setting, image: null, container: null, notice: "The sandbox is for folders on this computer." };
+    if (workspace.workspaceType !== "local") return { ...base, on: false, offer: false, state: "off", runtime: null, backend: null, backendSetting: setting, image: null, progress: null, container: null, platform: process.platform, notice: "The sandbox is for folders on this computer." };
     // The full check (every backend) on a fresh look or once a minute; the cached choice otherwise.
     const { asked, allow } = this.detectOptions();
     const altKey = JSON.stringify([asked, allow]);
@@ -349,6 +356,15 @@ export class BoxService {
       container = { name, exists: Boolean(mine), running: Boolean(mine?.running) };
     }
     const downloading = runtime.ok && pulling(this.home, runtime, image.pull);
+    // The download finished: plan the project now (not at its next chat), so the card goes on to starting and ready.
+    if (on && runtime.ok && project?.waitingImage && !downloading && (present || container?.exists)) {
+      project.waitingImage = false;
+      project.notice = null;
+      project.nextPlanAt = 0;
+      void this.ensure(workspace).catch(() => null);
+    }
+    const marker = runtime.ok ? pullMarker(this.home, runtime, image.pull) : null;
+    const progress = downloading && marker && runtime.ok ? pullProgress(pullLog(marker), marker, layerSizes(runtime, image)) : null;
     const record = readRecord(this.home, key);
     const run = project?.run ?? null;
     const state: BoxStatus["state"] = !on ? "off"
@@ -363,10 +379,32 @@ export class BoxService {
       backend,
       backendSetting: setting,
       image: { ref: image.pull, stack: image.stack, present, downloading },
+      progress,
       container,
+      platform: process.platform,
       notice: on ? project?.notice ?? (runtime.ok ? null : `Sandbox off for now: ${runtime.reason}.`) : null,
       error: run?.box?.error ?? (record?.state === "off" || record?.state === "failed" ? record.error || null : null),
     };
+  }
+
+  /**
+   * Try again now (the card's retry): a box that failed to start, or a
+   * project that went on without it, is planned again; its container and
+   * installs stay. The status after a fresh check.
+   */
+  async retry(workspace: BoxWorkspace): Promise<BoxStatus> {
+    const project = this.projects.get(boxKey(boxRoot(workspace)));
+    if (project && (project.run?.native || project.run?.box?.state === "failed")) project.run = null;
+    if (project) {
+      project.notice = null;
+      project.nextPlanAt = 0;
+    }
+    this.alternatives = null;
+    // A runtime started or installed meanwhile: the cached answer (a failure is kept 2 minutes) is asked again.
+    await Promise.race([this.detect({ fresh: true }), new Promise((resolve) => setTimeout(resolve, 10_000).unref?.())]);
+    await this.writeProjects();
+    void this.ensure(workspace).catch(() => null);
+    return this.status(workspace, { fresh: true });
   }
 
   /** Remove the project's container (installs gone); the next chat starts a fresh one. */

@@ -93,6 +93,12 @@ describe("Linux sandbox through the server", () => {
       const status = await on.json();
       expect(status).toMatchObject({ mode: "on", on: true, source: "project", state: "unavailable", engine: { status: "unmanaged" } });
       expect(status.runtime.ok).toBe(false);
+      expect(status).toMatchObject({ platform: process.platform, progress: null });
+      // Try again (the card's retry and Check again): a fresh look; still no runtime here.
+      const retried = await fetch(`${base}/workspace/${WORKSPACE_ID}/box/retry`, { method: "POST", headers, body: "{}" });
+      expect(retried.status).toBe(200);
+      expect(await retried.json()).toMatchObject({ mode: "on", on: true, state: "unavailable" });
+      expect(policyRequestActions("POST", `/workspace/${WORKSPACE_ID}/box/retry`)).toEqual(["settings"]);
       expect(await readOmniRushWorkspaceConfig(config, WORKSPACE_ID)).toMatchObject({ localBox: { mode: "on", offered: true } });
       const withBox = await engineConfig();
       expect(withBox.shell).toBe(join(root, "box-home", "shell-desktop", "bash"));

@@ -3827,6 +3827,15 @@ function createRoutes(
     return jsonResponse({ ...status, engine });
   });
 
+  // Try again now: a box that failed to start (or a project that went on without it) is planned again.
+  addRoute(routes, "POST", "/workspace/:id/box/retry", "client", async (ctx) => {
+    ensureWritable(config);
+    requireClientScope(ctx, "collaborator");
+    const workspace = await resolveWorkspace(config, ctx.params.id);
+    if (workspace.workspaceType !== "local") throw new ApiError(400, "box_unsupported", "The sandbox is for folders on this computer");
+    return jsonResponse(await boxServiceFor(config).retry(workspace));
+  });
+
   addRoute(routes, "POST", "/workspace/:id/box/reset", "client", async (ctx) => {
     ensureWritable(config);
     requireClientScope(ctx, "collaborator");

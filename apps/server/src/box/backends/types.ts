@@ -6,7 +6,7 @@ import type { ChildProcess, SpawnOptions } from "node:child_process";
 import type { BoxEndpoint } from "../client.js";
 import type { BoxInstallLog, BoxLog, BoxRuntime } from "../common.js";
 import type { BoxImage } from "../images.js";
-import type { RunCommand, RunResult } from "../run.js";
+import type { RunCommand, RunOptions, RunResult } from "../run.js";
 
 type Env = NodeJS.ProcessEnv;
 
@@ -34,6 +34,8 @@ export type OpenContext = {
   platform: NodeJS.Platform;
   log: BoxLog;
   onPulling: () => void;
+  /** The download's output lines as they come (its progress). */
+  onLine?: RunOptions["onLine"];
   spawnImpl?: SpawnLike;
 };
 
@@ -53,10 +55,10 @@ export type Opened =
   }
   | { ok: false; error: string };
 
-export type PresentImage = { id: string; digest: string | null; arch: string; config?: string };
+export type PresentImage = { id: string; digest: string | null; arch: string; config?: string; size?: number | null };
 export type ListedBox = { key: string; name: string; root: string; running: boolean; image: string; created: string };
 export type Removed = { kind: string; name: string; reason: string };
-export type DriverOptions = { run?: RunCommand; env?: Env; home?: string; timeoutMs?: number; log?: BoxLog };
+export type DriverOptions = { run?: RunCommand; env?: Env; home?: string; timeoutMs?: number; log?: BoxLog; onLine?: RunOptions["onLine"] };
 
 export type BoxDriver = {
   kind: "container" | "bwrap" | "apple" | "wsl" | "wslc";

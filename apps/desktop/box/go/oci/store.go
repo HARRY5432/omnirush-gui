@@ -24,6 +24,9 @@ import (
 // Store keeps unpacked images: <dir>/images/<id>/{rootfs/,image.json}.
 type Store struct {
 	Dir string
+	// Bytes, when set, hears the download as it goes: compressed bytes read
+	// so far over the image's total (the layers' sizes), for a progress line.
+	Bytes func(done, total int64)
 }
 
 // ImageID names an unpacked image: the digest it was pinned by, per arch.
@@ -162,13 +165,28 @@ func (s Store) Pull(ctx context.Context, c *Client, ref Ref, arch string, opt Ap
 	if err := os.MkdirAll(u.Root, 0o755); err != nil {
 		return nil, "", err
 	}
+	var total, done int64
+	for _, layer := range img.Layers {
+		total += layer.Size
+	}
+	if s.Bytes != nil {
+		s.Bytes(0, total)
+	}
 	for i, layer := range img.Layers {
 		var lastErr error
+		base := done
 		for attempt := 0; attempt < 3; attempt++ {
 			if attempt > 0 {
 				time.Sleep(time.Duration(attempt*2) * time.Second)
 			}
-			lastErr = s.applyBlob(ctx, c, ref, u, layer.Digest)
+			// A retry re-reads the whole layer: its bytes count again from its start.
+			done = base
+			lastErr = s.applyBlob(ctx, c, ref, u, layer.Digest, func(n int64) {
+				done += n
+				if s.Bytes != nil {
+					s.Bytes(done, total)
+				}
+			})
 			if lastErr == nil || ctx.Err() != nil {
 				break
 			}
@@ -192,20 +210,38 @@ func (s Store) Pull(ctx context.Context, c *Client, ref Ref, arch string, opt Ap
 
 // applyBlob streams one layer into the unpacker. A retry after a failure
 // half-way re-applies the whole layer, which is idempotent.
-func (s Store) applyBlob(ctx context.Context, c *Client, ref Ref, u *Unpacker, digest string) error {
+func (s Store) applyBlob(ctx context.Context, c *Client, ref Ref, u *Unpacker, digest string, read func(int64)) error {
 	rc, err := c.OpenBlob(ctx, ref, digest)
 	if err != nil {
 		return err
 	}
 	defer rc.Close()
-	if _, err := u.Apply(rc); err != nil {
+	var r io.Reader = rc
+	if read != nil {
+		r = countingReader{r: rc, read: read}
+	}
+	if _, err := u.Apply(r); err != nil {
 		return err
 	}
 	// Read to the end so the digest is checked.
-	if _, err := io.Copy(io.Discard, rc); err != nil {
+	if _, err := io.Copy(io.Discard, r); err != nil {
 		return err
 	}
 	return rc.Close()
+}
+
+// countingReader reports how many bytes each Read returned.
+type countingReader struct {
+	r    io.Reader
+	read func(int64)
+}
+
+func (c countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if n > 0 {
+		c.read(int64(n))
+	}
+	return n, err
 }
 
 func (s Store) rememberTag(ref Ref, arch, id string) error {

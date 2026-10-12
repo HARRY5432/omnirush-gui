@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { writeSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { boxKey, containerName, containerRoot, createArgs, credentialPath, filterChanges, helperPath, installShell, parseDiff, parseSize, rt, setToolsRoot, singleFileTar, wslPath } from "./box.js";
+import { Box, boxKey, containerName, containerRoot, createArgs, credentialPath, filterChanges, helperPath, installShell, parseDiff, parseSize, rt, setToolsRoot, singleFileTar, wslPath } from "./box.js";
 import { readBoxSettings } from "./desktop.js";
 import { detectStack, imageFor } from "./images.js";
-import { engineConfig, gcInBackground, mapToBox, rememberServerDefault, resolveMode, serverDefault } from "./launch.js";
+import { boxRun, engineConfig, gcInBackground, mapToBox, pullInBackground, pullLog, pullMarker, rememberServerDefault, resolveMode, serverDefault } from "./launch.js";
+import { clearLayerSizes, layerSizes, parseManifestSizes, parsePullLog, pullProgress } from "./pull-progress.js";
 import { DESKTOP_PROJECTS_FILE } from "./plugin-lib.js";
 import { candidates, detectRuntime, explainFailure, probe, probeWsl, wslLauncher, type RunCommand } from "./runtime.js";
 import { BoxService, type BoxWorkspace } from "./service.js";
@@ -262,6 +264,17 @@ describe("box service", () => {
     expect(await none.engineBits()).toBeNull();
   });
 
+  test("Try again with no runtime: a fresh look, still unavailable, with the OS for the card's next step", async () => {
+    const stateDir = await temp("state");
+    const root = await temp("project");
+    const workspace: BoxWorkspace = { id: "ws_t", path: root, workspaceType: "local" };
+    const settings: Settings = new Map([["ws_t", { mode: "on", offered: true }]]);
+    const boxes = service({ stateDir, workspaces: [workspace], settings, env: { OMNIRUSH_BOX_HOME: await temp("boxhome"), OMNIRUSH_BOX_BIN_DIR: await helpers(), PATH: "", OMNIRUSH_BOX_RUNTIME: "/nonexistent/docker" } });
+    const status = await boxes.retry(workspace);
+    expect(status).toMatchObject({ on: true, state: "unavailable", platform: process.platform, progress: null });
+    expect(settings.get("ws_t")).toEqual({ mode: "on", offered: true });
+  });
+
   test("a remote workspace never gets a box", async () => {
     const stateDir = await temp("state");
     const workspace: BoxWorkspace = { id: "ws_r", path: "/remote", workspaceType: "remote" };
@@ -356,5 +369,118 @@ describe("box install log and upkeep", () => {
     const system: string[] = [];
     await hooks["experimental.chat.system.transform"]({}, { system });
     expect(system[0]).toContain(`${root} is /c/proj inside the container`);
+  });
+});
+
+describe("box download progress (the Settings card's bar)", () => {
+  const DOCKER_LOG = [
+    "2026.10.2: Pulling from omnirush-ai/box-go",
+    "aaaaaaaaaaaa: Already exists",
+    "bbbbbbbbbbbb: Pulling fs layer",
+    "cccccccccccc: Pulling fs layer",
+    "bbbbbbbbbbbb: Waiting",
+    "cccccccccccc: Downloading",
+    "cccccccccccc: Verifying Checksum",
+    "cccccccccccc: Download complete",
+    "",
+  ].join("\n");
+
+  test("the runtime's piped output: layers named and downloaded (Docker and Podman)", () => {
+    expect(parsePullLog(DOCKER_LOG)).toEqual({ seen: ["aaaaaaaaaaaa", "bbbbbbbbbbbb", "cccccccccccc"], done: new Set(["aaaaaaaaaaaa", "cccccccccccc"]), bytes: null, layers: 3 });
+    const podman = parsePullLog("Trying to pull ghcr.io/x...\nCopying blob sha256:dddddddddddd1111 done   |\nCopying blob eeeeeeeeeeee2222\nCopying blob ffffffffffff skipped: already exists\n");
+    expect(podman).toEqual({ seen: ["dddddddddddd", "eeeeeeeeeeee", "ffffffffffff"], done: new Set(["dddddddddddd", "ffffffffffff"]), bytes: null, layers: 3 });
+    // bubblewrap's boxrun: its byte count (the latest line wins), and whole layers as they land.
+    const boxrun = parsePullLog(`{"progress":{"bytes":0,"total":259000000}}\n{"progress":{"bytes":52000000,"total":259000000}}\nlayer 1/3 sha256:${"a".repeat(64)} 52000000 bytes\n{"progress":{"bytes":131000000,"total":259000000}}\n{"progress":{"by`);
+    expect(boxrun).toMatchObject({ bytes: { done: 131_000_000, total: 259_000_000 }, layers: 3, done: new Set(["aaaaaaaaaaaa"]) });
+  });
+
+  test("layer sizes for this platform from `manifest inspect -v` (a list or one manifest)", () => {
+    const list = JSON.stringify([
+      { Descriptor: { platform: { os: "linux", architecture: "arm64" } }, OCIManifest: { layers: [{ digest: `sha256:${"9".repeat(64)}`, size: 1 }] } },
+      { Descriptor: { platform: { os: "linux", architecture: "amd64" } }, OCIManifest: { layers: [{ digest: `sha256:${"a".repeat(64)}`, size: 1000 }, { digest: `sha256:${"b".repeat(64)}`, size: 5000 }] } },
+    ]);
+    expect(parseManifestSizes(list, "amd64")).toEqual(new Map([["aaaaaaaaaaaa", 1000], ["bbbbbbbbbbbb", 5000]]));
+    expect(parseManifestSizes(JSON.stringify({ SchemaV2Manifest: { layers: [{ digest: `sha256:${"c".repeat(64)}`, size: 7 }] } }), "arm64")).toEqual(new Map([["cccccccccccc", 7]]));
+    expect(parseManifestSizes("not json")).toBeNull();
+    expect(parseManifestSizes(list, "riscv64")).toBeNull();
+  });
+
+  test("progress: bytes of the downloaded layers out of the layers the runtime downloads; layers only without sizes", async () => {
+    const home = await temp("pulls");
+    const marker = join(home, "docker-img.pid");
+    await writeFile(marker, "123");
+    await writeFile(pullLog(marker), DOCKER_LOG);
+    const sizes = new Map([["aaaaaaaaaaaa", 100], ["bbbbbbbbbbbb", 300], ["cccccccccccc", 600], ["dddddddddddd", 9_999]]);
+    // dddd... is in the image but already here and never named: not part of this download.
+    expect(pullProgress(pullLog(marker), marker, sizes)).toMatchObject({ bytesDone: 700, bytesTotal: 1000, layersDone: 2, layersTotal: 3 });
+    expect(pullProgress(pullLog(marker), marker, null)).toMatchObject({ bytesDone: null, bytesTotal: null, layersDone: 2, layersTotal: 3 });
+    // Sizes that do not cover a named layer belong to something else: no bytes.
+    expect(pullProgress(pullLog(marker), marker, new Map([["aaaaaaaaaaaa", 1]]))).toMatchObject({ bytesDone: null, bytesTotal: null });
+    expect(pullProgress(pullLog(marker), marker, sizes)?.startedAt).toBeGreaterThan(0);
+    await writeFile(pullLog(marker), `{"progress":{"bytes":65000000,"total":259000000}}\n`);
+    expect(pullProgress(pullLog(marker), marker, null)).toMatchObject({ bytesDone: 65_000_000, bytesTotal: 259_000_000 });
+    // No log (a download in this process): no progress.
+    expect(pullProgress(join(home, "none.log"), marker, sizes)).toBeNull();
+  });
+
+  test("the sizes are asked once per image, in the background, and only of Docker", async () => {
+    clearLayerSizes();
+    const calls: string[][] = [];
+    const run: RunCommand = async (_bin, args) => {
+      calls.push(args);
+      return { code: 0, stdout: JSON.stringify({ SchemaV2Manifest: { layers: [{ digest: `sha256:${"a".repeat(64)}`, size: 42 }] } }), stderr: "" };
+    };
+    const image = { stack: "base", ref: "r", digest: null, pull: "r:1" };
+    expect(layerSizes({ name: "podman", bin: "podman" }, image, { run })).toBeNull();
+    expect(layerSizes({ name: "docker", bin: "docker" }, image, { run })).toBeNull();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(layerSizes({ name: "docker", bin: "docker" }, image, { run })).toEqual(new Map([["aaaaaaaaaaaa", 42]]));
+    expect(calls).toEqual([["manifest", "inspect", "-v", "r:1"]]);
+    clearLayerSizes();
+  });
+
+  test("the detached download writes its output next to its marker", async () => {
+    const home = await temp("boxhome");
+    const runtime = { name: "docker", bin: "docker", backend: "docker" };
+    const image = { stack: "base", ref: "img", digest: null, pull: "img:1" };
+    let seen: unknown = null;
+    const started = pullInBackground(runtime, image, home, {
+      spawnImpl: (_command, _args, options) => {
+        seen = options.stdio;
+        if (Array.isArray(options.stdio)) writeSync(options.stdio[1], "aaaaaaaaaaaa: Pulling fs layer\n");
+        return { pid: 999_999_999, unref: () => {} };
+      },
+    });
+    expect(started.started).toBe(true);
+    expect(Array.isArray(seen) && seen[0] === "ignore").toBe(true);
+    expect(await readFile(pullLog(pullMarker(home, runtime, image.pull)), "utf8")).toBe("aaaaaaaaaaaa: Pulling fs layer\n");
+  });
+});
+
+describe("box start limit", () => {
+  test("the start limit counts while the box starts, not while its image downloads", async () => {
+    const home = await temp("boxhome");
+    const root = await temp("project");
+    const box = new Box({ key: "k", name: "n", root, croot: root, runtime: { name: "docker", bin: "docker" }, home, runFolder: join(home, "run"), run: async () => ({ code: 0, stdout: "", stderr: "" }), log: () => {}, platform: "linux", env: {} });
+    let phase: string | null = "pulling";
+    let open: (value: Box) => void = () => {};
+    const opening = new Promise<Box>((resolve) => { open = resolve; });
+    const run = boxRun({ box: { key: "k", home, root, runtime: { name: "docker", bin: "docker" } }, notice: null, shell: "bash", start: () => opening, get phase() { return phase; } }, { readyWaitMs: 60 });
+    const waiting = run.ready();
+    // 200 ms of download: longer than the 60 ms limit, which does not run meanwhile.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    phase = "starting";
+    box.setState("ready", null);
+    open(box);
+    expect(await waiting).toBe(box);
+    expect(run.native).toBe(false);
+  });
+
+  test("a start that takes longer than the limit (no download) goes on without the box", async () => {
+    const home = await temp("boxhome");
+    const root = await temp("project");
+    const run = boxRun({ box: { key: "k2", home, root, runtime: { name: "docker", bin: "docker" } }, notice: null, shell: "bash", start: () => new Promise<Box>(() => {}), get phase() { return "starting"; } }, { readyWaitMs: 40 });
+    expect(await run.ready()).toBeNull();
+    expect(run.native).toBe(true);
   });
 });

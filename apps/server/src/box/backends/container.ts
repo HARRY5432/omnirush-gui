@@ -75,10 +75,10 @@ export async function inspectImage(runtime: BoxRuntime, image: string, { run = r
 }
 
 /** `pull` with retries (a flaky link picks up where it stopped). */
-export async function pullImage(runtime: BoxRuntime, image: string, { run = runCommand, pauses = [2_000, 8_000], timeoutMs = 60 * 60_000, sleep = (ms: number) => new Promise((r) => setTimeout(r, ms)) }: { run?: RunCommand; pauses?: number[]; timeoutMs?: number; sleep?: (ms: number) => Promise<unknown> } = {}): Promise<{ ok: true; attempts: number } | { ok: false; error: string }> {
+export async function pullImage(runtime: BoxRuntime, image: string, { run = runCommand, pauses = [2_000, 8_000], timeoutMs = 60 * 60_000, sleep = (ms: number) => new Promise((r) => setTimeout(r, ms)), onLine }: { run?: RunCommand; pauses?: number[]; timeoutMs?: number; sleep?: (ms: number) => Promise<unknown>; onLine?: RunOptions["onLine"] } = {}): Promise<{ ok: true; attempts: number } | { ok: false; error: string }> {
   let last = null;
   for (let attempt = 0; attempt <= pauses.length; attempt += 1) {
-    last = await rt(runtime, run)(["pull", image], { timeoutMs });
+    last = await rt(runtime, run)(["pull", image], { timeoutMs, ...(onLine ? { onLine } : {}) });
     if (last.code === 0) return { ok: true, attempts: attempt + 1 };
     if (attempt < pauses.length) await sleep(pauses[attempt]!);
   }
@@ -181,7 +181,7 @@ export function parseSize(text: unknown): number | null {
 
 /** Create (or start) the project's container; boxd answers on a published loopback port. */
 async function open(ctx: OpenContext): Promise<Opened> {
-  const { key, name, root, croot, runtime, run, runFolder, image, pull, shims, pkglog, env, platform, log, onPulling } = ctx;
+  const { key, name, root, croot, runtime, run, runFolder, image, pull, shims, pkglog, env, platform, log, onPulling, onLine } = ctx;
   let info = await inspectContainer(runtime, name, run);
   if (info && info.labels?.[`${LABEL}.root`] && info.labels[`${LABEL}.root`] !== root) {
     return { ok: false, error: `container ${name} belongs to another folder` };
@@ -192,7 +192,7 @@ async function open(ctx: OpenContext): Promise<Opened> {
     if (!present) {
       if (!pull) return { ok: false, error: "the sandbox image is not downloaded yet" };
       onPulling();
-      const pulled = await pullImage(runtime, image.pull, { run });
+      const pulled = await pullImage(runtime, image.pull, { run, onLine });
       if (!pulled.ok) return { ok: false, error: `could not download the sandbox image: ${pulled.error}` };
       present = await inspectImage(runtime, image.pull, { run });
       if (!present) return { ok: false, error: "the sandbox image is not there after the download" };
@@ -250,10 +250,10 @@ export const containerDriver: BoxDriver = {
   execFallback: true,
   async imagePresent(runtime, image, { run = runCommand } = {}) {
     const found = await inspectImage(runtime, image.pull, { run });
-    return found ? { id: found.id, digest: found.digest, arch: found.arch } : null;
+    return found ? { id: found.id, digest: found.digest, arch: found.arch, size: found.size || null } : null;
   },
-  pull(runtime, image, { run = runCommand } = {}) {
-    return pullImage(runtime, image.pull, { run });
+  pull(runtime, image, { run = runCommand, onLine } = {}) {
+    return pullImage(runtime, image.pull, { run, onLine });
   },
   /** The detached download (the app keeps no handle on it). */
   pullCommand(runtime, image) {

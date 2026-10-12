@@ -149,6 +149,15 @@ func cmdPull(args []string) error {
 	defer cancel()
 	start := time.Now()
 	s := oci.Store{Dir: *store}
+	// A progress line on stderr at most every 200 ms (and at the end of each
+	// layer): {"progress":{"bytes":N,"total":M}}, read by the CLI's progress line.
+	var last time.Time
+	s.Bytes = func(done, total int64) {
+		if now := time.Now(); now.Sub(last) >= 200*time.Millisecond || done == total {
+			last = now
+			fmt.Fprintf(os.Stderr, "{\"progress\":{\"bytes\":%d,\"total\":%d}}\n", done, total)
+		}
+	}
 	img, id, err := s.Pull(ctx, oci.NewClient(), ref, *arch, oci.ApplyOptions{Chown: os.Geteuid() == 0}, func(i, n int, digest string, size int64) {
 		fmt.Fprintf(os.Stderr, "layer %d/%d %s %d bytes\n", i, n, digest, size)
 	})

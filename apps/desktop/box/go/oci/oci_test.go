@@ -259,12 +259,23 @@ func TestPullIndexWithToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	ref.Registry = strings.TrimPrefix(srv.URL, "http://")
-	store := Store{Dir: t.TempDir()}
+	var seen, lastDone, lastTotal int64
+	store := Store{Dir: t.TempDir(), Bytes: func(done, total int64) {
+		if done < lastDone {
+			t.Errorf("progress went back: %d after %d", done, lastDone)
+		}
+		seen++
+		lastDone, lastTotal = done, total
+	}}
 	c := NewClient()
 	img, id, err := store.Pull(context.Background(), c, ref, "x64", ApplyOptions{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if want := int64(len(l1) + len(l2)); seen < 2 || lastTotal != want || lastDone != want {
+		t.Fatalf("progress: %d calls, ended at %d/%d, want %d", seen, lastDone, lastTotal, want)
+	}
+	store.Bytes = nil
 	if img.Digest != idxDigest || img.Arch != "amd64" || len(img.Env) != 2 || img.WorkDir != "/root" {
 		t.Fatalf("%+v", img)
 	}

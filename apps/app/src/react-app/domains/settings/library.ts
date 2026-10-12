@@ -16,7 +16,9 @@ export type ComposerSettingsSection =
   | "plugins"
   | "connections"
   | "extensions"
-  | "providers";
+  | "providers"
+  /** Settings > General > Linux sandbox. */
+  | "sandbox";
 
 /** Fallback when Configure has no + menu section (opens the full inventory). */
 export const COMPOSER_CONFIGURE_SECTION = "extensions" satisfies ComposerSettingsSection;
@@ -43,7 +45,7 @@ export function composerConfigureSectionForMenu(section: string): ComposerSettin
 
 /** URL tail under /extensions for a composer Configure destination. */
 export function libraryPathForSection(section: ComposerSettingsSection): string {
-  if (section === "providers" || section === "extensions") return LIBRARY_ROUTE_PATH;
+  if (section === "providers" || section === "extensions" || section === "sandbox") return LIBRARY_ROUTE_PATH;
   return section;
 }
 
@@ -153,13 +155,14 @@ export function libraryAgentsFromOpencode(
 
 export type ComposerConfigureDestination =
   | { kind: "library"; path: string }
-  | { kind: "settings"; route: "/settings/ai" };
+  | { kind: "settings"; route: "/settings/ai" | "/settings/general#linux-sandbox" };
 
-/** Configure from the composer opens the matching Library filter, except providers. */
+/** Configure from the composer opens the matching Library filter, except providers and the sandbox (Settings). */
 export function composerConfigureDestination(
   section: ComposerSettingsSection,
 ): ComposerConfigureDestination {
   if (section === "providers") return { kind: "settings", route: "/settings/ai" };
+  if (section === "sandbox") return { kind: "settings", route: "/settings/general#linux-sandbox" };
   return { kind: "library", path: libraryPathForSection(section) };
 }
 
