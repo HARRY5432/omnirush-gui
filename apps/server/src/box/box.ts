@@ -211,8 +211,16 @@ export async function openBox({ root, runtime, env = process.env, platform = pro
   try {
     box.setState("starting", null, onState);
     const chosen = asked ?? imageFor(detectStack(projectRoot), { env });
-    const opened = await driver.open({ key, name, root: projectRoot, croot, runtime, run, home, runFolder, image: chosen, pull, shims, pkglog, env, platform, log, ...(spawnImpl ? { spawnImpl } : {}), ...(onLine ? { onLine } : {}), onPulling: () => box.setState("pulling", null, onState) });
-    if (!opened.ok) return box.fail(opened.error, onState);
+    let opened: Awaited<ReturnType<typeof driver.open>>;
+    for (let attempt = 0; ; attempt += 1) {
+      opened = await driver.open({ key, name, root: projectRoot, croot, runtime, run, home, runFolder, image: chosen, pull, shims, pkglog, env, platform, log, ...(spawnImpl ? { spawnImpl } : {}), ...(onLine ? { onLine } : {}), onPulling: () => box.setState("pulling", null, onState) });
+      if (!opened.ok) return box.fail(opened.error, onState);
+      if (opened.created || attempt > 0 || !(await mountReplaced(opened, { croot, readyMs }))) break;
+      // The folder was deleted and made again at its path (a new clone) while its box ran:
+      // the box still has the old, deleted one, where every command fails. A restart mounts the new one.
+      log("info", "box restarted: its folder was replaced since it started", { key });
+      await driver.stop(runtime, key, { run, env, home });
+    }
     if (opened.created) writeJson(path.join(home, "chains", key, "image.json"), { ...opened.created, backend: runtime.backend ?? runtime.name, created_at: new Date().toISOString() });
     // The first address that answers: the published/loopback one, then the box's own (Apple, WSL any).
     const ways = [opened.endpoint, ...(opened.alternates ?? [])];
@@ -262,6 +270,30 @@ async function acquireLock(home: string, key: string, { waitMs = 60_000 }: { wai
       await new Promise((resolve) => setTimeout(resolve, 150));
     }
   }
+}
+
+/**
+ * Whether the box's project folder is a deleted one (link count 0): the
+ * folder on this machine was removed and made again since the box started.
+ * Asks boxd at the first address that answers; false when it cannot tell.
+ */
+export async function mountReplaced(opened: { endpoint?: BoxEndpoint; alternates?: BoxEndpoint[] }, { croot, readyMs = 15_000, exec = client.exec, ping = client.ping }: { croot: string; readyMs?: number; exec?: typeof client.exec; ping?: typeof client.ping }): Promise<boolean> {
+  for (const way of [opened.endpoint, ...(opened.alternates ?? [])]) {
+    if (!way) continue;
+    const deadline = Date.now() + Math.min(readyMs, 5_000);
+    while (Date.now() < deadline) {
+      if (await ping(way, { timeoutMs: 1_000 })) {
+        try {
+          const res = await exec(way, ["stat", "-c", "%h", croot], { cwd: "/", timeoutMs: 5_000 });
+          return res.code === 0 && String(res.stdout).trim() === "0";
+        } catch {
+          return false;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+  return false;
 }
 
 function alive(pid: number): boolean {
@@ -680,8 +712,11 @@ export async function gcBoxes(runtime: BoxRuntime, { env = process.env, home = b
   const removed: Removed = [];
   const boxes = await driver.list(runtime, { run, env, home });
   for (const box of boxes) {
+    // Only this box home's own boxes (the ones it has a record of), never one another live process uses:
+    // a shared engine (rootful Docker) lists every user's boxes, and another user's folder can look gone here.
     const rec = readRecord(home, box.key);
-    const idle = rec?.updated ? (now - rec.updated) / 86_400_000 : Infinity;
+    if (!rec || (rec.pid && rec.pid !== process.pid && alive(rec.pid)) || (rec.root && box.root && path.resolve(rec.root) !== path.resolve(box.root))) continue;
+    const idle = rec.updated ? (now - rec.updated) / 86_400_000 : Infinity;
     if ((box.root && !exists(box.root)) || idle > maxIdleDays) {
       const res = await driver.remove(runtime, box.key, { run, env, home });
       if (res.removed) {
