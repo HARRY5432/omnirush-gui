@@ -15,7 +15,7 @@ import { PassThrough } from "node:stream";
 
 import { OPT_IN, BACKENDS, backendsFor, detectBackend, driverFor, normalizeBackend, ORDER } from "./backends/index.js";
 import { apparmorProfile, boxdEnv, boxrunPath, explainProbe, parseOut, probeBwrap, upArgs } from "./backends/bwrap.js";
-import { createAppleArgs, findDigest, macosMajor, parseVersions, probeApple, snapshotInfo, SUPPORTED as APPLE } from "./backends/apple.js";
+import { createAppleArgs, findDigest, macosMajor, parseVersions, probeApple, snapshotInfo, SUPPORTED as APPLE, systemProductVersion } from "./backends/apple.js";
 import { versionAtLeast } from "./backends/shared.js";
 import { decodeWsl, download, ENABLE_HINT, inDistro, parseWslList, probeWslDistro, startKeeper } from "./backends/wsl.js";
 import { createWslcArgs, labelsOf, parseJsonRows, parseWslcVersion, probeWslc, UPDATE_HINT } from "./backends/wslc.js";
@@ -189,8 +189,14 @@ const appleVersions = [{ appName: "container", version: "1.5.0", buildType: "rel
 
 describe("box backends: macOS", () => {
   test("Apple container: macOS 26 on Apple silicon, the 1.x line, its service running", async () => {
-    expect(macosMajor("25.0.0")).toBe(26);
-    expect(macosMajor("24.6.0")).toBe(25);
+    expect(macosMajor("25.0.0", null)).toBe(26);
+    expect(macosMajor("24.6.0", null)).toBe(15);
+    expect(macosMajor("20.1.0", null)).toBe(11);
+    expect(macosMajor("19.6.0", null)).toBe(null);
+    // This Mac's own version wins over the kernel number (macOS 27.0.1 reports Darwin 27.0.0).
+    expect(macosMajor("27.0.0", "27.0.1")).toBe(27);
+    expect(systemProductVersion(() => "<dict><key>ProductVersion</key>\n\t<string>27.0.1</string></dict>")).toBe("27.0.1");
+    expect(systemProductVersion(() => { throw new Error("ENOENT"); })).toBe(null);
     expect(parseVersions(JSON.stringify(appleVersions))).toEqual({ version: "1.5.0", server: "1.5.0" });
     expect(parseVersions("container CLI version 0.5.0 (build: release, commit: 1234)").version).toBe("0.5.0");
     const base = { platform: "darwin" as const, arch: "arm64", release: "25.1.0", env: { PATH: "/usr/bin" }, exists: set(APPLE_BIN) };
@@ -201,7 +207,7 @@ describe("box backends: macOS", () => {
       return r.ok ? "" : r.reason;
     };
     expect(await reason(good, { arch: "x64" })).toMatch(/Apple silicon/);
-    expect(await reason(good, { release: "24.6.0" })).toMatch(/macOS 26 or later \(this is macOS 25\)/);
+    expect(await reason(good, { release: "24.6.0" })).toMatch(/macOS 26 or later \(this is macOS 15\)/);
     expect(await reason(good, { exists: () => false })).toMatch(/not installed/);
     expect(await reason(async (_b, args) => (args[1] === "version" ? ok([{ appName: "container", version: "0.11.0" }]) : ok("")))).toMatch(/0\.11\.0 is outside the supported 1\.x line/);
     expect((await probeApple({ ...base, run: async (_b, args) => (args[1] === "version" ? ok([{ appName: "container", version: "2.0.0" }]) : ok("")) })).ok).toBe(false);
