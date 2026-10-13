@@ -196,6 +196,8 @@ export function explainFailure(name: string, result: Partial<RunResult>, { platf
   if (result.error === "timeout") return `${name} did not answer in time (is it starting?)`;
   const notRunning = platform === "linux" ? "the Docker daemon is not running" : "Docker is installed but not running (start Docker Desktop, OrbStack or colima)";
   if (name === "docker" && /permission denied/i.test(said) && /docker\.sock|docker daemon socket|docker api/i.test(said)) {
+    // macOS has no docker group: the socket is another account's (Docker Desktop links /var/run/docker.sock to its user's home).
+    if (platform === "darwin") return "Docker's socket belongs to another macOS user (their Docker Desktop); start Docker Desktop, OrbStack or colima in this account";
     return "Docker refused this user (add it to the docker group: `sudo usermod -aG docker $USER`, then log in again), or use rootless Podman";
   }
   if (name === "docker" && result.code !== 0) {

@@ -70,6 +70,9 @@ function stepFor(reason: string, platform: string | undefined): LinuxSandboxNext
   if (/Docker Desktop is installed but not running|Docker is installed but not running/.test(reason)) {
     return { title: "Start your container app", detail: "Open Docker Desktop, OrbStack or colima, wait until it is running, then check again.", command: null };
   }
+  if (/another macOS user/.test(reason)) {
+    return { title: "Start your container app", detail: "Docker here belongs to another account on this Mac. Open Docker Desktop, OrbStack or colima in this account, then check again.", command: null };
+  }
   if (/Docker daemon is not running/.test(reason)) return { title: "Start Docker", detail: "Run this in a terminal, then check again.", command: "sudo systemctl start docker" };
   return null;
 }
