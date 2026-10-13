@@ -78,6 +78,8 @@ export function explainProbe(out: Record<string, unknown> | null): string {
       return `${reason} (\`sudo apt install bubblewrap\` or your system's package)`;
     case "userns_off":
       return `${reason}; an admin can allow them, or use Podman or Docker`;
+    case "container":
+      return `${reason}; run OmniRush on the host, or give this container a Docker or Podman engine`;
     default:
       return reason;
   }

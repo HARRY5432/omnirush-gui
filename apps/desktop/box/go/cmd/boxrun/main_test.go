@@ -77,6 +77,22 @@ func TestClassify(t *testing.T) {
 	if r.Code != "userns_denied" {
 		t.Fatal(r)
 	}
+	// In a container (Docker's seccomp refuses the clone) the host's AppArmor sysctl is
+	// visible but is not what blocks it.
+	refused := "bwrap: No permissions to creating new namespace, likely because the kernel does not allow non-privileged user namespaces."
+	was := inContainer
+	defer func() { inContainer = was }()
+	inContainer = func() bool { return true }
+	if r = classify(probeResult{AppArmor: &one}, refused, fail); r.Code != "container" {
+		t.Fatal(r)
+	}
+	inContainer = func() bool { return false }
+	if r = classify(probeResult{AppArmor: &one}, refused, fail); r.Code != "userns_denied" {
+		t.Fatal(r)
+	}
+	if r = classify(probeResult{AppArmor: &one}, "bwrap: setting up uid map: Permission denied", fail); r.Code != "apparmor" {
+		t.Fatal(r)
+	}
 }
 
 func TestAlive(t *testing.T) {

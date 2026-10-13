@@ -503,17 +503,33 @@ func probe(bwAsked, fuseAsked, dir string) probeResult {
 // classify turns a failed namespace start into one line for the user.
 func classify(r probeResult, text string, fail func(code, reason, detail string) probeResult) probeResult {
 	low := strings.ToLower(text)
+	// bwrap could not even create the namespace (clone refused). Ubuntu's AppArmor
+	// rule lets that through and denies what comes after (the uid map), so this is
+	// never AppArmor: a container's seccomp filter, or namespaces turned off.
+	refused := strings.Contains(low, "no permissions to creat")
 	switch {
-	case r.AppArmor != nil && *r.AppArmor == 1:
+	case refused && inContainer():
+		return fail("container", "this runs in a container that does not allow user namespaces (its seccomp profile)", text)
+	case !refused && r.AppArmor != nil && *r.AppArmor == 1:
 		return fail("apparmor", "AppArmor blocks unprivileged user namespaces (kernel.apparmor_restrict_unprivileged_userns=1, Ubuntu 23.10+)", text)
 	case r.UsernsClone != nil && *r.UsernsClone == 0:
 		return fail("userns_off", "unprivileged user namespaces are off (kernel.unprivileged_userns_clone=0)", text)
 	case r.MaxUserNS != nil && *r.MaxUserNS == 0:
 		return fail("userns_off", "user namespaces are off (user.max_user_namespaces=0)", text)
-	case strings.Contains(low, "setting up uid map") || strings.Contains(low, "uid_map") || strings.Contains(low, "operation not permitted") || strings.Contains(low, "permission denied"):
+	case refused || strings.Contains(low, "setting up uid map") || strings.Contains(low, "uid_map") || strings.Contains(low, "operation not permitted") || strings.Contains(low, "permission denied"):
 		return fail("userns_denied", "this system does not let unprivileged users create namespaces (a container or a hardened kernel)", text)
 	}
 	return fail("start", "bubblewrap could not start a namespace", text)
+}
+
+// inContainer: this process runs in a Docker/Podman (or similar) container.
+var inContainer = func() bool {
+	for _, f := range []string{"/.dockerenv", "/run/.containerenv"} {
+		if _, err := os.Stat(f); err == nil {
+			return true
+		}
+	}
+	return os.Getenv("container") != ""
 }
 
 // probeInner runs inside the probe's namespaces: can overlayfs mount here?
