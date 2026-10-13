@@ -74,7 +74,8 @@ Archive recovery tests on staging passed four cases: base pause/restart,
 delta pause/restart with correct parent, disk exhaustion during packing, and
 concurrent packing under one pending budget. Restored binary bytes match.
 
-Defaults are a 256 MiB pending archive budget and 512 MiB free disk floor,
+Defaults are a 2 GiB pending archive budget (raw file sizes) and a free disk
+floor of 512 MiB or the archive's size, whichever is larger,
 configurable with OMNIRUSH_ARCHIVE_PENDING_BYTE_BUDGET and
 OMNIRUSH_ARCHIVE_MIN_FREE_DISK_BYTES. Reservation estimates are conservative;
 large bases can pause until the budget or available space increases.
