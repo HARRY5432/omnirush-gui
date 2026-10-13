@@ -427,6 +427,38 @@ describe("box service", () => {
     expect(await boxes.listedProjects()).toEqual([]);
   });
 
+  test("a running box whose folder was replaced (a new clone) is planned again at the next prompt", async () => {
+    const stateDir = await temp("state");
+    const home = await temp("boxhome");
+    const root = await temp("project");
+    const workspace: BoxWorkspace = { id: "ws_c", path: root, workspaceType: "local" };
+    let replaced = false;
+    const asked: string[] = [];
+    const boxes = new BoxService({
+      stateDir,
+      readSettings: async () => ({ mode: "on", offered: true }),
+      writeSettings: async () => {},
+      workspaces: () => [workspace],
+      pluginPath: () => "/plugins/omnirush-box.js",
+      env: { OMNIRUSH_BOX_HOME: home, PATH: "", OMNIRUSH_BOX_RUNTIME: "/nonexistent/docker" },
+      folderReplaced: async ({ croot }) => { asked.push(croot); return replaced; },
+    });
+    const box = new Box({ key: boxKey(root), name: "n", root, croot: root, runtime: { name: "docker", bin: "docker" }, home, runFolder: await temp("run"), run: async () => ({ code: 0, stdout: "", stderr: "" }), log: () => {}, platform: "linux", env: {} });
+    box.connect({ port: 1, token: "t", uid: 0, gid: 0, containerId: "c", imageId: "i" });
+    box.setState("ready", null);
+    const run: BoxRun = {
+      key: boxKey(root), container: "c", runtimeBin: "docker", runtimeArgs: [], backend: "docker", exec: null, root, native: false, box,
+      ready: async () => box, label: () => null, setTurn: () => {}, freeze: async () => null,
+    };
+    boxes["projects"].set(boxKey(root), { run, notice: null, planning: null, nextPlanAt: 0, waitingImage: false });
+    expect(await boxes.ensure(workspace)).toBe(run);
+    replaced = true;
+    // Planned again (no runtime here, so no box this time): the old run is dropped, never handed out again.
+    expect(await boxes.ensure(workspace)).toBeNull();
+    expect(boxes["projects"].get(boxKey(root))?.run).toBeNull();
+    expect(asked).toEqual([root, root]);
+  });
+
   test("a remote workspace never gets a box", async () => {
     const stateDir = await temp("state");
     const workspace: BoxWorkspace = { id: "ws_r", path: "/remote", workspaceType: "remote" };
