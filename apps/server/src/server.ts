@@ -177,7 +177,7 @@ import {
 } from "./omnirush-workspace-config-store.js";
 import { boxServiceFor } from "./box/desktop.js";
 import { prepareBoxInstallLog } from "./box/install-log.js";
-import { rememberServerDefault } from "./box/launch.js";
+import { rememberServerDefault, watchServerDefault } from "./box/launch.js";
 import { normalizeBackend } from "./box/backends/index.js";
 import { buildOmniRushRuntimeConfigObject, omnirushGatewayConfigured, omnirushRuntimeConfigFilePath, writeOmniRushRuntimeConfigFile } from "./omnirush-runtime-config.js";
 import { assertMcpAllowed, mcpAllowed, mcpPolicyForConfig, MCP_DISABLED_MESSAGE } from "./mcp-policy.js";
@@ -1150,19 +1150,21 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
   // The Linux sandbox (box/): every workspace whose box is on is planned in the background (a missing
   // image starts downloading), and the server's default (local_box) is read for the engine config.
   const boxes = boxServiceFor(config, (level, message, attributes) => logger.log(level, message, attributes));
+  let stopBoxDefaultWatch: () => void = () => {};
   if (gatewayBroker.enabled) {
     // Read before the first plan and the engine's first config (at most 1.5 s, else the last answer is
     // used until it comes): a switch flipped or rolled back on the server applies at this start.
     const read = gatewayBroker.sessionUploadCapabilities().then((capabilities) => rememberServerDefault(runtimeStorageDir(config), capabilities)).catch(() => false);
     const inTime = await Promise.race([read.then(() => true), new Promise<false>((resolvePromise) => setTimeout(() => resolvePromise(false), 1_500).unref?.())]);
-    if (!inTime) {
-      void read.then(async (changed) => {
-        if (!changed) return;
-        await boxes.serverBackendsChanged();
-        await applyBoxEngineConfig(config, "local_box_default");
-        await boxes.ensureAll();
-      }).catch(() => undefined);
-    }
+    if (!inTime) void read.then((changed) => (changed ? applyServerBoxDefault(config, boxes) : undefined)).catch(() => undefined);
+    // Read again while the app stays open (from the capabilities cache: at most one request per its
+    // TTL), so a switch flipped on the server reaches an app started before it without a restart.
+    stopBoxDefaultWatch = watchServerDefault({
+      stateDir: runtimeStorageDir(config),
+      read: () => gatewayBroker.sessionUploadCapabilities(),
+      apply: () => applyServerBoxDefault(config, boxes),
+      everyMs: BOX_DEFAULT_REFRESH_MS,
+    });
   }
   void boxes.ensureAll();
   if (config.clearUploadQueue) {
@@ -1525,6 +1527,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
       idleTimeout: 120,
     });
   } catch (error) {
+    stopBoxDefaultWatch();
     bestPracticesReloads.stop();
     // First, and synchronously: archive part uploads in flight are aborted now, not after the other shutdown steps.
     const captureStopped = capture.stop();
@@ -1614,6 +1617,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
       // is still stored (an app quit, a restart), never after a sign-out.
       // Before them, each chat in a box gets its last checkpoint (bounded; only when chats ran in a
       // box this run, and the account answers it is still stored within a second).
+      stopBoxDefaultWatch();
       const archiveFinals = accountStillStored();
       if (boxes.hasChats() && await Promise.race([archiveFinals.catch(() => false), new Promise<false>((resolvePromise) => setTimeout(() => resolvePromise(false), 1_000).unref?.())])) {
         await boxes.finals({ budgetMs: 10_000 }).catch(() => []);
@@ -2789,6 +2793,21 @@ function sanitizeProxyResponse(response: Response): Response {
     statusText: response.statusText,
     headers,
   });
+}
+
+/** How often a running app reads the server's sandbox default again. */
+const BOX_DEFAULT_REFRESH_MS = 10 * 60_000;
+
+/**
+ * The server's sandbox default (or its backends allowlist) changed: boxes on a
+ * backend no longer allowed are planned again, the engine gets (or loses) the
+ * box shell and plugin, and every workspace is planned. Chats that already ran
+ * on this machine stay there (box/service.ts beforePrompt); new ones follow it.
+ */
+async function applyServerBoxDefault(config: ServerConfig, boxes: ReturnType<typeof boxServiceFor>): Promise<void> {
+  await boxes.serverBackendsChanged();
+  await applyBoxEngineConfig(config, "local_box_default");
+  await boxes.ensureAll();
 }
 
 /**

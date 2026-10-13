@@ -147,6 +147,8 @@ export class BoxService {
   private readonly chatTurns = new Map<string, number>();
   /** Chats (and their project's key) that ran on this machine before the server's default turned the box on: they stay here. */
   private readonly nativeChats = new Map<string, string>();
+  /** Chats sent to their project's box in this run (a failed checkpoint included). */
+  private readonly boxedChats = new Set<string>();
   private readonly home: string;
   private readonly env: NodeJS.ProcessEnv;
   private readonly platform: NodeJS.Platform;
@@ -536,19 +538,21 @@ export class BoxService {
     // The chat's own turn number, counted with the box on or off: a chat that ran natively
     // (reopened, or its box turned on mid-chat) has its first checkpoint (turn-1) before a later
     // turn; the checkpoint names it as session_turn (CLI: the same).
-    const reopened = capture && !this.chatTurns.has(sessionId) && turnsBefore > 0;
-    const chatTurn = capture ? (this.chatTurns.get(sessionId) ?? turnsBefore) + 1 : 0;
+    const turnsSoFar = this.chatTurns.get(sessionId) ?? turnsBefore;
+    const chatTurn = capture ? turnsSoFar + 1 : 0;
     if (capture) this.chatTurns.set(sessionId, chatTurn);
     const run = await this.ensure(workspace).catch(() => null);
     if (!run || run.native) return null;
-    // A reopened chat with turns but no checkpoint ran on this machine: when only the server's default
+    // A chat with turns but no checkpoint ran on this machine (reopened, or started in this run before the
+    // server's default reached the app, or while the image downloaded): when only the server's default
     // turned the box on, it goes on here (new chats get the box); a project turned on by its user moves it.
-    if (reopened && !this.turns.has(sessionId) && savedTurns(this.snapshotDir(sessionId)) === 0 && (await this.mode(workspace)).source === "server") {
+    if (capture && turnsSoFar > 0 && !this.nativeChats.has(sessionId) && !this.boxedChats.has(sessionId) && !this.turns.has(sessionId) && savedTurns(this.snapshotDir(sessionId)) === 0 && (await this.mode(workspace)).source === "server") {
       this.nativeChats.set(sessionId, run.key);
       await this.writeProjects();
       this.log("info", "box: a chat that ran on this machine stays there", { sessionId, turnsBefore });
     }
     if (this.nativeChats.has(sessionId) || !capture) return null;
+    this.boxedChats.add(sessionId);
     const turn = (this.turns.get(sessionId) ?? savedTurns(this.snapshotDir(sessionId))) + 1;
     const started = Date.now();
     try {

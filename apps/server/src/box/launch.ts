@@ -73,6 +73,27 @@ export function rememberServerDefault(stateDir: string, capabilities: { local_bo
   return before !== JSON.stringify([value, backends]);
 }
 
+/**
+ * Reads the server's default again every `everyMs` while the app runs (an app
+ * started before a switch was flipped, or kept open for days, follows it
+ * without a restart) and calls `apply` when it (or its backends allowlist)
+ * changed. One read at a time; a failed one leaves the last answer. Returns
+ * the stop.
+ */
+export function watchServerDefault({ stateDir, read, apply, everyMs }: { stateDir: string; read: () => Promise<{ local_box?: unknown } | null | undefined>; apply: () => Promise<unknown>; everyMs: number }): () => void {
+  let busy = false;
+  const timer = setInterval(() => {
+    if (busy) return;
+    busy = true;
+    void read()
+      .then((capabilities) => (rememberServerDefault(stateDir, capabilities) ? apply() : undefined))
+      .catch(() => undefined)
+      .finally(() => { busy = false; });
+  }, everyMs);
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
+
 // --- the backend --------------------------------------------------------------------
 
 /** What the backend setting holds: "auto" (the ranked order), one backend id, or "native" (no box). */
