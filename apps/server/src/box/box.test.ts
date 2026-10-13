@@ -7,11 +7,11 @@ import { join } from "node:path";
 import { Box, boxKey, containerName, containerRoot, createArgs, credentialPath, filterChanges, helperPath, installShell, parseDiff, parseSize, rt, setToolsRoot, singleFileTar, wslPath } from "./box.js";
 import { readBoxSettings } from "./desktop.js";
 import { detectStack, imageFor } from "./images.js";
-import { boxRun, engineConfig, gcInBackground, mapToBox, pullInBackground, pullLog, pullMarker, rememberServerDefault, resolveMode, serverDefault, type BoxRun } from "./launch.js";
+import { boxRun, engineConfig, gcInBackground, mapToBox, pullInBackground, pullLog, pullMarker, rememberServerDefault, resolveMode, serverDefault, watchServerDefault, type BoxRun } from "./launch.js";
 import { clearLayerSizes, layerSizes, parseManifestSizes, parsePullLog, pullProgress } from "./pull-progress.js";
 import { DESKTOP_PROJECTS_FILE } from "./plugin-lib.js";
 import { candidates, detectRuntime, explainFailure, probe, probeWsl, wslLauncher, type RunCommand } from "./runtime.js";
-import { BoxService, type BoxWorkspace } from "./service.js";
+import { BoxService, runtimeWhy, type BoxWorkspace } from "./service.js";
 import { OmniRushBox } from "../opencode-plugins/omnirush-box.js";
 
 const dirs: string[] = [];
@@ -407,6 +407,98 @@ describe("box service", () => {
     // Turned on by the user before it was reopened: it moves at once.
     await boxes.beforePrompt("ses_native_r2", workspace, { turnsBefore: 4 });
     expect(frozen.splice(0)).toEqual(["ses_native_r2 turn-1"]);
+  });
+
+  test("the server's default turned on while the app runs: chats that ran on this machine stay there, new ones go in the box", async () => {
+    const stateDir = await temp("state");
+    const home = await temp("boxhome");
+    const root = await temp("project");
+    const workspace: BoxWorkspace = { id: "ws_l", path: root, workspaceType: "local" };
+    const frozen: string[] = [];
+    let failNext = false;
+    const run: BoxRun = {
+      key: boxKey(root), container: "c", runtimeBin: "docker", runtimeArgs: [], backend: "docker", exec: null, root, native: false, box: null,
+      ready: async () => null,
+      label: () => null,
+      setTurn: () => {},
+      freeze: async (label, { sessionId, turn = null }) => {
+        frozen.push(`${sessionId} ${label}`);
+        if (failNext) { failNext = false; throw new Error("checkpoint failed"); }
+        return { label, turn, copied: 0, carried: 0, save: async () => ({ label, changed: 0, bytes: 0 }), discard: async () => null };
+      },
+    };
+    rememberServerDefault(stateDir, { local_box: { default: "off" } });
+    const boxes = service({ stateDir, workspaces: [workspace], settings: new Map(), env: { OMNIRUSH_BOX_HOME: home } });
+    let on = false;
+    boxes.ensure = async () => (on ? run : null);
+    const listed = async () => JSON.parse(await readFile(join(home, DESKTOP_PROJECTS_FILE), "utf8")).native_chats ?? [];
+    // Before the switch: two turns on this machine (the first chat after it, too, while its image downloads).
+    expect(await boxes.beforePrompt("ses_live_old1", workspace)).toBeNull();
+    expect(await boxes.beforePrompt("ses_live_old1", workspace)).toBeNull();
+    // The app reads the switch (watchServerDefault) and the project's box is ready.
+    rememberServerDefault(stateDir, { local_box: { default: "on" } });
+    on = true;
+    expect(await boxes.beforePrompt("ses_live_old1", workspace)).toBeNull();
+    expect(await listed()).toEqual(["ses_live_old1"]);
+    // A new chat goes in; one whose first checkpoint failed stays in (its commands already ran there).
+    await boxes.beforePrompt("ses_live_new1", workspace);
+    failNext = true;
+    await boxes.beforePrompt("ses_live_new2", workspace);
+    await boxes.beforePrompt("ses_live_new2", workspace);
+    expect(frozen.splice(0)).toEqual(["ses_live_new1 turn-1", "ses_live_new2 turn-1", "ses_live_new2 turn-1"]);
+    expect(await listed()).toEqual(["ses_live_old1"]);
+  });
+
+  test("planOutcome: each chat says once where it runs and why (box.plan)", async () => {
+    const stateDir = await temp("state");
+    const home = await temp("boxhome");
+    const root = await temp("project");
+    const workspace: BoxWorkspace = { id: "ws_o", path: root, workspaceType: "local" };
+    const run: BoxRun = {
+      key: boxKey(root), container: "c", runtimeBin: "docker", runtimeArgs: [], backend: "docker", exec: null, root, native: false, box: null,
+      ready: async () => null, label: () => null, setTurn: () => {},
+      freeze: async (label, { turn = null }) => ({ label, turn, copied: 0, carried: 0, save: async () => ({ label, changed: 0, bytes: 0 }), discard: async () => null }),
+    };
+    rememberServerDefault(stateDir, { local_box: { default: "off" } });
+    const boxes = service({ stateDir, workspaces: [workspace], settings: new Map(), env: { OMNIRUSH_BOX_HOME: home } });
+    boxes.ensure = async () => null;
+    await boxes.beforePrompt("ses_out_off1", workspace);
+    expect(await boxes.planOutcome("ses_out_off1", workspace)).toEqual({ native: true, source: "default", reason: "off" });
+    expect(await boxes.planOutcome("ses_out_off1", workspace)).toBeNull();
+    rememberServerDefault(stateDir, { local_box: { default: "on" } });
+    expect(await boxes.planOutcome("ses_out_wait1", workspace)).toEqual({ native: true, source: "server", reason: "planning" });
+    boxes.ensure = async () => run;
+    await boxes.beforePrompt("ses_out_box1", workspace);
+    expect(await boxes.planOutcome("ses_out_box1", workspace)).toEqual({ native: false, source: "server", reason: "box" });
+    // The chat that ran here before the switch stays (kept_old_chat).
+    await boxes.beforePrompt("ses_out_off1", workspace);
+    expect(await boxes.planOutcome("ses_out_off1", workspace)).toBeNull();
+    await boxes.beforePrompt("ses_out_old2", workspace, { turnsBefore: 3 });
+    expect(await boxes.planOutcome("ses_out_old2", workspace)).toEqual({ native: true, source: "chat", reason: "kept_old_chat" });
+    expect(await boxes.planOutcome("ses_out_remote", { id: "ws_r", path: root, workspaceType: "remote" })).toBeNull();
+  });
+
+  test("runtimeWhy: the backend and its failure code, never its text or a path", () => {
+    expect(runtimeWhy({ name: "bwrap", code: "apparmor", reason: "AppArmor blocks /usr/bin/bwrap" })).toEqual({ name: "bwrap", code: "apparmor" });
+    expect(runtimeWhy({ name: "docker", reason: "the sandbox backend did not answer in time" })).toEqual({ name: "docker", code: "timeout" });
+    expect(runtimeWhy({ name: "C:\\docker.exe", code: "Not A Code", reason: "x" })).toEqual({ name: null, code: null });
+  });
+
+  test("watchServerDefault reads the server's default again and applies only a change", async () => {
+    const stateDir = await temp("state");
+    rememberServerDefault(stateDir, { local_box: { default: "off" } });
+    const answers: Array<{ local_box?: unknown } | null> = [{ local_box: { default: "off" } }, null, { local_box: { default: "on" } }, { local_box: { default: "on" } }];
+    let applied = 0;
+    const stop = watchServerDefault({ stateDir, read: async () => answers.shift() ?? null, apply: async () => { applied += 1; }, everyMs: 5 });
+    try {
+      for (let i = 0; i < 100 && answers.length > 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    } finally {
+      stop();
+    }
+    // Unchanged, no answer (the last one stays), then on once.
+    expect(serverDefault(stateDir)).toBe("on");
+    expect(applied).toBe(1);
   });
 
   test("a box on a backend the server no longer allows is planned again", async () => {
