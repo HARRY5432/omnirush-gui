@@ -270,6 +270,8 @@ export type CheckpointSummary = {
   schema: number;
   label: string;
   turn: number | null;
+  /** The chat's own turn number of the prompt this checkpoint comes before (when known). */
+  session_turn?: number;
   tar: string | null;
   bytes: number;
   sha256: string | null;
@@ -467,13 +469,13 @@ export class Box {
    * `discard()` drops it (a turn that never came). Checkpoints are taken one
    * at a time. Resolves { summary, commit, discard }.
    */
-  checkpoint(dir: string, turn: number | null, opts: { label?: string | null; leaf?: boolean; deps?: boolean; tarMax?: number; depsMax?: number } = {}): Promise<Checkpoint> {
+  checkpoint(dir: string, turn: number | null, opts: { label?: string | null; leaf?: boolean; sessionTurn?: number | null; deps?: boolean; tarMax?: number; depsMax?: number } = {}): Promise<Checkpoint> {
     const work = this.queue.then(() => this.takeCheckpoint(dir, turn, opts));
     this.queue = work.catch(() => undefined);
     return work;
   }
 
-  private async takeCheckpoint(dir: string, turn: number | null, { label: asked = null, leaf = false, deps = this.env.OMNIRUSH_BOX_DEPS !== "off", tarMax = Number(this.env.OMNIRUSH_BOX_TAR_MAX) || TAR_MAX_BYTES, depsMax = Number(this.env.OMNIRUSH_BOX_DEPS_MAX) || DEPS_MAX_BYTES }: { label?: string | null; leaf?: boolean; deps?: boolean; tarMax?: number; depsMax?: number } = {}): Promise<Checkpoint> {
+  private async takeCheckpoint(dir: string, turn: number | null, { label: asked = null, leaf = false, sessionTurn = null, deps = this.env.OMNIRUSH_BOX_DEPS !== "off", tarMax = Number(this.env.OMNIRUSH_BOX_TAR_MAX) || TAR_MAX_BYTES, depsMax = Number(this.env.OMNIRUSH_BOX_DEPS_MAX) || DEPS_MAX_BYTES }: { label?: string | null; leaf?: boolean; sessionTurn?: number | null; deps?: boolean; tarMax?: number; depsMax?: number } = {}): Promise<Checkpoint> {
     if (!this.ready || !this.endpoint) throw new Error(`the sandbox is ${this.state}`);
     const endpoint = this.endpoint;
     const t0 = Date.now();
@@ -576,6 +578,9 @@ export class Box {
       schema: RECORD_SCHEMA,
       label,
       turn: turn ?? null,
+      // The chat's own turn number of this checkpoint's prompt: a chat that ran on this
+      // machine before its box was on has its first checkpoint (turn-1) before a later prompt.
+      ...(sessionTurn && Number.isInteger(sessionTurn) && sessionTurn > 0 ? { session_turn: sessionTurn } : {}),
       tar: tarInfo ? `${label}.tar` : null,
       bytes: tarInfo?.bytes ?? 0,
       sha256: tarInfo?.sha256 ?? null,

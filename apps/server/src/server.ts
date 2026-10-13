@@ -1806,16 +1806,18 @@ export async function proxyOpencodeV2Request(input: {
     ? sessionId
     : null;
   const engine = capture && uploadedSessionId ? engineTarget(input.connection.url, headers, target.search, "v2") : null;
+  // A reopened chat's turns before this prompt: its turn numbers (uploads and box checkpoints) carry on from them.
+  const turnsBefore = capture && uploadedSessionId && engine ? await turnsBeforeCapture(capture, uploadedSessionId, engine) : 0;
   // The Linux sandbox (box/): a prompt of a workspace whose box is on starts the box, and takes the turn's checkpoint when it is captured.
   const boxInfo = promptDispatch && sessionId
-    ? await boxServiceFor(input.config).beforePrompt(sessionId, input.workspace, { capture: Boolean(uploadedSessionId && engine) })
+    ? await boxServiceFor(input.config).beforePrompt(sessionId, input.workspace, { capture: Boolean(uploadedSessionId && engine), turnsBefore })
     : null;
   if (capture && uploadedSessionId && engine) {
     // The turn before's background processes finish writing (at most 10 s after it ended), then
     // capture v2's session-start manifest is taken before the prompt reaches the engine (at most about 3 s).
     await capture.archiveStartGate(uploadedSessionId, input.workspace.path, lateWritesGate(input.workspace));
     capture.boxSession(uploadedSessionId, boxInfo);
-    capture.startSession(uploadedSessionId, input.workspace.id, input.workspace.path, await turnsBeforeCapture(capture, uploadedSessionId, engine));
+    capture.startSession(uploadedSessionId, input.workspace.id, input.workspace.path, turnsBefore);
     capture.recordPrompt(uploadedSessionId, { method, path: routePath, body: requestBody, engine: "v2", root: input.workspace.path, attachments: true, dispatchedAt: Date.now() });
     capture.captureSnapshot(uploadedSessionId, "prompt");
     capture.archiveSessionStarted(uploadedSessionId, input.workspace.path, engine);
@@ -2192,8 +2194,12 @@ export async function proxyOpencodeRequest(input: {
   const steer = Boolean(turnKind?.steer && uploadedSessionId && capture?.hasSession(uploadedSessionId));
   if (steer) createServerLogger(input.config).log("info", "Prompt steers the running turn.", { "turn.steer.reason": turnKind?.reason ?? "" });
   // The Linux sandbox (box/): a prompt of a workspace whose box is on starts the box, and takes the turn's checkpoint when it is captured.
+  // A reopened chat's turns before this prompt: its turn numbers (uploads and box checkpoints) carry on from them.
+  const turnsBefore = capture && captured && uploadedSessionId && workspace && !steer && isUploadPromptDispatch(method, proxyPath)
+    ? await turnsBeforeCapture(capture, uploadedSessionId, engineTarget(baseUrl, headers, search))
+    : 0;
   const boxInfo = workspace && uploadedSessionId && isUploadPromptDispatch(method, proxyPath)
-    ? await boxServiceFor(input.config).beforePrompt(uploadedSessionId, workspace, { capture: captured && !steer })
+    ? await boxServiceFor(input.config).beforePrompt(uploadedSessionId, workspace, { capture: captured && !steer, turnsBefore })
     : null;
   if (capture && captured && uploadedSessionId && workspace && !steer) {
     const promptDispatch = isUploadPromptDispatch(method, proxyPath);
@@ -2201,7 +2207,7 @@ export async function proxyOpencodeRequest(input: {
     // capture v2's session-start manifest is taken before the prompt reaches the engine (at most about 3 s).
     if (promptDispatch) await capture.archiveStartGate(uploadedSessionId, workspace.path, lateWritesGate(workspace, pool?.snapshot().generations.map((generation) => generation.pid) ?? []));
     if (promptDispatch) capture.boxSession(uploadedSessionId, boxInfo);
-    capture.startSession(uploadedSessionId, workspace.id, workspace.path, promptDispatch ? await turnsBeforeCapture(capture, uploadedSessionId, engineTarget(baseUrl, headers, search)) : 0);
+    capture.startSession(uploadedSessionId, workspace.id, workspace.path, turnsBefore);
     capture.recordPrompt(uploadedSessionId, {
       method,
       path: normalizeOpencodeProxyPath(proxyPath),

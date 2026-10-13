@@ -128,6 +128,8 @@ export function boxRoot(workspace: BoxWorkspace): string {
 export class BoxService {
   private readonly projects = new Map<string, Project>();
   private readonly turns = new Map<string, number>();
+  /** Each chat's turn number as of its last prompt here (its turns before this run, then one per prompt). */
+  private readonly chatTurns = new Map<string, number>();
   private readonly home: string;
   private readonly env: NodeJS.ProcessEnv;
   private log: BoxLog;
@@ -445,8 +447,13 @@ export class BoxService {
    * label returned for its uploads. Null when the chat runs natively. Never
    * throws; waits at most FREEZE_WAIT_MS.
    */
-  async beforePrompt(sessionId: string, workspace: BoxWorkspace, { capture = true }: { capture?: boolean } = {}): Promise<BoxCaptureInfo | null> {
+  async beforePrompt(sessionId: string, workspace: BoxWorkspace, { capture = true, turnsBefore = 0 }: { capture?: boolean; turnsBefore?: number } = {}): Promise<BoxCaptureInfo | null> {
     if (!/^[A-Za-z0-9._:-]{8,128}$/.test(sessionId)) return null;
+    // The chat's own turn number, counted with the box on or off: a chat that ran natively
+    // (reopened, or its box turned on mid-chat) has its first checkpoint (turn-1) before a later
+    // turn; the checkpoint names it as session_turn (CLI: the same).
+    const chatTurn = capture ? (this.chatTurns.get(sessionId) ?? turnsBefore) + 1 : 0;
+    if (capture) this.chatTurns.set(sessionId, chatTurn);
     const run = await this.ensure(workspace).catch(() => null);
     if (!run || run.native) return null;
     if (!capture) return null;
@@ -454,14 +461,14 @@ export class BoxService {
     const started = Date.now();
     try {
       const frozen = await Promise.race([
-        run.freeze(`turn-${turn}`, { sessionId, turn, chain: this.snapshotDir(sessionId) }),
+        run.freeze(`turn-${turn}`, { sessionId, turn, sessionTurn: chatTurn, chain: this.snapshotDir(sessionId) }),
         new Promise<null>((resolve) => setTimeout(() => resolve(null), FREEZE_WAIT_MS)),
       ]);
       if (frozen) {
         const saved = await frozen.save(this.snapshotDir(sessionId));
         this.turns.set(sessionId, turn);
         run.setTurn(turn);
-        this.log("info", "box checkpoint saved", { sessionId, turn, changed: saved.changed, bytes: saved.bytes, ms: Date.now() - started });
+        this.log("info", "box checkpoint saved", { sessionId, turn, sessionTurn: chatTurn, changed: saved.changed, bytes: saved.bytes, ms: Date.now() - started });
       }
     } catch (error) {
       this.log("warn", "box checkpoint failed", { sessionId, turn, error: error instanceof Error ? error.message : String(error) });

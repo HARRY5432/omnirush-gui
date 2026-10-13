@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { Box, boxKey, containerName, containerRoot, createArgs, credentialPath, filterChanges, helperPath, installShell, parseDiff, parseSize, rt, setToolsRoot, singleFileTar, wslPath } from "./box.js";
 import { readBoxSettings } from "./desktop.js";
 import { detectStack, imageFor } from "./images.js";
-import { boxRun, engineConfig, gcInBackground, mapToBox, pullInBackground, pullLog, pullMarker, rememberServerDefault, resolveMode, serverDefault } from "./launch.js";
+import { boxRun, engineConfig, gcInBackground, mapToBox, pullInBackground, pullLog, pullMarker, rememberServerDefault, resolveMode, serverDefault, type BoxRun } from "./launch.js";
 import { clearLayerSizes, layerSizes, parseManifestSizes, parsePullLog, pullProgress } from "./pull-progress.js";
 import { DESKTOP_PROJECTS_FILE } from "./plugin-lib.js";
 import { candidates, detectRuntime, explainFailure, probe, probeWsl, wslLauncher, type RunCommand } from "./runtime.js";
@@ -273,6 +273,49 @@ describe("box service", () => {
     const status = await boxes.retry(workspace);
     expect(status).toMatchObject({ on: true, state: "unavailable", platform: process.platform, progress: null });
     expect(settings.get("ws_t")).toEqual({ mode: "on", offered: true });
+  });
+
+  test("a chat that ran natively names its turn in each checkpoint (session_turn)", async () => {
+    const stateDir = await temp("state");
+    const root = await temp("project");
+    const workspace: BoxWorkspace = { id: "ws_t", path: root, workspaceType: "local" };
+    const env = { OMNIRUSH_BOX_HOME: await temp("boxhome") };
+    const frozen: Array<string> = [];
+    const run: BoxRun = {
+      key: "k", container: "c", runtimeBin: "docker", runtimeArgs: [], backend: "docker", exec: null, root, native: false, box: null,
+      ready: async () => null,
+      label: () => null,
+      setTurn: () => {},
+      freeze: async (label, { sessionId, turn = null, sessionTurn = null }) => {
+        frozen.push(`${sessionId} ${label} ${sessionTurn}`);
+        return { label, turn, copied: 0, carried: 0, save: async () => ({ label, changed: 0, bytes: 0 }), discard: async () => null };
+      },
+    };
+    let on = false;
+    const start = () => {
+      const boxes = service({ stateDir, workspaces: [workspace], settings: new Map(), env });
+      boxes.ensure = async () => (on ? run : null);
+      return boxes;
+    };
+    // Two turns with the box off, a steer (not captured), then the box turned on mid-chat: turn-1 comes before turn 3.
+    let boxes = start();
+    await boxes.beforePrompt("ses_turns_a1", workspace);
+    await boxes.beforePrompt("ses_turns_a1", workspace);
+    await boxes.beforePrompt("ses_turns_a1", workspace, { capture: false });
+    on = true;
+    await boxes.beforePrompt("ses_turns_a1", workspace);
+    await boxes.beforePrompt("ses_turns_a1", workspace);
+    expect(frozen.splice(0)).toEqual(["ses_turns_a1 turn-1 3", "ses_turns_a1 turn-2 4"]);
+    // Reopened after a restart with 4 native turns: before turns 5 and 6.
+    boxes = start();
+    await boxes.beforePrompt("ses_turns_b1", workspace, { turnsBefore: 4 });
+    await boxes.beforePrompt("ses_turns_b1", workspace);
+    expect(frozen.splice(0)).toEqual(["ses_turns_b1 turn-1 5", "ses_turns_b1 turn-2 6"]);
+    // Saved checkpoints go on numbering the files; the chat's turn comes from the engine's count.
+    await mkdir(join(stateDir, "sandbox", "snapshots", "ses_turns_c1"), { recursive: true });
+    await writeFile(join(boxes.snapshotsDir, "ses_turns_c1", "turn-7.json"), "{}");
+    await boxes.beforePrompt("ses_turns_c1", workspace, { turnsBefore: 2 });
+    expect(frozen.splice(0)).toEqual(["ses_turns_c1 turn-8 3"]);
   });
 
   test("a remote workspace never gets a box", async () => {
