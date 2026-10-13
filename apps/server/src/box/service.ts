@@ -194,6 +194,8 @@ export class BoxService {
   async serverBackendsChanged(): Promise<void> {
     const allow = serverBackends(this.options.stateDir);
     this.alternatives = null;
+    // A plan in flight (started with the old allowlist) settles first.
+    await Promise.allSettled([...this.projects.values()].map((project) => project.planning));
     for (const project of this.projects.values()) {
       if (!project.run || !allow || allow.includes(project.run.backend)) continue;
       project.run = null;
