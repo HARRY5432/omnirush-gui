@@ -111,7 +111,8 @@ export function scanHostBuilds(root: string, { platform = process.platform, limi
     if (over()) return [];
     result.scanned += 1;
     try {
-      const entries = readdirSync(dir, { withFileTypes: true });
+      // By name, so the same folder gives the same first hit on every filesystem.
+      const entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
       result.scanned += entries.length;
       return entries;
     } catch {
