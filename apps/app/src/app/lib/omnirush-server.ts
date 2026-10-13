@@ -452,9 +452,20 @@ export type OmniRushWorkspaceBox = {
   /** The computer's backend setting: "auto", one backend id, or "native"; and the values it takes here. */
   backendSetting: { value: string; source: "env" | "setting" | "auto"; choices: Array<{ id: string; label: string }> };
   image: { ref: string; stack: string; present: boolean | null; downloading: boolean } | null;
+  /** The image download's progress while it downloads (bytes when the server knows the layer sizes). Older servers: absent. */
+  progress?: OmniRushWorkspaceBoxProgress | null;
   container: { name: string; exists: boolean; running: boolean } | null;
+  /** The server's OS. Older servers: absent. */
+  platform?: string;
   notice: string | null;
   error: string | null;
+};
+export type OmniRushWorkspaceBoxProgress = {
+  bytesDone: number | null;
+  bytesTotal: number | null;
+  layersDone: number;
+  layersTotal: number;
+  startedAt: number | null;
 };
 export type OmniRushWorkspaceBoxChange = OmniRushWorkspaceBox & {
   engine: { status: "unchanged" | "applied" | "deferred" | "failed" | "unmanaged" };
@@ -1972,6 +1983,11 @@ export function createOmniRushServerClient(options: { baseUrl: string; token?: s
     setWorkspaceBoxBackend: (workspaceId: string, backend: string) =>
       requestJson<OmniRushWorkspaceBoxChange>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/box`, {
         token, hostToken, method: "PUT", body: { backend }, timeoutMs: ENGINE_RELOAD_TIMEOUT_MS,
+      }),
+    retryWorkspaceBox: (workspaceId: string) =>
+      // A fresh backend check, then the status (each bounded at 10 s on the server).
+      requestJson<OmniRushWorkspaceBox>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/box/retry`, {
+        token, hostToken, method: "POST", body: {}, timeoutMs: 30_000,
       }),
     resetWorkspaceBox: (workspaceId: string) =>
       requestJson<{ removed: boolean }>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/box/reset`, {

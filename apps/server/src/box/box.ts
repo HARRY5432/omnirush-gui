@@ -35,7 +35,7 @@ import { DEPS_MAX_BYTES, FILE_MAX_BYTES, HOME_IN_BOX, RECORD_SCHEMA, RUN_DIR, SH
 import { driverFor } from "./backends/index.js";
 import type { ListedBox, SpawnLike } from "./backends/types.js";
 import { detectStack, imageFor, type BoxImage, type ImagePins } from "./images.js";
-import { runCommand, type RunCommand } from "./run.js";
+import { runCommand, type RunCommand, type RunOptions } from "./run.js";
 
 type Env = NodeJS.ProcessEnv;
 
@@ -197,7 +197,7 @@ type OnState = (state: BoxState, error: string | null) => void;
  * (the record boxsh reads says the same). Throws only for programming
  * errors; a box that cannot start is a Box with state "failed" and `error`.
  */
-export async function openBox({ root, runtime, env = process.env, platform = process.platform, home = boxHome(env), run = runCommand, log = () => {}, shims = null, pkglog = null, pull = true, image: asked = null, onState = () => {}, spawnImpl, readyMs = 15_000 }: { root: string; runtime: BoxRuntime; env?: Env; platform?: NodeJS.Platform; home?: string; run?: RunCommand; log?: BoxLog; shims?: string | null; pkglog?: BoxInstallLog | null; pull?: boolean; image?: BoxImage | null; onState?: OnState; spawnImpl?: SpawnLike; readyMs?: number }): Promise<Box> {
+export async function openBox({ root, runtime, env = process.env, platform = process.platform, home = boxHome(env), run = runCommand, log = () => {}, shims = null, pkglog = null, pull = true, image: asked = null, onState = () => {}, onLine, spawnImpl, readyMs = 15_000 }: { root: string; runtime: BoxRuntime; env?: Env; platform?: NodeJS.Platform; home?: string; run?: RunCommand; log?: BoxLog; shims?: string | null; pkglog?: BoxInstallLog | null; pull?: boolean; image?: BoxImage | null; onState?: OnState; onLine?: RunOptions["onLine"]; spawnImpl?: SpawnLike; readyMs?: number }): Promise<Box> {
   const projectRoot = path.resolve(root);
   const key = boxKey(projectRoot, { platform });
   const name = containerName(key, env);
@@ -210,7 +210,7 @@ export async function openBox({ root, runtime, env = process.env, platform = pro
   try {
     box.setState("starting", null, onState);
     const chosen = asked ?? imageFor(detectStack(projectRoot), { env });
-    const opened = await driver.open({ key, name, root: projectRoot, croot, runtime, run, home, runFolder, image: chosen, pull, shims, pkglog, env, platform, log, ...(spawnImpl ? { spawnImpl } : {}), onPulling: () => box.setState("pulling", null, onState) });
+    const opened = await driver.open({ key, name, root: projectRoot, croot, runtime, run, home, runFolder, image: chosen, pull, shims, pkglog, env, platform, log, ...(spawnImpl ? { spawnImpl } : {}), ...(onLine ? { onLine } : {}), onPulling: () => box.setState("pulling", null, onState) });
     if (!opened.ok) return box.fail(opened.error, onState);
     if (opened.created) writeJson(path.join(home, "chains", key, "image.json"), { ...opened.created, backend: runtime.backend ?? runtime.name, created_at: new Date().toISOString() });
     // The first address that answers: the published/loopback one, then the box's own (Apple, WSL any).

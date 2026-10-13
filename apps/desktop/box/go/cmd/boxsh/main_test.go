@@ -1,9 +1,13 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseShellArgs(t *testing.T) {
@@ -70,5 +74,34 @@ func TestWindowsArgs(t *testing.T) {
 func TestWindowsToBox(t *testing.T) {
 	if got := windowsToBox(`C:\Users\Sam\.omnirush\pkglog\raw\12-ab`); got != "/c/Users/Sam/.omnirush/pkglog/raw/12-ab" {
 		t.Fatal(got)
+	}
+}
+
+// A box whose image is downloading is waited for past the start limit; the limit counts once it starts.
+func TestWaitReadyThroughDownload(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("OMNIRUSH_BOX_HOME", home)
+	t.Setenv("OMNIRUSH_BOX_WAIT_MS", "300")
+	if err := os.MkdirAll(filepath.Join(home, "boxes"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write := func(state string) {
+		data := `{"v":1,"key":"abc123","root":"/p","croot":"/p","state":"` + state + `","port":1,"token":"t"}`
+		if err := os.WriteFile(filepath.Join(home, "boxes", "abc123.json"), []byte(data), 0o600); err != nil {
+			t.Error(err)
+		}
+	}
+	write("pulling")
+	go func() {
+		time.Sleep(700 * time.Millisecond)
+		write("ready")
+	}()
+	rec, err := waitReady("abc123")
+	if err != nil || rec == nil || rec.State != "ready" {
+		t.Fatalf("waited through the download: %v %+v", err, rec)
+	}
+	write("starting")
+	if _, err := waitReady("abc123"); err == nil || !strings.Contains(err.Error(), "did not start in time") {
+		t.Fatalf("a start that hangs still times out: %v", err)
 	}
 }

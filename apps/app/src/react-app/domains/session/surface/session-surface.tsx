@@ -53,6 +53,7 @@ import type {
 import { ReactSessionComposer } from "./composer/composer";
 import { WorkspaceRunModeMenu } from "./composer/workspace-run-mode-menu";
 import { FullPermissionsToggle } from "./composer/full-permissions-toggle";
+import { SandboxStatusChip } from "./composer/sandbox-status-chip";
 import { SubagentModelMenu } from "./composer/subagent-model-menu";
 import { useSessionModelSelection } from "./session-model-store";
 import type { ProviderCatalog } from "./use-model-behavior";
@@ -3477,6 +3478,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
         <ReactSessionComposer
           runModeControl={<WorkspaceRunModeMenu client={props.client} workspaceId={props.workspaceId} busy={chatStreaming || preparingCloudTools || Boolean(props.activePermission || props.activeQuestion)} />}
           fullPermissionsControl={<FullPermissionsToggle client={props.client} workspaceId={props.workspaceId} />}
+          sandboxControl={<SandboxStatusChip client={props.client} workspaceId={props.workspaceId} onOpenSettings={() => props.onOpenSettingsSection?.("sandbox")} />}
           subagentModelControl={<SubagentModelMenu client={props.client} />}
           voiceClient={props.client}
           voiceWorkspaceId={props.workspaceId}

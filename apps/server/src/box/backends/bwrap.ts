@@ -22,7 +22,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { GOARCH, RUN_DIR, SHIMS_DIR, containerName, containerRoot, helperPath, newToken, readJson, writeJson, type BoxInstallLog, type BoxRuntime } from "../common.js";
-import { runCommand, type RunCommand } from "../run.js";
+import { runCommand, type RunCommand, type RunOptions } from "../run.js";
 import type { RuntimeResult } from "../runtime.js";
 import { boxshExec, num, parseOut, str } from "./shared.js";
 import type { BoxDriver, ListedBox, OpenContext, Opened, PresentImage, Removed } from "./types.js";
@@ -121,8 +121,9 @@ async function imagePresent(runtime: BoxRuntime, image: { pull: string }, { run 
   return presentOf(parseOut(res.stdout));
 }
 
-async function pull(runtime: BoxRuntime, image: { pull: string }, { run = runCommand, home = "" }: { run?: RunCommand; home?: string } = {}): Promise<{ ok: true } | { ok: false; error: string }> {
-  const res = await run(runtime.bin, ["pull", ...storeArgs(home), "--ref", image.pull, "--arch", runtime.arch || GOARCH[process.arch] || "amd64"], { timeoutMs: 60 * 60_000 });
+/** `onLine`: boxrun's output lines as they come (its progress, for a progress line). */
+async function pull(runtime: BoxRuntime, image: { pull: string }, { run = runCommand, home = "", onLine }: { run?: RunCommand; home?: string; onLine?: RunOptions["onLine"] } = {}): Promise<{ ok: true } | { ok: false; error: string }> {
+  const res = await run(runtime.bin, ["pull", ...storeArgs(home), "--ref", image.pull, "--arch", runtime.arch || GOARCH[process.arch] || "amd64"], { timeoutMs: 60 * 60_000, ...(onLine ? { onLine } : {}) });
   const out = parseOut(res.stdout);
   return out?.ok ? { ok: true } : { ok: false, error: String(out?.error || res.stderr || `boxrun pull exited ${res.code}`).slice(0, 300) };
 }
@@ -153,7 +154,7 @@ export function newMeta({ key, root, croot, present, image }: { key: string; roo
 }
 
 async function open(ctx: OpenContext): Promise<Opened> {
-  const { key, root, croot, runtime, run, home, runFolder, image, pull: mayPull, shims, pkglog, env, log, onPulling } = ctx;
+  const { key, root, croot, runtime, run, home, runFolder, image, pull: mayPull, shims, pkglog, env, log, onPulling, onLine } = ctx;
   const file = metaFile(home, key);
   let meta = readJson<BoxMeta>(file);
   if (meta && meta.root !== root) return { ok: false, error: `box ${key} belongs to another folder` };
@@ -163,7 +164,7 @@ async function open(ctx: OpenContext): Promise<Opened> {
     if (!present) {
       if (!mayPull) return { ok: false, error: "the sandbox image is not downloaded yet" };
       onPulling();
-      const pulled = await pull(runtime, image, { run, home });
+      const pulled = await pull(runtime, image, { run, home, onLine });
       if (!pulled.ok) return { ok: false, error: `could not download the sandbox image: ${pulled.error}` };
       present = await imagePresent(runtime, image, { run, home });
       if (!present) return { ok: false, error: "the sandbox image is not there after the download" };

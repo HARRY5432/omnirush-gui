@@ -174,9 +174,17 @@ func waitReady(key string) (*Record, error) {
 		limit = time.Duration(v) * time.Millisecond
 	}
 	start := time.Now()
-	said := false
+	said := ""
+	// While the image downloads (a first --sandbox run) the wait has no short
+	// limit: the download has its own (an hour), and the command runs once it is in.
+	pulled := time.Duration(0)
+	last := time.Now()
 	for {
 		rec, err := readRecord(key)
+		if err == nil && rec.State == "pulling" {
+			pulled += time.Since(last)
+		}
+		last = time.Now()
 		if err == nil {
 			switch rec.State {
 			case "ready":
@@ -191,15 +199,21 @@ func waitReady(key string) (*Record, error) {
 				return nil, fmt.Errorf("the sandbox is not available (%s); run `omnirush sandbox status`", msg)
 			}
 		}
-		if time.Since(start) > limit {
+		if time.Since(start)-pulled > limit || pulled > 61*time.Minute {
 			if err != nil {
 				return nil, fmt.Errorf("no sandbox record for this project (%v)", err)
 			}
 			return nil, errors.New("the sandbox did not start in time; run `omnirush sandbox status`")
 		}
-		if !said && time.Since(start) > 1500*time.Millisecond {
-			fmt.Fprintln(os.Stderr, "omnirush: waiting for the sandbox to start...")
-			said = true
+		if time.Since(start) > 1500*time.Millisecond {
+			msg := "omnirush: waiting for the sandbox to start..."
+			if err == nil && rec.State == "pulling" {
+				msg = "omnirush: waiting for the sandbox image to download (once)..."
+			}
+			if msg != said {
+				fmt.Fprintln(os.Stderr, msg)
+				said = msg
+			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
