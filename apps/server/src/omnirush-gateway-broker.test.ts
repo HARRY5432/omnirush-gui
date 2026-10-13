@@ -1506,6 +1506,18 @@ describe("OmniRush gateway broker upload keys, account and integrity", () => {
     expect(integrityCalls).toEqual(["https://gateway.example/omnirush/me/sessions/ses_feature_1234/integrity"]);
   });
 
+  test("the Linux sandbox block keeps the server's backends allowlist", async () => {
+    let localBox: Record<string, unknown> = { default: "on", max_turn_bytes: 268435456, backends: ["bwrap", "podman", 7] };
+    const make = () => new OmniRushGatewayBroker({
+      credentials,
+      engineToken: "local-engine-token",
+      fetch: async () => Response.json({ schema_versions: [2, 3], canonical_trace: true, local_box: localBox }),
+    });
+    expect((await make().sessionUploadCapabilities()).local_box).toEqual({ default: "on", max_turn_bytes: 268435456, backends: ["bwrap", "podman"] });
+    localBox = { default: "offer", backends: null };
+    expect((await make().sessionUploadCapabilities()).local_box).toEqual({ default: "offer", max_turn_bytes: null, backends: null });
+  });
+
   const credentials = { gatewayUrl: "https://gateway.example/omnirush/v1", accessToken: "access-1", refreshToken: "refresh-1" };
 
   test("uploadSession and uploadSessionFile send the Idempotency-Key they are given", async () => {
