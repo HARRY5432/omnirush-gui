@@ -406,6 +406,27 @@ describe("box service", () => {
     expect(frozen.splice(0)).toEqual(["ses_native_r2 turn-1"]);
   });
 
+  test("a box on a backend the server no longer allows is planned again", async () => {
+    const stateDir = await temp("state");
+    const root = await temp("project");
+    const workspace: BoxWorkspace = { id: "ws_a", path: root, workspaceType: "local" };
+    const boxes = service({ stateDir, workspaces: [workspace], settings: new Map(), env: { OMNIRUSH_BOX_HOME: await temp("boxhome") } });
+    const run: BoxRun = {
+      key: boxKey(root), container: "c", runtimeBin: "docker", runtimeArgs: [], backend: "docker", exec: null, root, native: false, box: null,
+      ready: async () => null, label: () => null, setTurn: () => {}, freeze: async () => null,
+    };
+    const projects = boxes["projects"];
+    projects.set(boxKey(root), { run, notice: null, planning: null, nextPlanAt: Date.now() + 60_000, waitingImage: false });
+    rememberServerDefault(stateDir, { local_box: { default: "on", backends: ["docker", "podman"] } });
+    await boxes.serverBackendsChanged();
+    expect(projects.get(boxKey(root))?.run).toBe(run);
+    expect(await boxes.listedProjects()).toEqual([boxKey(root)]);
+    rememberServerDefault(stateDir, { local_box: { default: "on", backends: ["podman"] } });
+    await boxes.serverBackendsChanged();
+    expect(projects.get(boxKey(root))).toMatchObject({ run: null, nextPlanAt: 0 });
+    expect(await boxes.listedProjects()).toEqual([]);
+  });
+
   test("a remote workspace never gets a box", async () => {
     const stateDir = await temp("state");
     const workspace: BoxWorkspace = { id: "ws_r", path: "/remote", workspaceType: "remote" };

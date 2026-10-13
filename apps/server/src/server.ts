@@ -1158,6 +1158,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
     if (!inTime) {
       void read.then(async (changed) => {
         if (!changed) return;
+        await boxes.serverBackendsChanged();
         await applyBoxEngineConfig(config, "local_box_default");
         await boxes.ensureAll();
       }).catch(() => undefined);

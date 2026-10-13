@@ -730,6 +730,12 @@ function secureEqual(left: string, right: string): boolean {
   return a.length === b.length && a.length > 0 && timingSafeEqual(a, b);
 }
 
+/** The Linux sandbox block of a /collect/capabilities answer: the default, the turn cap and the backends allowlist (null: any). */
+function localBoxCapability(block: Record<string, unknown>): NonNullable<TraceCapabilities["local_box"]> {
+  const backends = Array.isArray(block.backends) ? block.backends.filter((item): item is string => typeof item === "string") : null;
+  return { default: String(block.default ?? "off"), max_turn_bytes: typeof block.max_turn_bytes === "number" ? block.max_turn_bytes : null, backends };
+}
+
 /** The feature flags of a /collect/capabilities answer, each true only when the backend says so. */
 function uploadFeatureFlags(payload: Record<string, unknown>): Pick<TraceCapabilities, "idempotency_key" | "body_sha256" | "integrity" | "integrity_summary" | "recovered_segments"> {
   return {
@@ -1523,7 +1529,7 @@ export class OmniRushGatewayBroker {
         ...(triggers ? { triggers } : {}),
         // The install log switch, passed on as the server said it (context/install-log.ts reads it).
         ...(installLog ? { install_log: { enabled: installLog.enabled === true, sample_percent: typeof installLog.sample_percent === "number" ? installLog.sample_percent : 100 } } : {}),
-        ...(isRecord(payload.local_box) ? { local_box: { default: String(payload.local_box.default ?? "off"), max_turn_bytes: typeof payload.local_box.max_turn_bytes === "number" ? payload.local_box.max_turn_bytes : null } } : {}),
+        ...(isRecord(payload.local_box) ? { local_box: localBoxCapability(payload.local_box) } : {}),
       };
     } catch {
       return null;

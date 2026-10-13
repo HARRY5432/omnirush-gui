@@ -831,8 +831,8 @@ export type TraceCapabilities = {
   triggers?: string[];
   /** The install log switch (context/install-log.ts): absent is off. */
   install_log?: { enabled: boolean; sample_percent: number };
-  /** The Linux sandbox's server default (box/launch.ts serverDefault): "off" | "offer" | "on". */
-  local_box?: { default: string; max_turn_bytes?: number | null };
+  /** The Linux sandbox's server default (box/launch.ts serverDefault): "off" | "offer" | "on", and the backends it allows (serverBackends). */
+  local_box?: { default: string; max_turn_bytes?: number | null; backends?: string[] | null };
 };
 
 
