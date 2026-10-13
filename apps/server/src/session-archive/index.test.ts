@@ -1,13 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 
 import { gitMarkerDetector, gitParentDetector } from "./detect.js";
 import { FakeArchiveServer, slowPartTwo } from "./fake-archive-server.js";
-import { ARCHIVE_STATE_DIRECTORY, POLICY_TTL_MS, SessionArchiver, type SessionArchiverOptions } from "./index.js";
+import { ARCHIVE_STATE_DIRECTORY, DEFAULT_PENDING_BYTE_BUDGET, POLICY_TTL_MS, SessionArchiver, type SessionArchiverOptions } from "./index.js";
 import { cleanupTempDirs, manifestOf, openArchive, tempDir } from "./test-helpers.js";
 
 /** A capture result without its `detail` (the reason it was skipped, more precisely). */
@@ -1380,4 +1380,71 @@ test("concurrent archive packing stays inside the shared pending byte budget", a
   const queue = await readdir(join(state, ARCHIVE_STATE_DIRECTORY, "queue"));
   expect(queue).toHaveLength(1);
   expect(results.reduce((sum, result) => sum + (result.status === "queued" ? result.size : 0), 0)).toBeLessThanOrEqual(budget);
+});
+
+test("the default pending archive budget is 2 GiB", () => {
+  expect(DEFAULT_PENDING_BYTE_BUDGET).toBe(2 * 1024 ** 3);
+});
+
+test("a project over the old 256 MiB budget is archived by default", async () => {
+  const server = new FakeArchiveServer();
+  const { root } = await project();
+  const state = await tempDir("budget-default");
+  // A sparse 300 MiB file: the estimate counts it at its full size.
+  await writeFile(join(root, "assets/big.bin"), "");
+  await truncate(join(root, "assets/big.bin"), 300 * 1024 * 1024);
+  const subject = archiver(server, state, { freeDiskBytes: async () => 100 * 1024 ** 3 });
+  expect(await subject.captureBase("ses_budget_default", root)).toMatchObject({ status: "queued", kind: "base" });
+}, 60_000);
+
+test("a project over the budget is skipped as disk_budget with the bytes it needs", async () => {
+  const server = new FakeArchiveServer();
+  const { root } = await project();
+  const state = await tempDir("budget-over");
+  const subject = archiver(server, state, { pendingByteBudget: 64 * 1024, freeDiskBytes: async () => 100 * 1024 ** 3 });
+  const result = await subject.captureBase("ses_budget_over", root);
+  expect(result).toMatchObject({ status: "paused", reason: "disk_budget" });
+  // The estimate counts the raw sizes: the 300 KiB asset alone is over the budget.
+  expect(result.status === "paused" && result.requiredBytes).toBeGreaterThan(300 * 1024);
+  expect(await readdir(join(state, ARCHIVE_STATE_DIRECTORY, "queue"))).toEqual([]);
+  expect(server.objects()).toEqual([]);
+});
+
+test("an archive leaves at least its own size free on the disk, above the floor", async () => {
+  const server = new FakeArchiveServer();
+  const { root } = await project();
+  const state = await tempDir("budget-floor");
+  let free = 0;
+  const subject = archiver(server, state, { minimumFreeDiskBytes: 1024, freeDiskBytes: async () => free });
+  const probe = await subject.captureBase("ses_budget_floor", root);
+  expect(probe).toMatchObject({ status: "paused", reason: "disk_budget" });
+  const required = probe.status === "paused" ? probe.requiredBytes : 0;
+  expect(required).toBeGreaterThan(300 * 1024);
+
+  // The fixed floor plus the archive fits; the archive's own size beside it does not.
+  free = Math.floor(required * 1.5);
+  expect(await subject.captureBase("ses_budget_floor", root)).toMatchObject({ status: "paused", reason: "disk_budget", freeBytes: free });
+
+  free = required * 2 + 1024 * 1024;
+  expect(await subject.captureBase("ses_budget_floor", root)).toMatchObject({ status: "queued", sequence: 0 });
+});
+
+test("the 512 MiB floor still holds for a small archive", async () => {
+  const server = new FakeArchiveServer();
+  const { root } = await project();
+  const state = await tempDir("budget-min-floor");
+  const MiB = 1024 * 1024;
+  let free = 512 * MiB;
+  const subject = archiver(server, state, { freeDiskBytes: async () => free });
+  expect(await subject.captureBase("ses_budget_min_floor", root)).toMatchObject({ status: "paused", reason: "disk_budget" });
+  free = 520 * MiB;
+  expect(await subject.captureBase("ses_budget_min_floor", root)).toMatchObject({ status: "queued" });
+});
+
+test("a free-space floor of 0 turns the free-space check off", async () => {
+  const server = new FakeArchiveServer();
+  const { root } = await project();
+  const state = await tempDir("budget-floor-off");
+  const subject = archiver(server, state, { minimumFreeDiskBytes: 0, freeDiskBytes: async () => 4 * 1024 * 1024 });
+  expect(await subject.captureBase("ses_budget_floor_off", root)).toMatchObject({ status: "queued" });
 });

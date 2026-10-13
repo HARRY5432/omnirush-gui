@@ -168,7 +168,15 @@ const SIGN_OUT_ABORT_TIMEOUT_MS = 5_000;
 const START_FINAL_WINDOW_MS = 7 * 24 * 60 * 60_000;
 /** At most this many sessions are scanned for a final archive at app start. */
 const MAX_START_FINALS = 10;
-const DEFAULT_PENDING_BYTE_BUDGET = 256 * 1024 * 1024;
+/**
+ * Queued plus packing archive bytes, estimated from the raw file sizes (see
+ * estimateArchiveOutput): a project over it is skipped as disk_budget.
+ */
+export const DEFAULT_PENDING_BYTE_BUDGET = 2 * 1024 * 1024 * 1024;
+/**
+ * Free space an archive leaves on its disk: this much at least, and as much
+ * as the archive itself when that is more (a 2 GiB archive needs 4 GiB free).
+ */
 const DEFAULT_MIN_FREE_DISK_BYTES = 512 * 1024 * 1024;
 const ARCHIVE_PACK_RESERVE_BYTES = 1024 * 1024;
 /**
@@ -1417,6 +1425,11 @@ export class SessionArchiver {
     return Math.ceil(tarBytes * 1.01);
   }
 
+  /** The free space to keep beside an archive of `archiveBytes` (none when the floor is set to 0). */
+  private freeDiskFloor(archiveBytes: number): number {
+    return this.minimumFreeDiskBytes === 0 ? 0 : Math.max(this.minimumFreeDiskBytes, archiveBytes);
+  }
+
   private reserveDiskBudget(requiredBytes: number): Promise<{ bytes: number; release(): void } | null> {
     return this.budgetLocked(async () => {
       const records = await this.listQueue();
@@ -1424,7 +1437,7 @@ export class SessionArchiver {
       const freeBytes = await this.freeDiskBytes(this.dir).catch(() => null);
       if (freeBytes === null
         || pendingBytes + this.packingReservedBytes + requiredBytes > this.pendingByteBudget
-        || freeBytes < this.minimumFreeDiskBytes + requiredBytes) return null;
+        || freeBytes < this.freeDiskFloor(requiredBytes) + requiredBytes) return null;
       this.packingReservedBytes += requiredBytes;
       let released = false;
       const reservation = {
@@ -1448,7 +1461,7 @@ export class SessionArchiver {
       const extra = Math.max(0, boundedOutput - reservation.bytes);
       if (freeBytes === null
         || pendingBytes + this.packingReservedBytes + extra > this.pendingByteBudget
-        || freeBytes < this.minimumFreeDiskBytes + Math.max(ARCHIVE_PACK_RESERVE_BYTES, reservation.bytes + extra - boundedOutput)) {
+        || freeBytes < this.freeDiskFloor(reservation.bytes + extra) + Math.max(ARCHIVE_PACK_RESERVE_BYTES, reservation.bytes + extra - boundedOutput)) {
         throw new DiskBudgetPause(reservation.bytes + extra, pendingBytes, freeBytes);
       }
       this.packingReservedBytes += extra;
