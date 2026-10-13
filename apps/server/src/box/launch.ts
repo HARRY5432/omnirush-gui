@@ -313,7 +313,8 @@ export type BoxRun = {
   /** environment.sandbox for a chat's uploads; null while it is not (or no longer) the chat's. */
   label: (sessionId: string) => BoxLabel | null;
   setTurn: (turn: number) => void;
-  freeze: (label: string, options: { sessionId: string; turn?: number | null; chain?: string | null }) => Promise<Frozen | null>;
+  /** `sessionTurn`: the chat's own number of the prompt the checkpoint comes before (written as session_turn). */
+  freeze: (label: string, options: { sessionId: string; turn?: number | null; sessionTurn?: number | null; chain?: string | null }) => Promise<Frozen | null>;
 };
 
 /**
@@ -363,13 +364,13 @@ export function boxRun(plan: ReadyPlan, { log = () => {}, readyWaitMs = 30_000, 
      * the checkpoint is taken now and placed by save(); `final` (the state a
      * chat ends with) is a leaf, so a resumed chat chains on from its last turn.
      */
-    freeze: async (label, { sessionId, turn = null, chain = null }) => {
+    freeze: async (label, { sessionId, turn = null, sessionTurn = null, chain = null }) => {
       const opened = await ready();
       if (!opened) return null;
       const n = Number(turn ?? /^turn-(\d+)$/.exec(label)?.[1] ?? 0) || null;
       const name = n ? `turn-${n}` : label;
       const dir = chain ?? path.join(pending, `${process.pid}-${Date.now()}`);
-      const taken = await opened.checkpoint(dir, n, { label: name, leaf: !n });
+      const taken = await opened.checkpoint(dir, n, { label: name, leaf: !n, sessionTurn: n ? sessionTurn : null });
       checkpoints.set(sessionId, (checkpoints.get(sessionId) ?? 0) + 1);
       const summary: CheckpointSummary = taken.summary;
       return {
