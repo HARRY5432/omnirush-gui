@@ -1154,6 +1154,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
   if (gatewayBroker.enabled) {
     void gatewayBroker.sessionUploadCapabilities().then(async (capabilities) => {
       if (!rememberServerDefault(runtimeStorageDir(config), capabilities)) return;
+      await boxes.serverBackendsChanged();
       await applyBoxEngineConfig(config, "local_box_default");
       await boxes.ensureAll();
     }).catch(() => undefined);

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { boxKey, containerName, containerRoot, createArgs, credentialPath, filterChanges, helperPath, installShell, parseDiff, parseSize, rt, setToolsRoot, singleFileTar, wslPath } from "./box.js";
 import { readBoxSettings } from "./desktop.js";
 import { detectStack, imageFor } from "./images.js";
-import { engineConfig, gcInBackground, mapToBox, rememberServerDefault, resolveMode, serverDefault } from "./launch.js";
+import { engineConfig, gcInBackground, mapToBox, rememberServerDefault, resolveMode, serverDefault, type BoxRun } from "./launch.js";
 import { DESKTOP_PROJECTS_FILE } from "./plugin-lib.js";
 import { candidates, detectRuntime, explainFailure, probe, probeWsl, wslLauncher, type RunCommand } from "./runtime.js";
 import { BoxService, type BoxWorkspace } from "./service.js";
@@ -260,6 +260,27 @@ describe("box service", () => {
     // Without helpers there are no engine bits, whatever the settings.
     const none = service({ stateDir, workspaces: [workspace], settings, env: { ...env, OMNIRUSH_BOX_BIN_DIR: join(bin, "nothing") } });
     expect(await none.engineBits()).toBeNull();
+  });
+
+  test("a box on a backend the server no longer allows is planned again", async () => {
+    const stateDir = await temp("state");
+    const root = await temp("project");
+    const workspace: BoxWorkspace = { id: "ws_a", path: root, workspaceType: "local" };
+    const boxes = service({ stateDir, workspaces: [workspace], settings: new Map(), env: { OMNIRUSH_BOX_HOME: await temp("boxhome") } });
+    const run: BoxRun = {
+      key: boxKey(root), container: "c", runtimeBin: "docker", runtimeArgs: [], backend: "docker", exec: null, root, native: false, box: null,
+      ready: async () => null, label: () => null, setTurn: () => {}, freeze: async () => null,
+    };
+    const projects = boxes["projects"];
+    projects.set(boxKey(root), { run, notice: null, planning: null, nextPlanAt: Date.now() + 60_000 });
+    rememberServerDefault(stateDir, { local_box: { default: "on", backends: ["docker", "podman"] } });
+    await boxes.serverBackendsChanged();
+    expect(projects.get(boxKey(root))?.run).toBe(run);
+    expect(await boxes.listedProjects()).toEqual([boxKey(root)]);
+    rememberServerDefault(stateDir, { local_box: { default: "on", backends: ["podman"] } });
+    await boxes.serverBackendsChanged();
+    expect(projects.get(boxKey(root))).toMatchObject({ run: null, nextPlanAt: 0 });
+    expect(await boxes.listedProjects()).toEqual([]);
   });
 
   test("a remote workspace never gets a box", async () => {

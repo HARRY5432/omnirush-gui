@@ -187,6 +187,22 @@ export class BoxService {
     return saved;
   }
 
+  /**
+   * The server's backends allowlist changed (box-server.json): a project whose box runs on a
+   * backend it no longer allows is planned again (its chats go on natively until then).
+   */
+  async serverBackendsChanged(): Promise<void> {
+    const allow = serverBackends(this.options.stateDir);
+    this.alternatives = null;
+    for (const project of this.projects.values()) {
+      if (!project.run || !allow || allow.includes(project.run.backend)) continue;
+      project.run = null;
+      project.notice = null;
+      project.nextPlanAt = 0;
+    }
+    await this.writeProjects();
+  }
+
   private async mode(workspace: BoxWorkspace) {
     const settings = await this.options.readSettings(workspace.id).catch(() => ({ mode: null, offered: false }));
     const server = this.serverDefault();
