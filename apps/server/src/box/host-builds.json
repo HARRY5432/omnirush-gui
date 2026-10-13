@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "about": "Which builds in a project folder only run on the user's macOS or Windows machine (src/box/host-builds.js in the CLI, apps/server/src/box/host-builds.ts in the desktop app read this same file). Linux hosts are never checked.",
+  "limits": { "entries": 4000, "ms": 150, "binDepth": 2, "cacheEntries": 200, "cacheMs": 21600000 },
+  "hosts": {
+    "darwin": {
+      "label": "Mac",
+      "machine": "this Mac",
+      "format": "macho",
+      "packages": "(?:^|[-/+])darwin-(?:arm64|x64|64|universal)(?:$|[-@])",
+      "venv_home": ["/Library/", "/System/", "/Applications/", "/opt/homebrew/", "/opt/local/", "/usr/local/Cellar/", "/usr/local/opt/", "/usr/local/Frameworks/", "/Users/", "/private/", "/opt/anaconda", "/opt/miniconda", "/opt/miniforge"],
+      "venv_home_patterns": []
+    },
+    "win32": {
+      "label": "Windows",
+      "machine": "this PC",
+      "format": "pe",
+      "packages": "(?:^|[-/+])(?:win32|windows)-(?:x64|arm64|ia32|64)(?:$|[-@])",
+      "venv_home": ["\\\\"],
+      "venv_home_patterns": ["^[A-Za-z]:[\\\\/]"]
+    }
+  },
+  "venv_dirs": [".venv", "venv", "env", ".env"],
+  "venv_host_files": ["Scripts/python.exe", "Scripts/pythonw.exe"],
+  "build_dirs": ["bin", "build", "target", "dist", "out"],
+  "binary_extensions": [".exe", ".dll", ".dylib", ".node", ".so", ".pyd"],
+  "notices": {
+    "cli": {
+      "native": "This folder has {label} builds ({things}) that won't run in the Linux sandbox, so this chat runs on {machine}. `omnirush sandbox on` to use the sandbox here anyway.",
+      "explicit": "This chat runs in a Linux sandbox, but this folder has {label} builds ({things}) that won't run there; rebuilding them inside replaces them with Linux builds that won't run on {machine} (`omnirush --no-sandbox` runs it on {machine}).",
+      "box": "This chat runs in a Linux sandbox (this folder mounted, installs kept per folder); `omnirush --no-sandbox` or `omnirush sandbox off` runs it on {machine}."
+    },
+    "desktop": {
+      "native": "This folder has {label} builds ({things}) that won't run in the Linux sandbox, so its chats run on {machine}. Turn the sandbox on for this project to use it anyway.",
+      "explicit": "This folder has {label} builds ({things}) that won't run in the Linux sandbox; rebuilding them there replaces them with Linux builds that won't run on {machine}.",
+      "box": "Chats here run in a Linux sandbox, not on {machine}; turn it off for this project in Settings to run them here."
+    }
+  }
+}

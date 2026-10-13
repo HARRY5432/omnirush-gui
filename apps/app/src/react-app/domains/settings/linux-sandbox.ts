@@ -104,6 +104,7 @@ export function linuxSandboxView(box: OmniRushWorkspaceBox, pending: LinuxSandbo
   if (pending === "retry") return { ...base, tone: "busy", title: "Trying again…", detail: null };
   if (!box.on) {
     if (box.source === "env") return { ...base, tone: "off", title: "Off for this app", detail: "Set by OMNIRUSH_BOX where the app is launched." };
+    if (box.hostBuilds?.native) return { ...base, tone: "attention", title: "Off for this project", detail: box.hostBuilds.notice };
     return { ...base, tone: "off", title: "Off", detail: "Commands run on this computer." };
   }
   const using = runtimeLabel(box);
@@ -113,7 +114,9 @@ export function linuxSandboxView(box: OmniRushWorkspaceBox, pending: LinuxSandbo
     case "starting":
       return { ...base, tone: "busy", title: "Starting the sandbox…", detail: using ? `Using ${using}. This takes a few seconds.` : "This takes a few seconds." };
     case "ready":
-      return { ...base, tone: "ready", title: "Ready", detail: using ? `Commands run in a Linux container (${using}).` : "Commands run in a Linux container." };
+      // On by choice in a folder with this computer's builds: the warning; on macOS / Windows: that chats run in Linux.
+      if (box.hostBuilds && !box.hostBuilds.native) return { ...base, tone: "attention", title: "Ready", detail: box.hostBuilds.notice };
+      return { ...base, tone: "ready", title: "Ready", detail: box.boxNotice ?? (using ? `Commands run in a Linux container (${using}).` : "Commands run in a Linux container.") };
     case "failed":
       return { ...base, tone: "error", title: "The sandbox could not start", detail: RUNS_HERE, action: { kind: "retry", label: "Try again" }, errorDetail: box.error ?? box.notice };
     case "unavailable": {

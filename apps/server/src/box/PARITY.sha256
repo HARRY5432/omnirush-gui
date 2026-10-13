@@ -1,4 +1,6 @@
 # The sandbox image pins: the same files in omnirush-cli (src/box/) and omnirush-gui (apps/server/src/box/).
+# host-builds.json: the rules and notices for folders with macOS/Windows builds (host-builds.js / host-builds.ts read it).
 # A change to one must be ported to the other and this list updated in both (scripts/box/pins.mjs refreshes the pins' list).
 f4cf889b29e169592863020c6ac2b02c69d8887a8df1502dd01c7939805a9b8a  images.json
 fd7531323e200f2133cdf66ed8608d04af3a38049cfeb01a0a285cbd72813c4d  wsl.json
+ec1c7507cd3919a1066c870e3f7018424bdca8641fbf34fec9c4eefd9def1d29  host-builds.json
