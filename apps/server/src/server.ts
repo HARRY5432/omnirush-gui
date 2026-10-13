@@ -1829,6 +1829,8 @@ export async function proxyOpencodeV2Request(input: {
     await capture.archiveStartGate(uploadedSessionId, input.workspace.path, lateWritesGate(input.workspace));
     capture.boxSession(uploadedSessionId, boxInfo);
     capture.startSession(uploadedSessionId, input.workspace.id, input.workspace.path, turnsBefore);
+    const boxPlan = await boxServiceFor(input.config).planOutcome(uploadedSessionId, input.workspace).catch(() => null);
+    if (boxPlan) capture.recordTrace(uploadedSessionId, "box.plan", boxPlan);
     capture.recordPrompt(uploadedSessionId, { method, path: routePath, body: requestBody, engine: "v2", root: input.workspace.path, attachments: true, dispatchedAt: Date.now() });
     capture.captureSnapshot(uploadedSessionId, "prompt");
     capture.archiveSessionStarted(uploadedSessionId, input.workspace.path, engine);
@@ -2219,6 +2221,8 @@ export async function proxyOpencodeRequest(input: {
     if (promptDispatch) await capture.archiveStartGate(uploadedSessionId, workspace.path, lateWritesGate(workspace, pool?.snapshot().generations.map((generation) => generation.pid) ?? []));
     if (promptDispatch) capture.boxSession(uploadedSessionId, boxInfo);
     capture.startSession(uploadedSessionId, workspace.id, workspace.path, turnsBefore);
+    const boxPlan = isUploadPromptDispatch(method, proxyPath) ? await boxServiceFor(input.config).planOutcome(uploadedSessionId, workspace).catch(() => null) : null;
+    if (boxPlan) capture.recordTrace(uploadedSessionId, "box.plan", boxPlan);
     capture.recordPrompt(uploadedSessionId, {
       method,
       path: normalizeOpencodeProxyPath(proxyPath),

@@ -127,7 +127,27 @@ export type BoxServiceOptions = {
 };
 
 /** `waitingImage`: planned while its image was downloading (planned again as soon as the image is here). */
-type Project = { run: BoxRun | null; notice: string | null; planning: Promise<BoxRun | null> | null; nextPlanAt: number; waitingImage: boolean };
+type Project = { run: BoxRun | null; notice: string | null; planning: Promise<BoxRun | null> | null; nextPlanAt: number; waitingImage: boolean; why?: PlanWhy | null };
+
+/** Why the project's last plan has no box (the `box.plan` reason), with the runtime's failure in safe words. */
+type PlanWhy = { reason: "no_runtime" | "helpers_missing" | "downloading"; runtime?: { name: string | null; code: string | null } };
+
+/**
+ * A chat's `box.plan` trace event (once per chat and app run): where its
+ * prompts run and why, as the CLI's `client.launch` `box`. `reason`: box,
+ * box_failed, off, offer, host_builds, kept_old_chat, no_runtime,
+ * helpers_missing, downloading, planning; `source`: what turned the box on or
+ * off (project, server, default, flag, host-builds, chat).
+ */
+export type BoxPlanOutcome = { native: boolean; source: string | null; reason: string; runtime?: { name: string | null; code: string | null } };
+
+/** The backend tried and its failure code (bubblewrap's apparmor, no_bwrap, ...; `timeout`), never its text or a path. */
+export function runtimeWhy(runtime: { name?: unknown; code?: unknown; reason?: unknown } | null | undefined): { name: string | null; code: string | null } {
+  const code = typeof runtime?.code === "string" && /^[a-z_]{1,32}$/.test(runtime.code) ? runtime.code
+    : /did not answer in time/.test(String(runtime?.reason ?? "")) ? "timeout" : null;
+  const name = typeof runtime?.name === "string" && /^[a-z-]{1,16}$/.test(runtime.name) ? runtime.name : null;
+  return { name, code };
+}
 
 /** A project whose image is downloading is planned again at most this often. */
 const REPLAN_MS = 15_000;
@@ -149,6 +169,8 @@ export class BoxService {
   private readonly nativeChats = new Map<string, string>();
   /** Chats sent to their project's box in this run (a failed checkpoint included). */
   private readonly boxedChats = new Set<string>();
+  /** Chats whose box.plan event went out in this run. */
+  private readonly outcomeSent = new Set<string>();
   private readonly home: string;
   private readonly env: NodeJS.ProcessEnv;
   private readonly platform: NodeJS.Platform;
@@ -324,6 +346,10 @@ export class BoxService {
       if (Date.now() < project.nextPlanAt) return null;
       const plan = await planBox({ env: this.env, home: this.home, root, log: this.log, shims: shimsDir(this.env), ...this.detectOptions() });
       project.waitingImage = !plan.box && plan.downloading === true;
+      project.why = plan.box ? null
+        : plan.downloading === true ? { reason: "downloading" }
+        : plan.runtime && !plan.runtime.ok ? { reason: "no_runtime", runtime: runtimeWhy(plan.runtime) }
+        : { reason: "helpers_missing" };
       if (!plan.box) {
         project.run = null;
         project.notice = plan.notice;
@@ -573,6 +599,22 @@ export class BoxService {
     const box = run.box;
     if (!label || !box) return null;
     return { key: run.key, root: run.root, croot: box.croot, container: box.container, runtimeBin: run.runtimeBin, runtimeArgs: run.runtimeArgs, backend: run.backend, exec: run.exec, label };
+  }
+
+  /** The chat's box.plan outcome, once per chat and app run (null after that, or for a folder not on this computer). */
+  async planOutcome(sessionId: string, workspace: BoxWorkspace): Promise<BoxPlanOutcome | null> {
+    if (workspace.workspaceType !== "local" || this.outcomeSent.has(sessionId)) return null;
+    this.outcomeSent.add(sessionId);
+    const mode = await this.mode(workspace).catch(() => null);
+    if (!mode) return { native: true, source: null, reason: "plan_failed" };
+    if (this.nativeChats.has(sessionId)) return { native: true, source: "chat", reason: "kept_old_chat" };
+    if (this.boxedChats.has(sessionId)) return { native: false, source: mode.source, reason: "box" };
+    if (!mode.on) return { native: true, source: mode.source, reason: mode.source === "host-builds" ? "host_builds" : mode.offer ? "offer" : "off" };
+    const project = this.projects.get(boxKey(boxRoot(workspace)));
+    if (project?.run?.native) return { native: true, source: mode.source, reason: "box_failed" };
+    if (project?.why) return { native: true, source: mode.source, reason: project.why.reason, ...(project.why.runtime ? { runtime: project.why.runtime } : {}) };
+    // Not planned yet (a plan still running, or waiting for its next try).
+    return { native: true, source: mode.source, reason: "planning" };
   }
 
   /** Whether chats ran in a box during this run (they get a `final` checkpoint at quit). */
