@@ -24,9 +24,10 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { boxHome, boxKey, boxSnapshotsDir, containerName, installShell, listBoxes, readRecord, resetBox, savedTurns, type BoxLabel, type BoxLog } from "./box.js";
+import { boxHome, boxKey, boxSnapshotsDir, containerName, installShell, listBoxes, mountReplaced, readRecord, resetBox, savedTurns, type BoxLabel, type BoxLog } from "./box.js";
 import { LABELS, OPT_IN, backendsFor, driverFor } from "./backends/index.js";
 import type { BoxExec } from "./backends/types.js";
+import type { BoxEndpoint } from "./client.js";
 import { detectStack, imageFor } from "./images.js";
 import { askedBackend, boxRun, planBox, pullLog, pullMarker, pulling, pullInBackground, resolveMode, saveBackend, serverBackends, serverDefault, shimsDir, type BoxRun, type ProjectBoxMode, type ServerBoxDefault } from "./launch.js";
 import type { BoxInstallLogPaths } from "./install-log.js";
@@ -109,6 +110,8 @@ export type BoxServiceOptions = {
   pluginPath: () => string;
   log?: BoxLog;
   env?: NodeJS.ProcessEnv;
+  /** Whether a running box's project folder was deleted and made again (box.ts mountReplaced; tests replace it). */
+  folderReplaced?: (box: { endpoint: BoxEndpoint; croot: string }) => Promise<boolean>;
 };
 
 /** `waitingImage`: planned while its image was downloading (planned again as soon as the image is here). */
@@ -139,7 +142,10 @@ export class BoxService {
   private installLog: BoxInstallLogPaths | null = null;
   private alternatives: { at: number; key: string; list: BackendAlternative[] } | null = null;
 
+  private readonly folderReplaced: NonNullable<BoxServiceOptions["folderReplaced"]>;
+
   constructor(private readonly options: BoxServiceOptions) {
+    this.folderReplaced = options.folderReplaced ?? (({ endpoint, croot }) => mountReplaced({ endpoint }, { croot, readyMs: 1_000 }));
     this.env = options.env ?? process.env;
     this.home = boxHome(this.env);
     this.log = options.log ?? (() => {});
@@ -261,7 +267,15 @@ export class BoxService {
         await this.writeProjects();
         return null;
       }
-      if (project.run && !project.run.native) return project.run;
+      if (project.run && !project.run.native) {
+        const box = project.run.box;
+        // The folder was deleted and made again (a new clone) while its box ran: the box still has the deleted
+        // one, where every command fails. Planned again, the box restarts on the new folder (openBox).
+        if (!box?.ready || !box.endpoint || !(await this.folderReplaced({ endpoint: box.endpoint, croot: box.croot }).catch(() => false))) return project.run;
+        this.log("info", "box folder replaced while it ran: starting it again", { key });
+        project.run = null;
+        project.nextPlanAt = 0;
+      }
       if (Date.now() < project.nextPlanAt) return null;
       const plan = await planBox({ env: this.env, home: this.home, root, log: this.log, shims: shimsDir(this.env), ...this.detectOptions() });
       project.waitingImage = !plan.box && plan.downloading === true;
