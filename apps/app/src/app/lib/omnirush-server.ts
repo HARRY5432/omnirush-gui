@@ -435,7 +435,8 @@ export type OmniRushWorkspaceBox = {
   mode: "on" | "off" | null;
   serverDefault: "off" | "offer" | "on";
   on: boolean;
-  source: "env" | "project" | "server" | "default";
+  /** "host-builds": the server's default would put it in the sandbox, but the folder has this computer's builds. */
+  source: "env" | "project" | "server" | "default" | "host-builds";
   offer: boolean;
   state: "off" | "unavailable" | "downloading" | "starting" | "ready" | "failed";
   runtime: { ok: boolean; name: string | null; flavor: string | null; version: string | null; reason: string | null } | null;
@@ -459,6 +460,13 @@ export type OmniRushWorkspaceBox = {
   platform?: string;
   notice: string | null;
   error: string | null;
+  /**
+   * macOS / Windows: the folder has this computer's builds (node_modules, a venv, programs). `native`: its
+   * chats stay on this computer; else the sandbox is on by choice and `notice` warns. Older servers: absent.
+   */
+  hostBuilds?: { native: boolean; things: string; notice: string } | null;
+  /** macOS / Windows, while chats run in the sandbox: one line that says so. Older servers: absent. */
+  boxNotice?: string | null;
 };
 export type OmniRushWorkspaceBoxProgress = {
   bytesDone: number | null;

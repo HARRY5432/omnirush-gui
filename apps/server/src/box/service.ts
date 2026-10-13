@@ -28,6 +28,7 @@ import { boxHome, boxKey, boxSnapshotsDir, containerName, installShell, listBoxe
 import { LABELS, OPT_IN, backendsFor, driverFor } from "./backends/index.js";
 import type { BoxExec } from "./backends/types.js";
 import type { BoxEndpoint } from "./client.js";
+import { hostBuilds, hostBuildsNotice, hostBuildThings, hostRules } from "./host-builds.js";
 import { detectStack, imageFor } from "./images.js";
 import { askedBackend, boxRun, planBox, pullLog, pullMarker, pulling, pullInBackground, resolveMode, saveBackend, serverBackends, serverDefault, shimsDir, type BoxRun, type ProjectBoxMode, type ServerBoxDefault } from "./launch.js";
 import type { BoxInstallLogPaths } from "./install-log.js";
@@ -60,7 +61,8 @@ export type BoxStatus = {
   serverDefault: ServerBoxDefault;
   /** Whether the project's chats should run in its box. */
   on: boolean;
-  source: "env" | "project" | "server" | "default";
+  /** "host-builds": the server's default would put it in the box, but its folder has this computer's builds (macOS, Windows). */
+  source: "env" | "project" | "server" | "default" | "host-builds";
   /** The server offers the box and this project was not offered it yet. */
   offer: boolean;
   state: "off" | "unavailable" | "downloading" | "starting" | "ready" | "failed";
@@ -78,6 +80,14 @@ export type BoxStatus = {
   /** One line for the user (why it is off, that it is downloading). */
   notice: string | null;
   error: string | null;
+  /**
+   * macOS / Windows: the folder has this computer's builds (host-builds.ts). `native`: its chats
+   * stay on this computer (only the server's default had it on); else it is on by the user's
+   * choice and `notice` warns that rebuilding them in the box replaces them. Null otherwise.
+   */
+  hostBuilds: { native: boolean; things: string; notice: string } | null;
+  /** macOS / Windows, while the project's chats run in the box: the one line that says so (null elsewhere). */
+  boxNotice: string | null;
 };
 
 export type BoxBackendView = {
@@ -112,6 +122,8 @@ export type BoxServiceOptions = {
   env?: NodeJS.ProcessEnv;
   /** Whether a running box's project folder was deleted and made again (box.ts mountReplaced; tests replace it). */
   folderReplaced?: (box: { endpoint: BoxEndpoint; croot: string }) => Promise<boolean>;
+  /** The OS whose builds count as this computer's (host-builds.ts; tests set it). */
+  platform?: NodeJS.Platform;
 };
 
 /** `waitingImage`: planned while its image was downloading (planned again as soon as the image is here). */
@@ -137,6 +149,7 @@ export class BoxService {
   private readonly nativeChats = new Map<string, string>();
   private readonly home: string;
   private readonly env: NodeJS.ProcessEnv;
+  private readonly platform: NodeJS.Platform;
   private log: BoxLog;
   private projectsWrite: Promise<void> = Promise.resolve();
   private installLog: BoxInstallLogPaths | null = null;
@@ -147,6 +160,7 @@ export class BoxService {
   constructor(private readonly options: BoxServiceOptions) {
     this.folderReplaced = options.folderReplaced ?? (({ endpoint, croot }) => mountReplaced({ endpoint }, { croot, readyMs: 1_000 }));
     this.env = options.env ?? process.env;
+    this.platform = options.platform ?? process.platform;
     this.home = boxHome(this.env);
     this.log = options.log ?? (() => {});
   }
@@ -224,7 +238,35 @@ export class BoxService {
   private async mode(workspace: BoxWorkspace) {
     const settings = await this.options.readSettings(workspace.id).catch(() => ({ mode: null, offered: false }));
     const server = this.serverDefault();
-    return { settings, server, ...resolveMode({ env: this.env, project: settings.mode, server, offered: settings.offered }) };
+    const resolved = resolveMode({ env: this.env, project: settings.mode, server, offered: settings.offered });
+    const gate = workspace.workspaceType === "local" ? this.hostGate(boxRoot(workspace), resolved) : null;
+    // A box already running for the project keeps its chats (builds made since do not move them out).
+    const running = this.projects.get(boxKey(boxRoot(workspace)))?.run;
+    if (gate?.native && !(running && !running.native)) return { settings, server, ...resolved, on: false, source: "host-builds" as const, offer: false, hostBuilds: gate };
+    return { settings, server, ...resolved, hostBuilds: gate };
+  }
+
+  /**
+   * macOS / Windows: a project folder with this computer's builds (node_modules,
+   * a venv, Mach-O / PE programs; host-builds.ts). Only the server's default
+   * putting it in the box: its chats stay here (`native`); the user's own
+   * choice (the project's switch, OMNIRUSH_BOX=1): in the box, with a warning.
+   * Null on Linux, with the box off, or when the folder has none.
+   * OMNIRUSH_BOX_KEEP_NATIVE=off or OMNIRUSH_BOX_HOST_BUILDS=off skips it.
+   */
+  private hostGate(root: string, mode: { on: boolean; source: string }): { native: boolean; things: string; notice: string } | null {
+    if (!mode.on || !hostRules(this.platform)) return null;
+    if (String(this.env.OMNIRUSH_BOX_KEEP_NATIVE ?? "").trim().toLowerCase() === "off") return null;
+    let found;
+    try {
+      found = hostBuilds(root, { platform: this.platform, stateDir: this.options.stateDir, env: this.env });
+    } catch (error) {
+      this.log("warn", "host builds check failed", { error: error instanceof Error ? error.message : String(error) });
+      return null;
+    }
+    if (!found.found) return null;
+    const native = mode.source === "server";
+    return { native, things: hostBuildThings(found), notice: hostBuildsNotice(native ? "native" : "explicit", { platform: this.platform, result: found }) };
   }
 
   /**
@@ -260,10 +302,11 @@ export class BoxService {
     this.projects.set(key, project);
     if (project.planning) return project.planning;
     project.planning = (async () => {
-      const { on } = await this.mode(workspace);
+      const { on, hostBuilds: gate } = await this.mode(workspace);
       if (!on) {
+        if (gate?.native && project.notice !== gate.notice) this.log("info", "box: the server's default not applied, the folder has this computer's builds", { key, things: gate.things });
         project.run = null;
-        project.notice = null;
+        project.notice = gate?.native ? gate.notice : null;
         await this.writeProjects();
         return null;
       }
@@ -354,16 +397,16 @@ export class BoxService {
   }
 
   async status(workspace: BoxWorkspace, { fresh = false }: { fresh?: boolean } = {}): Promise<BoxStatus> {
-    const { settings, server, on, source, offer } = await this.mode(workspace);
+    const { settings, server, on, source, offer, hostBuilds: gate } = await this.mode(workspace);
     // The server's "offer": shown once per folder (CLI: the tip, once per folder).
     if (offer && workspace.workspaceType === "local") await this.options.writeSettings(workspace.id, { offered: true }).catch(() => undefined);
     const root = boxRoot(workspace);
     const key = boxKey(root);
     const project = this.projects.get(key);
-    const base = { mode: settings.mode, serverDefault: server, on, source, offer, error: null };
+    const base = { mode: settings.mode, serverDefault: server, on, source, offer, error: null, hostBuilds: gate, boxNotice: null };
     const backendSetting = { ...askedBackend({ env: this.env, stateDir: this.options.stateDir }), choices: backendChoices() };
     const setting = { value: backendSetting.backend, source: backendSetting.source, choices: backendSetting.choices };
-    if (workspace.workspaceType !== "local") return { ...base, on: false, offer: false, state: "off", runtime: null, backend: null, backendSetting: setting, image: null, progress: null, container: null, platform: process.platform, notice: "The sandbox is for folders on this computer." };
+    if (workspace.workspaceType !== "local") return { ...base, on: false, offer: false, state: "off", runtime: null, backend: null, backendSetting: setting, image: null, progress: null, container: null, platform: this.platform, notice: "The sandbox is for folders on this computer." };
     // The full check (every backend) on a fresh look or once a minute; the cached choice otherwise.
     const { asked, allow } = this.detectOptions();
     const altKey = JSON.stringify([asked, allow]);
@@ -423,9 +466,10 @@ export class BoxService {
       image: { ref: image.pull, stack: image.stack, present, downloading },
       progress,
       container,
-      platform: process.platform,
-      notice: on ? project?.notice ?? (runtime.ok ? null : `Sandbox off for now: ${runtime.reason}.`) : null,
+      platform: this.platform,
+      notice: on ? project?.notice ?? (runtime.ok ? null : `Sandbox off for now: ${runtime.reason}.`) : gate?.native ? gate.notice : null,
       error: run?.box?.error ?? (record?.state === "off" || record?.state === "failed" ? record.error || null : null),
+      boxNotice: on && hostRules(this.platform) ? hostBuildsNotice("box", { platform: this.platform }) : null,
     };
   }
 

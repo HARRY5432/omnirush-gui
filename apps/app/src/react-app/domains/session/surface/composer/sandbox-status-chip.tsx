@@ -39,6 +39,28 @@ function SandboxChip(props: { client: LinuxSandboxClient; workspaceId: string; o
   const chip = "flex h-9 max-h-9 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-sm text-gray-10 transition-colors hover:bg-gray-3 hover:text-gray-12";
 
   if (!box.on && sandbox.pending !== "on") {
+    // The server's default left this project on this computer (its folder has this computer's builds): say why.
+    if (box.hostBuilds?.native) {
+      return (
+        <Tooltip>
+          <TooltipTrigger
+            render={<button type="button" aria-label="Linux sandbox: off for this project" data-testid="sandbox-host-builds-chip" className={chip} onClick={props.onOpenSettings} />}
+          >
+            <span className="relative">
+              <Box className="size-4" aria-hidden />
+              <span aria-hidden className={`absolute -right-0.5 -bottom-0.5 size-2 rounded-full ring-2 ring-dls-surface ${DOT.off}`} />
+            </span>
+            <span className="hidden whitespace-nowrap @min-[760px]/composer:inline">Sandbox off</span>
+          </TooltipTrigger>
+          <TooltipContent>
+            <div className="flex max-w-64 flex-col">
+              <span className="font-medium">Linux sandbox: off for this project</span>
+              <span>{box.hostBuilds.notice}</span>
+            </div>
+          </TooltipContent>
+        </Tooltip>
+      );
+    }
     if (!box.offer || offerDismissed) return null;
     return (
       <div className="flex shrink-0 items-center rounded-md border border-dashed border-gray-6" data-testid="sandbox-offer-chip">

@@ -70,6 +70,9 @@ function stepFor(reason: string, platform: string | undefined): LinuxSandboxNext
   if (/Docker Desktop is installed but not running|Docker is installed but not running/.test(reason)) {
     return { title: "Start your container app", detail: "Open Docker Desktop, OrbStack or colima, wait until it is running, then check again.", command: null };
   }
+  if (/another macOS user/.test(reason)) {
+    return { title: "Start your container app", detail: "Docker here belongs to another account on this Mac. Open Docker Desktop, OrbStack or colima in this account, then check again.", command: null };
+  }
   if (/Docker daemon is not running/.test(reason)) return { title: "Start Docker", detail: "Run this in a terminal, then check again.", command: "sudo systemctl start docker" };
   return null;
 }
@@ -101,6 +104,7 @@ export function linuxSandboxView(box: OmniRushWorkspaceBox, pending: LinuxSandbo
   if (pending === "retry") return { ...base, tone: "busy", title: "Trying again…", detail: null };
   if (!box.on) {
     if (box.source === "env") return { ...base, tone: "off", title: "Off for this app", detail: "Set by OMNIRUSH_BOX where the app is launched." };
+    if (box.hostBuilds?.native) return { ...base, tone: "attention", title: "Off for this project", detail: box.hostBuilds.notice };
     return { ...base, tone: "off", title: "Off", detail: "Commands run on this computer." };
   }
   const using = runtimeLabel(box);
@@ -110,7 +114,9 @@ export function linuxSandboxView(box: OmniRushWorkspaceBox, pending: LinuxSandbo
     case "starting":
       return { ...base, tone: "busy", title: "Starting the sandbox…", detail: using ? `Using ${using}. This takes a few seconds.` : "This takes a few seconds." };
     case "ready":
-      return { ...base, tone: "ready", title: "Ready", detail: using ? `Commands run in a Linux container (${using}).` : "Commands run in a Linux container." };
+      // On by choice in a folder with this computer's builds: the warning; on macOS / Windows: that chats run in Linux.
+      if (box.hostBuilds && !box.hostBuilds.native) return { ...base, tone: "attention", title: "Ready", detail: box.hostBuilds.notice };
+      return { ...base, tone: "ready", title: "Ready", detail: box.boxNotice ?? (using ? `Commands run in a Linux container (${using}).` : "Commands run in a Linux container.") };
     case "failed":
       return { ...base, tone: "error", title: "The sandbox could not start", detail: RUNS_HERE, action: { kind: "retry", label: "Try again" }, errorDetail: box.error ?? box.notice };
     case "unavailable": {

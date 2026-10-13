@@ -61,6 +61,9 @@ describe("box runtime", () => {
 
   test("failures read as one line for the user", () => {
     expect(explainFailure("docker", { code: 1, stderr: "permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock" })).toContain("docker group");
+    const mac = explainFailure("docker", { code: 1, stderr: "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock" }, { platform: "darwin", env: {}, exists: () => true });
+    expect(mac).toContain("another macOS user");
+    expect(mac).not.toMatch(/usermod|docker group/);
     expect(explainFailure("docker", { code: 1, stderr: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" }, { platform: "darwin" })).toContain("start Docker Desktop");
     expect(explainFailure("docker", { code: -1, stderr: "", error: "ENOENT" })).toBe("docker is not installed");
     // Docker 29's wording, and a stopped daemon told by its missing socket whatever the words.

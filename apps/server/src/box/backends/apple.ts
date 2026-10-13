@@ -52,10 +52,28 @@ export function findAppleBin({ env = process.env, exists = existsSync }: { env?:
   return null;
 }
 
-/** macOS major version from the Darwin kernel release (Darwin 25 = macOS 26). */
-export function macosMajor(release = os.release()): number | null {
+const SYSTEM_VERSION = "/System/Library/CoreServices/SystemVersion.plist";
+
+/** This Mac's ProductVersion ("27.0.1") from SystemVersion.plist, or null. */
+export function systemProductVersion(read: (file: string) => string = (file) => readFileSync(file, "utf8")): string | null {
+  try {
+    const match = /<key>ProductVersion<\/key>\s*<string>(\d+(?:\.\d+)*)<\/string>/.exec(read(SYSTEM_VERSION));
+    return match?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * macOS major version: this Mac's own ProductVersion when asked about this
+ * machine, else from the Darwin release (20-24 = macOS 11-15, 25 = macOS 26).
+ */
+export function macosMajor(release = os.release(), product: string | null = release === os.release() ? systemProductVersion() : null): number | null {
+  const own = Number.parseInt(String(product ?? ""), 10);
+  if (Number.isFinite(own) && own >= 10) return own;
   const darwin = Number.parseInt(String(release).split(".")[0] ?? "", 10);
-  return Number.isFinite(darwin) && darwin >= 20 ? darwin + 1 : null;
+  if (!Number.isFinite(darwin) || darwin < 20) return null;
+  return darwin <= 24 ? darwin - 9 : darwin + 1;
 }
 
 function record(value: unknown): Record<string, unknown> {

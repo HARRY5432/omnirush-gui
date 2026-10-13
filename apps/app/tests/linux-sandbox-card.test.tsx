@@ -156,6 +156,20 @@ describe("Linux sandbox card", () => {
     expect(linuxSandboxView(box({ ...on, state: "unavailable", notice: "Sandbox off for now: the sandbox did not start in time." }))).toMatchObject({ title: "The sandbox is not running", action: { kind: "retry" }, errorDetail: "the sandbox did not start in time" });
   });
 
+  test("macOS / Windows: a project kept off for its host builds says why (switch off, one click on); on by choice it warns; a box says it is Linux", () => {
+    const kept = "This folder has Mac builds (node_modules, .venv) that won't run in the Linux sandbox, so its chats run on this Mac. Turn the sandbox on for this project to use it anyway.";
+    const off = box({ on: false, source: "host-builds", state: "off", notice: kept, hostBuilds: { native: true, things: "node_modules, .venv", notice: kept } });
+    expect(linuxSandboxView(off)).toMatchObject({ tone: "attention", title: "Off for this project", detail: kept });
+    const markup = card({ box: off });
+    expect(switchMarkup(markup)).toContain('aria-checked="false"');
+    expect(switchMarkup(markup)).not.toContain('aria-disabled="true"');
+    expect(markup).toContain("Mac builds (node_modules, .venv)");
+    const warning = "This folder has Mac builds (node_modules) that won't run in the Linux sandbox; rebuilding them there replaces them with Linux builds that won't run on this Mac.";
+    expect(linuxSandboxView(box({ ...on, mode: "on", source: "project", state: "ready", hostBuilds: { native: false, things: "node_modules", notice: warning } }))).toMatchObject({ tone: "attention", title: "Ready", detail: warning });
+    const line = "Chats here run in a Linux sandbox, not on this Mac; turn it off for this project in Settings to run them here.";
+    expect(linuxSandboxView(box({ ...on, state: "ready", boxNotice: line }))).toMatchObject({ tone: "ready", title: "Ready", detail: line });
+  });
+
   test("forced by the environment: the switch is locked and says where", () => {
     const markup = card({ box: box({ source: "env" }) });
     expect(switchMarkup(markup)).toContain('aria-disabled="true"');
