@@ -2195,6 +2195,22 @@ const desktopCommandHandlers = {
       const input = args[0] && typeof args[0] === "object" ? args[0] : {};
       return omnirushAccountStore.spinQuality({ idempotencyKey: typeof input.idempotencyKey === "string" ? input.idempotencyKey : undefined });
   },
+  // Buildathon: shown only to enrolled accounts; every failure is a null
+  // (or a "retry"), never a thrown error, so the app quietly shows nothing.
+  "omnirushBuildathon": async (event) => {
+      return omnirushAccountStore.buildathonStatus();
+  },
+  "omnirushBuildathonSessions": async (event) => {
+      return omnirushAccountStore.buildathonSessions();
+  },
+  "omnirushBuildathonLink": async (event, ...args) => {
+      const input = args[0] && typeof args[0] === "object" ? args[0] : {};
+      return omnirushAccountStore.buildathonLink({ code: input.code });
+  },
+  "omnirushBuildathonTagSession": async (event, ...args) => {
+      const input = args[0] && typeof args[0] === "object" ? args[0] : {};
+      return omnirushAccountStore.buildathonTagSession({ sessionId: input.sessionId, track: input.track, project: input.project });
+  },
   "omnirushAccountConnect": async (event, ...args) => {
       const input = args[0] ?? {};
       const result = await omnirushAccountStore.authorize({

@@ -285,6 +285,68 @@ export type OmniRushQualityDetails = {
  * Labels, hints and messages are server text, shown as given. Null from the
  * desktop: the app falls back to its own checklist.
  */
+/** Buildathon (GET /omnirush/me/buildathon), parsed by the main process; null unless enrolled. */
+export type OmniRushBuildathonTrack = { id: string; label: string };
+export type OmniRushBuildathonPhase = "upcoming" | "building" | "judging" | "results" | "closed";
+export type OmniRushBuildathonEvent = {
+  id: string;
+  name: string;
+  startsAt: string | null;
+  registrationEndsAt: string | null;
+  deadlineAt: string;
+  resultsAt: string | null;
+  phase: OmniRushBuildathonPhase | null;
+  pageUrl: string | null;
+  submitUrl: string | null;
+  rules: string[];
+  tracks: OmniRushBuildathonTrack[];
+  /** Largest first. */
+  reminders: Array<{ beforeSeconds: number; text: string }>;
+};
+export type OmniRushBuildathonParticipant = {
+  enrolledAt: string | null;
+  tokensGranted: number;
+  tokensUsed: number;
+  tokensLeft: number;
+  sessionsTagged: number;
+  sessionsGood: number;
+};
+export type OmniRushBuildathonSubmission = {
+  submissionId: string;
+  submittedAt: string | null;
+  updatedAt: string | null;
+  track: string | null;
+  title: string | null;
+  repoUrl: string | null;
+  demoVideoUrl: string | null;
+  liveUrl: string | null;
+  sessionIds: string[];
+  checks: Array<{ id: string; ok: boolean; text: string }>;
+  locked: boolean;
+};
+export type OmniRushBuildathonStatus = {
+  enrolled: true;
+  serverTime: string | null;
+  event: OmniRushBuildathonEvent;
+  participant: OmniRushBuildathonParticipant | null;
+  submission: OmniRushBuildathonSubmission | null;
+};
+export type OmniRushBuildathonSession = {
+  sessionId: string;
+  title: string | null;
+  project: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
+  track: string | null;
+  status: "good" | "pending" | "incomplete";
+  reasons: string[];
+  tokens: number;
+};
+export type OmniRushBuildathonLinkResult =
+  | { ok: true; status: OmniRushBuildathonStatus }
+  | { ok: false; error: string };
+export type OmniRushBuildathonTagResult = "tagged" | "refused" | "retry";
+
 export type OmniRushSessionStatus = {
   sessionId: string;
   status: "on_track" | "at_risk" | "failing" | "unknown";
@@ -835,6 +897,13 @@ export type DesktopCommandMap = {
   omnirushQualitySpin: {
     args: [input: { idempotencyKey: string }];
     result: OmniRushQualitySpinOutcome;
+  };
+  omnirushBuildathon: { args: []; result: OmniRushBuildathonStatus | null };
+  omnirushBuildathonSessions: { args: []; result: OmniRushBuildathonSession[] | null };
+  omnirushBuildathonLink: { args: [input: { code: string }]; result: OmniRushBuildathonLinkResult };
+  omnirushBuildathonTagSession: {
+    args: [input: { sessionId: string; track: string; project?: string | null }];
+    result: OmniRushBuildathonTagResult;
   };
   omnirushAccountConnect: {
     args: [options?: { gatewayUrl?: string; deviceName?: string }];

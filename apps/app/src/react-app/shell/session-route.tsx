@@ -14,6 +14,7 @@ import { closeWorkspaceTerminals } from "../domains/session/terminal/terminal-ru
 import type { ProviderListResponse } from "@opencode-ai/sdk/v2/client";
 
 import { captureAnalyticsEvent, markTaskRunStart } from "@/app/lib/analytics";
+import { noteNewBuildathonProject } from "@/app/lib/buildathon";
 import { trackSessionActive, trackTaskStarted } from "@/app/lib/den-telemetry";
 import { buildDiagnosticsBundleJson } from "@/app/lib/diagnostics-bundle";
 import { downloadTextAsFile } from "@/app/lib/download";
@@ -3161,6 +3162,7 @@ export function SessionRoute() {
           });
         }
         captureAnalyticsEvent("workspace_created", { workspace_type: "local" });
+        noteNewBuildathonProject(workspacePath, targetWorkspace?.displayName ?? targetWorkspace?.name ?? null);
         if (session?.id) {
           captureAnalyticsEvent("task_created", { source: "workspace_created", workspace_type: "local" });
           if (firstTaskPrompt || firstTaskAttachments.length) {

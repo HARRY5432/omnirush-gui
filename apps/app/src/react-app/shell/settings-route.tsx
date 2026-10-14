@@ -2288,6 +2288,9 @@ function SettingsRouteContent(props: SettingsSurfaceProps = {}) {
             runtimeWorkspaceId={runtimeWorkspaceId}
             linuxSandboxClient={omnirushClient}
             sandboxWorkspaceId={selectedWorkspaceId || runtimeWorkspaceId}
+            buildathonProject={selectedWorkspace?.workspaceType === "local" && selectedWorkspace.path
+              ? { path: selectedWorkspace.path, name: selectedWorkspace.displayName?.trim() || selectedWorkspace.name || selectedWorkspace.path }
+              : null}
             buildDiagnosticsBundle={() => buildDiagnosticsBundleJson({
               developerMode,
               omnirushServerStatus: routeOmniRushStatus,

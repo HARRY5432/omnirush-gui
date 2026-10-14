@@ -44,6 +44,7 @@ import { isDesktopRuntime } from "../../../../app/lib/runtime-env";
 import { refreshAccountStatus, setQualitySessionId, useAccountStatusStore, useQualityUiStore, type AccountQuality } from "../../../../app/lib/quality";
 import { goodSessionWording } from "../../../../app/lib/good-session";
 import { ProgressRing, QualityTierBadge, SpinCounts, spinRowTitle } from "../../quality/quality-parts";
+import { buildathonProjects, useBuildathonStore } from "../../../../app/lib/buildathon";
 import { OmniRushDenHelpLink } from "../../workspace/omnirush-den-help-link";
 import { NotificationBell } from "../../../shell/notification-center";
 import { useUiStateStore } from "../../../shell/ui-state-store";
@@ -1154,6 +1155,11 @@ export function AppSidebar(props: AppSidebarProps) {
   React.useEffect(() => {
     setQualitySessionId(props.selectedSessionId ?? null);
   }, [props.selectedSessionId]);
+
+  // The buildathon layer files event sessions under their project's track.
+  React.useEffect(() => {
+    useBuildathonStore.getState().setProjects(buildathonProjects(props.workspaceSessionGroups));
+  }, [props.workspaceSessionGroups]);
 
   // Green unread dots: agent finished while the user was on another session.
   React.useEffect(() => {

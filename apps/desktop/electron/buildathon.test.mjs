@@ -1,0 +1,212 @@
+import assert from "node:assert/strict";
+import { mkdtemp } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+
+import {
+  BUILDATHON_TRACKS,
+  buildathonLinkCode,
+  buildathonTrackId,
+  parseBuildathonSessions,
+  parseBuildathonStatus,
+  parseBuildathonSubmission,
+} from "./buildathon.mjs";
+import { createDesktopOmniRushAccountStore } from "./omnirush-account.mjs";
+
+const GATEWAY = "http://localhost:8090/omnirush/v1";
+const SUBMISSION = {
+  submission_id: "OFB-4K7Q9M",
+  submitted_at: "2026-10-18T10:00:00Z",
+  updated_at: "2026-10-18T11:00:00Z",
+  track: "agents",
+  title: "Thing",
+  repo_url: "https://github.com/a/b",
+  demo_video_url: "https://youtu.be/x",
+  live_url: "http://insecure.example",
+  description: "d",
+  session_ids: ["ses_1", 7],
+  checks: [{ id: "repo_public", ok: true, text: "Repo is public" }, { ok: false }],
+  locked: false,
+};
+const ENROLLED = {
+  enrolled: true,
+  server_time: "2026-10-15T10:00:00Z",
+  event: {
+    id: "frontier-2026",
+    name: "OmniRush Frontier Buildathon 2026",
+    starts_at: "2026-10-13T18:30:00Z",
+    registration_ends_at: "2026-10-19T18:29:59Z",
+    deadline_at: "2026-10-20T18:29:59Z",
+    results_at: "2026-10-25T06:30:00Z",
+    phase: "building",
+    page_url: "https://unstop.com/p/x",
+    submit_url: "https://omnirush.ai/console/buildathon",
+    rules: ["OmniRush must be the only generative AI tool you use.", "", "Individual only."],
+    tracks: [{ id: "agents", label: "Agents & Automation" }, { id: "BAD ID", label: "x" }],
+    reminders: [{ before_s: 900, text: "15 min" }, { before_s: 86400, text: "24 h" }, { before_s: 3600, text: "1 h" }, { before_s: 0, text: "no" }],
+  },
+  participant: { enrolled_at: "2026-10-14T00:00:00Z", tokens_granted: 10000000, tokens_used: 1234567, tokens_left: 8765433, sessions_tagged: 12, sessions_good: 7 },
+  submission: null,
+};
+
+function testStorage() {
+  return {
+    isAsyncEncryptionAvailable: async () => true,
+    getSelectedStorageBackend: () => "keychain",
+    encryptStringAsync: async (value) => Buffer.from(value, "utf8"),
+    decryptStringAsync: async (value) => ({ result: value.toString("utf8"), shouldReEncrypt: false }),
+  };
+}
+
+async function signedInStore(fetchImpl) {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "omnirush-buildathon-"));
+  const store = createDesktopOmniRushAccountStore({
+    filePath: path.join(directory, "account.bin"),
+    loadSafeStorage: () => testStorage(),
+    platform: /** @type {NodeJS.Platform} */ ("linux"),
+    env: { OMNIRUSH_DEV_MODE: "1" },
+    sleep: async () => undefined,
+    execFileImpl: async (file) => { throw new Error(`unexpected ${file}`); },
+    clientVersion: "3.4.9",
+    fetchImpl,
+  });
+  await store.save({ gatewayUrl: GATEWAY, accessToken: "access-1", refreshToken: "refresh-1" });
+  return store;
+}
+
+test("buildathon: anything but an enrolled answer with a deadline is null", () => {
+  assert.equal(parseBuildathonStatus(null), null);
+  assert.equal(parseBuildathonStatus({ enrolled: false }), null);
+  assert.equal(parseBuildathonStatus({ enrolled: "true", event: ENROLLED.event }), null);
+  assert.equal(parseBuildathonStatus({ enrolled: true }), null);
+  assert.equal(parseBuildathonStatus({ enrolled: true, event: { ...ENROLLED.event, deadline_at: "soon" } }), null);
+  assert.equal(parseBuildathonStatus([]), null);
+});
+
+test("buildathon: the enrolled block, cleaned", () => {
+  const status = parseBuildathonStatus(ENROLLED);
+  assert.equal(status.enrolled, true);
+  assert.equal(status.event.id, "frontier-2026");
+  assert.equal(status.event.phase, "building");
+  assert.equal(status.event.deadlineAt, "2026-10-20T18:29:59Z");
+  assert.deepEqual(status.event.rules, ["OmniRush must be the only generative AI tool you use.", "Individual only."]);
+  assert.deepEqual(status.event.tracks, [{ id: "agents", label: "Agents & Automation" }]);
+  assert.deepEqual(status.event.reminders.map((reminder) => reminder.beforeSeconds), [86400, 3600, 900]);
+  assert.equal(status.participant.tokensLeft, 8765433);
+  assert.equal(status.participant.sessionsGood, 7);
+  assert.equal(status.submission, null);
+});
+
+test("buildathon: the six tracks stand in when the server lists none", () => {
+  const status = parseBuildathonStatus({ ...ENROLLED, event: { ...ENROLLED.event, tracks: [], phase: "odd", submit_url: "javascript:alert(1)" } });
+  assert.deepEqual(status.event.tracks.map((track) => track.id), BUILDATHON_TRACKS.map((track) => track.id));
+  assert.equal(status.event.tracks.length, 6);
+  assert.equal(status.event.phase, null);
+  assert.equal(status.event.submitUrl, null);
+});
+
+test("buildathon: tokens left defaults to granted minus used", () => {
+  const status = parseBuildathonStatus({ ...ENROLLED, participant: { tokens_granted: 10000000, tokens_used: 4000000 } });
+  assert.equal(status.participant.tokensLeft, 6000000);
+});
+
+test("buildathon: the submission object", () => {
+  const submission = parseBuildathonSubmission(SUBMISSION);
+  assert.equal(submission.submissionId, "OFB-4K7Q9M");
+  assert.equal(submission.liveUrl, null, "only https links are kept");
+  assert.deepEqual(submission.sessionIds, ["ses_1"]);
+  assert.deepEqual(submission.checks, [{ id: "repo_public", ok: true, text: "Repo is public" }]);
+  assert.equal(parseBuildathonSubmission({}), null);
+  assert.equal(parseBuildathonStatus({ ...ENROLLED, submission: SUBMISSION }).submission.submissionId, "OFB-4K7Q9M");
+});
+
+test("buildathon: tagged sessions", () => {
+  const sessions = parseBuildathonSessions({
+    sessions: [
+      { session_id: "ses_1", title: "API", project: "app", started_at: "2026-10-15T01:00:00Z", track: "agents", status: "good", reasons: [], tokens: 12000 },
+      { session_id: "ses_2", status: "weird", reasons: ["Too short", ""] },
+      { title: "no id" },
+    ],
+  });
+  assert.equal(sessions.length, 2);
+  assert.equal(sessions[0].status, "good");
+  assert.equal(sessions[1].status, "pending");
+  assert.deepEqual(sessions[1].reasons, ["Too short"]);
+  assert.equal(parseBuildathonSessions({}), null);
+});
+
+test("buildathon: track ids and link codes", () => {
+  assert.equal(buildathonTrackId("Human-AI"), "human-ai");
+  assert.equal(buildathonTrackId("../x"), null);
+  assert.equal(buildathonLinkCode(" fb-7kq2-m9 "), "FB-7KQ2-M9");
+  assert.equal(buildathonLinkCode("x"), null);
+  assert.equal(buildathonLinkCode("FB/../.."), null);
+});
+
+test("buildathon store: GET /me/buildathon with the device credential; null for not enrolled, errors, timeouts", async () => {
+  const seen = [];
+  const store = await signedInStore(async (url, init) => {
+    seen.push({ path: new URL(url).pathname, authorization: new Headers(init.headers).get("authorization"), signal: init.signal instanceof AbortSignal });
+    return Response.json(ENROLLED);
+  });
+  assert.equal((await store.buildathonStatus()).event.id, "frontier-2026");
+  assert.deepEqual(seen, [{ path: "/omnirush/me/buildathon", authorization: "Bearer access-1", signal: true }]);
+
+  for (const fetchImpl of [
+    async () => Response.json({ enrolled: false }),
+    async () => new Response("nope", { status: 404 }),
+    async () => new Response("down", { status: 500 }),
+    async () => new Response("not json", { status: 200 }),
+    async () => { throw new TypeError("fetch failed"); },
+    async () => { throw new DOMException("The operation timed out.", "TimeoutError"); },
+  ]) {
+    const other = await signedInStore(fetchImpl);
+    assert.equal(await other.buildathonStatus(), null);
+    assert.equal(await other.buildathonSessions(), null);
+  }
+});
+
+test("buildathon store: PUT the track of a session; 204 tagged, 404 refused, 5xx retry", async () => {
+  const seen = [];
+  const store = await signedInStore(async (url, init) => {
+    seen.push({ path: new URL(url).pathname, method: init.method, body: init.body });
+    return new Response(null, { status: 204 });
+  });
+  assert.equal(await store.buildathonTagSession({ sessionId: "ses_abc", track: "agents", project: "/home/a/shipwright" }), "tagged");
+  assert.deepEqual(seen, [{ path: "/omnirush/me/sessions/ses_abc/buildathon", method: "PUT", body: JSON.stringify({ track: "agents", project: "shipwright" }) }]);
+  assert.equal(await store.buildathonTagSession({ sessionId: "../me", track: "agents" }), "refused");
+  assert.equal(await store.buildathonTagSession({ sessionId: "ses_abc", track: "" }), "refused");
+  assert.equal(seen.length, 1, "bad input never reaches the server");
+
+  const notParticipant = await signedInStore(async () => Response.json({ detail: "Not Found" }, { status: 404 }));
+  assert.equal(await notParticipant.buildathonTagSession({ sessionId: "ses_abc", track: "agents" }), "refused");
+  const outside = await signedInStore(async () => Response.json({ error: "outside_window" }, { status: 409 }));
+  assert.equal(await outside.buildathonTagSession({ sessionId: "ses_abc", track: "agents" }), "refused");
+  const down = await signedInStore(async () => new Response("down", { status: 503 }));
+  assert.equal(await down.buildathonTagSession({ sessionId: "ses_abc", track: "agents" }), "retry");
+  const offline = await signedInStore(async () => { throw new TypeError("fetch failed"); });
+  assert.equal(await offline.buildathonTagSession({ sessionId: "ses_abc", track: "agents" }), "retry");
+});
+
+test("buildathon store: link code", async () => {
+  const seen = [];
+  const store = await signedInStore(async (url, init) => {
+    seen.push({ path: new URL(url).pathname, method: init.method, body: init.body });
+    return Response.json(ENROLLED);
+  });
+  const linked = await store.buildathonLink({ code: "fb-7kq2-m9" });
+  assert.equal(linked.ok, true);
+  assert.equal(linked.status.event.id, "frontier-2026");
+  assert.deepEqual(seen, [{ path: "/omnirush/me/buildathon/link", method: "POST", body: JSON.stringify({ code: "FB-7KQ2-M9" }) }]);
+  assert.equal((await store.buildathonLink({ code: "" })).ok, false);
+
+  const refused = await signedInStore(async () => Response.json({ error: "code_already_used" }, { status: 400 }));
+  assert.deepEqual(await refused.buildathonLink({ code: "FB-0000-00" }), { ok: false, error: "That code was already used." });
+  const unknown = await signedInStore(async () => Response.json({ error: "some_new_code" }, { status: 400 }));
+  assert.match(/** @type {any} */ (await unknown.buildathonLink({ code: "FB-0000-00" })).error, /not found/);
+  const limited = await signedInStore(async () => Response.json({ error: "too_many_attempts" }, { status: 429 }));
+  assert.match(/** @type {any} */ (await limited.buildathonLink({ code: "FB-0000-00" })).error, /Too many tries/);
+  const offline = await signedInStore(async () => { throw new TypeError("fetch failed"); });
+  assert.equal((await offline.buildathonLink({ code: "FB-0000-00" })).ok, false);
+});
