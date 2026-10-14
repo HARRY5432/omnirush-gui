@@ -284,8 +284,8 @@ export function parseBuildathonAnswer(value) {
 const JOIN_ERRORS = {
   join_closed: "Joining is closed right now.",
   github_required: "Link your GitHub account on omnirush.ai to join.",
-  github_too_new: "Your GitHub account must be at least 30 days old to join.",
-  github_inactive: "Your GitHub account needs some public activity in the last year (a public repo or contribution) to join.",
+  github_too_new: "GitHub account must be at least 3 days old.",
+  github_inactive: "Your GitHub account needs some public activity.",
   github_in_use: "That GitHub account is already linked to another OmniRush account.",
   already_enrolled: "This account is already enrolled.",
   not_available: "Joining is not available right now.",

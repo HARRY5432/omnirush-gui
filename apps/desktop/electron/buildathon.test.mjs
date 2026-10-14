@@ -380,7 +380,7 @@ test("buildathon store: join; the enrolled status, or the refusal in words", asy
 
   const closed = await signedInStore(async () => Response.json({ error: "join_closed" }, { status: 403 }));
   assert.deepEqual(await closed.buildathonJoin(), { ok: false, error: "Joining is closed right now.", closed: true });
-  for (const [code, words] of /** @type {Array<[string, RegExp]>} */ ([["github_required", /Link your GitHub/], ["github_too_new", /30 days/], ["github_inactive", /public activity/], ["github_in_use", /another OmniRush account/]])) {
+  for (const [code, words] of /** @type {Array<[string, RegExp]>} */ ([["github_required", /Link your GitHub/], ["github_too_new", /3 days old/], ["github_inactive", /public activity/], ["github_in_use", /another OmniRush account/]])) {
     const refused = await signedInStore(async () => Response.json({ error: code }, { status: 403 }));
     assert.match(/** @type {any} */ (await refused.buildathonJoin()).error, words, code);
   }
