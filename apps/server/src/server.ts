@@ -864,10 +864,11 @@ function isPromptAsyncProxyRequest(method: string, proxyPath: string) {
   return method === "POST" && /^\/session\/[^/]+\/prompt_async$/.test(normalizeOpencodeProxyPath(proxyPath));
 }
 
-// A prompt dispatch (v1 prompt_async, v2 prompt, or a slash command) is the
-// session uploader's "prompt" milestone: the workspace is captured as the turn begins.
+// A prompt dispatch (v1 prompt_async, the v1 engine's synchronous prompt
+// `POST /session/:id/message`, v2 prompt, or a slash command) is the session
+// uploader's "prompt" milestone: the workspace is captured as the turn begins.
 function isUploadPromptDispatch(method: string, proxyPath: string): boolean {
-  return method === "POST" && /^\/session\/[^/]+\/(?:prompt_async|prompt|command)$/.test(normalizeOpencodeProxyPath(proxyPath));
+  return method === "POST" && /^\/session\/[^/]+\/(?:prompt_async|prompt|message|command)$/.test(normalizeOpencodeProxyPath(proxyPath));
 }
 
 /**
@@ -919,7 +920,9 @@ export function createLocalWorkflowPromptDispatcher(config: ServerConfig): Local
   return {
     assertAllowed: (workspace) => assertUploadDispatchAllowed(config, workspace),
     prompt: (workspace, sessionId, body, signal) => {
-      const proxyPath = `/opencode/session/${encodeURIComponent(sessionId)}/prompt`;
+      // The v1 engine's synchronous prompt route; it has no `/prompt` (its
+      // catch-all answers that with a 200 web page, and nothing runs).
+      const proxyPath = `/opencode/session/${encodeURIComponent(sessionId)}/message`;
       const url = new URL(`http://127.0.0.1${proxyPath}`);
       const request = new Request(url, {
         method: "POST",
@@ -934,9 +937,12 @@ export function createLocalWorkflowPromptDispatcher(config: ServerConfig): Local
 
 // The session a captured engine request belongs to, read from the decoded
 // route path exactly as the engine reads its `:id` parameter. Null when the
-// path is not a session request or its identifier is malformed.
-function uploadSessionId(proxyPath: string): string | null {
-  const match = normalizeOpencodeProxyPath(proxyPath).match(/^\/session\/([^/]+)\/(?:prompt_async|prompt|command|abort|interrupt)$/);
+// path is not a session request or its identifier is malformed. `message` is
+// a dispatch only when posted (a GET reads the history).
+function uploadSessionId(proxyPath: string, method: string): string | null {
+  const path = normalizeOpencodeProxyPath(proxyPath);
+  const match = path.match(/^\/session\/([^/]+)\/(?:prompt_async|prompt|command|abort|interrupt)$/)
+    ?? (method === "POST" ? path.match(/^\/session\/([^/]+)\/message$/) : null);
   return match?.[1] ? decodeEngineRouteParam(match[1]) : null;
 }
 
@@ -2159,7 +2165,7 @@ export async function proxyOpencodeRequest(input: {
       await input.request.arrayBuffer().catch(() => undefined);
       return uploadAccountRequiredResponse();
     }
-    if (uploadSessionId(proxyPath) === null) {
+    if (uploadSessionId(proxyPath, method) === null) {
       // A dispatch is either refused or captured: a session identifier the
       // engine cannot decode would start a turn the session uploader cannot attribute.
       await input.request.arrayBuffer().catch(() => undefined);
@@ -2208,7 +2214,7 @@ export async function proxyOpencodeRequest(input: {
     ? undefined
     : await input.request.arrayBuffer().then((buf) => (buf.byteLength > 0 ? buf : undefined));
   const capture = workspace ? captureServicesByServer.get(input.config) : undefined;
-  const uploadedSessionId = uploadSessionId(proxyPath);
+  const uploadedSessionId = uploadSessionId(proxyPath, method);
   // The agent works from here (the prompt is on its way) until the engine runs no session.
   const turnActivity = workspace && workspace.workspaceType !== "remote" && uploadedSessionId && isUploadPromptDispatch(method, proxyPath)
     ? turnActivityFor(input.config)
