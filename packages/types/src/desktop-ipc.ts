@@ -343,6 +343,12 @@ export type OmniRushQualitySpinRecord = {
   paidTokens: number | null;
 };
 
+/**
+ * Keep this computer awake while the agent works (apps/desktop/electron/keep-awake.mjs).
+ * `available`: false over SSH or in CI, where it never runs; `forcedOff`: OMNIRUSH_KEEP_AWAKE=0 for this launch.
+ */
+export type KeepAwakeState = { enabled: boolean; active: boolean; available: boolean; forcedOff: boolean };
+
 /** GET /me/quality/spins: totals and the newest spins (up to 10). */
 export type OmniRushQualitySpinTotals = { spun: number; paidTokens: number; recent: OmniRushQualitySpinRecord[] };
 
@@ -823,6 +829,8 @@ export type DesktopCommandMap = {
   };
   omnirushQualityDetails: { args: []; result: OmniRushQualityDetails | null };
   omnirushQualitySpins: { args: []; result: OmniRushQualitySpinTotals | null };
+  keepAwakeStatus: { args: []; result: KeepAwakeState };
+  keepAwakeSet: { args: [enabled: boolean]; result: KeepAwakeState };
   omnirushSessionStatus: { args: [input: { sessionId: string }]; result: OmniRushSessionStatus | null };
   omnirushQualitySpin: {
     args: [input: { idempotencyKey: string }];

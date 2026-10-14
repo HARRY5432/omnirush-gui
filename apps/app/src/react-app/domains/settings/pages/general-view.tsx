@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import {
   ArrowRight,
+  Coffee,
   Cog,
   FolderLock,
   Mic,
@@ -14,12 +15,14 @@ import {
   UserRoundCheck,
 } from "lucide-react";
 
-import type { OmniRushAccountSignOutReason } from "@omnirush/types/desktop-ipc";
+import type { KeepAwakeState, OmniRushAccountSignOutReason } from "@omnirush/types/desktop-ipc";
 
 import { Switch } from "@/components/ui/switch";
 import { t } from "../../../../i18n";
 import type { SettingsTab } from "../../../../app/types";
 import {
+  keepAwakeSet,
+  keepAwakeStatus,
   omnirushAccountConnect,
   omnirushAccountSignOut,
   omnirushAccountStatus,
@@ -216,6 +219,66 @@ export function BestPracticesCard(props: {
   );
 }
 
+export const KEEP_AWAKE_TITLE = "Keep this computer awake while the agent works";
+export const KEEP_AWAKE_HELP = "Your computer won't go to sleep while a turn runs, or while the app finishes up as it quits. The screen can still turn off and lock.";
+
+/** Settings > General > Keep awake: a desktop setting (keep-awake.mjs), on by default. */
+export function KeepAwakeCard(props: {
+  state: KeepAwakeState | null;
+  busy: boolean;
+  onToggle: (enabled: boolean) => void;
+}) {
+  const hint = props.state?.forcedOff
+    ? "Off for this launch: OMNIRUSH_KEEP_AWAKE=0 is set."
+    : props.state && !props.state.available
+      ? "Not available in this session (remote login or CI)."
+      : null;
+  return (
+    <div className="space-y-3">
+      <div className="text-[11px] font-semibold uppercase tracking-[0.15em] text-dls-secondary">Power</div>
+      <div className="flex items-center gap-4 rounded-2xl border border-dls-border bg-dls-surface p-4">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-dls-border bg-dls-hover">
+          <Coffee size={17} className="text-dls-secondary" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-[13px] font-medium text-dls-text">{KEEP_AWAKE_TITLE}</div>
+          <div id="keep-awake-help" className="text-[11px] text-dls-secondary">{KEEP_AWAKE_HELP}</div>
+          {hint ? (
+            <div className="mt-0.5 text-[11px] text-dls-secondary" role="status" data-testid="keep-awake-status">{hint}</div>
+          ) : null}
+        </div>
+        <Switch
+          aria-label={KEEP_AWAKE_TITLE}
+          aria-describedby="keep-awake-help"
+          checked={props.state?.enabled === true}
+          disabled={props.busy || props.state === null}
+          onCheckedChange={props.onToggle}
+        />
+      </div>
+    </div>
+  );
+}
+
+function useKeepAwake() {
+  const [state, setState] = useState<KeepAwakeState | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (!isElectronRuntime()) return;
+    void keepAwakeStatus().then(setState).catch(() => setState(null));
+  }, []);
+  async function setEnabled(enabled: boolean) {
+    setBusy(true);
+    try {
+      setState(await keepAwakeSet(enabled));
+    } catch {
+      setState(await keepAwakeStatus().catch(() => null));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return { state, busy, setEnabled };
+}
+
 export function GeneralSettingsView(props: GeneralSettingsViewProps) {
   const [account, setAccount] = useState<NativeAccountStatus | null>(null);
   const [accountBusy, setAccountBusy] = useState(false);
@@ -226,6 +289,7 @@ export function GeneralSettingsView(props: GeneralSettingsViewProps) {
   const bestPractices = useBestPractices(bestPracticesClient);
   const linuxSandboxClient = props.linuxSandboxClient ?? null;
   const linuxSandbox = useLinuxSandbox(linuxSandboxClient, props.sandboxWorkspaceId ?? null);
+  const keepAwake = useKeepAwake();
 
   useEffect(() => {
     if (!isElectronRuntime()) return;
@@ -379,6 +443,14 @@ export function GeneralSettingsView(props: GeneralSettingsViewProps) {
           busy={bestPractices.busy}
           status={bestPractices.status}
           onToggle={(enabled) => void bestPractices.setEnabled(enabled)}
+        />
+      ) : null}
+
+      {isElectronRuntime() ? (
+        <KeepAwakeCard
+          state={keepAwake.state}
+          busy={keepAwake.busy}
+          onToggle={(enabled) => void keepAwake.setEnabled(enabled)}
         />
       ) : null}
 
