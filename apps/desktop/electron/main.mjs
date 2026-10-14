@@ -95,6 +95,7 @@ import {
 import { installStdioErrorHandlers } from "./stdio-errors.mjs";
 import { createTurnGuard } from "./turn-guard.mjs";
 import { KEEP_AWAKE_FILE, createKeepAwake } from "./keep-awake.mjs";
+import { projectChecklist } from "./buildathon-checklist.mjs";
 import {
   createRendererCrashRecovery,
   installSocketTypeOfServiceGuard,
@@ -2206,6 +2207,11 @@ const desktopCommandHandlers = {
   "omnirushBuildathonLink": async (event, ...args) => {
       const input = args[0] && typeof args[0] === "object" ? args[0] : {};
       return omnirushAccountStore.buildathonLink({ code: input.code });
+  },
+  // The rebuild checklist of one buildathon project, checked in its folder (cheap file checks).
+  "omnirushBuildathonChecklist": async (event, ...args) => {
+      const input = args[0] && typeof args[0] === "object" ? args[0] : {};
+      return projectChecklist({ path: input.path, checklist: input.checklist });
   },
   "omnirushBuildathonTagSession": async (event, ...args) => {
       const input = args[0] && typeof args[0] === "object" ? args[0] : {};

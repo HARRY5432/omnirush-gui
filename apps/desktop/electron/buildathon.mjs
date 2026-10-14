@@ -7,6 +7,11 @@
  * shows nothing.
  */
 
+import { parseChecklist } from "./buildathon-checklist.mjs";
+
+/** The server's default rules, word for word (the CLI and the server embed the same). */
+export const DEFAULT_AGENT_RULES = "This project is part of the OmniRush Buildathon and must rebuild from scratch on a clean Linux machine. Keep every file the project needs inside this folder and use git, committing after each working step. Pin the runtime version (.nvmrc / .python-version / go.mod toolchain / rust-toolchain.toml) and always keep a lockfile; install dependencies only into the project (no global installs, no sudo outside the Dockerfile). Maintain a Dockerfile that installs every system package and dependency and can build and run the project, a single test command (e.g. `make test`) that works offline, and a README with exact setup, run, test and deploy steps. Never hard-code absolute paths from this machine or put secrets in files (use .env.example). After each change, run the tests.";
+
 export const BUILDATHON_TRACKS = /** @type {const} */ ([
   { id: "agents", label: "Agents & Automation" },
   { id: "devtools", label: "Developer Tools & Open Source" },
@@ -150,6 +155,23 @@ export function parseBuildathonSubmission(value) {
   };
 }
 
+const REPRO_BOX = ["on", "offer", "off"];
+
+/**
+ * The `repro` block (contract "Reproducibility mode"); a missing or partial
+ * one falls back to the defaults: box on, the default rules and checklist.
+ * @returns {import("@omnirush/types/desktop-ipc").OmniRushBuildathonRepro}
+ */
+export function parseBuildathonRepro(value) {
+  const block = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const rules = text(block.agent_rules);
+  return {
+    box: REPRO_BOX.includes(block.box) ? block.box : "on",
+    agentRules: rules && rules.length <= 8_000 ? rules : DEFAULT_AGENT_RULES,
+    checklist: parseChecklist(block.checklist),
+  };
+}
+
 /**
  * GET /me/buildathon (or the link answer): null unless the account is
  * enrolled and the event names a deadline.
@@ -165,6 +187,7 @@ export function parseBuildathonStatus(value) {
     event,
     participant: parseParticipant(value.participant),
     submission: parseBuildathonSubmission(value.submission),
+    repro: parseBuildathonRepro(value.repro),
   };
 }
 

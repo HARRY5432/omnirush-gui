@@ -3,7 +3,13 @@ import { describe, expect, test } from "bun:test";
 import {
   buildathonChipText,
   buildathonCountdown,
+  buildathonProjectPaths,
   buildathonProjects,
+  buildathonServerBody,
+  projectAnswered,
+  readProjectEntries,
+  resetBuildathonServerSync,
+  syncBuildathonServer,
   clockOffsetMs,
   formatEventTime,
   formatRemaining,
@@ -162,7 +168,7 @@ test("the only-tool rule comes first", () => {
 });
 
 describe("refresh", () => {
-  const status: BuildathonStatus = { enrolled: true, serverTime: null, event: EVENT, participant: null, submission: null };
+  const status: BuildathonStatus = { enrolled: true, serverTime: null, event: EVENT, participant: null, submission: null, repro: { box: "on", agentRules: "", checklist: [] } };
 
   test("enrolled shows, anything else hides", async () => {
     await refreshBuildathon(async () => status);
@@ -174,5 +180,50 @@ describe("refresh", () => {
       throw new Error("bridge missing");
     });
     expect(useBuildathonStore.getState().status).toBeNull();
+  });
+});
+
+describe("reproducibility mode: buildathon projects", () => {
+  const inside = Date.parse("2026-10-15T00:00:00Z");
+  const before = Date.parse("2026-10-01T00:00:00Z");
+
+  test("a track, or a skip first answered inside the event; the first answer's time is kept", () => {
+    const storage = memoryStorage();
+    writeProjectTrack("/p/tracked", "agents", storage, before);
+    writeProjectTrack("/p/skipped", null, storage, inside);
+    writeProjectTrack("/p/early-skip", null, storage, before);
+    writeProjectTrack("/p/unknown-track", "nope", storage, inside);
+    expect(projectAnswered("/p/skipped", storage)).toBe(true);
+    expect(projectAnswered("/p/never", storage)).toBe(false);
+    expect(buildathonProjectPaths(EVENT, readProjectEntries(storage))).toEqual(["/p/skipped", "/p/tracked"]);
+    // A later track keeps the first answer's time; a later skip of an early folder does not make it one.
+    writeProjectTrack("/p/early-skip", null, storage, inside);
+    expect(readProjectEntries(storage)["/p/early-skip"]!.first).toBe(new Date(before).toISOString());
+    expect(buildathonProjectPaths(EVENT, readProjectEntries(storage))).not.toContain("/p/early-skip");
+  });
+
+  test("older entries (the track alone) still read", () => {
+    const storage = memoryStorage({ "omnirush.buildathon.tracks.v1": JSON.stringify({ "/p/old": "agents" }) });
+    expect(readProjectTrack("/p/old", storage)).toBe("agents");
+    expect(buildathonProjectPaths(EVENT, readProjectEntries(storage))).toEqual(["/p/old"]);
+  });
+
+  test("the server's body, sent only when it changed; a failure is sent again", async () => {
+    resetBuildathonServerSync();
+    const status: BuildathonStatus = {
+      enrolled: true, serverTime: null, event: EVENT, participant: null, submission: null,
+      repro: { box: "on", agentRules: "Rules.", checklist: [] },
+    };
+    const storage = memoryStorage();
+    writeProjectTrack("/p/app", "agents", storage, inside);
+    const entries = readProjectEntries(storage);
+    expect(buildathonServerBody(status, entries)).toEqual({ repro: { box: "on", agent_rules: "Rules." }, projects: ["/p/app"], deadline_at: EVENT.deadlineAt });
+    expect(buildathonServerBody(null, entries)).toBeNull();
+    const sent: unknown[] = [];
+    expect(await syncBuildathonServer(status, async () => { throw new Error("down"); }, entries)).toBe("failed");
+    expect(await syncBuildathonServer(status, async (body) => void sent.push(body), entries)).toBe("sent");
+    expect(await syncBuildathonServer(status, async (body) => void sent.push(body), entries)).toBe("unchanged");
+    expect(await syncBuildathonServer(null, async (body) => void sent.push(body), entries)).toBe("skipped");
+    expect(sent.length).toBe(1);
   });
 });

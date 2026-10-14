@@ -140,14 +140,20 @@ export function askedBackend({ env = process.env, stateDir }: { env?: NodeJS.Pro
 
 /**
  * On or off for a project, and why: OMNIRUSH_BOX=1|0 (every project), then
- * the project's setting, then the server's default ("on"; "offer" shows a
- * one-line offer until the project was offered it once; "off").
+ * the project's setting, then (a buildathon project, buildathon-repro.ts) the
+ * event's `repro.box`, then the server's default ("on"; "offer" shows a
+ * one-line offer until the project was offered it once; "off"). A buildathon
+ * project kept off by OMNIRUSH_BOX=0 or its own switch says so (`lessRepro`).
+ * CLI: src/box/launch.js resolveMode, the same order.
  */
-export function resolveMode({ env = process.env, project, server, offered = false }: { env?: NodeJS.ProcessEnv; project: ProjectBoxMode; server: ServerBoxDefault; offered?: boolean }): { on: boolean; source: "env" | "project" | "server" | "default"; offer: boolean } {
+export function resolveMode({ env = process.env, project, server, offered = false, buildathon = null }: { env?: NodeJS.ProcessEnv; project: ProjectBoxMode; server: ServerBoxDefault; offered?: boolean; buildathon?: "on" | "offer" | "off" | null }): { on: boolean; source: "env" | "project" | "server" | "default" | "buildathon"; offer: boolean; lessRepro?: true } {
+  const lessRepro = buildathon === "on" || buildathon === "offer" ? { lessRepro: true as const } : {};
   const asked = String(env.OMNIRUSH_BOX ?? "").trim().toLowerCase();
   if (["1", "on", "true"].includes(asked)) return { on: true, source: "env", offer: false };
-  if (["0", "off", "false"].includes(asked)) return { on: false, source: "env", offer: false };
-  if (project === "on" || project === "off") return { on: project === "on", source: "project", offer: false };
+  if (["0", "off", "false"].includes(asked)) return { on: false, source: "env", offer: false, ...lessRepro };
+  if (project === "on" || project === "off") return { on: project === "on", source: "project", offer: false, ...(project === "off" ? lessRepro : {}) };
+  if (buildathon === "on") return { on: true, source: "buildathon", offer: false };
+  if (buildathon === "offer" && server !== "on") return { on: false, source: "buildathon", offer: !offered };
   if (server === "on") return { on: true, source: "server", offer: false };
   return { on: false, source: server === "offer" ? "server" : "default", offer: server === "offer" && !offered };
 }

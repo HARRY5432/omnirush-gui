@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Copy, ExternalLink, Trophy, X } from "lucide-react";
+import { Check, Copy, ExternalLink, Trophy, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
@@ -10,11 +10,14 @@ import { cn } from "@/lib/utils";
 import {
   desktopNotificationShow,
   omnirushBuildathon,
+  omnirushBuildathonChecklist,
   omnirushBuildathonLink,
   omnirushBuildathonSessions,
   omnirushBuildathonTagSession,
   openDesktopUrl,
 } from "../../../app/lib/desktop";
+import { createOmniRushServerClient } from "../../../app/lib/omnirush-server";
+import { resolveOmniRushConnection } from "../../shell/omnirush-connection";
 import {
   BUILDATHON_REFRESH_MS,
   buildathonChipText,
@@ -22,6 +25,10 @@ import {
   compactTokens,
   formatEventTime,
   formatRemaining,
+  buildathonProjectPaths,
+  projectAnswered,
+  projectKey,
+  readProjectEntries,
   readProjectTrack,
   readProjectTracks,
   readShownReminders,
@@ -33,9 +40,11 @@ import {
   sessionStatusLabel,
   sessionsToTag,
   setProjectTrack,
+  syncBuildathonServer,
   tagSessions,
   useBuildathonStore,
   type BuildathonCountdown,
+  type BuildathonProject,
   type BuildathonSession,
   type BuildathonStatus,
   type BuildathonTrack,
@@ -100,7 +109,7 @@ function TrackSelect(props: { tracks: BuildathonTrack[]; value: string | null; o
       data-testid={props.testId}
       aria-label="Buildathon track"
     >
-      <option value="">Not part of the buildathon</option>
+      <option value="">No track</option>
       {props.tracks.map((track) => (
         <option key={track.id} value={track.id}>{track.label}</option>
       ))}
@@ -154,11 +163,11 @@ function NewProjectPrompt(props: { status: BuildathonStatus; project: { path: st
           <div className="flex items-center gap-1.5 font-medium"><Trophy className="size-3.5" /> Building for the buildathon?</div>
           <div className="mt-0.5 text-xs text-muted-foreground">Pick a track for “{props.project.name}”. You can change it later in Settings.</div>
         </div>
-        <Button variant="ghost" size="icon-xs" aria-label="Not now" onClick={props.onDone}><X /></Button>
+        <Button variant="ghost" size="icon-xs" aria-label="Not now" onClick={() => { setProjectTrack(props.project.path, null); props.onDone(); }}><X /></Button>
       </div>
       <TrackSelect tracks={trackOptions(props.status)} value={track} onChange={setTrack} testId="buildathon-prompt-select" />
       <div className="flex justify-end gap-2">
-        <Button variant="ghost" size="xs" onClick={props.onDone}>Not now</Button>
+        <Button variant="ghost" size="xs" onClick={() => { setProjectTrack(props.project.path, null); props.onDone(); }}>Not now</Button>
         <Button
           size="xs"
           disabled={!track}
@@ -274,6 +283,63 @@ function Section(props: { title: string; children: React.ReactNode; testId?: str
   );
 }
 
+/** The buildathon project the checklist is about: the open one when it is one, else the first. */
+function checklistProject(status: BuildathonStatus, projects: BuildathonProject[], selectedId: string | null): BuildathonProject | null {
+  const listed = new Set(buildathonProjectPaths(status.event, readProjectEntries()));
+  const candidates = projects.filter((project) => project.local && listed.has(projectKey(project.path) ?? ""));
+  return candidates.find((project) => project.id === selectedId) ?? candidates[0] ?? null;
+}
+
+/** The rebuild checklist of a buildathon project, checked in its folder (cheap file checks). */
+function ChecklistSection(props: { status: BuildathonStatus }) {
+  const projects = useBuildathonStore((store) => store.projects);
+  const selectedId = useBuildathonStore((store) => store.selectedProjectId);
+  const tracksVersion = useBuildathonStore((store) => store.tracksVersion);
+  const project = useMemo(() => checklistProject(props.status, projects, selectedId), [props.status, projects, selectedId, tracksVersion]);
+  const [checks, setChecks] = useState<Array<{ id: string; text: string; ok: boolean | null }> | null | undefined>(undefined);
+  const checklist = props.status.repro.checklist;
+  const path = project?.path ?? null;
+  useEffect(() => {
+    if (!path) return;
+    let live = true;
+    setChecks(undefined);
+    void omnirushBuildathonChecklist({ path, checklist }).catch(() => null).then((result) => {
+      if (live) setChecks(result ?? null);
+    });
+    return () => {
+      live = false;
+    };
+  }, [path, checklist]);
+  if (!project) {
+    return (
+      <Section title="Rebuild checklist" testId="buildathon-checklist">
+        <div className="text-xs text-muted-foreground">Pick a track for your project (Settings, or the prompt on a new project) to check it here.</div>
+      </Section>
+    );
+  }
+  const known = checks ? checks.filter((check) => check.ok !== null) : [];
+  const passed = known.filter((check) => check.ok).length;
+  return (
+    <Section title={`Rebuild checklist · ${project.name}${checks ? ` · ${passed}/${known.length}` : ""}`} testId="buildathon-checklist">
+      {checks === undefined ? <div className="text-xs text-muted-foreground">Checking…</div>
+        : checks === null ? <div className="text-xs text-muted-foreground">The folder could not be checked.</div>
+        : (
+          <ul className="grid grid-cols-1 gap-1 text-xs sm:grid-cols-2">
+            {checks.map((check) => (
+              <li key={check.id} className="flex items-start gap-1.5" data-check={check.id} data-ok={String(check.ok)}>
+                {check.ok === true ? <Check className="mt-0.5 size-3.5 shrink-0 text-emerald-600" />
+                  : check.ok === false ? <X className="mt-0.5 size-3.5 shrink-0 text-red-600 dark:text-red-400" />
+                  : <span className="mt-0.5 w-3.5 shrink-0 text-center text-muted-foreground">?</span>}
+                <span className={check.ok === false ? "text-foreground" : "text-muted-foreground"}>{check.text}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      <div className="text-[11px] text-muted-foreground">Chats in this project follow the event's rebuild rules and run in the Linux sandbox when it is on.</div>
+    </Section>
+  );
+}
+
 /** "My Buildathon": countdown, tokens, rules, sessions, submission, link code. */
 export function BuildathonPanel(props: { status: BuildathonStatus; onClose: () => void }) {
   const { event, participant, submission } = props.status;
@@ -362,6 +428,8 @@ export function BuildathonPanel(props: { status: BuildathonStatus; onClose: () =
             ) : null}
           </Section>
 
+          <ChecklistSection status={props.status} />
+
           <Section title="Rules" testId="buildathon-rules">
             <ul className="space-y-1 text-xs">
               {rules.map((rule, index) => (
@@ -432,9 +500,33 @@ export function BuildathonLayer() {
     void tagSessions(pending, (input) => omnirushBuildathonTagSession(input));
   }, [status, projects, tracksVersion]);
 
+  // The local server gets the buildathon projects and the event's `repro` block: their chats get
+  // the event's rules (engine plugin) and, with `box: "on"`, the Linux sandbox. Retried on failure.
+  const [syncRetry, setSyncRetry] = useState(0);
+  useEffect(() => {
+    if (!status) return;
+    let live = true;
+    let timer: number | undefined;
+    void syncBuildathonServer(status, async (body) => {
+      const connection = await resolveOmniRushConnection();
+      if (!connection.normalizedBaseUrl || !(connection.resolvedToken || connection.resolvedHostToken)) throw new Error("server not ready");
+      await createOmniRushServerClient({
+        baseUrl: connection.normalizedBaseUrl,
+        token: connection.resolvedToken || undefined,
+        hostToken: connection.resolvedHostToken || undefined,
+      }).setBuildathon(body);
+    }).then((outcome) => {
+      if (live && outcome === "failed") timer = window.setTimeout(() => setSyncRetry((value) => value + 1), 30_000);
+    });
+    return () => {
+      live = false;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [status, tracksVersion, syncRetry]);
+
   const closePrompt = useCallback((path: string) => useBuildathonStore.getState().dropNewProject(path), []);
   const prompt = status && status.event && buildathonCountdown(status.event, now).kind !== "closed"
-    ? newProjects.find((project) => !readProjectTrack(project.path)) ?? null
+    ? newProjects.find((project) => !projectAnswered(project.path)) ?? null
     : null;
 
   if (!status) return null;

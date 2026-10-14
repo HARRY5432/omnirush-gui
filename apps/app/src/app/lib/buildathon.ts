@@ -169,28 +169,85 @@ export function projectKey(path: string | null | undefined): string | null {
   return trimmed || null;
 }
 
-export function readProjectTracks(storage: KeyValueStore | null = defaultStorage()): Record<string, string> {
+/**
+ * A folder's answer: its track, or null when it was skipped ("No track");
+ * `first`: when it was first answered. (CLI: the folder tracks file, the same
+ * fields.) Older entries were the track alone.
+ */
+export type ProjectEntry = { track: string | null; first: string | null; at: string | null };
+
+export function readProjectEntries(storage: KeyValueStore | null = defaultStorage()): Record<string, ProjectEntry> {
   const value = readJson<Record<string, unknown>>(BUILDATHON_TRACKS_STORAGE_KEY, {}, storage);
-  const tracks: Record<string, string> = {};
-  for (const [path, track] of Object.entries(value)) {
-    if (typeof track === "string" && track) tracks[path] = track;
+  const entries: Record<string, ProjectEntry> = {};
+  for (const [path, entry] of Object.entries(value)) {
+    if (typeof entry === "string" && entry) entries[path] = { track: entry, first: null, at: null };
+    else if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+      const raw = entry as Record<string, unknown>;
+      const iso = (v: unknown) => (typeof v === "string" && Number.isFinite(Date.parse(v)) ? v : null);
+      entries[path] = { track: typeof raw.track === "string" && raw.track ? raw.track : null, first: iso(raw.first), at: iso(raw.at) };
+    }
   }
+  return entries;
+}
+
+/** Folder -> track, for folders that have one. */
+export function readProjectTracks(storage: KeyValueStore | null = defaultStorage()): Record<string, string> {
+  const tracks: Record<string, string> = {};
+  for (const [path, entry] of Object.entries(readProjectEntries(storage))) if (entry.track) tracks[path] = entry.track;
   return tracks;
 }
 
 export function readProjectTrack(path: string | null | undefined, storage: KeyValueStore | null = defaultStorage()): string | null {
   const key = projectKey(path);
-  return key ? readProjectTracks(storage)[key] ?? null : null;
+  return key ? readProjectEntries(storage)[key]?.track ?? null : null;
 }
 
-/** Saves (or, with null, clears) a folder's track. */
-export function writeProjectTrack(path: string | null | undefined, track: string | null, storage: KeyValueStore | null = defaultStorage()): void {
+/** Whether the folder was answered (a track or a skip). */
+export function projectAnswered(path: string | null | undefined, storage: KeyValueStore | null = defaultStorage()): boolean {
+  const key = projectKey(path);
+  return Boolean(key && readProjectEntries(storage)[key]);
+}
+
+/** Saves a folder's track, or (null) its skip; the first answer's time is kept. */
+export function writeProjectTrack(path: string | null | undefined, track: string | null, storage: KeyValueStore | null = defaultStorage(), now = Date.now()): void {
   const key = projectKey(path);
   if (!key) return;
-  const tracks = readProjectTracks(storage);
-  if (track) tracks[key] = track;
-  else delete tracks[key];
-  writeJson(BUILDATHON_TRACKS_STORAGE_KEY, tracks, storage);
+  const entries = readProjectEntries(storage);
+  const at = new Date(now).toISOString();
+  entries[key] = { track, first: entries[key]?.first ?? entries[key]?.at ?? at, at };
+  // A bounded list: the most recent 500 folders.
+  const kept = Object.entries(entries).sort((a, b) => String(a[1].at).localeCompare(String(b[1].at))).slice(-500);
+  writeJson(BUILDATHON_TRACKS_STORAGE_KEY, Object.fromEntries(kept), storage);
+}
+
+/**
+ * The buildathon projects (contract "Reproducibility mode"): folders with a
+ * track, and folders skipped whose first answer fell inside the event. The
+ * server leaves out generic folders (home, temp, a root).
+ */
+export function buildathonProjectPaths(event: BuildathonEvent, entries: Record<string, ProjectEntry>): string[] {
+  const starts = event.startsAt ? Date.parse(event.startsAt) : Number.NEGATIVE_INFINITY;
+  const deadline = Date.parse(event.deadlineAt);
+  const known = new Set(event.tracks.map((track) => track.id));
+  const out: string[] = [];
+  for (const [path, entry] of Object.entries(entries)) {
+    if (entry.track && known.has(entry.track)) out.push(path);
+    else if (!entry.track && entry.first) {
+      const first = Date.parse(entry.first);
+      if (first >= starts && first <= deadline) out.push(path);
+    }
+  }
+  return out.sort();
+}
+
+/** The server's body for PUT /runtime-config/buildathon (null without an event). */
+export function buildathonServerBody(status: BuildathonStatus | null, entries: Record<string, ProjectEntry>) {
+  if (!status) return null;
+  return {
+    repro: { box: status.repro.box, agent_rules: status.repro.agentRules },
+    projects: buildathonProjectPaths(status.event, entries),
+    deadline_at: status.event.deadlineAt,
+  };
 }
 
 export function readTaggedSessions(storage: KeyValueStore | null = defaultStorage()): Record<string, string> {
@@ -266,6 +323,8 @@ type BuildathonStore = {
   offsetMs: number;
   panelOpen: boolean;
   projects: BuildathonProject[];
+  /** The project open in the app (the panel's checklist is about it). */
+  selectedProjectId: string | null;
   /** Projects created in this run, waiting for the one-time track question. */
   newProjects: Array<{ path: string; name: string }>;
   /** Bumped on every track change so pickers re-read storage. */
@@ -273,7 +332,7 @@ type BuildathonStore = {
   setStatus: (status: BuildathonStatus | null, receivedAtMs?: number) => void;
   openPanel: () => void;
   closePanel: () => void;
-  setProjects: (projects: BuildathonProject[]) => void;
+  setProjects: (projects: BuildathonProject[], selectedProjectId?: string | null) => void;
   noteNewProject: (project: { path: string; name: string }) => void;
   dropNewProject: (path: string) => void;
   bumpTracks: () => void;
@@ -284,6 +343,7 @@ export const useBuildathonStore = create<BuildathonStore>((set) => ({
   offsetMs: 0,
   panelOpen: false,
   projects: [],
+  selectedProjectId: null,
   newProjects: [],
   tracksVersion: 0,
   setStatus: (status, receivedAtMs = Date.now()) =>
@@ -294,7 +354,7 @@ export const useBuildathonStore = create<BuildathonStore>((set) => ({
     })),
   openPanel: () => set({ panelOpen: true }),
   closePanel: () => set({ panelOpen: false }),
-  setProjects: (projects) => set({ projects }),
+  setProjects: (projects, selectedProjectId = null) => set({ projects, selectedProjectId }),
   noteNewProject: (project) =>
     set((state) => {
       const key = projectKey(project.path);
@@ -381,4 +441,33 @@ export function buildathonProjects(groups: SessionGroupLike[]): BuildathonProjec
       parentId: session.parentID ?? null,
     })),
   }));
+}
+
+let lastSent: string | null = null;
+
+/**
+ * Tells the local server the buildathon projects and the event's `repro`
+ * block when they changed since the last answer it took. Never throws; a
+ * failure is tried again on the next call.
+ */
+export async function syncBuildathonServer(
+  status: BuildathonStatus | null,
+  send: (body: NonNullable<ReturnType<typeof buildathonServerBody>>) => Promise<unknown>,
+  entries: Record<string, ProjectEntry> = readProjectEntries(),
+): Promise<"sent" | "unchanged" | "skipped" | "failed"> {
+  const body = buildathonServerBody(status, entries);
+  if (!body) return "skipped";
+  const key = JSON.stringify(body);
+  if (key === lastSent) return "unchanged";
+  try {
+    await send(body);
+    lastSent = key;
+    return "sent";
+  } catch {
+    return "failed";
+  }
+}
+
+export function resetBuildathonServerSync(): void {
+  lastSent = null;
 }

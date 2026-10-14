@@ -1,17 +1,21 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtemp, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import {
   BUILDATHON_TRACKS,
+  DEFAULT_AGENT_RULES,
   buildathonLinkCode,
   buildathonTrackId,
+  parseBuildathonRepro,
   parseBuildathonSessions,
   parseBuildathonStatus,
   parseBuildathonSubmission,
 } from "./buildathon.mjs";
+import { DEFAULT_CHECKLIST, evaluateChecklist, projectChecklist } from "./buildathon-checklist.mjs";
 import { createDesktopOmniRushAccountStore } from "./omnirush-account.mjs";
 
 const GATEWAY = "http://localhost:8090/omnirush/v1";
@@ -209,4 +213,64 @@ test("buildathon store: link code", async () => {
   assert.match(/** @type {any} */ (await limited.buildathonLink({ code: "FB-0000-00" })).error, /Too many tries/);
   const offline = await signedInStore(async () => { throw new TypeError("fetch failed"); });
   assert.equal((await offline.buildathonLink({ code: "FB-0000-00" })).ok, false);
+});
+
+test("repro block: the server's values, else the contract's defaults (box on)", () => {
+  const none = parseBuildathonRepro(undefined);
+  assert.equal(none.box, "on");
+  assert.equal(none.agentRules, DEFAULT_AGENT_RULES);
+  assert.deepEqual(none.checklist.map((c) => c.id), ["git", "lockfile", "runtime_pin", "dockerfile", "test_cmd", "readme", "env_example", "no_abs_paths"]);
+  const server = parseBuildathonRepro({ box: "offer", agent_rules: "Use make.", checklist: [{ id: "git" }, { id: "custom", text: "Custom" }, { bad: 1 }] });
+  assert.equal(server.box, "offer");
+  assert.equal(server.agentRules, "Use make.");
+  assert.deepEqual(server.checklist, [{ id: "git", text: DEFAULT_CHECKLIST[0].text }, { id: "custom", text: "Custom" }]);
+  assert.equal(parseBuildathonRepro({ box: "maybe" }).box, "on");
+  assert.equal(parseBuildathonStatus(ENROLLED).repro.box, "on", "parsed with the rest of the answer");
+});
+
+test("repro: the default rules are the contract's text, word for word", async () => {
+  const contract = "This project is part of the OmniRush Buildathon and must rebuild from scratch on a clean Linux machine. Keep every file the project needs inside this folder and use git, committing after each working step. Pin the runtime version (.nvmrc / .python-version / go.mod toolchain / rust-toolchain.toml) and always keep a lockfile; install dependencies only into the project (no global installs, no sudo outside the Dockerfile). Maintain a Dockerfile that installs every system package and dependency and can build and run the project, a single test command (e.g. `make test`) that works offline, and a README with exact setup, run, test and deploy steps. Never hard-code absolute paths from this machine or put secrets in files (use .env.example). After each change, run the tests.";
+  assert.equal(DEFAULT_AGENT_RULES, contract);
+  const server = await readFile(new URL("../../server/src/buildathon-repro.ts", import.meta.url), "utf8");
+  assert.ok(server.includes(JSON.stringify(contract)), "the server embeds the same text");
+});
+
+function project(prefix = "omnirush-bt-proj-") {
+  return mkdtempSync(path.join(os.tmpdir(), prefix));
+}
+
+test("checklist: cheap checks in the folder, pass and fail", () => {
+  const bare = project();
+  const results = evaluateChecklist(bare, DEFAULT_CHECKLIST, { home: "/home/nobody" });
+  const ok = Object.fromEntries(results.map((r) => [r.id, r.ok]));
+  assert.deepEqual(ok, { git: false, lockfile: false, runtime_pin: false, dockerfile: false, test_cmd: false, readme: false, env_example: true, no_abs_paths: true });
+
+  const good = project();
+  mkdirSync(path.join(good, ".git", "refs", "heads"), { recursive: true });
+  mkdirSync(path.join(good, "src"));
+  writeFileSync(path.join(good, ".git", "refs", "heads", "main"), "abc\n");
+  writeFileSync(path.join(good, "package.json"), JSON.stringify({ engines: { node: "22" }, scripts: { test: "node --test" } }));
+  writeFileSync(path.join(good, "package-lock.json"), "{}");
+  writeFileSync(path.join(good, "Dockerfile"), "FROM node:22\n");
+  writeFileSync(path.join(good, "README.md"), "# app\n");
+  writeFileSync(path.join(good, ".env"), "KEY=1\n");
+  writeFileSync(path.join(good, ".env.example"), "KEY=\n");
+  writeFileSync(path.join(good, "src", "a.js"), "export const p = './data';\n");
+  const all = evaluateChecklist(good, [...DEFAULT_CHECKLIST, { id: "future", text: "Future" }], { home: "/home/alice" });
+  assert.deepEqual(all.map((r) => r.ok), [true, true, true, true, true, true, true, true, null]);
+
+  writeFileSync(path.join(good, "src", "b.py"), 'DATA = "/home/alice/datasets/x.csv"\n');
+  assert.equal(evaluateChecklist(good, [{ id: "no_abs_paths", text: "x" }], { home: "/home/alice" })[0].ok, false);
+  rmSync(path.join(good, ".env.example"));
+  assert.equal(evaluateChecklist(good, [{ id: "env_example", text: "x" }], { home: "/home/alice" })[0].ok, false, ".env without an example");
+});
+
+test("checklist IPC: an existing project folder only, never home, a root or a relative path", () => {
+  const dir = project();
+  assert.equal(projectChecklist({ path: dir, checklist: [] }).length, 8, "the default list when none is sent");
+  assert.equal(projectChecklist({ path: os.homedir() }), null);
+  assert.equal(projectChecklist({ path: "/" }), null);
+  assert.equal(projectChecklist({ path: "relative/dir" }), null);
+  assert.equal(projectChecklist({ path: path.join(dir, "missing") }), null);
+  assert.equal(projectChecklist({}), null);
 });

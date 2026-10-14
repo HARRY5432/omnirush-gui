@@ -324,12 +324,20 @@ export type OmniRushBuildathonSubmission = {
   checks: Array<{ id: string; ok: boolean; text: string }>;
   locked: boolean;
 };
+/** The event's reproducibility settings (defaults when the server sends none). */
+export type OmniRushBuildathonRepro = {
+  box: "on" | "offer" | "off";
+  agentRules: string;
+  checklist: Array<{ id: string; text: string }>;
+};
+export type OmniRushBuildathonCheck = { id: string; text: string; ok: boolean | null };
 export type OmniRushBuildathonStatus = {
   enrolled: true;
   serverTime: string | null;
   event: OmniRushBuildathonEvent;
   participant: OmniRushBuildathonParticipant | null;
   submission: OmniRushBuildathonSubmission | null;
+  repro: OmniRushBuildathonRepro;
 };
 export type OmniRushBuildathonSession = {
   sessionId: string;
@@ -901,6 +909,10 @@ export type DesktopCommandMap = {
   omnirushBuildathon: { args: []; result: OmniRushBuildathonStatus | null };
   omnirushBuildathonSessions: { args: []; result: OmniRushBuildathonSession[] | null };
   omnirushBuildathonLink: { args: [input: { code: string }]; result: OmniRushBuildathonLinkResult };
+  omnirushBuildathonChecklist: {
+    args: [input: { path: string; checklist: Array<{ id: string; text: string }> }];
+    result: OmniRushBuildathonCheck[] | null;
+  };
   omnirushBuildathonTagSession: {
     args: [input: { sessionId: string; track: string; project?: string | null }];
     result: OmniRushBuildathonTagResult;

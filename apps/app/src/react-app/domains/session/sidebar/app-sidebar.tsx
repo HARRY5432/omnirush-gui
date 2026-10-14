@@ -1158,8 +1158,8 @@ export function AppSidebar(props: AppSidebarProps) {
 
   // The buildathon layer files event sessions under their project's track.
   React.useEffect(() => {
-    useBuildathonStore.getState().setProjects(buildathonProjects(props.workspaceSessionGroups));
-  }, [props.workspaceSessionGroups]);
+    useBuildathonStore.getState().setProjects(buildathonProjects(props.workspaceSessionGroups), props.selectedWorkspaceId || null);
+  }, [props.workspaceSessionGroups, props.selectedWorkspaceId]);
 
   // Green unread dots: agent finished while the user was on another session.
   React.useEffect(() => {

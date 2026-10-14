@@ -29,6 +29,7 @@ import {
   omnirushBudgetWrapPluginPath,
   omnirushOfficeAttachmentsPluginPath,
   omnirushSpreadsheetsPluginPath,
+  omnirushBuildathonPluginPath,
   omnirushChromeDevtoolsPluginPath,
   omnirushPdfAttachmentsPluginPath,
 } from "./omnirush-extensions-plugin-path.js";
@@ -272,6 +273,8 @@ export function buildOmniRushRuntimeConfigObjectFromSnapshot(
       omnirushReasoningEffortPluginPath(),
       omnirushTitleRecoveryPluginPath(),
       omnirushSwarmPluginPath(),
+      // Buildathon projects only (the app lists them): the event's reproducibility rules.
+      omnirushBuildathonPluginPath(),
       ...runtimePluginList(runtimeConfig),
       // This must be last: user/runtime plugins may not reintroduce MCP
       // configuration or replace the deny rules.
