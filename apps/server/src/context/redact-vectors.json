@@ -230,6 +230,12 @@
    "context": "app/.env.example"
   },
   {
+   "name": "named env file any value",
+   "input": "DB_PASSWORD=supersecretword",
+   "expect": "DB_PASSWORD=[REDACTED]",
+   "context": "docker/production.env"
+  },
+  {
    "name": "npmrc token",
    "input": "//registry.npmjs.org/:_authToken=np⟨+⟩m_Oc6Qi7ggAMKfjlaTNJkd38tGFzUnusvrIPab",
    "expect": "//registry.npmjs.org/:_authToken=[REDACTED]",

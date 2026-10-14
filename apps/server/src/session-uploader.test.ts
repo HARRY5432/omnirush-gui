@@ -32,6 +32,7 @@ import {
   filterUploadDiff,
   isUploadableWebUrl,
   isUploadPathDenied,
+  isUploadFileDenied,
   isPathLikeKey,
   isSecretAssignmentKey,
   isSecretAssignmentValue,
@@ -68,6 +69,58 @@ describe("session uploader privacy", () => {
       expect(isUploadPathDenied(path)).toBe(true);
     }
     expect(isUploadPathDenied("src/app.ts")).toBe(false);
+  });
+
+  test("keeps a .env template in scrubbed snapshots; the archive and every real .env still deny it", () => {
+    for (const path of [".env.example", "app/.env.sample", "config/.env.template", ".env.dist", ".ENV.EXAMPLE", ".env.defaults"]) {
+      expect(isUploadFileDenied(path)).toBe(false);
+      // What is stored byte for byte never takes one.
+      expect(isUploadPathDenied(path)).toBe(true);
+    }
+    for (const path of [".env", ".env.local", ".env.production", ".env.example.local", "secrets/.env.example", ".env.example/x.txt", "keys/.env.sample"]) {
+      expect(isUploadFileDenied(path)).toBe(true);
+    }
+    // A template's values are scrubbed as its .env's would be, under both rule sets.
+    const filled = "PORT=3000\nAPI_TOKEN=abcdefgh123\nDATABASE_PASSWORD=Summer2024!\nJWT_SECRET=supersecretjwt\nAPI_KEY=<your-api-key>\n";
+    const policy = Symbol.for("omnirush.redactionPolicy");
+    const holder = globalThis as unknown as Record<symbol, unknown>;
+    const before = holder[policy];
+    try {
+      for (const rules of ["legacy", "client-v3"]) {
+        holder[policy] = rules;
+        for (const file of [".env.example", "app/.env.sample"]) {
+          expect(redactUploadContent(file, filled)).toMatch(/^PORT=3000\nAPI_TOKEN=\[REDACTED[^\n]*\nDATABASE_PASSWORD=\[REDACTED[^\n]*\nJWT_SECRET=\[REDACTED[^\n]*\nAPI_KEY=<your-api-key>\n$/);
+          const diff = filterUploadDiff(`diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -0,0 +1 @@\n+DATABASE_PASSWORD=Summer2024!\n`).diff;
+          expect(diff).toMatch(/\+DATABASE_PASSWORD=\[REDACTED/);
+        }
+      }
+    } finally {
+      holder[policy] = before;
+    }
+  });
+
+  test("denies a named env file (prod.env) everywhere and scrubs it as a credential file", () => {
+    for (const path of ["prod.env", "app.env", "docker/production.env", "Config/Staging.ENV", ".local.env", "tests/fixtures/app.env"]) {
+      expect(isUploadFileDenied(path)).toBe(true);
+      expect(isUploadPathDenied(path)).toBe(true);
+    }
+    for (const path of ["src/env.ts", "prod.env.example", "environment.yml", "src/load.env.ts", "envs/readme.md"]) {
+      expect(isUploadFileDenied(path)).toBe(false);
+    }
+    const policy = Symbol.for("omnirush.redactionPolicy");
+    const holder = globalThis as unknown as Record<symbol, unknown>;
+    const before = holder[policy];
+    try {
+      for (const rules of ["legacy", "client-v3"]) {
+        holder[policy] = rules;
+        for (const file of ["prod.env", "docker/production.env"]) {
+          const text = redactUploadText("PORT=3000\nDATABASE_PASSWORD=Summer2024!\n", { context: file, mode: redactModeForPath(file) }).text;
+          expect(text).toMatch(/^PORT=3000\nDATABASE_PASSWORD=\[REDACTED/);
+        }
+      }
+    } finally {
+      holder[policy] = before;
+    }
   });
 
   test("redacts private keys and provider-style secrets before upload", () => {

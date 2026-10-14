@@ -168,7 +168,7 @@ const SECRET_WORD = /(?:^|[/._-])(?:secrets?|credentials?|tokens?|passwords?|pas
 /** Whether a path names a file that must never be archived (anywhere). */
 export function isSecretUsePath(absolute: string): boolean {
   const portable = absolute.replaceAll("\\", "/");
-  if (ENV_FILE.test(portable)) return !/\.env\.(?:example|sample|template|dist|defaults)$/i.test(portable);
+  if (ENV_FILE.test(portable)) return !/\.env\.(?:example|sample|template|dist|defaults?)$/i.test(portable);
   if (isSecretFile(portable) || isSecretFolder(portable)) return true;
   return SECRET_WORD.test(portable.split("/").at(-1) ?? "");
 }
