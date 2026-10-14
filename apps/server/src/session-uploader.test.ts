@@ -407,6 +407,186 @@ describe("session uploader privacy", () => {
     expect(envelopes.slice(3).map((item) => [item.snapshot_type, item.session_segment, item.sequence])).toEqual([["start", 2, 4], ["trace", 2, 5], ["end", 2, 6]]);
   }, 20_000);
 
+  test("a crash after a turn settled, while its trace is on its way, still sends the turn's end and every event at the next start", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-turnend-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-turnend-state-"));
+    roots.push(root, stateDir);
+    await writeFile(join(root, "app.txt"), "hello\n");
+    const envelopes: Array<Record<string, unknown>> = [];
+    const parse = (compressed: Uint8Array) => withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as Record<string, unknown>;
+    let traces = 0;
+    const hangs: Array<() => void> = [];
+    let released = false;
+    // An upload that never gets through while the run lives; once it "died", any upload fails at once.
+    const stall = () => released ? Promise.resolve(new Response(null, { status: 503 })) : new Promise<Response>((resolve) => hangs.push(() => resolve(new Response(null, { status: 503 }))));
+    const crashed = new SessionUploader({
+      stateDir,
+      upload: async (_sessionId, compressed) => {
+        const envelope = parse(compressed);
+        if (envelope.snapshot_type === "trace") {
+          traces += 1;
+          // The turn's own trace never gets through before the app dies (a slow link, a big transcript).
+          if (traces > 1) return stall();
+          // The flush before it is slow: the turn's end is taken while it is on its way.
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        }
+        envelopes.push(envelope);
+        return Response.json({ ok: true }, { status: 201 });
+      },
+      fallbackScanMs: 60_000,
+    });
+    const sessionId = "session-turnend-1234";
+    crashed.startSession(sessionId, "workspace-turnend", root);
+    await crashed.idle(sessionId);
+    crashed.captureSnapshot(sessionId, "prompt");
+    crashed.recordTrace(sessionId, "tool.call", { n: 1 });
+    crashed.flushTrace(sessionId);
+    crashed.recordTrace(sessionId, "tool.call", { n: 2 });
+    crashed.recordTrace(sessionId, "session.idle", { status: "idle", outcome: "completed" });
+    crashed.captureSnapshot(sessionId, "turn_completed");
+    crashed.flushTrace(sessionId, { messages: [{ info: { id: "msg_user", role: "user" } }, { info: { id: "msg_answer", role: "assistant", parentID: "msg_user" } }] });
+    for (let waited = 0; waited < 5_000 && !envelopes.some((item) => item.snapshot_type === "trace"); waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    // The process dies here: the turn's trace (its end, its messages) is still on its way.
+    const sent = envelopes.length;
+    const sentEvents = envelopes.filter((item) => item.snapshot_type === "trace").flatMap((item) => (item.trace as Array<{ type: string; data?: Record<string, unknown> }>) ?? []);
+    expect(sentEvents.filter((event) => event.type === "tool.call").map((event) => event.data?.n)).toEqual([1]);
+    expect(sentEvents.map((event) => event.type)).not.toContain("turn.completed");
+
+    const next = new SessionUploader({
+      stateDir,
+      upload: async (_sessionId, compressed) => {
+        envelopes.push(parse(compressed));
+        return Response.json({ ok: true }, { status: 201 });
+      },
+      fallbackScanMs: 60_000,
+    });
+    for (let waited = 0; waited < 5_000 && envelopes.length <= sent; waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
+    const recovered = envelopes[sent]!;
+    expect(recovered).toMatchObject({ snapshot_type: "trace", session_segment: 1 });
+    const events = recovered.trace as Array<{ type: string; data?: Record<string, unknown> }>;
+    expect(events[0]?.type).toBe("collector.recovered");
+    expect(events[0]?.data).toMatchObject({ turn_open: false });
+    expect(events.filter((event) => event.type === "tool.call").map((event) => event.data?.n)).toEqual([2]);
+    const end = events.find((event) => event.type === "turn.completed");
+    expect((end?.data?.messages as unknown[] | undefined)?.length).toBe(2);
+    await next.stop();
+    // The stalled uploads of the run that "died" end, so they hold no upload slot.
+    released = true;
+    for (const release of hangs) release();
+    await crashed.stop().catch(() => undefined);
+  }, 20_000);
+
+  test("an upload on its way when the app died leaves no gap: the journal that holds its events goes out under its sequence", async () => {
+    for (const serverKnows of [true, false]) {
+      const root = await mkdtemp(join(tmpdir(), "omnirush-upload-unsent-"));
+      const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-unsent-state-"));
+      roots.push(root, stateDir);
+      await writeFile(join(root, "app.txt"), "hello\n");
+      const stored: Array<Record<string, unknown>> = [];
+      const hangs: Array<() => void> = [];
+      let released = false;
+      // An upload that never gets through while the run lives; once it "died", any upload fails at once.
+      const stall = () => released ? Promise.resolve(new Response(null, { status: 503 })) : new Promise<Response>((resolve) => hangs.push(() => resolve(new Response(null, { status: 503 }))));
+      const options = {
+        stateDir,
+        fallbackScanMs: 60_000,
+        capabilities: async () => ({ schema_versions: [1, 2], canonical_trace: false, idempotency_key: true, integrity: true, integrity_summary: true }),
+        sessionIntegrity: async () => serverKnows
+          ? Response.json(stored.length === 0
+            ? { summary: true, max_segment: null, max_sequence: null, segments: [] }
+            : { summary: true, max_segment: 1, max_sequence: Math.max(...stored.map((item) => Number(item.sequence))), segments: [] })
+          : Response.json({ detail: "unavailable" }, { status: 503 }),
+      };
+      const crashed = new SessionUploader({
+        ...options,
+        upload: async (_sessionId, compressed) => {
+          const envelope = withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as Record<string, unknown>;
+          // The trace flush is on its way when the app dies: the server never stores it.
+          if (envelope.snapshot_type === "trace") return stall();
+          stored.push(envelope);
+          return Response.json({ ok: true }, { status: 201 });
+        },
+      });
+      const sessionId = "session-unsent-1234";
+      crashed.startSession(sessionId, "workspace-unsent", root);
+      await crashed.idle(sessionId);
+      crashed.recordTrace(sessionId, "tool.call", { n: 1 });
+      crashed.flushTrace(sessionId);
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      expect(stored.map((item) => [item.snapshot_type, item.sequence])).toEqual([["start", 1]]);
+
+      const next = new SessionUploader({
+        ...options,
+        upload: async (_sessionId, compressed) => {
+          stored.push(withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as Record<string, unknown>);
+          return Response.json({ ok: true }, { status: 201 });
+        },
+      });
+      for (let waited = 0; waited < 5_000 && !stored.some((item) => item.snapshot_type === "trace"); waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
+      const recovered = stored.find((item) => item.snapshot_type === "trace")!;
+      const marker = (recovered.trace as Array<{ type: string; data: Record<string, unknown> }>)[0]!;
+      expect(marker.type).toBe("collector.recovered");
+      expect((recovered.trace as Array<{ type: string; data: Record<string, unknown> }>).filter((event) => event.type === "tool.call")).toHaveLength(1);
+      if (serverKnows) {
+        // Sequence 2 never reached the server: the recovered trace takes it.
+        expect(recovered).toMatchObject({ session_segment: 1, sequence: 2 });
+        expect(marker.data.unsent_sequences).toEqual({ from: 2, to: 2 });
+      } else {
+        // The server cannot say: the numbering goes on past it, as before.
+        expect(recovered).toMatchObject({ session_segment: 1, sequence: 3 });
+        expect(marker.data.unsent_sequences).toBeUndefined();
+      }
+      await next.stop();
+      released = true;
+      for (const release of hangs) release();
+      await crashed.stop().catch(() => undefined);
+    }
+  }, 30_000);
+
+  test("a recovered journal is a recovered segment when the server takes one, so a run killed before its start snapshot reads as such", async () => {
+    for (const recoveredSegments of [true, false]) {
+      const root = await mkdtemp(join(tmpdir(), "omnirush-upload-recseg-"));
+      const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-recseg-state-"));
+      roots.push(root, stateDir);
+      await writeFile(join(root, "app.txt"), "hello\n");
+      const envelopes: Array<Record<string, unknown>> = [];
+      const hangs: Array<() => void> = [];
+      let released = false;
+      // An upload that never gets through while the run lives; once it "died", any upload fails at once.
+      const stall = () => released ? Promise.resolve(new Response(null, { status: 503 })) : new Promise<Response>((resolve) => hangs.push(() => resolve(new Response(null, { status: 503 }))));
+      const options = {
+        stateDir,
+        fallbackScanMs: 60_000,
+        capabilities: async () => ({ schema_versions: [1, 2], canonical_trace: false, idempotency_key: true, recovered_segments: recoveredSegments }),
+      };
+      const crashed = new SessionUploader({
+        ...options,
+        // The start snapshot never goes out: the app dies while it uploads.
+        upload: async () => stall(),
+      });
+      const sessionId = "session-recseg-1234";
+      crashed.startSession(sessionId, "workspace-recseg", root);
+      crashed.recordTrace(sessionId, "tool.call", { n: 1 });
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      const next = new SessionUploader({
+        ...options,
+        upload: async (_sessionId, compressed) => {
+          envelopes.push(withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as Record<string, unknown>);
+          return Response.json({ ok: true }, { status: 201 });
+        },
+      });
+      for (let waited = 0; waited < 5_000 && !envelopes.some((item) => item.snapshot_type === "trace"); waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
+      const recovered = envelopes.find((item) => item.snapshot_type === "trace");
+      expect(recovered).toMatchObject({ trigger: recoveredSegments ? "session_recovered" : "trace_flush" });
+      expect((recovered?.trace as Array<{ type: string }>)[0]?.type).toBe("collector.recovered");
+      await next.stop();
+      released = true;
+      for (const release of hangs) release();
+      await crashed.stop().catch(() => undefined);
+    }
+  }, 30_000);
+
   test("an app that went away after a finished turn: the next launch sends the chat's end (marked recovered), once", async () => {
     const root = await mkdtemp(join(tmpdir(), "omnirush-upload-endrec-"));
     const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-endrec-state-"));

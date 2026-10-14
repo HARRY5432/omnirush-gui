@@ -239,7 +239,11 @@ export type UploadTrigger =
   | "fs_change"
   | "periodic"
   | "session_end"
-  | "trace_flush";
+  | "trace_flush"
+  // The trace of a run that ended without its uploads (a crash, a kill),
+  // sent from its journal at the next start: its segment may have no start
+  // snapshot (the backend's recovered segment).
+  | "session_recovered";
 
 /** How a turn ended, when not as answered: "aborted" is a turn the user stopped (Esc, Stop). */
 export type TurnEndOutcome = "aborted";
@@ -674,6 +678,13 @@ type JournalState = {
   full: boolean;
   /** A recovery's stand-in state: never journaled itself. */
   off: boolean;
+  /**
+   * Trace events taken off the chat's trace for an upload that has not
+   * settled yet (queued behind a snapshot, or on its way), oldest first: a
+   * rewrite after an earlier upload keeps them, so a crash before they are
+   * sent loses none of them.
+   */
+  inFlight: TraceEvent[][];
   /**
    * Lines are written once the chat's own recovery is done (prepareSession):
    * a journal a previous process left under the same name is read first.
@@ -4503,7 +4514,7 @@ export function segmentEnd(payload: unknown, segment: number): "missing" | "pres
 }
 
 /** The /collect features this client uses; without a capability answer, none. */
-type UploadFeatures = { idempotencyKey: boolean; integrity: boolean };
+type UploadFeatures = { idempotencyKey: boolean; integrity: boolean; recoveredSegments?: boolean };
 const NO_UPLOAD_FEATURES: UploadFeatures = { idempotencyKey: false, integrity: false };
 
 /** What a /collect upload carries besides its body. */
@@ -4642,7 +4653,11 @@ export class SessionUploader {
       server: () => this.uploadUrl ?? "gateway",
       ...(this.capabilityProbe ? { probe: this.capabilityProbe } : {}),
       onAnswer: (capabilities) => {
-        this.probedFeatures = { idempotencyKey: capabilities.idempotency_key === true, integrity: capabilities.integrity === true };
+        this.probedFeatures = {
+          idempotencyKey: capabilities.idempotency_key === true,
+          integrity: capabilities.integrity === true,
+          recoveredSegments: capabilities.recovered_segments === true || (capabilities.triggers?.includes("session_recovered") ?? false),
+        };
       },
       log: (level, message, attributes) => this.log(level, message, attributes),
     });
@@ -5172,7 +5187,7 @@ export class SessionUploader {
       failureCount: 0,
       ready: Promise.resolve(),
       tail: Promise.resolve(),
-      journal: { pending: [], timer: null, tail: Promise.resolve(), bytes: 0, full: false, off: false, ready: false },
+      journal: { pending: [], timer: null, tail: Promise.resolve(), bytes: 0, full: false, off: false, ready: false, inFlight: [] },
       refused: [],
       idleEndTimer: null,
       turns: 0,
@@ -6135,16 +6150,25 @@ export class SessionUploader {
       }
       // Capture context: the turn's last messages (its tool calls) arrive here, not as turn.messages.
       if (isRecord(finalTrace)) this.contextOf(sessionId)?.turnMessages(sessionId, finalTrace.messages, true);
-      pendingTrace.push({ at: new Date().toISOString(), type: "turn.completed", data: finalTrace });
+      const completed: TraceEvent = { at: new Date().toISOString(), type: "turn.completed", data: finalTrace };
+      pendingTrace.push(completed);
+      // The turn's end is on disk at once: the journal already says the turn
+      // is closed (its turn_completed milestone), and the upload may wait
+      // behind that snapshot's. A crash meanwhile still sends the turn's end
+      // and messages at the next start.
+      this.journalEvent(state, completed, true);
     }
     if (pendingTrace.length === 0) return;
+    state.journal.inFlight.push(pendingTrace);
     this.enqueue(state, async () => {
       await state.ready;
       if (state.trace.length > 0) pendingTrace.push(...state.trace.splice(0));
       try {
         await this.uploadTrace(state, pendingTrace);
       } finally {
-        // Uploaded, spooled or refused: the journal keeps only what came after.
+        // Uploaded, spooled or refused: the journal keeps only what came after
+        // (and what other uploads have not sent yet).
+        state.journal.inFlight = state.journal.inFlight.filter((batch) => batch !== pendingTrace);
         await this.journalRewrite(state);
       }
     });
@@ -6712,7 +6736,7 @@ export class SessionUploader {
     }
   }
 
-  private async uploadTrace(state: SessionState, events: TraceEvent[]): Promise<void> {
+  private async uploadTrace(state: SessionState, events: TraceEvent[], trigger: Extract<UploadTrigger, "trace_flush" | "session_recovered"> = "trace_flush"): Promise<void> {
     if (events.length === 0) return;
     // A session imported from the opencode 2.x engine's store says so in each
     // trace upload (an opaque event type: kept as sent), so a reader can tell
@@ -6743,13 +6767,13 @@ export class SessionUploader {
           // One form per schema: the server reads the top-level trace for 3, and only trace.json for 1 and 2.
           ...(version === TRACE_SCHEMA_VERSION ? { trace: batch.events } : {}),
         });
-      let uploaded = await this.uploadEnvelope(state, "trace", "trace_flush", await makeBody(schemaVersion));
-      if (uploaded === "key_reused") uploaded = await this.uploadEnvelope(state, "trace", "trace_flush", await makeBody(schemaVersion));
+      let uploaded = await this.uploadEnvelope(state, "trace", trigger, await makeBody(schemaVersion));
+      if (uploaded === "key_reused") uploaded = await this.uploadEnvelope(state, "trace", trigger, await makeBody(schemaVersion));
       if (uploaded === "unsupported_schema" && schemaVersion === TRACE_SCHEMA_VERSION && !downgraded) {
         downgraded = true;
         schemaVersion = 2;
         this.downgradeTraceSchema();
-        uploaded = await this.uploadEnvelope(state, "trace", "trace_flush", await makeBody(schemaVersion));
+        uploaded = await this.uploadEnvelope(state, "trace", trigger, await makeBody(schemaVersion));
       }
     }
   }
@@ -7269,7 +7293,7 @@ export class SessionUploader {
     this.scheduleJournal(state, now);
   }
 
-  private journalEvent(state: SessionState, event: TraceEvent): void {
+  private journalEvent(state: SessionState, event: TraceEvent, now = false): void {
     if (!this.journalDir || state.journal.full || state.journal.off) return;
     let line: string;
     try {
@@ -7283,7 +7307,7 @@ export class SessionUploader {
     }
     state.journal.bytes += line.length + 1;
     state.journal.pending.push(line);
-    this.scheduleJournal(state, false);
+    this.scheduleJournal(state, now);
   }
 
   private scheduleJournal(state: SessionState, now: boolean): void {
@@ -7325,7 +7349,7 @@ export class SessionUploader {
     const lines = [this.journalMetaLine(state)];
     state.journal.bytes = 0;
     state.journal.full = false;
-    for (const event of state.trace) {
+    for (const event of [...state.journal.inFlight.flat(), ...state.trace]) {
       const line = JSON.stringify({ e: event });
       if (state.journal.bytes + line.length > MAX_JOURNAL_BYTES) {
         state.journal.full = true;
@@ -7413,6 +7437,25 @@ export class SessionUploader {
       }));
     }
     void Promise.allSettled(recovered);
+  }
+
+  /**
+   * The sequences a previous process took for this chat that the server
+   * never stored and no spooled upload holds (an upload on its way when the
+   * process died): the run after the server's highest and the spool's. Null
+   * when there are none, or when the server cannot say (offline, an older
+   * backend, a chat it holds nothing of): the numbering then goes on as it was.
+   */
+  private async unsentSequences(state: SessionState): Promise<{ from: number; to: number } | null> {
+    if (state.sequence <= 0) return null;
+    const server = await this.serverPosition(state.id);
+    if (!server || server.segment > state.segment || server.sequence >= state.sequence) return null;
+    const spooled = this.spoolDir
+      ? await this.spoolLocked(() => this.listSpool()).catch(() => null)
+      : [];
+    if (spooled === null) return null;
+    const floor = Math.max(server.sequence, ...spooled.filter((entry) => entry.session_id === state.id).map((entry) => entry.sequence));
+    return floor < state.sequence ? { from: floor + 1, to: state.sequence } : null;
   }
 
   /**
@@ -7515,17 +7558,29 @@ export class SessionUploader {
           if (path && !isUploadPathDenied(path) && state.touchedPaths.size < MAX_TOUCHED_PATHS) state.touchedPaths.add(path);
         }
       }
+      // The upload the process had on its way when it went away took a
+      // sequence the server never stored; its events are this journal's.
+      // They go out under that number again, so the segment shows no gap.
+      const unsent = events.length > 0 ? await this.unsentSequences(state) : null;
+      if (unsent) state.sequence = unsent.from - 1;
       const marker: TraceEvent = {
         at: new Date().toISOString(),
         type: "collector.recovered",
-        data: { reason: "restart", turn_open: meta.turn_open, events: events.length, journal_at: meta.at, session_segment: state.segment },
+        data: {
+          reason: "restart", turn_open: meta.turn_open, events: events.length, journal_at: meta.at, session_segment: state.segment,
+          ...(unsent ? { unsent_sequences: unsent } : {}),
+        },
       };
       // The end that follows was taken at this launch, not when the app went away.
       const endMarker: TraceEvent[] = endMissing
         ? [{ at: marker.at, type: "session.end_recovered", data: { reason: journal.reason ?? "run_ended_without_end", last_message_id: state.lastMessageId ?? null, ...(meta.turn_open ? { turn_open: true } : {}), ...(record ? {} : { ledger: "missing" }) } }]
         : [];
+      // A run killed before its segment's start snapshot went out leaves a
+      // segment of traces only: the backend takes it as a recovered segment
+      // when the trace says so (its trigger), not as a missing start.
+      const trigger = (await this.uploadFeatures()).recoveredSegments ? "session_recovered" as const : "trace_flush" as const;
       try {
-        await this.uploadTrace(state, [marker, ...events, ...endMarker]);
+        await this.uploadTrace(state, [marker, ...events, ...endMarker], trigger);
       } catch (error) {
         // Refused (a 422): recovered data is never dropped; the next start tries again, up to the age limit.
         this.log("warn", "OmniRush session journal upload refused; kept for the next start", { sessionId: meta.session_id, error: error instanceof Error ? error.message : "unknown" });

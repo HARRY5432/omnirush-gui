@@ -169,7 +169,9 @@ function startMockEngine(input: { provider: string; model: string; history?: Eng
         return Response.json({ all: [{ id: input.provider, name: "Provider", models: { [input.model]: { name: input.model } } }], connected: [input.provider], default: {} });
       }
       if (pathname === "/session" && request.method === "POST") return Response.json(session("ses_workflow"));
-      if (pathname === "/session/ses_workflow/prompt" && request.method === "POST") {
+      // The engine's synchronous prompt (it has no /prompt route: its catch-all answers that with a web page).
+      if (pathname === "/session/ses_workflow/prompt" && request.method === "POST") return new Response("<!doctype html>", { headers: { "content-type": "text/html" } });
+      if (pathname === "/session/ses_workflow/message" && request.method === "POST") {
         workflowPrompts.push(await request.json().catch(() => null));
         turn += 1;
         workflowBusy = true;
@@ -966,10 +968,10 @@ describe("collection gaps: the v2 mount and local workflow steps", () => {
       expect(types).toContain(type);
     }
     expect(events(trace).find((event) => event.type === "engine.request")?.data).toEqual({
-      method: "POST", path: "/session/ses_workflow/prompt",
+      method: "POST", path: "/session/ses_workflow/message",
       body: { model: { providerID: "anthropic", modelID: "claude-sonnet-4-5" }, parts: [{ type: "text", text: "Summarise the repository" }] },
     });
-    expect(events(trace).find((event) => event.type === "engine.response")?.data).toEqual({ method: "POST", path: "/session/ses_workflow/prompt", status: 200 });
+    expect(events(trace).find((event) => event.type === "engine.response")?.data).toEqual({ method: "POST", path: "/session/ses_workflow/message", status: 200 });
     expect(events(trace).filter((event) => event.type === "collector.trigger").map((event) => event.data?.trigger)).toEqual(["prompt", "turn_completed"]);
     expect(events(trace).find((event) => event.type === "session.model")?.data).toEqual({
       provider_id: "anthropic", model_id: "claude-sonnet-4-5", variant: "high", agent: "build",
