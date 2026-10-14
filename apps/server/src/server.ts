@@ -215,6 +215,7 @@ import pkg from "../package.json" with { type: "json" };
 import constants from "../../../constants.json" with { type: "json" };
 import { BestPracticesEngineReloads } from "./best-practices.js";
 import { BUNDLED_ENGINE_VERSION } from "./engine-identity.js";
+import { createTurnActivity, type TurnActivity } from "./turn-activity.js";
 
 export {
   isSupportedWorkspaceTextFilePath,
@@ -231,6 +232,25 @@ const agentDiagnosticsLastRunByServer = new WeakMap<ServerConfig, Map<string, nu
 const agentDiagnosticsInFlightByServer = new WeakMap<ServerConfig, Set<string>>();
 const commandAdmissionsByServer = new WeakMap<ServerConfig, Map<string, { fingerprint: string; admittedAt: number }>>();
 const captureServicesByServer = new WeakMap<ServerConfig, CaptureService>();
+const turnActivityByServer = new WeakMap<ServerConfig, TurnActivity>();
+
+/** Whether the agent works on this server's engine (turn-activity.ts), for an embedding app that asked (onTurnActivity). */
+function turnActivityFor(config: ServerConfig): TurnActivity | null {
+  const onChange = config.onTurnActivity;
+  if (!onChange) return null;
+  let activity = turnActivityByServer.get(config);
+  if (!activity) {
+    activity = createTurnActivity({ busy: () => collectBusyEngineSessions(config), onChange });
+    turnActivityByServer.set(config, activity);
+  }
+  return activity;
+}
+
+/** The server stops: no turn runs on it any more. */
+export function stopTurnActivity(config: ServerConfig): void {
+  turnActivityByServer.get(config)?.stop();
+  turnActivityByServer.delete(config);
+}
 /** Voice dictation's broker hop (omnirush-voice.ts), per server. */
 const voiceServicesByServer = new WeakMap<ServerConfig, OmniRushVoiceService>();
 /** The broker's integrity read (rate-limited there), per server, for the checklist bar's "Good session ★". */
@@ -1716,6 +1736,9 @@ export async function proxyOpencodeV2Request(input: {
     }
     await awaitOmniRushModelCatalogSettled(input.config);
   }
+  // The agent works from here (the prompt is on its way) until the engine runs no session.
+  const turnActivity = promptDispatch && collectible && sessionId !== null ? turnActivityFor(input.config) : null;
+  turnActivity?.promptDispatched();
   const target = new URL(input.connection.url);
   target.pathname = forwardedPath;
   target.search = input.url.search;
@@ -1836,6 +1859,8 @@ export async function proxyOpencodeV2Request(input: {
     capture.archiveSessionStarted(uploadedSessionId, input.workspace.path, engine);
   }
   const response = await loopbackFetch(target.toString(), { method, headers, body, signal: input.recoverySignal });
+  // The engine has the prompt: its session status says busy from now on.
+  turnActivity?.promptDispatched();
   if (capture && uploadedSessionId && engine) {
     capture.recordTrace(uploadedSessionId, "engine.response", { method, path: routePath, status: response.status });
     if (response.ok) capture.observeSession(uploadedSessionId, engine);
@@ -2188,6 +2213,11 @@ export async function proxyOpencodeRequest(input: {
     : await input.request.arrayBuffer().then((buf) => (buf.byteLength > 0 ? buf : undefined));
   const capture = workspace ? captureServicesByServer.get(input.config) : undefined;
   const uploadedSessionId = uploadSessionId(proxyPath);
+  // The agent works from here (the prompt is on its way) until the engine runs no session.
+  const turnActivity = workspace && workspace.workspaceType !== "remote" && uploadedSessionId && isUploadPromptDispatch(method, proxyPath)
+    ? turnActivityFor(input.config)
+    : null;
+  turnActivity?.promptDispatched();
   const deletedUploadedSessionId = uploadDeletedSessionId(method, proxyPath);
   // A chat the engine does not have (a stale tab, a deleted chat) is not
   // started: its prompt is refused, and it would only leave an empty start
@@ -2415,6 +2445,8 @@ export async function proxyOpencodeRequest(input: {
 
   const forwardAndUpload = async () => {
     const response = await forward();
+    // The engine has the prompt: its session status says busy from now on.
+    turnActivity?.promptDispatched();
     if (capture?.uploadEnabled && uploadedSessionId && steer) {
       if (workspace && response.ok) steered(capture, uploadedSessionId, engineTarget(served.baseUrl, served.headers, search));
     } else if (capture?.uploadEnabled && uploadedSessionId) {

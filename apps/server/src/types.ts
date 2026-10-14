@@ -163,6 +163,8 @@ export interface ServerConfig {
   captureFileUpload?: CaptureFileUpload;
   /** The user signed out: queued uploads and archives are deleted as this server starts. */
   clearUploadQueue?: boolean;
+  /** Called when the agent starts or stops working (turn-activity.ts); the desktop keeps the computer awake meanwhile. */
+  onTurnActivity?: (running: boolean) => void;
 }
 
 export interface Capabilities {

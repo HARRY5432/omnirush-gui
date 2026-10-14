@@ -30,6 +30,7 @@ import {
   clearTrustedOpencodeProcess,
   collectBusyEngineSessions,
   createEnginePoolForConfig,
+  stopTurnActivity,
   createServerLogger,
   registerTrustedOpencodeProcess,
   startServer,
@@ -65,6 +66,8 @@ export type EmbeddedServerOptions = CliArgs & {
   captureFileUpload?: CaptureFileUpload;
   /** The user signed out since the last start: queued uploads and archives are deleted first. */
   clearUploadQueue?: boolean;
+  /** Called when the agent starts working (a prompt went out) and when no turn runs any more. */
+  onTurnActivity?: (running: boolean) => void;
   /**
    * How the embedding desktop launches its bundled UI-control MCP. Persisted
    * entries still using `npx -y omnirush-ui-mcp` are rewritten to it before
@@ -104,6 +107,7 @@ export async function startEmbeddedServer(options: EmbeddedServerOptions): Promi
   config.appVersion = typeof options.appVersion === "string" && options.appVersion.trim() ? options.appVersion.trim() : undefined;
   config.captureFileUpload = options.captureFileUpload;
   config.clearUploadQueue = options.clearUploadQueue === true;
+  config.onTurnActivity = options.onTurnActivity;
   const logger = createServerLogger(config);
 
   // Spawn managed OpenCode if requested and no explicit base URL was provided.
@@ -118,6 +122,7 @@ export async function startEmbeddedServer(options: EmbeddedServerOptions): Promi
 
   const releaseResources = async (): Promise<void> => {
     const errors: unknown[] = [];
+    stopTurnActivity(config);
     try { await stopTaskRecovery(config); } catch (error) { errors.push(error); }
 
     const identity = managedOpencodeIdentity;

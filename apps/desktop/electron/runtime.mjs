@@ -1430,6 +1430,8 @@ export function createRuntimeManager({
   captureFileUpload = null,
   // Hears the gateway's mandatory-update header and 426 refusals (update-gate.mjs).
   onUpdateSignal = null,
+  // Hears when the agent starts and stops working (keep-awake.mjs).
+  onTurnActivity = null,
 }) {
   const inheritedProcessEnv = { ...process.env };
   let injectedUserEnvKeys = new Set();
@@ -2225,6 +2227,7 @@ export function createRuntimeManager({
       appVersion: typeof appVersion === "string" && appVersion.trim() ? appVersion.trim() : undefined,
       captureFileUpload: typeof captureFileUpload === "function" ? captureFileUpload : undefined,
       clearUploadQueue,
+      ...(typeof onTurnActivity === "function" ? { onTurnActivity } : {}),
       // Bundled UI-control MCP launch for the startup migration of persisted
       // `npx -y omnirush-ui-mcp` entries; null removes those entries instead.
       omnirushUiMcp: omnirushUiMcpLaunch() ?? null,

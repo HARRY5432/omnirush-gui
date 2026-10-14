@@ -94,6 +94,7 @@ import {
 } from "./sentry.mjs";
 import { installStdioErrorHandlers } from "./stdio-errors.mjs";
 import { createTurnGuard } from "./turn-guard.mjs";
+import { KEEP_AWAKE_FILE, createKeepAwake } from "./keep-awake.mjs";
 import {
   createRendererCrashRecovery,
   installSocketTypeOfServiceGuard,
@@ -116,6 +117,7 @@ const {
   nativeTheme,
   net: electronNet,
   powerMonitor,
+  powerSaveBlocker,
   Notification: ElectronNotification,
   session,
   shell,
@@ -1386,6 +1388,12 @@ function omnirushUiMcpLaunch() {
   });
 }
 
+// The computer stays awake while the agent works (keep-awake.mjs): the local server says when.
+const keepAwake = createKeepAwake({
+  powerSaveBlocker,
+  settingFile: path.join(app.getPath("userData"), KEEP_AWAKE_FILE),
+});
+
 const runtimeManager = createRuntimeManager({
   app,
   desktopRoot: path.resolve(__dirname, ".."),
@@ -1416,6 +1424,8 @@ const runtimeManager = createRuntimeManager({
   omnirushGatewayCredentials: omnirushAccountStore,
   // The gateway's x-omnirush-update-required header and 426 refusals.
   onUpdateSignal: (signal) => updateGate.signal(signal),
+  // The agent started or stopped working (apps/server/src/turn-activity.ts).
+  onTurnActivity: (running) => keepAwake.setTurnRunning(running),
   // Session upload envelopes report environment.app_version from the desktop build, not the server package.
   appVersion: app.getVersion(),
 });
@@ -2563,6 +2573,8 @@ const desktopCommandHandlers = {
   "__setApplicationMenuVisible": async (event, ...args) => {
       return applicationMenu.setVisible(args[0]);
   },
+  "keepAwakeStatus": async () => keepAwake.status(),
+  "keepAwakeSet": async (event, ...args) => keepAwake.setEnabled(args[0] === true),
   "__setTurnRunning": async (event, ...args) => {
       return turnGuard.setTurnRunning(args[0] === true);
   },
@@ -2998,6 +3010,8 @@ or use: pnpm dev:worktree`);
     showShutdownScreen();
     desktopAutomationRunner.stop();
     browserLoginSync.shutdown();
+    // The uploads finish as the services stop: the computer stays awake for them.
+    const releaseKeepAwake = keepAwake.hold();
     runDetachedTask("stop services before quit", async () => {
       // Re-check the update feed while services stop, so a download staged
       // before newer releases shipped is replaced by the newest one instead
@@ -3010,6 +3024,8 @@ or use: pnpm dev:worktree`);
           terminalSessions.killAll(),
         ]);
       } finally {
+        releaseKeepAwake();
+        keepAwake.stop();
         scheduleBlankSlateProfileCleanup();
         const installUpdateAndQuit = await updateInstall;
         if (installUpdateAndQuit) installUpdateAndQuit();
