@@ -338,7 +338,37 @@ export type OmniRushBuildathonStatus = {
   participant: OmniRushBuildathonParticipant | null;
   submission: OmniRushBuildathonSubmission | null;
   repro: OmniRushBuildathonRepro;
+  /** The updates feed, newest first (at most 20). */
+  announcements: OmniRushBuildathonAnnouncement[];
+  /** The linked GitHub account (needed to submit); null when none is linked. */
+  github: { login: string; linkedAt: string | null } | null;
 };
+export type OmniRushBuildathonAnnouncement = {
+  id: string;
+  title: string;
+  /** Plain text; may contain URLs. */
+  body: string;
+  url: string | null;
+  level: "info" | "important";
+  publishedAt: string | null;
+};
+/** A non-participant's promo (GET /me/buildathon `enrolled: false` + `promo`). */
+export type OmniRushBuildathonPromo = {
+  /** The dismissal key: a new id shows the promo again. */
+  id: string;
+  title: string;
+  text: string | null;
+  ctaLabel: string;
+  ctaUrl: string | null;
+  /** Registration close: hidden after it. */
+  endsAt: string | null;
+  /** True: open joining (on the web at `joinUrl`, which links GitHub; without one, POST /me/buildathon/join). */
+  join: boolean;
+  joinUrl: string | null;
+};
+export type OmniRushBuildathonPromoStatus = { enrolled: false; serverTime: string | null; promo: OmniRushBuildathonPromo };
+/** What the app reads from GET /me/buildathon: a participant, a promo, or nothing to show. */
+export type OmniRushBuildathonAnswer = OmniRushBuildathonStatus | OmniRushBuildathonPromoStatus | null;
 export type OmniRushBuildathonSession = {
   sessionId: string;
   title: string | null;
@@ -352,7 +382,7 @@ export type OmniRushBuildathonSession = {
 };
 export type OmniRushBuildathonLinkResult =
   | { ok: true; status: OmniRushBuildathonStatus }
-  | { ok: false; error: string };
+  | { ok: false; error: string; closed?: boolean };
 export type OmniRushBuildathonTagResult = "tagged" | "refused" | "retry";
 
 export type OmniRushSessionStatus = {
@@ -906,7 +936,8 @@ export type DesktopCommandMap = {
     args: [input: { idempotencyKey: string }];
     result: OmniRushQualitySpinOutcome;
   };
-  omnirushBuildathon: { args: []; result: OmniRushBuildathonStatus | null };
+  omnirushBuildathon: { args: []; result: OmniRushBuildathonAnswer };
+  omnirushBuildathonJoin: { args: []; result: OmniRushBuildathonLinkResult };
   omnirushBuildathonSessions: { args: []; result: OmniRushBuildathonSession[] | null };
   omnirushBuildathonLink: { args: [input: { code: string }]; result: OmniRushBuildathonLinkResult };
   omnirushBuildathonChecklist: {

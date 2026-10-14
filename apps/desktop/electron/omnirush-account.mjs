@@ -13,7 +13,7 @@ import {
   writePlaintextCredentialFile,
 } from "./plaintext-credential-file.mjs";
 import { CLIENT_HEADER, guiClientHeaderValue, parseClientUpdate } from "./update-gate.mjs";
-import { buildathonLinkCode, buildathonLinkError, buildathonProjectName, buildathonTrackId, parseBuildathonSessions, parseBuildathonStatus } from "./buildathon.mjs";
+import { buildathonJoinError, buildathonLinkCode, buildathonLinkError, buildathonProjectName, buildathonTrackId, parseBuildathonAnswer, parseBuildathonSessions, parseBuildathonStatus } from "./buildathon.mjs";
 import { parseAccountQuality, parseFailLabels, parseQualitySessions, parseSessionStatus, parseSpinHistory, profileSessionId, parseSpinResult, parseWheelSegments, spinIdempotencyKey, spinRefusal } from "./quality.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -1249,15 +1249,15 @@ export function createDesktopOmniRushAccountStore({
   }
 
   /**
-   * The buildathon block (GET /me/buildathon). Null for anyone not enrolled,
-   * while signed out, offline, slow or on a bad answer: the app then shows
-   * nothing about the event.
+   * The buildathon block (GET /me/buildathon): a participant's status, a
+   * non-participant's promo, or null (no promo, signed out, offline, slow or
+   * a bad answer): the app then shows nothing about the event.
    */
   async function buildathonStatus() {
     try {
       const response = await sendAuthorized("/me/buildathon", { method: "GET", signal: AbortSignal.timeout(BUILDATHON_TIMEOUT_MS) });
       if (!response?.ok) return null;
-      return parseBuildathonStatus(await response.json());
+      return parseBuildathonAnswer(await response.json());
     } catch {
       return null;
     }
@@ -1298,6 +1298,30 @@ export function createDesktopOmniRushAccountStore({
     if (!response.ok) return { ok: false, error: buildathonLinkError(payload, response.status) };
     const status = parseBuildathonStatus(payload);
     return status ? { ok: true, status } : { ok: false, error: "That code is not linked to an event you can join." };
+  }
+
+  /**
+   * Join the event from the app (POST /me/buildathon/join; only offered when
+   * the promo says `join: true`). The answer is the enrolled status.
+   * @returns {Promise<import("@omnirush/types/desktop-ipc").OmniRushBuildathonLinkResult>}
+   */
+  async function buildathonJoin() {
+    let response;
+    try {
+      response = await sendAuthorized("/me/buildathon/join", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+        signal: AbortSignal.timeout(BUILDATHON_TIMEOUT_MS),
+      });
+    } catch {
+      return { ok: false, error: "Could not join right now. Try again in a moment." };
+    }
+    if (!response) return { ok: false, error: "Sign in to join." };
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) return { ok: false, error: buildathonJoinError(payload, response.status), closed: response.status === 403 };
+    const status = parseBuildathonStatus(payload);
+    return status ? { ok: true, status } : { ok: false, error: "Could not join right now. Try again in a moment." };
   }
 
   /**
@@ -1381,6 +1405,7 @@ export function createDesktopOmniRushAccountStore({
     buildathonStatus,
     buildathonSessions,
     buildathonLink,
+    buildathonJoin,
     buildathonTagSession,
   };
 }

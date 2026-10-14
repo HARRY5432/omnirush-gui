@@ -10,6 +10,9 @@ import {
   DEFAULT_AGENT_RULES,
   buildathonLinkCode,
   buildathonTrackId,
+  parseBuildathonAnnouncements,
+  parseBuildathonAnswer,
+  parseBuildathonPromo,
   parseBuildathonRepro,
   parseBuildathonSessions,
   parseBuildathonStatus,
@@ -154,7 +157,7 @@ test("buildathon store: GET /me/buildathon with the device credential; null for 
     seen.push({ path: new URL(url).pathname, authorization: new Headers(init.headers).get("authorization"), signal: init.signal instanceof AbortSignal });
     return Response.json(ENROLLED);
   });
-  assert.equal((await store.buildathonStatus()).event.id, "frontier-2026");
+  assert.equal(/** @type {any} */ (await store.buildathonStatus()).event.id, "frontier-2026");
   assert.deepEqual(seen, [{ path: "/omnirush/me/buildathon", authorization: "Bearer access-1", signal: true }]);
 
   for (const fetchImpl of [
@@ -273,4 +276,118 @@ test("checklist IPC: an existing project folder only, never home, a root or a re
   assert.equal(projectChecklist({ path: "relative/dir" }), null);
   assert.equal(projectChecklist({ path: path.join(dir, "missing") }), null);
   assert.equal(projectChecklist({}), null);
+});
+
+const PROMO = {
+  id: "frontier-2026-reg",
+  title: "Frontier Buildathon 2026",
+  text: "$300 prize pool · $300 of GPT-6 tokens each · solo · 6 days",
+  cta_label: "Join the Buildathon",
+  cta_url: "https://omnirush.ai/buildathon",
+  ends_at: "2026-10-19T18:29:59Z",
+  join: false,
+};
+
+test("promo: a non-participant's promo block, cleaned", () => {
+  assert.deepEqual(parseBuildathonPromo(PROMO), {
+    id: "frontier-2026-reg",
+    title: "Frontier Buildathon 2026",
+    text: "$300 prize pool · $300 of GPT-6 tokens each · solo · 6 days",
+    ctaLabel: "Join the Buildathon",
+    ctaUrl: "https://omnirush.ai/buildathon",
+    endsAt: "2026-10-19T18:29:59Z",
+    join: false,
+    joinUrl: null,
+  });
+  // Open joining on the web.
+  const open = parseBuildathonPromo({ ...PROMO, join: true, join_url: "https://omnirush.ai/console/buildathon?join=1" });
+  assert.equal(open.joinUrl, "https://omnirush.ai/console/buildathon?join=1");
+  assert.equal(parseBuildathonPromo({ ...PROMO, join_url: "https://omnirush.ai/console/buildathon?join=1" }).joinUrl, null, "no join_url unless join is on");
+  assert.equal(parseBuildathonPromo({ ...PROMO, join: true, join_url: "http://omnirush.ai/x" }).joinUrl, null);
+  // Defaults and cleaning.
+  const bare = parseBuildathonPromo({ id: "p1", title: "T", cta_url: "https://x.example/" , join: "yes" });
+  assert.equal(bare.ctaLabel, "Join the Buildathon");
+  assert.equal(bare.join, false, "only a literal true joins in the app");
+  assert.equal(bare.text, null);
+  assert.equal(bare.endsAt, null);
+  // In-app join needs no page.
+  assert.equal(parseBuildathonPromo({ id: "p1", title: "T", join: true }).join, true);
+  // Unusable: no id, a bad id, no title, no way to act (no join, no https page).
+  for (const bad of [null, [], { ...PROMO, id: "" }, { ...PROMO, id: "has space" }, { ...PROMO, title: " " },
+    { ...PROMO, cta_url: "http://omnirush.ai/buildathon" }, { ...PROMO, cta_url: "javascript:alert(1)" }]) {
+    assert.equal(parseBuildathonPromo(bad), null, JSON.stringify(bad));
+  }
+});
+
+test("promo: GET /me/buildathon reads as status, promo or nothing", () => {
+  assert.equal(parseBuildathonAnswer({ enrolled: false }), null, "no promo: nothing, as before");
+  assert.equal(parseBuildathonAnswer({ enrolled: false, promo: { id: "x" } }), null);
+  assert.deepEqual(parseBuildathonAnswer({ enrolled: false, promo: PROMO, server_time: "2026-10-15T10:00:00Z" }), {
+    enrolled: false,
+    serverTime: "2026-10-15T10:00:00Z",
+    promo: parseBuildathonPromo(PROMO),
+  });
+  assert.equal(parseBuildathonAnswer({ promo: PROMO }), null, "enrolled must be false, not missing");
+  const status = parseBuildathonAnswer({ ...ENROLLED, promo: PROMO });
+  assert.equal(status.enrolled, true);
+  assert.equal("promo" in status, false, "participants never get the promo");
+});
+
+test("announcements: newest first, at most 20, cleaned", () => {
+  const list = parseBuildathonAnnouncements([
+    { id: "a_1", title: "Old", body: "first", url: null, level: "info", published_at: "2026-10-14T10:00:00Z" },
+    { id: "a_2", title: "New", body: "see https://omnirush.ai/x", url: "https://omnirush.ai/x", level: "important", published_at: "2026-10-15T10:00:00Z" },
+    { id: "a_2", title: "dup", body: "dup" },
+    { id: "a_3", body: "body only", url: "http://insecure.example", level: "loud" },
+    { id: "", title: "no id" },
+    { id: "a_4" },
+    "junk",
+  ]);
+  assert.deepEqual(list.map((a) => a.id), ["a_2", "a_1", "a_3"]);
+  assert.equal(list[0].level, "important");
+  assert.equal(list[0].url, "https://omnirush.ai/x");
+  assert.equal(list[2].title, "Update");
+  assert.equal(list[2].url, null);
+  assert.equal(list[2].level, "info");
+  const many = Array.from({ length: 30 }, (_, index) => ({ id: `a_${index}`, title: `t${index}`, published_at: new Date(Date.UTC(2026, 9, 14, index % 24, index)).toISOString() }));
+  assert.equal(parseBuildathonAnnouncements(many).length, 20);
+  assert.deepEqual(parseBuildathonAnnouncements(undefined), []);
+  assert.deepEqual(parseBuildathonStatus(ENROLLED).announcements, []);
+  assert.equal(parseBuildathonStatus(ENROLLED).github, null);
+  assert.deepEqual(parseBuildathonStatus({ ...ENROLLED, github: { login: "octo-cat", linked_at: "2026-10-14T19:30:00Z" } }).github, { login: "octo-cat", linkedAt: "2026-10-14T19:30:00Z" });
+  assert.equal(parseBuildathonStatus({ ...ENROLLED, github: { login: "bad login!" } }).github, null);
+  assert.equal(parseBuildathonStatus({ ...ENROLLED, announcements: [{ id: "a_1", title: "Hi" }] }).announcements[0].title, "Hi");
+});
+
+test("buildathon store: the promo comes through GET /me/buildathon", async () => {
+  const store = await signedInStore(async () => Response.json({ enrolled: false, promo: PROMO }));
+  const answer = await store.buildathonStatus();
+  assert.equal(answer.enrolled, false);
+  assert.equal(answer.promo.id, "frontier-2026-reg");
+});
+
+test("buildathon store: join; the enrolled status, or the refusal in words", async () => {
+  const seen = [];
+  const store = await signedInStore(async (url, init) => {
+    seen.push({ path: new URL(url).pathname, method: init.method, authorization: new Headers(init.headers).get("authorization") });
+    return Response.json({ ...ENROLLED, announcements: [{ id: "a_1", title: "Welcome" }] });
+  });
+  const joined = await store.buildathonJoin();
+  assert.equal(joined.ok, true);
+  assert.equal(joined.status.event.id, "frontier-2026");
+  assert.equal(joined.status.announcements[0].id, "a_1");
+  assert.deepEqual(seen, [{ path: "/omnirush/me/buildathon/join", method: "POST", authorization: "Bearer access-1" }]);
+
+  const closed = await signedInStore(async () => Response.json({ error: "join_closed" }, { status: 403 }));
+  assert.deepEqual(await closed.buildathonJoin(), { ok: false, error: "Joining is closed right now.", closed: true });
+  for (const [code, words] of /** @type {Array<[string, RegExp]>} */ ([["github_required", /Link your GitHub/], ["github_too_new", /3 days old/], ["github_inactive", /public activity/], ["github_in_use", /another OmniRush account/]])) {
+    const refused = await signedInStore(async () => Response.json({ error: code }, { status: 403 }));
+    assert.match(/** @type {any} */ (await refused.buildathonJoin()).error, words, code);
+  }
+  const odd = await signedInStore(async () => Response.json({ enrolled: false }));
+  assert.equal((await odd.buildathonJoin()).ok, false);
+  const down = await signedInStore(async () => new Response("down", { status: 502 }));
+  assert.match(/** @type {any} */ (await down.buildathonJoin()).error, /Try again/);
+  const offline = await signedInStore(async () => { throw new TypeError("fetch failed"); });
+  assert.equal((await offline.buildathonJoin()).ok, false);
 });

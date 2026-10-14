@@ -172,8 +172,74 @@ export function parseBuildathonRepro(value) {
   };
 }
 
+const PROMO_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/;
+const ANNOUNCEMENT_LEVELS = ["info", "important"];
+
+function clip(value, max) {
+  const raw = text(value);
+  return raw ? (raw.length > max ? `${raw.slice(0, max - 1).trimEnd()}…` : raw) : null;
+}
+
 /**
- * GET /me/buildathon (or the link answer): null unless the account is
+ * The `promo` block of a non-participant's answer (contract "Promo for
+ * non-participants"). Null when absent or unusable: no id, no title, or no
+ * way to act on it (neither in-app joining nor an https page).
+ * @returns {import("@omnirush/types/desktop-ipc").OmniRushBuildathonPromo | null}
+ */
+export function parseBuildathonPromo(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const id = text(value.id);
+  const title = clip(value.title, 120);
+  if (!id || !PROMO_ID.test(id) || !title) return null;
+  const join = value.join === true;
+  const ctaUrl = httpsUrl(value.cta_url);
+  const joinUrl = join ? httpsUrl(value.join_url) : null;
+  if (!join && !ctaUrl) return null;
+  return {
+    id,
+    title,
+    text: clip(value.text, 280),
+    ctaLabel: clip(value.cta_label, 40) ?? "Join the Buildathon",
+    ctaUrl,
+    endsAt: isoTime(value.ends_at),
+    join,
+    joinUrl,
+  };
+}
+
+/**
+ * The participants' updates feed: newest first, at most 20, each with an id
+ * and a title or a body.
+ * @returns {import("@omnirush/types/desktop-ipc").OmniRushBuildathonAnnouncement[]}
+ */
+export function parseBuildathonAnnouncements(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const id = text(entry.id);
+    if (!id || id.length > 120 || seen.has(id)) continue;
+    const title = clip(entry.title, 160);
+    const body = clip(entry.body, 4_000);
+    if (!title && !body) continue;
+    seen.add(id);
+    out.push({
+      id,
+      title: title ?? "Update",
+      body: body ?? "",
+      url: httpsUrl(entry.url),
+      level: ANNOUNCEMENT_LEVELS.includes(entry.level) ? entry.level : "info",
+      publishedAt: isoTime(entry.published_at),
+    });
+  }
+  // Newest first (the server's order; a stable sort keeps it for equal or missing times).
+  out.sort((left, right) => (Date.parse(right.publishedAt ?? "") || 0) - (Date.parse(left.publishedAt ?? "") || 0));
+  return out.slice(0, 20);
+}
+
+/**
+ * GET /me/buildathon (or the link/join answer): null unless the account is
  * enrolled and the event names a deadline.
  * @returns {BuildathonStatus | null}
  */
@@ -188,7 +254,50 @@ export function parseBuildathonStatus(value) {
     participant: parseParticipant(value.participant),
     submission: parseBuildathonSubmission(value.submission),
     repro: parseBuildathonRepro(value.repro),
+    announcements: parseBuildathonAnnouncements(value.announcements),
+    github: parseBuildathonGithub(value.github ?? value.participant?.github),
   };
+}
+
+/** The linked GitHub account (`github` of the enrolled body); null when none is linked. */
+export function parseBuildathonGithub(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const login = text(value.login);
+  if (!login || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(login)) return null;
+  return { login, linkedAt: isoTime(value.linked_at) };
+}
+
+/**
+ * GET /me/buildathon as the app reads it: the participant's status, a
+ * non-participant's promo (`enrolled: false` with a usable `promo`), or null
+ * (nothing to show).
+ * @returns {import("@omnirush/types/desktop-ipc").OmniRushBuildathonAnswer}
+ */
+export function parseBuildathonAnswer(value) {
+  const status = parseBuildathonStatus(value);
+  if (status) return status;
+  if (!value || typeof value !== "object" || Array.isArray(value) || value.enrolled !== false) return null;
+  const promo = parseBuildathonPromo(value.promo);
+  return promo ? { enrolled: false, serverTime: isoTime(value.server_time), promo } : null;
+}
+
+const JOIN_ERRORS = {
+  join_closed: "Joining is closed right now.",
+  github_required: "Link your GitHub account on omnirush.ai to join.",
+  github_too_new: "GitHub account must be at least 3 days old.",
+  github_inactive: "Your GitHub account needs some public activity.",
+  github_in_use: "That GitHub account is already linked to another OmniRush account.",
+  already_enrolled: "This account is already enrolled.",
+  not_available: "Joining is not available right now.",
+};
+
+/** A refused join as a sentence. */
+export function buildathonJoinError(payload, status) {
+  const code = payload && typeof payload === "object" ? text(payload.error) : null;
+  if (code && Object.hasOwn(JOIN_ERRORS, code)) return JOIN_ERRORS[code];
+  if (status === 403) return JOIN_ERRORS.join_closed;
+  if (status === 401) return "Sign in to join.";
+  return "Could not join right now. Try again in a moment.";
 }
 
 /**

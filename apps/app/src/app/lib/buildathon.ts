@@ -1,13 +1,16 @@
 // Buildathon, renderer side. The Electron main process reads
-// GET /me/buildathon (apps/desktop/electron/buildathon.mjs) and answers null
-// for anyone not enrolled, offline or on any error; everything here then
-// renders nothing. Nothing in this file is awaited on the way to the first
+// GET /me/buildathon (apps/desktop/electron/buildathon.mjs) and answers a
+// participant's status, a non-participant's promo, or null (no promo,
+// offline, any error); with null everything here renders nothing. Nothing in this file is awaited on the way to the first
 // screen.
 
 import { create } from "zustand";
 
 import type {
+  OmniRushBuildathonAnnouncement,
+  OmniRushBuildathonAnswer,
   OmniRushBuildathonEvent,
+  OmniRushBuildathonPromo,
   OmniRushBuildathonSession,
   OmniRushBuildathonStatus,
   OmniRushBuildathonTagResult,
@@ -18,12 +21,25 @@ export type BuildathonStatus = OmniRushBuildathonStatus;
 export type BuildathonEvent = OmniRushBuildathonEvent;
 export type BuildathonSession = OmniRushBuildathonSession;
 export type BuildathonTrack = OmniRushBuildathonTrack;
+export type BuildathonPromo = OmniRushBuildathonPromo;
+export type BuildathonAnnouncement = OmniRushBuildathonAnnouncement;
+export type BuildathonAnswer = OmniRushBuildathonAnswer;
 
 export const BUILDATHON_REFRESH_MS = 10 * 60_000;
+/** After the join page opens: re-read every 30 s (and on focus) for 10 minutes. */
+export const JOIN_WATCH_REFRESH_MS = 30_000;
+export const JOIN_WATCH_MS = 10 * 60_000;
 export const ONLY_TOOL_RULE = "OmniRush must be the only generative AI tool you use.";
 export const BUILDATHON_TRACKS_STORAGE_KEY = "omnirush.buildathon.tracks.v1";
 export const BUILDATHON_TAGGED_STORAGE_KEY = "omnirush.buildathon.tagged.v1";
 export const BUILDATHON_REMINDERS_STORAGE_KEY = "omnirush.buildathon.reminders.v1";
+/** Promo ids: `dismissed` (banner closed, or the card's close), `card` (the one-time home card was shown). */
+export const BUILDATHON_PROMO_STORAGE_KEY = "omnirush.buildathon.promo.v1";
+/** Announcement ids: `notified` (toast + notification shown), `read` (seen in My Buildathon). */
+export const BUILDATHON_ANNOUNCEMENTS_STORAGE_KEY = "omnirush.buildathon.announcements.v1";
+/** At most this many announcements pop up one by one; the rest are one summary toast. */
+export const ANNOUNCEMENT_TOAST_LIMIT = 3;
+const MAX_IDS_REMEMBERED = 200;
 const MAX_TAGGED_REMEMBERED = 500;
 const HOUR_MS = 3_600_000;
 
@@ -274,6 +290,72 @@ export function rememberShownReminders(keys: string[], storage: KeyValueStore | 
   writeJson(BUILDATHON_REMINDERS_STORAGE_KEY, [...shown].slice(-50), storage);
 }
 
+// --- Promo (non-participants) -------------------------------------------------
+
+type IdLists = Record<string, string[]>;
+
+function readIdLists(key: string, storage: KeyValueStore | null): IdLists {
+  const value = readJson<Record<string, unknown>>(key, {}, storage);
+  const lists: IdLists = {};
+  for (const [name, ids] of Object.entries(value)) {
+    if (Array.isArray(ids)) lists[name] = ids.filter((id): id is string => typeof id === "string");
+  }
+  return lists;
+}
+
+function addIds(key: string, list: string, ids: string[], storage: KeyValueStore | null): void {
+  if (!ids.length) return;
+  const lists = readIdLists(key, storage);
+  const next = (lists[list] ?? []).filter((id) => !ids.includes(id));
+  next.push(...ids);
+  lists[list] = next.slice(-MAX_IDS_REMEMBERED);
+  writeJson(key, lists, storage);
+}
+
+export function readPromoIds(list: "dismissed" | "card", storage: KeyValueStore | null = defaultStorage()): Set<string> {
+  return new Set(readIdLists(BUILDATHON_PROMO_STORAGE_KEY, storage)[list] ?? []);
+}
+
+export function rememberPromoId(list: "dismissed" | "card", id: string, storage: KeyValueStore | null = defaultStorage()): void {
+  addIds(BUILDATHON_PROMO_STORAGE_KEY, list, [id], storage);
+}
+
+/** Whether the promo is still on: not dismissed under its id and before its end (server clock). */
+export function promoActive(promo: BuildathonPromo | null, nowMs: number, dismissed: ReadonlySet<string>): promo is BuildathonPromo {
+  if (!promo || dismissed.has(promo.id)) return false;
+  const ends = promo.endsAt ? Date.parse(promo.endsAt) : Number.NaN;
+  return !(Number.isFinite(ends) && ends <= nowMs);
+}
+
+// --- Announcements (participants) ----------------------------------------------
+
+export function readAnnouncementIds(list: "notified" | "read", storage: KeyValueStore | null = defaultStorage()): Set<string> {
+  return new Set(readIdLists(BUILDATHON_ANNOUNCEMENTS_STORAGE_KEY, storage)[list] ?? []);
+}
+
+export function rememberAnnouncementIds(list: "notified" | "read", ids: string[], storage: KeyValueStore | null = defaultStorage()): void {
+  addIds(BUILDATHON_ANNOUNCEMENTS_STORAGE_KEY, list, ids, storage);
+}
+
+/**
+ * The announcements to pop up now: those never shown, oldest first so the
+ * newest ends on top. Past the limit only the newest pop up and the rest are
+ * counted (one summary).
+ */
+export function announcementsToNotify(
+  announcements: BuildathonAnnouncement[],
+  notified: ReadonlySet<string>,
+  limit = ANNOUNCEMENT_TOAST_LIMIT,
+): { show: BuildathonAnnouncement[]; more: number; ids: string[] } {
+  const fresh = announcements.filter((announcement) => !notified.has(announcement.id));
+  const show = fresh.slice(0, limit).reverse();
+  return { show, more: Math.max(0, fresh.length - limit), ids: fresh.map((announcement) => announcement.id) };
+}
+
+export function unreadAnnouncementIds(announcements: BuildathonAnnouncement[], read: ReadonlySet<string>): string[] {
+  return announcements.filter((announcement) => !read.has(announcement.id)).map((announcement) => announcement.id);
+}
+
 // --- Which sessions to tag ---------------------------------------------------
 
 export type BuildathonProject = {
@@ -319,6 +401,14 @@ export function sessionsToTag(
 
 type BuildathonStore = {
   status: BuildathonStatus | null;
+  /** A non-participant's promo (null for participants and when there is none). */
+  promo: BuildathonPromo | null;
+  /** Bumped when a promo is dismissed or an announcement read, so views re-read storage. */
+  seenVersion: number;
+  /** Until when (local ms) the app re-reads often, after opening the join page. */
+  joinWatchUntil: number;
+  /** Set when this run saw the account go from the promo to enrolled (the "You're in" moment). */
+  joinedAt: number | null;
   /** Server clock minus local clock, from the latest answer. */
   offsetMs: number;
   panelOpen: boolean;
@@ -330,6 +420,11 @@ type BuildathonStore = {
   /** Bumped on every track change so pickers re-read storage. */
   tracksVersion: number;
   setStatus: (status: BuildathonStatus | null, receivedAtMs?: number) => void;
+  /** Either a participant's status or a promo (or neither): one answer of GET /me/buildathon. */
+  setAnswer: (answer: BuildathonAnswer, receivedAtMs?: number) => void;
+  bumpSeen: () => void;
+  startJoinWatch: (nowMs?: number) => void;
+  clearJoined: () => void;
   openPanel: () => void;
   closePanel: () => void;
   setProjects: (projects: BuildathonProject[], selectedProjectId?: string | null) => void;
@@ -338,8 +433,17 @@ type BuildathonStore = {
   bumpTracks: () => void;
 };
 
+/** Enrolled after showing the promo in this run: the join just happened (the watch ends). */
+function joinedFrom(state: BuildathonStore, nowMs: number): Partial<BuildathonStore> {
+  return state.promo && !state.status ? { joinedAt: nowMs, joinWatchUntil: 0 } : {};
+}
+
 export const useBuildathonStore = create<BuildathonStore>((set) => ({
   status: null,
+  promo: null,
+  seenVersion: 0,
+  joinWatchUntil: 0,
+  joinedAt: null,
   offsetMs: 0,
   panelOpen: false,
   projects: [],
@@ -350,8 +454,23 @@ export const useBuildathonStore = create<BuildathonStore>((set) => ({
     set((state) => ({
       status,
       offsetMs: status ? clockOffsetMs(status.serverTime, receivedAtMs) : 0,
+      promo: status ? null : state.promo,
       panelOpen: status ? state.panelOpen : false,
+      ...(status ? joinedFrom(state, receivedAtMs) : {}),
     })),
+  setAnswer: (answer, receivedAtMs = Date.now()) =>
+    set((state) => {
+      if (answer?.enrolled === true) {
+        return { status: answer, promo: null, offsetMs: clockOffsetMs(answer.serverTime, receivedAtMs), panelOpen: state.panelOpen, ...joinedFrom(state, receivedAtMs) };
+      }
+      if (answer?.enrolled === false && answer.promo) {
+        return { status: null, promo: answer.promo, offsetMs: clockOffsetMs(answer.serverTime, receivedAtMs), panelOpen: false };
+      }
+      return { status: null, promo: null, offsetMs: 0, panelOpen: false };
+    }),
+  bumpSeen: () => set((state) => ({ seenVersion: state.seenVersion + 1 })),
+  startJoinWatch: (nowMs = Date.now()) => set({ joinWatchUntil: nowMs + JOIN_WATCH_MS }),
+  clearJoined: () => set({ joinedAt: null }),
   openPanel: () => set({ panelOpen: true }),
   closePanel: () => set({ panelOpen: false }),
   setProjects: (projects, selectedProjectId = null) => set({ projects, selectedProjectId }),
@@ -375,15 +494,14 @@ export function noteNewBuildathonProject(path: string | null | undefined, name?:
 
 let refreshing: Promise<void> | null = null;
 
-/** One read of the event; any failure hides everything. Never throws. */
-export function refreshBuildathon(read: () => Promise<BuildathonStatus | null>): Promise<void> {
+/** One read of the event (a participant's status or a promo); any failure hides everything. Never throws. */
+export function refreshBuildathon(read: () => Promise<BuildathonAnswer>): Promise<void> {
   if (refreshing) return refreshing;
   refreshing = (async () => {
     try {
-      const status = await read();
-      useBuildathonStore.getState().setStatus(status?.enrolled === true ? status : null);
+      useBuildathonStore.getState().setAnswer(await read());
     } catch {
-      useBuildathonStore.getState().setStatus(null);
+      useBuildathonStore.getState().setAnswer(null);
     } finally {
       refreshing = null;
     }

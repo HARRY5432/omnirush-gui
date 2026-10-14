@@ -50,6 +50,7 @@ import { SyncRestartGate } from "./sync-restart-banner";
 import { UpdateGate } from "./update-gate";
 import { QualityRewards } from "../domains/quality/quality-notice";
 import { BuildathonLayer } from "../domains/buildathon/buildathon";
+import { BuildathonPromoGate } from "../domains/buildathon/buildathon-promo";
 import { TurnRunningSync } from "../domains/quality/good-session";
 import { SettingsRoute } from "./settings-route";
 import { ShellConfigProvider } from "./shell-config";
@@ -388,6 +389,7 @@ export function AppRoot() {
         <DesktopUpdaterProvider>
         <UpdateGate>
         <SyncRestartGate>
+        <BuildathonPromoGate>
         <ShellConfigProvider>
         <AppMenuProvider>
         <OmniRushControlProvider>
@@ -527,6 +529,7 @@ export function AppRoot() {
         </OmniRushControlProvider>
         </AppMenuProvider>
         </ShellConfigProvider>
+        </BuildathonPromoGate>
         </SyncRestartGate>
         </UpdateGate>
         </DesktopUpdaterProvider>

@@ -2208,6 +2208,10 @@ const desktopCommandHandlers = {
       const input = args[0] && typeof args[0] === "object" ? args[0] : {};
       return omnirushAccountStore.buildathonLink({ code: input.code });
   },
+  // Join from the promo (only offered when the server's promo says so).
+  "omnirushBuildathonJoin": async (event) => {
+      return omnirushAccountStore.buildathonJoin();
+  },
   // The rebuild checklist of one buildathon project, checked in its folder (cheap file checks).
   "omnirushBuildathonChecklist": async (event, ...args) => {
       const input = args[0] && typeof args[0] === "object" ? args[0] : {};
