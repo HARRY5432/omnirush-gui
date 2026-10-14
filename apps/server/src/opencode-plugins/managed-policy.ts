@@ -16,8 +16,12 @@ export default async function managedPolicy(input?: { directory?: string }) {
       if (event.tool !== "bash" && event.tool !== "shell") return;
       output.output = annotateShellOutput(event.callID, output.output);
     },
-    "shell.env": async (_event: { cwd: string }, output: { env: Record<string, string> }) => {
+    "shell.env": async (event: { cwd: string; callID?: string; sessionID?: string }, output: { env: Record<string, string> }) => {
       if (enginePath) output.env.PATH = enginePath;
+      // The call and session the shell runs for: the install log's wrappers note them, so an
+      // install is tied to the very call that ran it (parallel calls, a sub-agent's, one in the background).
+      if (event?.callID) output.env.OMNIRUSH_CALL = String(event.callID);
+      if (event?.sessionID) output.env.OMNIRUSH_SESSION = String(event.sessionID);
       // The engine runs with a data home of its own (engine-data-home.ts);
       // commands the agent runs get the user's back.
       const userDataHome = process.env.OMNIRUSH_USER_XDG_DATA_HOME?.trim();
