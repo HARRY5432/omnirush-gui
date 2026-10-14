@@ -13,7 +13,7 @@ export const MAX_PROCESSES = 200;
 export const MAX_LISTENING = 200;
 const MAX_COMMAND_CHARS = 2_000;
 
-export type ProcessInfo = { pid: number; ppid: number; name: string; command: string };
+export type ProcessInfo = { pid: number; ppid: number; name: string; command: string; /** Its working folder, where the source knows it (a box). */ cwd?: string };
 export type ListeningPort = { proto: "tcp"; address: string; port: number; pid: number | null; process: string | null };
 
 /** Process names (or name prefixes) that matter to a developer's environment. */
@@ -332,7 +332,7 @@ export type ProcessSnapshot = {
   /** Ports of the session's processes (address class, pid, name) and of any other process (port and base name only). */
   listening: Array<ListeningPort | ForeignListeningPort>;
   /** The session's own processes and those working in its folders, with scrubbed command lines. */
-  processes: Array<{ pid: number; name: string; command: string; scope: "session" | "folder" }>;
+  processes: Array<{ pid: number; name: string; command: string; scope: "session" | "folder"; /** The working folder (home as `~`), in a box. */ cwd?: string }>;
   /** How many processes the machine runs (none of the others is named). */
   total_processes: number;
   truncated: boolean;
@@ -358,6 +358,109 @@ export type SnapshotOptions = ProcessTableOptions & {
   /** Tests: the working directory of a process (Linux /proc, macOS lsof), null when unknown. */
   cwdOf?: (pids: number[]) => Promise<Map<number, string>>;
 };
+
+// --- an OmniRush box ------------------------------------------------------------------
+//
+// A session whose shell tool runs in its project's box (src/box) has its
+// processes and servers there, in their own PID namespace, out of this
+// machine's process table. They are read through the box's helper: `ps`
+// for the table, the box's /proc for the listening sockets and their
+// owners. Every process in the box is the session's, but the box's own
+// helper and these probes.
+
+/** The box's own helper and init, never the session's. */
+const BOX_OWN = /^(?:boxd|boxrun|docker-init|tini|catatonit)$/;
+/** `args` only: the name is its program (parsePs). */
+const BOX_PS_ARGS = ["-eww", "-o", "pid=,ppid=,args="];
+/**
+ * The table, then the processes OmniRush's own probes run (this one, the
+ * toolchain's and env_turn's, all started with OMNIRUSH_LEDGER_OFF=1; read
+ * before and after the table, so a probe as short as `gcc --version` that
+ * ends meanwhile is still known), then each process's working folder. One
+ * process per section (no fork per entry), and the script always exits 0.
+ */
+const BOX_PROBES = "grep -las OMNIRUSH_LEDGER_OFF=1 /proc/[0-9]*/environ";
+const BOX_TABLE = `b=$(${BOX_PROBES}); ps ${BOX_PS_ARGS.join(" ")}; echo "#probes"; echo "$b"; ${BOX_PROBES}; echo "#cwds"; find /proc/[0-9]* -maxdepth 1 -name cwd -printf '%h %l\\n' 2>/dev/null; true`;
+/**
+ * Listening sockets (/proc/net/tcp, tcp6), then `/proc/<pid>/fd socket:[<inode>]`
+ * for every socket a process holds (`<pid> <inode>` from the loop where the
+ * box has no find). A readlink per fd costs ~1.3 ms: 1.6 s in a box with
+ * 1,200 fds, against ~15 ms for one find.
+ */
+const BOX_SOCKETS = 'cat /proc/net/tcp /proc/net/tcp6 2>/dev/null; echo "#owners"; if command -v find >/dev/null 2>&1; then find /proc/[0-9]*/fd -lname "socket:*" -printf "%h %l\\n" 2>/dev/null; else for f in /proc/[0-9]*/fd/*; do l=$(readlink "$f" 2>/dev/null) || continue; case "$l" in socket:*) p=${f#/proc/}; i=${l#socket:[}; echo "${p%%/*} ${i%]}";; esac; done; fi; true';
+
+/** `BOX_TABLE` output: the session's processes (the box's helper and OmniRush's probes left out), with their working folders. */
+export function parseBoxTable(text: string): ProcessInfo[] {
+  const [table = "", probes = "", cwds = ""] = text.split(/^#(?:probes|cwds)$/m);
+  const probing = new Set<number>();
+  for (const line of probes.split("\n")) {
+    const match = /^\/proc\/(\d+)\/environ$/.exec(line.trim());
+    if (match) probing.add(Number(match[1]));
+  }
+  const cwdOf = new Map<number, string>();
+  for (const line of cwds.split("\n")) {
+    const match = /^\/proc\/(\d+) (\/.*)$/.exec(line.trim());
+    if (match) cwdOf.set(Number(match[1]), match[2]!);
+  }
+  return parsePs(table)
+    // `ps` itself has exited by the time its environment could be read: it is known by its command line.
+    .filter((info) => !BOX_OWN.test(info.name) && !probing.has(info.pid) && !info.command.startsWith(`ps ${BOX_PS_ARGS.join(" ")}`) && !info.command.includes("#probes") && !info.command.includes("#owners"))
+    .map((info) => (cwdOf.has(info.pid) ? { ...info, cwd: cwdOf.get(info.pid)! } : info));
+}
+
+/** The box's process table through `run` (a runner for commands inside the box); null when the box did not answer. */
+export async function boxProcessTable(run: Runner): Promise<{ processes: ProcessInfo[]; method: string } | null> {
+  const result = await run("sh", ["-c", BOX_TABLE], { timeoutMs: 5_000, maxBytes: 2 * 1024 * 1024 });
+  if (!result || result.code !== 0 || !result.stdout.trim()) return null;
+  return { processes: parseBoxTable(result.stdout), method: "box-ps" };
+}
+
+/** The box's listening TCP sockets and their owners (`BOX_SOCKETS` output). */
+export function parseBoxSockets(text: string, processes: readonly ProcessInfo[]): ListeningPort[] {
+  const [table = "", owners = ""] = text.split(/^#owners$/m);
+  const byInode = new Map<number, number>();
+  for (const line of owners.split("\n")) {
+    const match = /^(?:\/proc\/)?(\d+)(?:\/fd)? (?:socket:\[)?(\d+)\]?$/.exec(line.trim());
+    if (match) byInode.set(Number(match[2]), Number(match[1]));
+  }
+  const byPid = new Map(processes.map((p) => [p.pid, p]));
+  // /proc/net/tcp and tcp6 each start with a header line: parse them one by one.
+  const rows = table.split(/^(?=\s*sl\s)/m).flatMap(parseProcNetTcp);
+  return rows.filter((socket) => socket.state === "0A").map((socket) => {
+    const pid = byInode.get(socket.inode) ?? null;
+    return { proto: "tcp" as const, address: socket.local.address, port: socket.local.port, pid, process: pid !== null ? byPid.get(pid)?.name ?? null : null };
+  });
+}
+
+export async function boxListeningPorts(run: Runner, processes: readonly ProcessInfo[]): Promise<{ ports: ListeningPort[]; method: string }> {
+  const result = await run("sh", ["-c", BOX_SOCKETS], { timeoutMs: 5_000, maxBytes: 4 * 1024 * 1024 });
+  return { ports: result && result.code === 0 ? parseBoxSockets(result.stdout, processes) : [], method: "box-proc" };
+}
+
+/**
+ * A `context.processes` snapshot of a box: every process in it is the
+ * session's (scope: the box's whole tree), each with its working folder.
+ * Null when the box did not answer (stopped, paused, gone): no snapshot is
+ * better than one saying nothing ran.
+ */
+export async function boxProcessSnapshot(phase: ProcessSnapshot["phase"], turn: number, run: Runner, options: Omit<SnapshotOptions, "precomputed" | "scope" | "selfPid">): Promise<ProcessSnapshot | null> {
+  const read = await boxProcessTable(run);
+  if (!read) return null;
+  const { processes: table, method } = read;
+  // The box's helper is left out of the table: what it started hangs from the box's root (0).
+  const pids = new Set(table.map((info) => info.pid));
+  const processes = table.map((info) => (pids.has(info.ppid) ? info : { ...info, ppid: 0 }));
+  const ports = await boxListeningPorts(run, processes);
+  return processSnapshot(phase, turn, {
+    ...options,
+    scope: { rootPid: 0, folders: () => [] },
+    selfPid: -1,
+    // A socket whose owner could not be read stays unowned (port only), as on this machine: it is the
+    // box's helper (root's, the probe is not), a root process of the agent's, or, where the box shares
+    // this machine's network (bubblewrap, the WSL distro), any process of this machine's.
+    precomputed: { processes, listening: ports.ports, method: `${method}+${ports.method}` },
+  });
+}
 
 /** The descendants of `rootPid` in a process table. */
 export function descendantsOf(rootPid: number, processes: readonly ProcessInfo[]): Set<number> {
@@ -444,6 +547,7 @@ export async function processSnapshot(phase: ProcessSnapshot["phase"], turn: num
     name: cleanText(baseNameOnly(info.name) ?? info.name, options.privacy, options.scrub),
     command: cleanCommand(info.command, options.privacy, options.scrub),
     scope: tree.has(info.pid) ? ("session" as const) : ("folder" as const),
+    ...(info.cwd ? { cwd: cleanText(info.cwd, options.privacy, options.scrub) } : {}),
   }));
   const owned = (pid: number | null) => pid !== null && (tree.has(pid) || inFolders.has(pid) || pid === scope.rootPid);
   const listening = ports.slice(0, MAX_LISTENING).map((port): ListeningPort | ForeignListeningPort => (owned(port.pid)
