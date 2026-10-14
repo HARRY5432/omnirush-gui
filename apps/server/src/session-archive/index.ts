@@ -538,7 +538,7 @@ export class SessionArchiver {
   private key: ArchiveKey | null = null;
   private disabled: string | null = null;
   /** The last folder policy answer, kept with the key for POLICY_TTL_MS; a failed probe is kept as off. */
-  private policy: { value: ArchivePolicy; at: number } | null = null;
+  private policy: { value: ArchivePolicy; at: number; outage?: boolean } | null = null;
   /** The probe in flight, shared by the sessions that start meanwhile. */
   private policyProbe: Promise<KeyResult> | null = null;
   private readonly sessionTails = new Map<string, Promise<void>>();
@@ -1235,10 +1235,15 @@ export class SessionArchiver {
     const touched = gate.marker === TOUCHED_MARKER;
     // A session that is not archived keeps no touched paths; any other keeps them.
     if (!gate.archivable || !gate.marker) {
+      // no_marker: a folder without git while the server's folder policies are off (or could not be asked, now or
+      // in the outage kept for a minute).
+      const outage = probe.fetched ? probe.fetched.status === "unavailable" : this.policy?.outage === true;
+      const detail = gate.reason === "no_marker" ? (outage ? "policy_unavailable" : "no_git_folder_policy_off") : gate.reason;
+      // The policy could not be asked (offline, a timeout, a 5xx, a bearer to refresh): no answer is no
+      // refusal. The base is tried again (the lifecycle's next prompt, turn or retry), its paths kept.
+      if (detail === "policy_unavailable") return { status: "skipped", reason: "unavailable", detail };
       this.dropPrescan(sessionId);
       await this.touched.forget(sessionId);
-      // no_marker: a folder without git while the server's folder policies are off (or could not be asked).
-      const detail = gate.reason === "no_marker" ? (probe.fetched?.status === "unavailable" ? "policy_unavailable" : "no_git_folder_policy_off") : gate.reason;
       return { status: "skipped", reason: "not_archivable", detail };
     }
     // The key and the consent check (7.2): a probe made for this base already holds them; else the full fetch.
@@ -1374,7 +1379,7 @@ export class SessionArchiver {
     // An outage (timeout, 5xx, offline) is kept as off for a minute only, not POLICY_TTL_MS: a folder
     // without git that starts during a blip is asked again at its next turn instead of going without a base.
     const at = this.now().getTime() - (fetched.status === "unavailable" ? Math.max(0, POLICY_TTL_MS - POLICY_OUTAGE_TTL_MS) : 0);
-    this.policy = { value: fetched.status === "ok" ? fetched.policy : POLICY_OFF, at };
+    this.policy = { value: fetched.status === "ok" ? fetched.policy : POLICY_OFF, at, ...(fetched.status === "unavailable" ? { outage: true } : {}) };
     // The uploader's rules follow the server's switch; anything but a yes keeps the old rules.
     const rulesBefore = redactionV3();
     setRedactionPolicy(fetched.status === "ok" && fetched.policy.redactionV3 === true ? CLIENT_V3 : "legacy");

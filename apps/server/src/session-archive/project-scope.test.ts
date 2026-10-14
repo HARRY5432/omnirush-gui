@@ -7,7 +7,7 @@ import { zstdDecompressSync } from "node:zlib";
 
 import { SessionUploader } from "../session-uploader.js";
 import { looksLikeProject, projectArchiveSkip } from "./detect.js";
-import { SessionArchiver } from "./index.js";
+import { POLICY_OUTAGE_TTL_MS, POLICY_TTL_MS, SessionArchiver } from "./index.js";
 import { parseArchivePolicy } from "./policy.js";
 import { openSealedBuffer, SEAL_ALG, sealKeyring } from "./seal.js";
 import { readTar } from "./test-helpers.js";
@@ -130,6 +130,45 @@ describe("a folder without git", () => {
     expect(base.members.has("node_modules/dep/index.js") || base.members.has(".env")).toBe(false);
     const reasons = new Map(base.state.excluded.map((item) => [item.path, item.reason]));
     expect([reasons.get("node_modules"), reasons.get(".env")]).toEqual(["regenerable", "credential"]);
+  });
+
+  test("a folder policy the server did not answer is a retry, not a refusal: now, from the kept outage, and from a 401", async () => {
+    const stateDir = temp("omnirush-scope-state-");
+    const keyring = sealKeyring([randomBytes(32)]);
+    const { publicRaw, kid } = [...keyring.values()][0]!;
+    let server: "on" | "down" | "unauthorized" | "off" = "down";
+    let asked = 0;
+    const request = async (route: string) => {
+      if (route !== "archives/key") return new Response("{}", { status: 404 });
+      asked += 1;
+      if (server === "down") return new Response("{}", { status: 503 });
+      if (server === "unauthorized") return new Response("{}", { status: 401 });
+      const policy = server === "on" ? { all_folders: false, touched_files: true, project_folders: true, capture_v2: true } : { all_folders: false, touched_files: false, project_folders: false };
+      return Response.json({ public_key: publicRaw.toString("base64"), kid, alg: SEAL_ALG, policy });
+    };
+    let clock = Date.now();
+    const archiver = new SessionArchiver({ stateDir, request: request as never, excludedDirs: [stateDir], log: () => undefined, touchedFlushMs: 10, now: () => new Date(clock) });
+    stops.push(() => archiver.stop({ budgetMs: 1000 }));
+    const root = temp("omnirush-scope-outage-");
+    write(join(root, "notes.txt"), "hello\n");
+    const outage = { status: "skipped", reason: "unavailable", detail: "policy_unavailable" } as const;
+    expect(await archiver.captureBase("ses_scope_outage", root, 0)).toEqual(outage);
+    // Within the minute the outage is kept: still said as an outage (it used to read "policy off").
+    expect(await archiver.captureBase("ses_scope_outage_kept", root, 0)).toEqual(outage);
+    // A 401 (a bearer to refresh) is an outage too.
+    server = "unauthorized";
+    clock += POLICY_OUTAGE_TTL_MS + 1_000;
+    expect(await archiver.captureBase("ses_scope_outage_401", root, 0)).toEqual(outage);
+    // The server answers again once the outage is no longer kept: the same session's base goes through.
+    server = "on";
+    clock += POLICY_OUTAGE_TTL_MS + 1_000;
+    const before = asked;
+    expect(await archiver.captureBase("ses_scope_outage", root, 1)).toEqual({ status: "skipped", reason: "unchanged", detail: "touched_files_lazy" });
+    expect(asked).toBe(before + 1);
+    // A real off is still a refusal.
+    server = "off";
+    clock += POLICY_TTL_MS + 1_000;
+    expect(await archiver.captureBase("ses_scope_off", root, 0)).toEqual({ status: "skipped", reason: "not_archivable", detail: "no_git_folder_policy_off" });
   });
 
   test("without project_folders (an older backend) a project folder stays in touched scope", async () => {

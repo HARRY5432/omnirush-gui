@@ -89,6 +89,11 @@ export function projectArchiveOutcome(result: CaptureResult): ProjectArchiveOutc
   return { status: "skipped", reason: result.reason, ...(result.detail ? { detail: result.detail } : {}) };
 }
 
+/** A base the server's folder policy could not be asked for: not a refusal, the start step runs again (next prompt, turn or retry timer). */
+export function baseRetried(result: CaptureResult): boolean {
+  return result.status === "skipped" && result.reason === "unavailable" && result.detail === "policy_unavailable";
+}
+
 const DEFAULT_CONSENT_RECHECK_MS = 10 * 60_000;
 /** The quiet window after a turn: with no new prompt by then, the session gets a final archive. */
 export const FINAL_IDLE_MS = 10 * 60_000;
@@ -608,9 +613,9 @@ export class ProjectArchiveLifecycle {
     record.root = root;
     const result = await this.archiver.captureBase(sessionId, root, count);
     this.reportArchive(sessionId, projectArchiveOutcome(result));
-    if (result.status === "paused") {
+    if (result.status === "paused" || baseRetried(result)) {
       record.start = { root, engine: start.engine };
-      this.unresolved(sessionId, record, `archive paused: ${result.reason}`);
+      this.unresolved(sessionId, record, result.status === "paused" ? `archive paused: ${result.reason}` : "the folder policy could not be asked");
     }
     if (result.status === "skipped" && result.reason === "disabled") this.sessions.delete(sessionId);
     if (result.status === "skipped" && (result.reason === "not_archivable" || result.reason === "stopped")) record.root = null;
