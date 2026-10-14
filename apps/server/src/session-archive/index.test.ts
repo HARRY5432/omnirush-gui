@@ -383,8 +383,11 @@ describe("SessionArchiver", () => {
         refreshAccessToken: async () => (refreshes.push("refresh"), server.token),
       });
       const started = Date.now();
+      // No answer (502, 401, offline) is no refusal: the base is to be tried again (the lifecycle retries it).
+      // An answer that says off (428, 503 archive_disabled) is one.
+      const expected = ["502", "401", "network"].includes(name) ? "unavailable" : "not_archivable";
       for (const dir of ["notes", "drafts", "scratch"]) {
-        expect({ name, result: reasonOf(await subject.captureBase(`ses_${dir}_folder`, join(home, dir))) }).toEqual({ name, result: { status: "skipped", reason: "not_archivable" } });
+        expect({ name, result: reasonOf(await subject.captureBase(`ses_${dir}_folder`, join(home, dir))) }).toEqual({ name, result: { status: "skipped", reason: expected } });
       }
       expect(Date.now() - started).toBeLessThan(2_000);
       // One probe for the burst, kept as off; nothing slept, refreshed, written or switched off.

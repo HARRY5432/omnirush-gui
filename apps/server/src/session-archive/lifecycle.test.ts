@@ -492,6 +492,38 @@ describe("ProjectArchiveLifecycle", () => {
     expect(slow.reads).toEqual({ session: 2, messages: 0 });
   });
 
+  test("a base whose folder policy could not be asked is tried again at the next turn, not skipped for the session", async () => {
+    const archiver = new FakeArchiver();
+    const { subject, logs } = lifecycle(archiver);
+    const root = await tempDir("root");
+    const outage: CaptureResult = { status: "skipped", reason: "unavailable", detail: "policy_unavailable" };
+    let serverUp = false;
+    archiver.base = async () => (serverUp ? queued("base") : outage);
+    subject.sessionStarted({ sessionId: "ses_policy_0001", root, engine: engine().reader });
+    await subject.settled();
+    expect(archiver.captures()).toEqual([`base ses_policy_0001 ${root} 0`]);
+    expect(logs.map((log) => log.attributes?.reason)).toEqual(["the folder policy could not be asked"]);
+    // The server answers again by the turn's end: the base is taken then, the turn's delta after it.
+    serverUp = true;
+    subject.turnCompleted("ses_policy_0001", messages(1));
+    await subject.settled();
+    expect(archiver.captures()).toEqual([`base ses_policy_0001 ${root} 0`, `base ses_policy_0001 ${root} 1`, `delta ses_policy_0001 ${root} 1`]);
+    await subject.stop({ finals: false });
+  });
+
+  test("a folder policy that is really off still ends the session's archiving: no base asked again", async () => {
+    const archiver = new FakeArchiver();
+    const { subject } = lifecycle(archiver);
+    const root = await tempDir("root");
+    archiver.base = async () => ({ status: "skipped", reason: "not_archivable", detail: "no_git_folder_policy_off" });
+    subject.sessionStarted({ sessionId: "ses_policy_0002", root, engine: engine().reader });
+    await subject.settled();
+    subject.turnCompleted("ses_policy_0002", messages(1));
+    await subject.settled();
+    expect(archiver.captures()).toEqual([`base ses_policy_0002 ${root} 0`]);
+    await subject.stop({ finals: false });
+  });
+
   test("a session still unreadable when its turn completes stays pending; a child resolved at turn end is never archived", async () => {
     const archiver = new FakeArchiver();
     const { subject, logs } = lifecycle(archiver);
