@@ -216,6 +216,15 @@ const CONFIRM_PENDING_MS = 24 * 60 * 60_000;
 /** Launch checks go out one at a time, this far apart, and at most this many per launch. */
 const CONFIRM_LAUNCH_SPACING_MS = 5_000;
 const CONFIRM_LAUNCH_MAX = 20;
+/**
+ * A chat quiet this long after a finished turn (no prompt, nothing running)
+ * sends its end: the workspace as the turn left it. A later turn supersedes
+ * it with the next end, so a chat the user never closes (the app left open,
+ * then killed, a machine that never comes back) is still finished.
+ */
+const IDLE_END_MS = 60_000;
+/** Chats the ledger says never sent their end (and no journal stands for), sent at one launch at most. */
+const LEDGER_END_RECOVERY_MAX = 25;
 /** How long a chat's first prompt waits to learn where the server's copy of it stands. */
 const SERVER_POSITION_TIMEOUT_MS = 5_000;
 const ACCOUNT_REQUIRED_MARKER = "omnirush_account_required";
@@ -645,8 +654,14 @@ type SessionState = {
   repositioned?: boolean;
   /** "segment:sequence" of uploads the server refused for good. */
   refused: string[];
-  /** Set once the chat's end snapshot went out. */
+  /** Set once the chat's end snapshot went out (at its close, or once it went quiet after a turn: idleEnd). */
   endedAt?: string;
+  /** The quiet-after-a-turn end, while it waits (IDLE_END_MS). */
+  idleEndTimer: ReturnType<typeof setTimeout> | null;
+  /** Prompts this process dispatched in the chat: an end taken while one came in is not the chat's last state. */
+  turns: number;
+  /** The last workspace snapshot that went out is an end, with no turn since: the chat's close sends none again. */
+  endCurrent: boolean;
   /** Trace events not yet handed to an upload, as written to the chat's journal on disk. */
   journal: JournalState;
 };
@@ -746,6 +761,8 @@ type SessionUploaderOptions = {
   repairTranscript?: (chat: RecoveredTurn) => Promise<unknown[][] | null>;
   /** Integrity checks of ended chats (after each end, and at launch for recent unconfirmed ones); on unless false. */
   confirm?: boolean;
+  /** How long a chat stays quiet after a finished turn before its end goes out (IDLE_END_MS); 0 turns it off. */
+  idleEndMs?: number;
   /** GET /omnirush/me/sessions/{id}/integrity for this account (where the server's copy of a chat stands). */
   sessionIntegrity?: (sessionId: string, options?: { summary?: boolean; turns?: number }) => Promise<Response>;
   /**
@@ -4468,6 +4485,23 @@ export function serverSessionPosition(payload: unknown): { segment: number; sequ
   return found ? { segment, sequence } : null;
 }
 
+/**
+ * What the integrity answer (with its uploads) says of `segment`'s end:
+ * "present" (a live end upload), "missing" (the segment without one, and no
+ * later segment), "unknown" (no such segment, a later one, no uploads listed).
+ */
+export function segmentEnd(payload: unknown, segment: number): "missing" | "present" | "unknown" {
+  if (!isRecord(payload) || !Array.isArray(payload.segments)) return "unknown";
+  let answer: "missing" | "present" | "unknown" = "unknown";
+  for (const item of payload.segments) {
+    if (!isRecord(item) || !Number.isSafeInteger(item.segment)) continue;
+    if (Number(item.segment) > segment) return "unknown";
+    if (Number(item.segment) !== segment || !Array.isArray(item.uploads)) continue;
+    answer = item.uploads.some((upload) => isRecord(upload) && upload.snapshot_type === "end" && upload.deleted !== true) ? "present" : "missing";
+  }
+  return answer;
+}
+
 /** The /collect features this client uses; without a capability answer, none. */
 type UploadFeatures = { idempotencyKey: boolean; integrity: boolean };
 const NO_UPLOAD_FEATURES: UploadFeatures = { idempotencyKey: false, integrity: false };
@@ -4511,6 +4545,7 @@ export class SessionUploader {
   private readonly onRecoveredTurn?: SessionUploaderOptions["onRecoveredTurn"];
   private readonly repairTranscript?: SessionUploaderOptions["repairTranscript"];
   private readonly confirmEnabled: boolean;
+  private readonly idleEndMs: number;
   /** Integrity checks waiting, by chat. */
   private readonly confirmTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly confirming = new Set<string>();
@@ -4637,6 +4672,7 @@ export class SessionUploader {
     this.onRecoveredTurn = options.onRecoveredTurn;
     this.repairTranscript = options.repairTranscript;
     this.confirmEnabled = options.confirm !== false && Boolean(options.sessionIntegrity);
+    this.idleEndMs = options.idleEndMs ?? IDLE_END_MS;
     this.snapshotMaxBytes = options.snapshotMaxBytes ?? MAX_SNAPSHOT_BYTES;
     this.minChangeIntervalMs = options.minChangeIntervalMs ?? MIN_UPLOAD_CHANGE_INTERVAL_MS;
     this.maxWatchedFiles = options.maxWatchedFiles ?? MAX_UPLOAD_WATCHED_FILES;
@@ -5138,6 +5174,9 @@ export class SessionUploader {
       tail: Promise.resolve(),
       journal: { pending: [], timer: null, tail: Promise.resolve(), bytes: 0, full: false, off: false, ready: false },
       refused: [],
+      idleEndTimer: null,
+      turns: 0,
+      endCurrent: false,
     };
   }
 
@@ -5847,6 +5886,8 @@ export class SessionUploader {
     if (trigger === "prompt") state.turnStartedAt = Date.now() + 1;
     const startedAt = state.turnStartedAt;
     state.turnInProgress = trigger === "prompt";
+    if (trigger === "prompt") this.reopenAfterEnd(state);
+    else this.scheduleIdleEnd(state);
     // A crash from here on leaves the turn open in the journal (or no longer).
     this.journalMeta(state, true);
     // The milestone carries whatever edits were held back for another session's turn.
@@ -5979,9 +6020,67 @@ export class SessionUploader {
     return read.content;
   }
 
+  /**
+   * A turn finished: once the chat stays quiet for idleEndMs (no prompt, no
+   * turn running) its end goes out, the workspace as the turn left it. The
+   * chat stays open; its next prompt reopens it (reopenAfterEnd) and a later
+   * end supersedes this one, like any later snapshot of the segment.
+   */
+  private scheduleIdleEnd(state: SessionState): void {
+    if (state.idleEndTimer) clearTimeout(state.idleEndTimer);
+    state.idleEndTimer = null;
+    if (this.idleEndMs <= 0 || state.finished || this.stopped) return;
+    const turns = state.turns;
+    state.idleEndTimer = setTimeout(() => {
+      state.idleEndTimer = null;
+      this.sendIdleEnd(state, turns);
+    }, this.idleEndMs);
+    state.idleEndTimer.unref?.();
+  }
+
+  private sendIdleEnd(state: SessionState, turns: number): void {
+    if (state.finished || this.stopped || state.turnInProgress || state.turns !== turns) return;
+    this.enqueue(state, async () => {
+      await state.ready;
+      await state.changeCaptureTail;
+      if (state.finished || this.stopped || state.turnInProgress || state.turns !== turns || state.endCurrent) return;
+      this.appendTrace(state, "session.idle_end", { idle_ms: this.idleEndMs });
+      try {
+        await this.uploadTrace(state, state.trace.splice(0));
+      } finally {
+        await this.journalRewrite(state);
+      }
+      const sent = await this.uploadWorkspace(state, "end", "session_end");
+      // A prompt that came in meanwhile reopened the chat: this end is not its last state.
+      if (!sent || state.finished || state.turnInProgress || state.turns !== turns) {
+        if (state.turns !== turns || state.turnInProgress) state.endCurrent = false;
+        return;
+      }
+      state.endedAt = new Date().toISOString();
+      await this.persistSession(state).catch(() => undefined);
+      this.log("info", "OmniRush session end sent after a quiet finished turn", { sessionId: state.id });
+    });
+  }
+
+  /** A prompt: the quiet-turn end waits for this turn, and an end already sent no longer stands for the chat. */
+  private reopenAfterEnd(state: SessionState): void {
+    state.turns += 1;
+    if (state.idleEndTimer) clearTimeout(state.idleEndTimer);
+    state.idleEndTimer = null;
+    state.endCurrent = false;
+    if (!state.endedAt) return;
+    // The ledger says so at once: a run killed in this turn still gets its end at the next launch.
+    state.endedAt = undefined;
+    void this.persistSession(state).catch(() => undefined);
+  }
+
   finishSession(sessionId: string, finalTrace?: unknown): void {
     const state = this.sessions.get(sessionId);
     if (!state || state.finished) return;
+    if (state.idleEndTimer) clearTimeout(state.idleEndTimer);
+    state.idleEndTimer = null;
+    // Edits still on their way to a snapshot: the close sends its end even after a quiet-turn end.
+    const changesPending = Boolean(state.changeTimer || state.deferTimer || state.changesHeld || state.dirty.size > 0 || state.dirtyOverflow);
     const pendingTrace = state.trace.splice(0);
     if (finalTrace !== undefined) {
       for (const evidence of knownToolPathEvidence("session.completed", finalTrace)) {
@@ -6009,8 +6108,11 @@ export class SessionUploader {
       if (finalTrace !== undefined) pendingTrace.push({ at: new Date().toISOString(), type: "session.completed", data: finalTrace });
       try {
         await this.uploadTrace(state, pendingTrace);
-        await this.uploadWorkspace(state, "end", "session_end");
-        state.endedAt = new Date().toISOString();
+        // The quiet-turn end is the chat's last state when nothing moved since: no second end.
+        if (!state.endCurrent || changesPending || this.journalHasChanges(state) || !state.endedAt) {
+          await this.uploadWorkspace(state, "end", "session_end");
+          state.endedAt = new Date().toISOString();
+        }
         await this.persistSession(state).catch(() => undefined);
         // Once after a chat ends (not at quit: the next launch asks).
         if (!this.stopped) this.scheduleConfirm(sessionId, CONFIRM_AFTER_END_MS);
@@ -6591,6 +6693,7 @@ export class SessionUploader {
       // The baseline is the last *accepted* manifest (uploaded or spooled): the
       // next change snapshot reports exactly what moved since this one.
       accepted = true;
+      state.endCurrent = type === "end";
       state.manifest = manifest;
       state.extras = extraEntries;
       state.turnManifest ??= turnBaseline(manifest, state.turnStartedAt, [previous]);
@@ -7274,9 +7377,10 @@ export class SessionUploader {
     try {
       names = (await readdir(this.journalDir)).filter((name) => name.endsWith(".jsonl"));
     } catch {
-      return;
+      // No journal folder: the ledger may still name chats whose end never went out.
+      names = [];
     }
-    const found: Array<{ path: string; meta: JournalMeta; events: TraceEvent[] }> = [];
+    const found: Array<{ path: string | null; meta: JournalMeta; events: TraceEvent[]; reason?: string }> = [];
     for (const name of names) {
       const path = join(this.journalDir, name);
       try {
@@ -7292,6 +7396,9 @@ export class SessionUploader {
         await rm(path, { force: true }).catch(() => undefined);
       }
     }
+    // Chats the ledger says never sent their end, with no journal left to say so (a launch of an
+    // older version read it, or it was lost): their end goes out too, once the server confirms it lacks it.
+    found.push(...(await this.ledgerEndsMissing(new Set(found.map((journal) => journal.meta.session_id)))));
     // Registered before this resolves, so a chat's start finds its recovery.
     const recovered: Promise<void>[] = [];
     let chain = Promise.resolve();
@@ -7308,22 +7415,89 @@ export class SessionUploader {
     void Promise.allSettled(recovered);
   }
 
-  /** A chat's journal outlived the app, its turn is not open, and the ledger has no end for it: the end never went out. */
+  /**
+   * A chat's journal outlived the app and the ledger has no end for it: the
+   * end never went out. A turn left open too (its messages are settled in the
+   * chat's next segment), and a chat the ledger has no record of at all (it
+   * lost it), like the CLI's recovery: the journal goes only once the end went.
+   */
   private endMissing(meta: JournalMeta): boolean {
     const record = this.ledger.sessions[meta.session_id];
-    return !meta.turn_open && Boolean(record) && !record?.endedAt && !this.sessions.has(meta.session_id);
+    return !record?.endedAt && !this.sessions.has(meta.session_id);
   }
 
-  private async recoverJournal(journal: { path: string; meta: JournalMeta; events: TraceEvent[] }): Promise<void> {
+  /**
+   * Ledger records with no end and no journal, seen within the spool's age
+   * limit, whose folder is still there: the newest LEDGER_END_RECOVERY_MAX,
+   * each asked of the server first (its segment has no end there, and no later
+   * segment exists). Without the integrity route none is sent.
+   */
+  private async ledgerEndsMissing(journaled: Set<string>): Promise<Array<{ path: null; meta: JournalMeta; events: TraceEvent[]; reason: string }>> {
+    if (!this.sessionIntegrity || !(await this.uploadFeatures().catch(() => NO_UPLOAD_FEATURES)).integrity) return [];
+    const now = Date.now();
+    const candidates = Object.entries(this.ledger.sessions)
+      .filter(([sessionId, record]) => !record.endedAt && !journaled.has(sessionId) && !this.sessions.has(sessionId)
+        && record.root && record.workspaceId && now - Date.parse(record.lastSeenAt) <= this.spoolMaxAgeMs)
+      .sort(([, left], [, right]) => right.lastSeenAt.localeCompare(left.lastSeenAt))
+      .slice(0, LEDGER_END_RECOVERY_MAX);
+    const out: Array<{ path: null; meta: JournalMeta; events: TraceEvent[]; reason: string }> = [];
+    let confirmed = false;
+    for (const [sessionId, record] of candidates) {
+      if (!(await stat(record.root!).then((entry) => entry.isDirectory(), () => false))) continue;
+      const end = await this.serverEnd(sessionId, record.segment);
+      if (end === "present") {
+        // The end went out and the ledger never heard (a write lost): it says so now, and is not asked again.
+        record.endedAt = new Date().toISOString();
+        confirmed = true;
+      }
+      if (end !== "missing") continue;
+      out.push({
+        path: null,
+        meta: { v: 1, session_id: sessionId, workspace_id: record.workspaceId!, root: record.root!, segment: record.segment, turn_open: false, at: record.lastSeenAt },
+        events: [],
+        reason: "ledger_without_end",
+      });
+    }
+    if (confirmed) await this.saveLedger().catch(() => undefined);
+    return out;
+  }
+
+  /** Whether the server holds an end for `segment` of the chat ("missing": the segment without one, and nothing after it). */
+  private async serverEnd(sessionId: string, segment: number): Promise<"missing" | "present" | "unknown"> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const response = await Promise.race([
+        this.sessionIntegrity!(sessionId),
+        new Promise<null>((resolvePromise) => {
+          timer = setTimeout(() => resolvePromise(null), SERVER_POSITION_TIMEOUT_MS);
+          timer.unref?.();
+        }),
+      ]);
+      if (!response) return "unknown";
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined);
+        return "unknown";
+      }
+      return segmentEnd(JSON.parse(await boundedResponseText(response, 4 * 1024 * 1024)), segment);
+    } catch {
+      return "unknown";
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async recoverJournal(journal: { path: string | null; meta: JournalMeta; events: TraceEvent[]; reason?: string }): Promise<void> {
     const { meta, events } = journal;
     const record = this.ledger.sessions[meta.session_id];
     const endMissing = this.endMissing(meta);
     if (events.length > 0 || endMissing) {
-      // The segment the events were recorded in, numbered after what it already sent.
+      // The segment the events were recorded in, numbered after what it already sent
+      // (the server says where, when this ledger lost the chat).
+      const server = record ? null : await this.serverPosition(meta.session_id);
       const state = this.newSessionState(meta.session_id, meta.workspace_id, meta.root, new FileHashCache());
       state.journal.off = true;
       state.segment = record?.segment ?? meta.segment;
-      state.sequence = record?.nextSequence ?? 0;
+      state.sequence = record?.nextSequence ?? server?.sequence ?? 0;
       state.sentBytes = record?.sentBytes ?? 0;
       state.lastMessageId = record?.lastMessageId;
       state.failureCount = record?.failureCount ?? 0;
@@ -7348,7 +7522,7 @@ export class SessionUploader {
       };
       // The end that follows was taken at this launch, not when the app went away.
       const endMarker: TraceEvent[] = endMissing
-        ? [{ at: marker.at, type: "session.end_recovered", data: { reason: "run_ended_without_end", last_message_id: state.lastMessageId ?? null } }]
+        ? [{ at: marker.at, type: "session.end_recovered", data: { reason: journal.reason ?? "run_ended_without_end", last_message_id: state.lastMessageId ?? null, ...(meta.turn_open ? { turn_open: true } : {}), ...(record ? {} : { ledger: "missing" }) } }]
         : [];
       try {
         await this.uploadTrace(state, [marker, ...events, ...endMarker]);
@@ -7365,7 +7539,7 @@ export class SessionUploader {
       }
       this.log("info", "OmniRush session journal recovered", { sessionId: meta.session_id, events: events.length, turnOpen: meta.turn_open });
     }
-    await rm(journal.path, { force: true });
+    if (journal.path) await rm(journal.path, { force: true });
     // The open turn's messages are still in the engine: the host settles it once this chat's recovery is done.
     if (meta.turn_open && this.onRecoveredTurn) {
       const turn: RecoveredTurn = { sessionId: meta.session_id, workspaceId: meta.workspace_id, root: meta.root };

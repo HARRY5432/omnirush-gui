@@ -389,19 +389,22 @@ describe("session uploader privacy", () => {
 
     const recoveredTurns: Array<{ sessionId: string; workspaceId: string; root: string }> = [];
     const next = new SessionUploader({ stateDir, upload, fallbackScanMs: 60_000, onRecoveredTurn: (turn) => recoveredTurns.push(turn) });
-    for (let waited = 0; waited < 5_000 && envelopes.length < 2; waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
+    for (let waited = 0; waited < 5_000 && recoveredTurns.length === 0; waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
     const recovered = envelopes[1]!;
     expect(recovered).toMatchObject({ snapshot_type: "trace", session_segment: 1, sequence: 2 });
     const types = (recovered.trace as Array<{ type: string }>).map((event) => event.type);
     expect(types[0]).toBe("collector.recovered");
     expect(types).toContain("engine.request");
     expect(types).toContain("tool.call");
+    // The killed run's segment gets its end (marked recovered, turn open); the turn is settled in the next one.
+    expect(types.at(-1)).toBe("session.end_recovered");
+    expect(envelopes[2]).toMatchObject({ snapshot_type: "end", session_segment: 1, sequence: 3, trigger: "session_end" });
     expect(recoveredTurns).toEqual([{ sessionId, workspaceId: "workspace-journal", root }]);
     expect(await readdir(join(stateDir, "omnirush-upload-journal"))).toEqual([]);
-    // The chat's next segment starts after the recovered upload.
+    // The chat's next segment starts after the recovered uploads.
     next.startSession(sessionId, "workspace-journal", root);
     await next.stop();
-    expect(envelopes.slice(2).map((item) => [item.snapshot_type, item.session_segment, item.sequence])).toEqual([["start", 2, 3], ["trace", 2, 4], ["end", 2, 5]]);
+    expect(envelopes.slice(3).map((item) => [item.snapshot_type, item.session_segment, item.sequence])).toEqual([["start", 2, 4], ["trace", 2, 5], ["end", 2, 6]]);
   }, 20_000);
 
   test("an app that went away after a finished turn: the next launch sends the chat's end (marked recovered), once", async () => {
@@ -441,6 +444,177 @@ describe("session uploader privacy", () => {
     await new Promise((resolve) => setTimeout(resolve, 500));
     await third.stop();
     expect(envelopes.length).toBe(count);
+  }, 20_000);
+
+  test("a chat left open after a finished turn sends its end once quiet; its next prompt reopens it and its close sends the next end", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-idleend-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-idleend-state-"));
+    roots.push(root, stateDir);
+    await writeFile(join(root, "app.txt"), "hello\n");
+    const envelopes: Array<Record<string, unknown>> = [];
+    const upload = async (_sessionId: string, compressed: Uint8Array) => {
+      envelopes.push(withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as Record<string, unknown>);
+      return Response.json({ ok: true }, { status: 201 });
+    };
+    const ledger = async () => (JSON.parse(await readFile(join(stateDir, "omnirush-upload-sessions.json"), "utf8")) as { sessions: Record<string, { endedAt?: string; segment: number }> }).sessions;
+    const waitFor = async (check: () => boolean | Promise<boolean>) => {
+      for (let waited = 0; waited < 5_000 && !(await check()); waited += 25) await new Promise((resolve) => setTimeout(resolve, 25));
+    };
+    const uploader = new SessionUploader({ stateDir, upload, fallbackScanMs: 60_000, idleEndMs: 300 });
+    const sessionId = "session-idleend-1234";
+    uploader.startSession(sessionId, "workspace-idleend", root);
+    uploader.captureSnapshot(sessionId, "prompt");
+    await writeFile(join(root, "app.txt"), "hello, turn one\n");
+    uploader.captureSnapshot(sessionId, "turn_completed");
+    uploader.flushTrace(sessionId, { messages: [] });
+    await waitFor(() => envelopes.some((item) => item.snapshot_type === "end"));
+    // The app stays open: the chat's end is out, with the turn's state.
+    const first = envelopes.findIndex((item) => item.snapshot_type === "end");
+    expect(envelopes[first]).toMatchObject({ session_id: sessionId, session_segment: 1, trigger: "session_end" });
+    const before = envelopes.slice(0, first).filter((item) => item.snapshot_type === "trace").flatMap((item) => (item.trace as Array<{ type: string }>) ?? []).map((event) => event.type);
+    expect(before).toContain("turn.completed");
+    expect(before.at(-1)).toBe("session.idle_end");
+    await waitFor(async () => Boolean((await ledger())[sessionId]?.endedAt));
+    expect((await ledger())[sessionId]?.endedAt).toBeString();
+    // A next prompt reopens the chat: the ledger no longer says it ended.
+    uploader.captureSnapshot(sessionId, "prompt");
+    await waitFor(async () => !(await ledger())[sessionId]?.endedAt);
+    expect((await ledger())[sessionId]?.endedAt).toBeUndefined();
+    await writeFile(join(root, "app.txt"), "hello, turn two\n");
+    uploader.captureSnapshot(sessionId, "turn_completed");
+    uploader.flushTrace(sessionId, { messages: [] });
+    // Closed before it went quiet: the close sends the chat's end, after the first one.
+    await uploader.stop();
+    const ends = envelopes.filter((item) => item.snapshot_type === "end");
+    expect(ends.map((item) => [item.session_segment, item.trigger])).toEqual([[1, "session_end"], [1, "session_end"]]);
+    expect((ends[1]!.sequence as number) > (ends[0]!.sequence as number)).toBe(true);
+    const sequences = envelopes.map((item) => item.sequence as number);
+    expect(new Set(sequences).size).toBe(sequences.length);
+  }, 20_000);
+
+  test("a chat whose quiet end is its last state sends no second end at close; one with edits since does", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-idleend2-"));
+    roots.push(root);
+    await writeFile(join(root, "app.txt"), "hello\n");
+    const envelopes: Array<Record<string, unknown>> = [];
+    const upload = async (_sessionId: string, compressed: Uint8Array) => {
+      envelopes.push(withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as Record<string, unknown>);
+      return Response.json({ ok: true }, { status: 201 });
+    };
+    const uploader = new SessionUploader({ upload, fallbackScanMs: 60_000, idleEndMs: 200, changeDebounceMs: 10_000 });
+    const quiet = "session-idleend-quiet";
+    const edited = "session-idleend-edited";
+    const other = await mkdtemp(join(tmpdir(), "omnirush-upload-idleend3-"));
+    roots.push(other);
+    await writeFile(join(other, "b.txt"), "b\n");
+    uploader.startSession(quiet, "ws", root);
+    uploader.startSession(edited, "ws2", other);
+    for (const id of [quiet, edited]) {
+      uploader.captureSnapshot(id, "prompt");
+      uploader.captureSnapshot(id, "turn_completed");
+      uploader.flushTrace(id, { messages: [] });
+    }
+    for (let waited = 0; waited < 5_000 && envelopes.filter((item) => item.snapshot_type === "end").length < 2; waited += 25) await new Promise((resolve) => setTimeout(resolve, 25));
+    await Promise.all([uploader.idle(quiet), uploader.idle(edited)]);
+    // An edit after the quiet end, still waiting for its change snapshot as the app quits.
+    await writeFile(join(other, "b.txt"), "b, edited after\n");
+    for (let waited = 0; waited < 2_000; waited += 25) await new Promise((resolve) => setTimeout(resolve, 25));
+    await uploader.stop();
+    const endsOf = (id: string) => envelopes.filter((item) => item.session_id === id && item.snapshot_type === "end").length;
+    expect(endsOf(quiet)).toBe(1);
+    expect(endsOf(edited)).toBe(2);
+  }, 20_000);
+
+  test("a journal whose chat the ledger lost: the next launch sends its end, numbered after the server's copy", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-lostledger-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-lostledger-state-"));
+    roots.push(root, stateDir);
+    await writeFile(join(root, "app.txt"), "hello\n");
+    const envelopes: Array<Record<string, unknown>> = [];
+    const upload = async (_sessionId: string, compressed: Uint8Array) => {
+      envelopes.push(withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as Record<string, unknown>);
+      return Response.json({ ok: true }, { status: 201 });
+    };
+    const crashed = new SessionUploader({ stateDir, upload, fallbackScanMs: 60_000, idleEndMs: 0 });
+    const sessionId = "session-lostledger-1234";
+    crashed.startSession(sessionId, "workspace-lostledger", root);
+    crashed.captureSnapshot(sessionId, "prompt");
+    crashed.captureSnapshot(sessionId, "turn_completed");
+    crashed.flushTrace(sessionId, { messages: [] });
+    await crashed.idle(sessionId);
+    crashed.recordTrace(sessionId, "tool.call", { n: 2 });
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    // Killed; and the ledger lost the chat.
+    await rm(join(stateDir, "omnirush-upload-sessions.json"), { force: true });
+    const top = Math.max(...envelopes.map((item) => item.sequence as number));
+    const next = new SessionUploader({
+      stateDir,
+      upload,
+      fallbackScanMs: 60_000,
+      capabilities: async () => ({ schema_versions: [1, 2], canonical_trace: false, idempotency_key: true, integrity: true, integrity_summary: true }),
+      sessionIntegrity: async (id) => Response.json({ session_id: id, max_segment: 1, max_sequence: top, segments: [{ segment: 1, sequences: [], gaps: [], max_sequence: top }] }),
+      confirm: false,
+    });
+    for (let waited = 0; waited < 5_000 && !envelopes.some((item) => item.snapshot_type === "end"); waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
+    await next.stop();
+    const recovered = envelopes.filter((item) => (item.sequence as number) > top);
+    expect(recovered.map((item) => [item.snapshot_type, item.session_segment, item.sequence])).toEqual([["trace", 1, top + 1], ["end", 1, top + 2]]);
+    const marker = (recovered[0]!.trace as Array<{ type: string; data?: Record<string, unknown> }>).find((event) => event.type === "session.end_recovered");
+    expect(marker?.data).toMatchObject({ reason: "run_ended_without_end", ledger: "missing" });
+  }, 20_000);
+
+  test("a ledger record with no end and no journal (an older launch read it): the next launch sends the end the server lacks, once", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-ledgerend-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-ledgerend-state-"));
+    roots.push(root, stateDir);
+    await writeFile(join(root, "app.txt"), "hello\n");
+    const envelopes: Array<Record<string, unknown>> = [];
+    const upload = async (_sessionId: string, compressed: Uint8Array) => {
+      envelopes.push(withTraceEvents(JSON.parse(zstdDecompressSync(compressed).toString("utf8"))) as Record<string, unknown>);
+      return Response.json({ ok: true }, { status: 201 });
+    };
+    const crashed = new SessionUploader({ stateDir, upload, fallbackScanMs: 60_000, idleEndMs: 0 });
+    const missing = "session-ledgerend-missing";
+    const held = "session-ledgerend-held";
+    for (const id of [missing, held]) {
+      crashed.startSession(id, "workspace-ledgerend", root);
+      crashed.captureSnapshot(id, "prompt");
+      crashed.captureSnapshot(id, "turn_completed");
+      crashed.flushTrace(id, { messages: [] });
+      await crashed.idle(id);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    // Killed, then a launch of an older version read (and deleted) the journals.
+    await rm(join(stateDir, "omnirush-upload-journal"), { recursive: true, force: true });
+    const asked: string[] = [];
+    const make = () => new SessionUploader({
+      stateDir,
+      upload,
+      fallbackScanMs: 60_000,
+      capabilities: async () => ({ schema_versions: [1, 2], canonical_trace: false, idempotency_key: true, integrity: true, integrity_summary: true }),
+      sessionIntegrity: async (id, options) => {
+        asked.push(`${id}:${options?.summary === true}`);
+        // The server holds `held`'s end already (sent, the ledger never heard).
+        const uploads = [{ snapshot_type: "start", sequence: 1 }, { snapshot_type: "trace", sequence: 2 }, ...(id === held ? [{ snapshot_type: "end", sequence: 3 }] : [])];
+        return Response.json({ session_id: id, segments: [{ segment: 1, sequences: uploads.map((item) => item.sequence), gaps: [], max_sequence: uploads.length, uploads }] });
+      },
+      confirm: false,
+    });
+    const next = make();
+    for (let waited = 0; waited < 5_000 && !envelopes.some((item) => item.snapshot_type === "end"); waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
+    await next.stop();
+    const ends = envelopes.filter((item) => item.snapshot_type === "end");
+    expect(ends.map((item) => [item.session_id, item.session_segment, item.trigger])).toEqual([[missing, 1, "session_end"]]);
+    const marker = envelopes.filter((item) => item.session_id === missing && item.snapshot_type === "trace").flatMap((item) => (item.trace as Array<{ type: string; data?: Record<string, unknown> }>) ?? []).find((event) => event.type === "session.end_recovered");
+    expect(marker?.data).toMatchObject({ reason: "ledger_without_end" });
+    expect(asked.sort()).toEqual([`${held}:false`, `${missing}:false`]);
+    // A third launch finds nothing left to send or ask: `missing` ended, and the ledger now knows `held` did.
+    const count = envelopes.length;
+    const third = make();
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await third.stop();
+    expect(envelopes.length).toBe(count);
+    expect(asked).toHaveLength(2);
   }, 20_000);
 
   test("the base's outcome rides along (collector.project_archive, workspace.project_archive); two chats on one folder mark turn.overlap", async () => {
