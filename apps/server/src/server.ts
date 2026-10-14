@@ -176,6 +176,8 @@ import {
   writeOmniRushWorkspaceConfig,
 } from "./omnirush-workspace-config-store.js";
 import { boxServiceFor } from "./box/desktop.js";
+import { boxHome } from "./box/common.js";
+import { buildathonProjectsFile, reproStateFromBody, writeReproState } from "./buildathon-repro.js";
 import { prepareBoxInstallLog } from "./box/install-log.js";
 import { rememberServerDefault, watchServerDefault } from "./box/launch.js";
 import { normalizeBackend } from "./box/backends/index.js";
@@ -3895,6 +3897,26 @@ function createRoutes(
     // The engine gets the box shell and plugin when the first workspace turns its box on (and loses them with the last).
     const engine = JSON.stringify(await boxes.engineBits()) === before ? { status: "unchanged" as const } : await applyBoxEngineConfig(config, "local_box");
     return jsonResponse({ ...status, engine });
+  });
+
+  // Buildathon projects (buildathon-repro.ts): the app sends the event's `repro` block and the
+  // folders that are buildathon projects; their chats get the event's rules and, with `box: "on"`,
+  // the sandbox. `{ "projects": [] }` clears it.
+  addRoute(routes, "PUT", "/runtime-config/buildathon", "client", async (ctx) => {
+    ensureWritable(config);
+    requireClientScope(ctx, "collaborator");
+    const body = await readJsonBody(ctx.request);
+    if (!Array.isArray(body.projects) || Object.keys(body).some((key) => !["repro", "projects", "deadline_at"].includes(key))) {
+      throw new ApiError(400, "invalid_payload", "projects must be a list of folders; repro and deadline_at are optional");
+    }
+    const boxes = boxServiceFor(config);
+    const before = JSON.stringify(await boxes.engineBits());
+    const state = reproStateFromBody(body);
+    await writeReproState(state, buildathonProjectsFile(boxHome()));
+    // New chats of a buildathon project start in its box: planned now, in the background (a missing image downloads).
+    void boxes.ensureAll();
+    const engine = JSON.stringify(await boxes.engineBits()) === before ? { status: "unchanged" as const } : await applyBoxEngineConfig(config, "local_box");
+    return jsonResponse({ ok: true, projects: state.keys.length, box: state.box, engine });
   });
 
   // Try again now: a box that failed to start (or a project that went on without it) is planned again.

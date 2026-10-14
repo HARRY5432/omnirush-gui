@@ -105,6 +105,8 @@ export function linuxSandboxView(box: OmniRushWorkspaceBox, pending: LinuxSandbo
   if (!box.on) {
     if (box.source === "env") return { ...base, tone: "off", title: "Off for this app", detail: "Set by OMNIRUSH_BOX where the app is launched." };
     if (box.hostBuilds?.native) return { ...base, tone: "attention", title: "Off for this project", detail: box.hostBuilds.notice };
+    // A buildathon project: turned off here (less reproducible), or the event offers the sandbox.
+    if (box.notice) return { ...base, tone: "attention", title: box.source === "project" ? "Off for this project" : "Off", detail: box.notice };
     return { ...base, tone: "off", title: "Off", detail: "Commands run on this computer." };
   }
   const using = runtimeLabel(box);

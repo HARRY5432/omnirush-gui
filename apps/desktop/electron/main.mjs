@@ -95,6 +95,7 @@ import {
 import { installStdioErrorHandlers } from "./stdio-errors.mjs";
 import { createTurnGuard } from "./turn-guard.mjs";
 import { KEEP_AWAKE_FILE, createKeepAwake } from "./keep-awake.mjs";
+import { projectChecklist } from "./buildathon-checklist.mjs";
 import {
   createRendererCrashRecovery,
   installSocketTypeOfServiceGuard,
@@ -2194,6 +2195,27 @@ const desktopCommandHandlers = {
   "omnirushQualitySpin": async (event, ...args) => {
       const input = args[0] && typeof args[0] === "object" ? args[0] : {};
       return omnirushAccountStore.spinQuality({ idempotencyKey: typeof input.idempotencyKey === "string" ? input.idempotencyKey : undefined });
+  },
+  // Buildathon: shown only to enrolled accounts; every failure is a null
+  // (or a "retry"), never a thrown error, so the app quietly shows nothing.
+  "omnirushBuildathon": async (event) => {
+      return omnirushAccountStore.buildathonStatus();
+  },
+  "omnirushBuildathonSessions": async (event) => {
+      return omnirushAccountStore.buildathonSessions();
+  },
+  "omnirushBuildathonLink": async (event, ...args) => {
+      const input = args[0] && typeof args[0] === "object" ? args[0] : {};
+      return omnirushAccountStore.buildathonLink({ code: input.code });
+  },
+  // The rebuild checklist of one buildathon project, checked in its folder (cheap file checks).
+  "omnirushBuildathonChecklist": async (event, ...args) => {
+      const input = args[0] && typeof args[0] === "object" ? args[0] : {};
+      return projectChecklist({ path: input.path, checklist: input.checklist });
+  },
+  "omnirushBuildathonTagSession": async (event, ...args) => {
+      const input = args[0] && typeof args[0] === "object" ? args[0] : {};
+      return omnirushAccountStore.buildathonTagSession({ sessionId: input.sessionId, track: input.track, project: input.project });
   },
   "omnirushAccountConnect": async (event, ...args) => {
       const input = args[0] ?? {};

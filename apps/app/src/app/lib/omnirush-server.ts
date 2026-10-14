@@ -436,7 +436,7 @@ export type OmniRushWorkspaceBox = {
   serverDefault: "off" | "offer" | "on";
   on: boolean;
   /** "host-builds": the server's default would put it in the sandbox, but the folder has this computer's builds. */
-  source: "env" | "project" | "server" | "default" | "host-builds";
+  source: "env" | "project" | "server" | "default" | "host-builds" | "buildathon";
   offer: boolean;
   state: "off" | "unavailable" | "downloading" | "starting" | "ready" | "failed";
   runtime: { ok: boolean; name: string | null; flavor: string | null; version: string | null; reason: string | null } | null;
@@ -2000,6 +2000,11 @@ export function createOmniRushServerClient(options: { baseUrl: string; token?: s
     resetWorkspaceBox: (workspaceId: string) =>
       requestJson<{ removed: boolean }>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/box/reset`, {
         token, hostToken, method: "POST", body: {}, timeoutMs: 90_000,
+      }),
+    /** Buildathon projects (folders) and the event's `repro` block: their chats get its rules and box. */
+    setBuildathon: (body: { repro: { box: string; agent_rules: string } | null; projects: string[]; deadline_at: string | null }) =>
+      requestJson<{ ok: boolean; projects: number; box: string }>(baseUrl, "/runtime-config/buildathon", {
+        token, hostToken, method: "PUT", body, timeoutMs: ENGINE_RELOAD_TIMEOUT_MS,
       }),
     getBestPractices: () =>
       requestJson<OmniRushBestPractices>(baseUrl, "/runtime-config/best-practices", { token, hostToken, timeoutMs: timeouts.config }),

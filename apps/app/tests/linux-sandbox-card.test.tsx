@@ -156,6 +156,14 @@ describe("Linux sandbox card", () => {
     expect(linuxSandboxView(box({ ...on, state: "unavailable", notice: "Sandbox off for now: the sandbox did not start in time." }))).toMatchObject({ title: "The sandbox is not running", action: { kind: "retry" }, errorDetail: "the sandbox did not start in time" });
   });
 
+  test("a buildathon project turned off here says it is less reproducible; the event's offer says so too", () => {
+    const less = "This buildathon project runs on this computer (sandbox off here), so it is less reproducible. Turn the Linux sandbox on to run it in the box.";
+    expect(linuxSandboxView(box({ on: false, mode: "off", source: "project", state: "off", notice: less }))).toMatchObject({ tone: "attention", title: "Off for this project", detail: less });
+    const offer = "This buildathon project rebuilds more reliably in the Linux sandbox. Turn it on to run its chats there.";
+    expect(linuxSandboxView(box({ on: false, source: "buildathon", offer: true, state: "off", notice: offer }))).toMatchObject({ tone: "attention", title: "Off", detail: offer });
+    expect(linuxSandboxView(box({ on: false, source: "default", state: "off", notice: null }))).toMatchObject({ tone: "off", title: "Off", detail: "Commands run on this computer." });
+  });
+
   test("macOS / Windows: a project kept off for its host builds says why (switch off, one click on); on by choice it warns; a box says it is Linux", () => {
     const kept = "This folder has Mac builds (node_modules, .venv) that won't run in the Linux sandbox, so its chats run on this Mac. Turn the sandbox on for this project to use it anyway.";
     const off = box({ on: false, source: "host-builds", state: "off", notice: kept, hostBuilds: { native: true, things: "node_modules, .venv", notice: kept } });

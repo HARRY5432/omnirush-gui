@@ -40,6 +40,7 @@ import { DiagnosticsSection } from "./diagnostics-section";
 import { BEST_PRACTICES_HELP, useBestPractices, type BestPracticesClient } from "../best-practices";
 import { useLinuxSandbox, type LinuxSandboxClient } from "../linux-sandbox";
 import { LinuxSandboxCard } from "../linux-sandbox-card";
+import { BuildathonTrackCard } from "../../buildathon/buildathon";
 
 export type GeneralSettingsViewProps = {
   onNavigateTab: (tab: SettingsTab) => void;
@@ -53,6 +54,8 @@ export type GeneralSettingsViewProps = {
   /** The Linux sandbox card (per project); hidden without a client or a selected workspace. */
   linuxSandboxClient?: LinuxSandboxClient | null;
   sandboxWorkspaceId?: string | null;
+  /** The selected local project, for its buildathon track (shown to enrolled accounts only). */
+  buildathonProject?: { path: string; name: string } | null;
   /** Builds the sanitized diagnostics bundle with the route's context. */
   buildDiagnosticsBundle?: () => Promise<string>;
 };
@@ -452,6 +455,10 @@ export function GeneralSettingsView(props: GeneralSettingsViewProps) {
           busy={keepAwake.busy}
           onToggle={(enabled) => void keepAwake.setEnabled(enabled)}
         />
+      ) : null}
+
+      {props.buildathonProject ? (
+        <BuildathonTrackCard projectPath={props.buildathonProject.path} projectName={props.buildathonProject.name} />
       ) : null}
 
       {linuxSandboxClient && props.sandboxWorkspaceId ? (

@@ -27,6 +27,7 @@ import { useDenControlPlaneConfigured } from "../domains/cloud/use-den-control-p
 import { JoinOrganizationDialog } from "../domains/cloud/join-organization-dialog";
 import { resolveOmniRushConnection } from "./omnirush-connection";
 import { captureAnalyticsEvent } from "../../app/lib/analytics";
+import { noteNewBuildathonProject } from "../../app/lib/buildathon";
 import { buildOmniRushWorkspaceBaseUrl, createOmniRushServerClient } from "../../app/lib/omnirush-server";
 import { buildDenAuthUrl, DEFAULT_DEN_BASE_URL, readDenSettings } from "../../app/lib/den";
 import { markDesktopSignInInitiated } from "../../app/lib/den-sign-in-intent";
@@ -239,6 +240,7 @@ export function WelcomeRoute() {
         }
         if (targetWorkspaceId) {
           writeActiveWorkspaceId(targetWorkspaceId);
+          noteNewBuildathonProject(targetWorkspace?.path?.trim() || folder, targetWorkspace?.displayName ?? targetWorkspace?.name ?? null);
           if (projectLabel) {
             writeWorkspaceProjectDimension(targetWorkspaceId, {
               label: projectLabel,

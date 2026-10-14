@@ -13,6 +13,7 @@ import {
   writePlaintextCredentialFile,
 } from "./plaintext-credential-file.mjs";
 import { CLIENT_HEADER, guiClientHeaderValue, parseClientUpdate } from "./update-gate.mjs";
+import { buildathonLinkCode, buildathonLinkError, buildathonProjectName, buildathonTrackId, parseBuildathonSessions, parseBuildathonStatus } from "./buildathon.mjs";
 import { parseAccountQuality, parseFailLabels, parseQualitySessions, parseSessionStatus, parseSpinHistory, profileSessionId, parseSpinResult, parseWheelSegments, spinIdempotencyKey, spinRefusal } from "./quality.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -47,6 +48,8 @@ const SERVER_ROTATION_GRACE_MS = 120_000;
 const REFRESH_TIMEOUT_MS = 20_000;
 /** A session's live status: past this the app shows its own checklist (the server contract's 3 s). */
 const SESSION_STATUS_TIMEOUT_MS = 3_000;
+/** Buildathon reads never hold anything up: past this the event is simply not shown. */
+const BUILDATHON_TIMEOUT_MS = 10_000;
 /**
  * A refresh token that may already have been rotated (the answer was lost)
  * is sent again only while that attempt, timeout included, ends inside the
@@ -1246,6 +1249,86 @@ export function createDesktopOmniRushAccountStore({
   }
 
   /**
+   * The buildathon block (GET /me/buildathon). Null for anyone not enrolled,
+   * while signed out, offline, slow or on a bad answer: the app then shows
+   * nothing about the event.
+   */
+  async function buildathonStatus() {
+    try {
+      const response = await sendAuthorized("/me/buildathon", { method: "GET", signal: AbortSignal.timeout(BUILDATHON_TIMEOUT_MS) });
+      if (!response?.ok) return null;
+      return parseBuildathonStatus(await response.json());
+    } catch {
+      return null;
+    }
+  }
+
+  /** The event's tagged sessions (GET /me/buildathon/sessions); null when unavailable. */
+  async function buildathonSessions() {
+    try {
+      const response = await sendAuthorized("/me/buildathon/sessions", { method: "GET", signal: AbortSignal.timeout(BUILDATHON_TIMEOUT_MS) });
+      if (!response?.ok) return null;
+      return parseBuildathonSessions(await response.json());
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Link a registration made under another email (POST /me/buildathon/link).
+   * @param {{ code?: unknown }} [input]
+   * @returns {Promise<import("@omnirush/types/desktop-ipc").OmniRushBuildathonLinkResult>}
+   */
+  async function buildathonLink(input = {}) {
+    const code = buildathonLinkCode(input.code);
+    if (!code) return { ok: false, error: "Enter the code from your registration email." };
+    let response;
+    try {
+      response = await sendAuthorized("/me/buildathon/link", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code }),
+        signal: AbortSignal.timeout(BUILDATHON_TIMEOUT_MS),
+      });
+    } catch {
+      return { ok: false, error: "The code could not be checked. Try again in a moment." };
+    }
+    if (!response) return { ok: false, error: "Sign in to link a code." };
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) return { ok: false, error: buildathonLinkError(payload, response.status) };
+    const status = parseBuildathonStatus(payload);
+    return status ? { ok: true, status } : { ok: false, error: "That code is not linked to an event you can join." };
+  }
+
+  /**
+   * Name the track of one session (PUT /me/sessions/{id}/buildathon), with
+   * the folder's last name. 204 is done; 400/403/404/409 (unknown track, not
+   * a participant, outside the event) are final as well; anything else may
+   * be tried again later.
+   * @param {{ sessionId?: unknown, track?: unknown, project?: unknown }} [input]
+   * @returns {Promise<"tagged" | "refused" | "retry">}
+   */
+  async function buildathonTagSession(input = {}) {
+    const sessionId = profileSessionId(input.sessionId);
+    const track = buildathonTrackId(input.track);
+    const project = buildathonProjectName(input.project);
+    if (!sessionId || !track) return "refused";
+    try {
+      const response = await sendAuthorized(`/me/sessions/${encodeURIComponent(sessionId)}/buildathon`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(project ? { track, project } : { track }),
+        signal: AbortSignal.timeout(BUILDATHON_TIMEOUT_MS),
+      });
+      if (!response) return "retry";
+      if (response.ok) return "tagged";
+      return [400, 403, 404, 409].includes(response.status) ? "refused" : "retry";
+    } catch {
+      return "retry";
+    }
+  }
+
+  /**
    * Sign out locally and, for a user-initiated sign-out, revoke the device
    * session remotely and forget the keychain gateway URL so the next sign-in
    * uses the configured default. `revokeRemote: false` is the server-driven
@@ -1284,5 +1367,20 @@ export function createDesktopOmniRushAccountStore({
     }
   }
 
-  return { load, save, refresh, authorize, status, clear, qualityDetails, qualitySpinTotals, spinQuality, sessionStatus };
+  return {
+    load,
+    save,
+    refresh,
+    authorize,
+    status,
+    clear,
+    qualityDetails,
+    qualitySpinTotals,
+    spinQuality,
+    sessionStatus,
+    buildathonStatus,
+    buildathonSessions,
+    buildathonLink,
+    buildathonTagSession,
+  };
 }

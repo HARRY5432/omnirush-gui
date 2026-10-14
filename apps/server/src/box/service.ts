@@ -33,6 +33,7 @@ import { detectStack, imageFor } from "./images.js";
 import { askedBackend, boxRun, planBox, pullLog, pullMarker, pulling, pullInBackground, resolveMode, saveBackend, serverBackends, serverDefault, shimsDir, type BoxRun, type ProjectBoxMode, type ServerBoxDefault } from "./launch.js";
 import type { BoxInstallLogPaths } from "./install-log.js";
 import { DESKTOP_PROJECTS_FILE } from "./plugin-lib.js";
+import { BUILDATHON_OFFER_NOTICE, buildathonBoxFor, buildathonProjectsFile, LESS_REPRO_NOTICE } from "../buildathon-repro.js";
 import { layerSizes, pullProgress, type PullProgress } from "./pull-progress.js";
 import { detectRuntime, type BackendAlternative, type DetectOptions, type RuntimeResult } from "./runtime.js";
 
@@ -62,7 +63,7 @@ export type BoxStatus = {
   /** Whether the project's chats should run in its box. */
   on: boolean;
   /** "host-builds": the server's default would put it in the box, but its folder has this computer's builds (macOS, Windows). */
-  source: "env" | "project" | "server" | "default" | "host-builds";
+  source: "env" | "project" | "server" | "default" | "host-builds" | "buildathon";
   /** The server offers the box and this project was not offered it yet. */
   offer: boolean;
   state: "off" | "unavailable" | "downloading" | "starting" | "ready" | "failed";
@@ -262,7 +263,9 @@ export class BoxService {
   private async mode(workspace: BoxWorkspace) {
     const settings = await this.options.readSettings(workspace.id).catch(() => ({ mode: null, offered: false }));
     const server = this.serverDefault();
-    const resolved = resolveMode({ env: this.env, project: settings.mode, server, offered: settings.offered });
+    // A buildathon project (the app lists them): the event's `repro.box` comes before the server's default.
+    const buildathon = workspace.workspaceType === "local" ? this.buildathonBox(boxRoot(workspace)) : null;
+    const resolved = resolveMode({ env: this.env, project: settings.mode, server, offered: settings.offered, buildathon });
     const gate = workspace.workspaceType === "local" ? this.hostGate(boxRoot(workspace), resolved) : null;
     // A box already running for the project keeps its chats (builds made since do not move them out).
     const running = this.projects.get(boxKey(boxRoot(workspace)))?.run;
@@ -278,6 +281,14 @@ export class BoxService {
    * Null on Linux, with the box off, or when the folder has none.
    * OMNIRUSH_BOX_KEEP_NATIVE=off or OMNIRUSH_BOX_HOST_BUILDS=off skips it.
    */
+  private buildathonBox(root: string): "on" | "offer" | "off" | null {
+    try {
+      return buildathonBoxFor(root, buildathonProjectsFile(this.home));
+    } catch {
+      return null;
+    }
+  }
+
   private hostGate(root: string, mode: { on: boolean; source: string }): { native: boolean; things: string; notice: string } | null {
     if (!mode.on || !hostRules(this.platform)) return null;
     if (String(this.env.OMNIRUSH_BOX_KEEP_NATIVE ?? "").trim().toLowerCase() === "off") return null;
@@ -289,7 +300,8 @@ export class BoxService {
       return null;
     }
     if (!found.found) return null;
-    const native = mode.source === "server";
+    // Only a default (the server's, or the buildathon's) keeps the folder here; the user's own choice does not.
+    const native = mode.source === "server" || mode.source === "buildathon";
     return { native, things: hostBuildThings(found), notice: hostBuildsNotice(native ? "native" : "explicit", { platform: this.platform, result: found }) };
   }
 
@@ -425,7 +437,7 @@ export class BoxService {
   }
 
   async status(workspace: BoxWorkspace, { fresh = false }: { fresh?: boolean } = {}): Promise<BoxStatus> {
-    const { settings, server, on, source, offer, hostBuilds: gate } = await this.mode(workspace);
+    const { settings, server, on, source, offer, hostBuilds: gate, lessRepro } = await this.mode(workspace);
     // The server's "offer": shown once per folder (CLI: the tip, once per folder).
     if (offer && workspace.workspaceType === "local") await this.options.writeSettings(workspace.id, { offered: true }).catch(() => undefined);
     const root = boxRoot(workspace);
@@ -495,7 +507,11 @@ export class BoxService {
       progress,
       container,
       platform: this.platform,
-      notice: on ? project?.notice ?? (runtime.ok ? null : `Sandbox off for now: ${runtime.reason}.`) : gate?.native ? gate.notice : null,
+      notice: on ? project?.notice ?? (runtime.ok ? null : `Sandbox off for now: ${runtime.reason}.`)
+        : gate?.native ? gate.notice
+        : lessRepro ? LESS_REPRO_NOTICE
+        : offer && source === "buildathon" ? BUILDATHON_OFFER_NOTICE
+        : null,
       error: run?.box?.error ?? (record?.state === "off" || record?.state === "failed" ? record.error || null : null),
       boxNotice: on && hostRules(this.platform) ? hostBuildsNotice("box", { platform: this.platform }) : null,
     };
@@ -572,7 +588,7 @@ export class BoxService {
     // A chat with turns but no checkpoint ran on this machine (reopened, or started in this run before the
     // server's default reached the app, or while the image downloaded): when only the server's default
     // turned the box on, it goes on here (new chats get the box); a project turned on by its user moves it.
-    if (capture && turnsSoFar > 0 && !this.nativeChats.has(sessionId) && !this.boxedChats.has(sessionId) && !this.turns.has(sessionId) && savedTurns(this.snapshotDir(sessionId)) === 0 && (await this.mode(workspace)).source === "server") {
+    if (capture && turnsSoFar > 0 && !this.nativeChats.has(sessionId) && !this.boxedChats.has(sessionId) && !this.turns.has(sessionId) && savedTurns(this.snapshotDir(sessionId)) === 0 && ["server", "buildathon"].includes((await this.mode(workspace)).source)) {
       this.nativeChats.set(sessionId, run.key);
       await this.writeProjects();
       this.log("info", "box: a chat that ran on this machine stays there", { sessionId, turnsBefore });
