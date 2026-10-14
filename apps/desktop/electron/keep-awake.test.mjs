@@ -134,7 +134,7 @@ test("main wires the server's turn activity, the quit and the settings commands"
   const main = readFileSync(path.join(here, "main.mjs"), "utf8");
   assert.ok(main.includes("onTurnActivity: (running) => keepAwake.setTurnRunning(running)"));
   assert.ok(main.includes("const releaseKeepAwake = keepAwake.hold();"));
-  assert.ok(main.includes('"keepAwakeStatus": async () => keepAwake.status()'));
+  assert.ok(main.includes('"keepAwakeStatus": async (event) => keepAwake.status()'));
   assert.ok(main.includes('"keepAwakeSet": async (event, ...args) => keepAwake.setEnabled(args[0] === true)'));
   const runtime = readFileSync(path.join(here, "runtime.mjs"), "utf8");
   assert.ok(runtime.includes('...(typeof onTurnActivity === "function" ? { onTurnActivity } : {}),'));

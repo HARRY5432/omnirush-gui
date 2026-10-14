@@ -2573,7 +2573,7 @@ const desktopCommandHandlers = {
   "__setApplicationMenuVisible": async (event, ...args) => {
       return applicationMenu.setVisible(args[0]);
   },
-  "keepAwakeStatus": async () => keepAwake.status(),
+  "keepAwakeStatus": async (event) => keepAwake.status(),
   "keepAwakeSet": async (event, ...args) => keepAwake.setEnabled(args[0] === true),
   "__setTurnRunning": async (event, ...args) => {
       return turnGuard.setTurnRunning(args[0] === true);
