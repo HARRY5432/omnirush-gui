@@ -7,8 +7,12 @@
 // a 5xx, a timeout, no network) keeps the format the server last advertised
 // instead of falling back. Only an explicit refusal of schema 3 by /collect
 // (422 unsupported_schema: unsupported()) moves a known server back to schema
-// 2. With nothing known and a failed check the upload goes out as schema 2,
-// and the server is asked again after RETRY_MS rather than RECHECK_MS.
+// 2. With nothing known and a failed check (a fresh install's first upload)
+// the upload goes out as schema 3, which every current server takes: a server
+// that refuses it answers 422 and the same batch goes again as schema 2, and
+// this process then keeps schema 2 for that server until it advertises 3. The
+// server is asked again after RETRY_MS rather than RECHECK_MS. A server with no
+// capabilities route at all (404) is an old one: schema 2, like its answer.
 
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
@@ -49,6 +53,12 @@ export function advertisesSchema3(answer: UploadFormatAnswer | null | undefined)
     && answer!.schema_versions.includes(3);
 }
 
+/** A check the server answered 404: it has no capabilities route (an old server), not a failed check. */
+function routeMissing(error: unknown): boolean {
+  if (error && typeof error === "object" && (error as { status?: unknown }).status === 404) return true;
+  return error instanceof Error && /\bstatus 404\b/.test(error.message);
+}
+
 /** The key a server is remembered under: its URL without a trailing slash. */
 export function uploadFormatServerKey(server: string): string {
   return server.trim().replace(/\/+$/, "").toLowerCase() || "default";
@@ -59,6 +69,8 @@ export class UploadFormat<Answer extends UploadFormatAnswer = UploadFormatAnswer
   private pending: { server: string; promise: Promise<UploadSchema> } | null = null;
   private generation = 0;
   private memory: Stored = { servers: {} };
+  /** Servers that refused schema 3 in this process (unsupported()) and have not advertised it since. */
+  private readonly refused = new Set<string>();
   private readonly now: () => number;
 
   constructor(private readonly options: UploadFormatOptions<Answer>) {
@@ -88,6 +100,7 @@ export class UploadFormat<Answer extends UploadFormatAnswer = UploadFormatAnswer
     this.generation += 1;
     this.pending = null;
     this.cache = { server, version: 2, until: this.now() + RECHECK_MS };
+    this.refused.add(server);
     const stored = this.read();
     if (!stored.servers[server]) return;
     delete stored.servers[server];
@@ -114,12 +127,15 @@ export class UploadFormat<Answer extends UploadFormatAnswer = UploadFormatAnswer
     try {
       answer = await this.options.probe();
     } catch (error) {
-      const remembered = this.remembers(server);
+      if (routeMissing(error)) return { version: this.remembers(server) ? 3 : 2, recheckMs: RECHECK_MS };
+      // Remembered: schema 3. Nothing known: schema 3 too (an old server's 422 turns the batch back to 2).
+      // Only a refusal this process saw keeps schema 2.
+      const version: UploadSchema = this.remembers(server) || !this.refused.has(server) ? 3 : 2;
       this.options.log?.("warn", "OmniRush session upload: the upload format check failed", {
         error: error instanceof Error ? error.message : "unknown",
-        schema: remembered ? 3 : 2,
+        schema: version,
       });
-      return { version: remembered ? 3 : 2, recheckMs: RETRY_MS };
+      return { version, recheckMs: RETRY_MS };
     }
     try {
       this.options.onAnswer?.(answer);
@@ -127,6 +143,7 @@ export class UploadFormat<Answer extends UploadFormatAnswer = UploadFormatAnswer
       /* the answer still counts */
     }
     if (advertisesSchema3(answer)) {
+      this.refused.delete(server);
       this.remember(server);
       return { version: 3, recheckMs: RECHECK_MS };
     }

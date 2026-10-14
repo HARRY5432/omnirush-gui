@@ -80,11 +80,16 @@ describe("the upload format when the capabilities check fails", () => {
     expect(await runTraces(stateDir, { schema_versions: [1, 2], canonical_trace: false })).toEqual([[3, false]]);
     expect(await runTraces(stateDir, "ok", { refuse3: true })).toEqual([[3, true], [2, false]]);
     expect(JSON.parse(await readFile(join(stateDir, UPLOAD_FORMAT_FILE), "utf8")).servers).toEqual({});
-    expect(await runTraces(stateDir, "fail")).toEqual([[2, false]]);
+    // Nothing known any more (a new process): a failed check tries schema 3, which this server takes.
+    expect(await runTraces(stateDir, "fail")).toEqual([[3, false]]);
   }, 30_000);
 
-  test("a fresh install whose first check fails sends schema 2", async () => {
-    expect(await runTraces(await temp("omnirush-format-state-"), "fail")).toEqual([[2, false]]);
+  test("a fresh install whose first check fails still sends schema 3", async () => {
+    expect(await runTraces(await temp("omnirush-format-state-"), "fail")).toEqual([[3, false]]);
+  }, 30_000);
+
+  test("a fresh install whose first check fails, on a server without schema 3: the batch goes again as schema 2", async () => {
+    expect(await runTraces(await temp("omnirush-format-state-"), "fail", { refuse3: true })).toEqual([[3, true], [2, false]]);
   }, 30_000);
 });
 
@@ -113,7 +118,7 @@ describe("UploadFormat (context/upload-format.ts)", () => {
     }
   });
 
-  test("an explicit 422 unsupported_schema downgrades; nothing known and a failed check is schema 2", async () => {
+  test("an explicit 422 unsupported_schema downgrades, and a failed check keeps schema 2 until the server advertises 3", async () => {
     const time = clock();
     let fail = false;
     const format = new UploadFormat({ file: null, server: () => "gateway", now: time.now, probe: async () => { if (fail) throw new Error("down"); return SCHEMA_3; } });
@@ -134,9 +139,22 @@ describe("UploadFormat (context/upload-format.ts)", () => {
     const down = async (): Promise<TraceCapabilities> => { throw new Error("503"); };
     expect(await new UploadFormat({ file, server: () => "gateway", now: time.now, probe: async () => SCHEMA_3 }).version()).toBe(3);
     expect(await new UploadFormat({ file, server: () => "gateway", now: time.now, probe: down }).version()).toBe(3);
-    expect(await new UploadFormat({ file, server: () => "other", now: time.now, probe: down }).version()).toBe(2);
+    expect(new UploadFormat({ file, server: () => "gateway", now: time.now, probe: down }).remembers("gateway")).toBe(true);
+    expect(new UploadFormat({ file, server: () => "other", now: time.now, probe: down }).remembers("other")).toBe(false);
     time.advance(REMEMBER_MS + 1);
-    expect(await new UploadFormat({ file, server: () => "gateway", now: time.now, probe: down }).version()).toBe(2);
+    expect(new UploadFormat({ file, server: () => "gateway", now: time.now, probe: down }).remembers("gateway")).toBe(false);
+  });
+
+  test("nothing known and a failed check is schema 3, asked again after RETRY_MS", async () => {
+    const time = clock();
+    let fail = true;
+    let asked = 0;
+    const format = new UploadFormat({ file: null, server: () => "gateway", now: time.now, probe: async () => { asked += 1; if (fail) throw new Error("401"); return SCHEMA_3; } });
+    expect(await format.version()).toBe(3);
+    fail = false;
+    time.advance(RETRY_MS + 1);
+    expect(await format.version()).toBe(3);
+    expect(asked).toBe(2);
   });
 });
 
