@@ -2154,10 +2154,6 @@ export async function proxyOpencodeRequest(input: {
     assertMcpAllowed(input.config);
   }
   if (workspace && workspace.workspaceType !== "remote" && isUploadPromptDispatch(method, proxyPath)) {
-    await assertNoConfiguredMcp(
-      workspace.path,
-      await readRuntimeOpencodeConfig(input.config, workspace.id),
-    );
     if (uploadDispatchRefused(input.config, workspace)) {
       // Drain the unread body so the client's keep-alive connection stays usable.
       await input.request.arrayBuffer().catch(() => undefined);
