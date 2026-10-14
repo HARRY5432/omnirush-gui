@@ -20,6 +20,11 @@ import { createOmniRushServerClient } from "../../../app/lib/omnirush-server";
 import { resolveOmniRushConnection } from "../../shell/omnirush-connection";
 import {
   BUILDATHON_REFRESH_MS,
+  JOIN_WATCH_REFRESH_MS,
+  announcementsToNotify,
+  readAnnouncementIds,
+  rememberAnnouncementIds,
+  unreadAnnouncementIds,
   buildathonChipText,
   buildathonCountdown,
   compactTokens,
@@ -43,6 +48,7 @@ import {
   syncBuildathonServer,
   tagSessions,
   useBuildathonStore,
+  type BuildathonAnnouncement,
   type BuildathonCountdown,
   type BuildathonProject,
   type BuildathonSession,
@@ -68,10 +74,20 @@ function useCountdown(status: BuildathonStatus | null): BuildathonCountdown | nu
   return status ? buildathonCountdown(status.event, now) : null;
 }
 
-/** Header chip: "Buildathon · 5d 03h left", red in the last hour. Nothing unless enrolled. */
+/** Ids of the announcements not yet read in My Buildathon. */
+function useUnreadAnnouncements(status: BuildathonStatus | null): string[] {
+  const seenVersion = useBuildathonStore((store) => store.seenVersion);
+  return useMemo(
+    () => (status ? unreadAnnouncementIds(status.announcements, readAnnouncementIds("read")) : []),
+    [status, seenVersion],
+  );
+}
+
+/** Header chip: "Buildathon · 5d 03h left", red in the last hour, a dot for unread updates. Nothing unless enrolled. */
 export function BuildathonChip() {
   const status = useBuildathonStore((store) => store.status);
   const countdown = useCountdown(status);
+  const unread = useUnreadAnnouncements(status);
   if (!status || !countdown) return null;
   return (
     <button
@@ -91,6 +107,13 @@ export function BuildathonChip() {
     >
       <Trophy className="size-3.5" />
       <span>{buildathonChipText(countdown)}</span>
+      {unread.length ? (
+        <span
+          className="size-1.5 rounded-full bg-[#3A2DF5] dark:bg-[#D8FC38]"
+          aria-label={`${unread.length} new update${unread.length === 1 ? "" : "s"}`}
+          data-testid="buildathon-chip-unread"
+        />
+      ) : null}
     </button>
   );
 }
@@ -340,11 +363,103 @@ function ChecklistSection(props: { status: BuildathonStatus }) {
   );
 }
 
-/** "My Buildathon": countdown, tokens, rules, sessions, submission, link code. */
+/** Plain text with its http(s) links clickable (opened in the browser). */
+function LinkedText(props: { text: string }) {
+  // A link ends before trailing punctuation ("see https://x.example/a." keeps the full stop as text).
+  const parts = props.text.split(/(https?:\/\/[^\s<>"']*[^\s<>"'.,;:!?)\]])/g);
+  return (
+    <>
+      {parts.map((part, index) =>
+        index % 2 === 1 ? (
+          <button
+            key={index}
+            type="button"
+            className="break-all text-primary hover:underline"
+            onClick={() => void openDesktopUrl(part).catch(() => undefined)}
+          >
+            {part}
+          </button>
+        ) : (
+          <span key={index}>{part}</span>
+        ),
+      )}
+    </>
+  );
+}
+
+function announcementTime(iso: string | null): string {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) return "";
+  return new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }).format(date);
+}
+
+/** The updates feed, newest first; a dot on each one not read before this panel opened. */
+function UpdatesSection(props: { announcements: BuildathonAnnouncement[]; unread: ReadonlySet<string> }) {
+  if (!props.announcements.length) return null;
+  const count = props.announcements.filter((announcement) => props.unread.has(announcement.id)).length;
+  return (
+    <Section title={`Updates${count ? ` · ${count} new` : ""}`} testId="buildathon-updates">
+      <ul className="flex flex-col gap-1.5">
+        {props.announcements.map((announcement) => {
+          const unread = props.unread.has(announcement.id);
+          return (
+            <li
+              key={announcement.id}
+              className={cn(
+                "rounded-lg border px-3 py-2 text-xs",
+                announcement.level === "important" ? "border-[#3A2DF5]/40 bg-[#3A2DF5]/5 dark:border-[#D8FC38]/40 dark:bg-[#D8FC38]/5" : "border-border",
+              )}
+              data-testid="buildathon-update"
+              data-id={announcement.id}
+              data-unread={unread ? "true" : "false"}
+            >
+              <div className="flex items-start gap-2">
+                <span
+                  className={cn("mt-1.5 size-1.5 shrink-0 rounded-full", unread ? "bg-[#3A2DF5] dark:bg-[#D8FC38]" : "bg-transparent")}
+                  aria-label={unread ? "New" : undefined}
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="font-medium">{announcement.title}</span>
+                    <span className="shrink-0 text-[10.5px] text-muted-foreground">{announcementTime(announcement.publishedAt)}</span>
+                  </div>
+                  {announcement.body ? (
+                    <div className="mt-0.5 whitespace-pre-wrap break-words text-muted-foreground"><LinkedText text={announcement.body} /></div>
+                  ) : null}
+                  {announcement.url ? (
+                    <button
+                      type="button"
+                      className="mt-1 inline-flex items-center gap-1 text-primary hover:underline"
+                      onClick={() => void openDesktopUrl(announcement.url!).catch(() => undefined)}
+                    >
+                      Open link <ExternalLink className="size-3" />
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    </Section>
+  );
+}
+
+/** "My Buildathon": countdown, tokens, updates, rules, sessions, submission, link code. */
 export function BuildathonPanel(props: { status: BuildathonStatus; onClose: () => void }) {
   const { event, participant, submission } = props.status;
   const countdown = useCountdown(props.status)!;
   const [sessions, setSessions] = useState<BuildathonSession[] | null | undefined>(undefined);
+  // The unread ones as of opening keep their dots while the panel is open; they count as read from now on.
+  const [unread] = useState(() => new Set(unreadAnnouncementIds(props.status.announcements, readAnnouncementIds("read"))));
+  useEffect(() => {
+    const ids = unreadAnnouncementIds(props.status.announcements, readAnnouncementIds("read"));
+    if (!ids.length) return;
+    rememberAnnouncementIds("read", ids);
+    rememberAnnouncementIds("notified", ids);
+    useBuildathonStore.getState().bumpSeen();
+  }, [props.status.announcements]);
 
   useEffect(() => {
     let live = true;
@@ -391,6 +506,27 @@ export function BuildathonPanel(props: { status: BuildathonStatus; onClose: () =
                 <div className="h-full rounded-full bg-[#b9f45a]" style={{ width: `${percent}%` }} />
               </div>
             </div>
+          </div>
+
+          <UpdatesSection announcements={props.status.announcements} unread={unread} />
+
+          <div className="flex items-center justify-between gap-2 rounded-lg border border-border px-3 py-2 text-xs" data-testid="buildathon-github">
+            {props.status.github ? (
+              <span>
+                <span className="text-muted-foreground">GitHub</span>{" "}
+                <span className="font-medium" data-testid="buildathon-github-login">@{props.status.github.login}</span>
+                <span className="text-muted-foreground"> · your submission repo must be under this account</span>
+              </span>
+            ) : (
+              <>
+                <span className="text-muted-foreground">Link your GitHub account before you submit.</span>
+                {submitUrl ? (
+                  <Button size="xs" variant="outline" onClick={() => void openDesktopUrl(submitUrl).catch(() => undefined)}>
+                    Link GitHub <ExternalLink className="size-3" />
+                  </Button>
+                ) : null}
+              </>
+            )}
           </div>
 
           <Section title="Submission" testId="buildathon-submission">
@@ -491,6 +627,62 @@ export function BuildathonLayer() {
     toast.info(status.event.name, { description: due.text, duration: 15_000 });
     void desktopNotificationShow({ title: status.event.name, body: due.text }).catch(() => undefined);
   }, [status, now]);
+
+  // After the join page opened: re-read every 30 s and whenever the window comes back, for 10 minutes.
+  const joinWatchUntil = useBuildathonStore((store) => store.joinWatchUntil);
+  useEffect(() => {
+    if (joinWatchUntil <= Date.now()) return;
+    const check = () => {
+      if (Date.now() > useBuildathonStore.getState().joinWatchUntil) return;
+      void refreshBuildathon(readStatus);
+    };
+    const timer = window.setInterval(check, JOIN_WATCH_REFRESH_MS);
+    const stop = window.setTimeout(() => window.clearInterval(timer), joinWatchUntil - Date.now() + 1_000);
+    const onVisible = () => { if (document.visibilityState === "visible") check(); };
+    window.addEventListener("focus", check);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearInterval(timer);
+      window.clearTimeout(stop);
+      window.removeEventListener("focus", check);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [joinWatchUntil]);
+
+  // Just joined (from the promo, in this run): greet once and open My Buildathon.
+  const joinedAt = useBuildathonStore((store) => store.joinedAt);
+  useEffect(() => {
+    if (!joinedAt || !status) return;
+    const store = useBuildathonStore.getState();
+    store.clearJoined();
+    // The updates so far are listed (with dots) in the panel that opens now, not popped up one by one.
+    rememberAnnouncementIds("notified", status.announcements.map((announcement) => announcement.id));
+    store.openPanel();
+    const tokens = status.participant?.tokensGranted ? `${compactTokens(status.participant.tokensGranted)} event tokens are on your account. ` : "";
+    const body = `${tokens}Pick a track for your project to get started.`;
+    toast.success(`You're in: ${status.event.name}`, { description: body, duration: 15_000 });
+    void desktopNotificationShow({ title: `You're in: ${status.event.name}`, body }).catch(() => undefined);
+  }, [joinedAt, status]);
+
+  // Updates: each one never shown pops up once (toast + desktop notification); a burst is capped.
+  useEffect(() => {
+    if (!status?.announcements.length) return;
+    const due = announcementsToNotify(status.announcements, readAnnouncementIds("notified"));
+    if (!due.ids.length) return;
+    rememberAnnouncementIds("notified", due.ids);
+    const view = { label: "View", onClick: () => useBuildathonStore.getState().openPanel() };
+    for (const announcement of due.show) {
+      const body = announcement.body.length > 220 ? `${announcement.body.slice(0, 219).trimEnd()}…` : announcement.body;
+      const show = announcement.level === "important" ? toast.warning : toast.info;
+      show(announcement.title, { description: body || undefined, duration: 20_000, action: view });
+      void desktopNotificationShow({ title: `${status.event.name}: ${announcement.title}`, body: body || undefined }).catch(() => undefined);
+    }
+    if (due.more) {
+      const text = `${due.more} more update${due.more === 1 ? "" : "s"} in My Buildathon`;
+      toast.info(text, { duration: 20_000, action: view });
+      void desktopNotificationShow({ title: status.event.name, body: text }).catch(() => undefined);
+    }
+  }, [status]);
 
   // Tell the server each event session's track (fire-and-forget).
   useEffect(() => {

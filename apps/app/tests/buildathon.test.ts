@@ -1,6 +1,15 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  announcementsToNotify,
+  promoActive,
+  readAnnouncementIds,
+  readPromoIds,
+  rememberAnnouncementIds,
+  rememberPromoId,
+  unreadAnnouncementIds,
+  type BuildathonAnnouncement,
+  type BuildathonPromo,
   buildathonChipText,
   buildathonCountdown,
   buildathonProjectPaths,
@@ -168,7 +177,7 @@ test("the only-tool rule comes first", () => {
 });
 
 describe("refresh", () => {
-  const status: BuildathonStatus = { enrolled: true, serverTime: null, event: EVENT, participant: null, submission: null, repro: { box: "on", agentRules: "", checklist: [] } };
+  const status: BuildathonStatus = { enrolled: true, serverTime: null, event: EVENT, participant: null, submission: null, repro: { box: "on", agentRules: "", checklist: [] }, announcements: [], github: null };
 
   test("enrolled shows, anything else hides", async () => {
     await refreshBuildathon(async () => status);
@@ -213,6 +222,8 @@ describe("reproducibility mode: buildathon projects", () => {
     const status: BuildathonStatus = {
       enrolled: true, serverTime: null, event: EVENT, participant: null, submission: null,
       repro: { box: "on", agentRules: "Rules.", checklist: [] },
+      announcements: [],
+      github: null,
     };
     const storage = memoryStorage();
     writeProjectTrack("/p/app", "agents", storage, inside);
@@ -225,5 +236,77 @@ describe("reproducibility mode: buildathon projects", () => {
     expect(await syncBuildathonServer(status, async (body) => void sent.push(body), entries)).toBe("unchanged");
     expect(await syncBuildathonServer(null, async (body) => void sent.push(body), entries)).toBe("skipped");
     expect(sent.length).toBe(1);
+  });
+});
+
+describe("promo (non-participants)", () => {
+  const promo: BuildathonPromo = {
+    id: "frontier-2026-reg", title: "Frontier Buildathon 2026", text: "$300 prize pool", ctaLabel: "Join the Buildathon",
+    ctaUrl: "https://omnirush.ai/buildathon", endsAt: "2026-10-19T18:29:59Z", join: false, joinUrl: null,
+  };
+  const before = Date.parse("2026-10-15T00:00:00Z");
+
+  test("on until dismissed under its id, and never after its end", () => {
+    const storage = memoryStorage();
+    expect(promoActive(promo, before, readPromoIds("dismissed", storage))).toBe(true);
+    expect(promoActive(promo, Date.parse("2026-10-19T18:30:00Z"), new Set())).toBe(false);
+    expect(promoActive({ ...promo, endsAt: null }, Date.parse("2027-01-01T00:00:00Z"), new Set())).toBe(true);
+    expect(promoActive(null, before, new Set())).toBe(false);
+    rememberPromoId("dismissed", promo.id, storage);
+    expect(promoActive(promo, before, readPromoIds("dismissed", storage))).toBe(false);
+    // A new id shows again.
+    expect(promoActive({ ...promo, id: "frontier-2026-last-call" }, before, readPromoIds("dismissed", storage))).toBe(true);
+    expect(readPromoIds("card", storage).size).toBe(0);
+  });
+
+  test("the store takes a promo or a status, never both", async () => {
+    const status: BuildathonStatus = { enrolled: true, serverTime: null, event: EVENT, participant: null, submission: null, repro: { box: "on", agentRules: "", checklist: [] }, announcements: [], github: null };
+    await refreshBuildathon(async () => ({ enrolled: false, serverTime: null, promo }));
+    expect(useBuildathonStore.getState().promo?.id).toBe(promo.id);
+    expect(useBuildathonStore.getState().status).toBeNull();
+    // Joining on the web: the watch re-reads; the first enrolled answer replaces the promo at once.
+    useBuildathonStore.getState().startJoinWatch(1_000);
+    expect(useBuildathonStore.getState().joinWatchUntil).toBe(1_000 + 10 * 60_000);
+    await refreshBuildathon(async () => status);
+    expect(useBuildathonStore.getState().promo).toBeNull();
+    expect(useBuildathonStore.getState().status?.event.id).toBe("frontier-2026");
+    expect(useBuildathonStore.getState().joinedAt).not.toBeNull();
+    expect(useBuildathonStore.getState().joinWatchUntil).toBe(0);
+    useBuildathonStore.getState().clearJoined();
+    // A participant's later reads are not a new join.
+    await refreshBuildathon(async () => status);
+    expect(useBuildathonStore.getState().joinedAt).toBeNull();
+    await refreshBuildathon(async () => ({ enrolled: false, serverTime: null, promo }));
+    await refreshBuildathon(async () => null);
+    expect(useBuildathonStore.getState().promo).toBeNull();
+    expect(useBuildathonStore.getState().status).toBeNull();
+  });
+});
+
+describe("announcements (participants)", () => {
+  const item = (id: string, title = id): BuildathonAnnouncement => ({ id, title, body: "", url: null, level: "info", publishedAt: null });
+  const feed = [item("a_5"), item("a_4"), item("a_3"), item("a_2"), item("a_1")]; // newest first
+
+  test("each once; a burst shows the newest few (newest last) and counts the rest", () => {
+    const storage = memoryStorage();
+    const first = announcementsToNotify(feed, readAnnouncementIds("notified", storage));
+    expect(first.show.map((a) => a.id)).toEqual(["a_3", "a_4", "a_5"]);
+    expect(first.more).toBe(2);
+    expect(first.ids.length).toBe(5);
+    rememberAnnouncementIds("notified", first.ids, storage);
+    expect(announcementsToNotify(feed, readAnnouncementIds("notified", storage)).ids).toEqual([]);
+    const next = announcementsToNotify([item("a_6"), ...feed], readAnnouncementIds("notified", storage));
+    expect(next.show.map((a) => a.id)).toEqual(["a_6"]);
+    expect(next.more).toBe(0);
+  });
+
+  test("unread until read in My Buildathon; ids persist and are bounded", () => {
+    const storage = memoryStorage();
+    expect(unreadAnnouncementIds(feed, readAnnouncementIds("read", storage)).length).toBe(5);
+    rememberAnnouncementIds("read", ["a_5", "a_4"], storage);
+    expect(unreadAnnouncementIds(feed, readAnnouncementIds("read", storage))).toEqual(["a_3", "a_2", "a_1"]);
+    rememberAnnouncementIds("read", Array.from({ length: 300 }, (_, index) => `x_${index}`), storage);
+    expect(readAnnouncementIds("read", storage).size).toBe(200);
+    expect(readAnnouncementIds("notified", storage).size).toBe(0);
   });
 });
