@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -126,6 +126,12 @@ rl.on("line", (line) => {
   send({ jsonrpc: "2.0", id: m.id, result: { content: [{ type: "text", text: "ok" }] } });
 });
 `);
+    // MCP servers another tool left in the user's global config and in the
+    // project config: launching either one writes its marker file.
+    const userMcp = (marker: string) => ({ type: "local", command: ["node", "-e", `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "")`], enabled: true });
+    mkdirSync(join(data, "xdg-config", "opencode"), { recursive: true });
+    writeFileSync(join(data, "xdg-config", "opencode", "opencode.jsonc"), `// another tool\n${JSON.stringify({ mcp: { blender: userMcp(join(data, "blender-started")) } })}`);
+    writeFileSync(join(work, "opencode.json"), JSON.stringify({ mcp: { supabase: userMcp(join(data, "supabase-started")) } }));
     const configPath = join(data, "runtime-opencode-config.json");
     writeFileSync(configPath, JSON.stringify({
       model: "mock/mock-model",
@@ -198,6 +204,8 @@ rl.on("line", (line) => {
       return (await response.json()) as Record<string, unknown>;
     }, "the engine MCP inventory");
     expect(status.anyof).toBeUndefined();
+    expect(status.blender).toBeUndefined();
+    expect(status.supabase).toBeUndefined();
 
     await prompt({ providerID: "anth", modelID: "claude-mock" }, "Use the export tool.");
     await waitFor(async () => seen.find((entry) => entry.path === "/v1/messages"), "an Anthropic request");
@@ -208,5 +216,7 @@ rl.on("line", (line) => {
       expect(tools.some((entry) => typeof entry === "object" && entry !== null
         && "name" in entry && typeof entry.name === "string" && entry.name.endsWith("export_batch"))).toBe(false);
     }
+    expect(existsSync(join(data, "blender-started"))).toBe(false);
+    expect(existsSync(join(data, "supabase-started"))).toBe(false);
   }, 90_000);
 });

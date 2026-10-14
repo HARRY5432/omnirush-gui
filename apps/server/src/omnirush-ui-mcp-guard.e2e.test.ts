@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -51,6 +51,7 @@ function startMockEngine() {
         return Response.json({ [name]: { status: "connected" } });
       }
       if (url.pathname === "/mcp") return Response.json({});
+      if (url.pathname === "/session/ses_1/prompt_async") return new Response(null, { status: 204 });
       if (url.pathname === "/session/status") return Response.json({});
       if (url.pathname === "/instance/dispose") return Response.json(true);
       return Response.json({ code: "not_found", message: "Not found" }, { status: 404 });
@@ -60,7 +61,8 @@ function startMockEngine() {
   const pushedNames = () => requests
     .filter((entry) => entry.method === "POST" && entry.pathname === "/mcp")
     .map((entry) => (entry.body as { name?: string } | null)?.name);
-  return { baseUrl: `http://127.0.0.1:${server.port}`, pushedNames };
+  const prompts = () => requests.filter((entry) => entry.pathname === "/session/ses_1/prompt_async");
+  return { baseUrl: `http://127.0.0.1:${server.port}`, pushedNames, prompts };
 }
 
 async function fixture() {
@@ -187,5 +189,38 @@ describe("complete MCP ban at the HTTP and runtime boundaries", () => {
     // The raw legacy row remains readable only so removal/credential cleanup
     // can repair it; runtime and engine boundaries never expose it.
     expect((await readRuntimeOpencodeConfig(config, "ws_1")).mcp?.["omnirush-ui"]).toEqual(LEGACY);
+  });
+
+  test("MCP servers left in the user's own config do not block prompts", async () => {
+    const { config, engine } = await fixture();
+    const root = config.workspaces[0]!.path;
+    const globalDir = join(root, "global-opencode");
+    await mkdir(globalDir, { recursive: true });
+    await writeFile(join(globalDir, "opencode.jsonc"), `// written by another tool\n${JSON.stringify({ mcp: { blender: SAFE } })}`);
+    await writeFile(join(root, "opencode.json"), JSON.stringify({ mcp: { supabase: SAFE } }));
+    await seedRuntimeRow(config, "ws_1", { mcp: { "omnirush-ui": LEGACY } });
+    const saved = {
+      OPENCODE_CONFIG_DIR: process.env.OPENCODE_CONFIG_DIR,
+      OMNIRUSH_DEV_MODE: process.env.OMNIRUSH_DEV_MODE,
+      OMNIRUSH_SESSION_UPLOAD_OPTIONAL: process.env.OMNIRUSH_SESSION_UPLOAD_OPTIONAL,
+    };
+    stops.push(() => {
+      for (const [name, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    });
+    process.env.OPENCODE_CONFIG_DIR = globalDir;
+    process.env.OMNIRUSH_DEV_MODE = "1";
+    process.env.OMNIRUSH_SESSION_UPLOAD_OPTIONAL = "1";
+    const { call } = await start(config, engine.baseUrl);
+
+    // The engine's MCP policy plugin strips these entries; the prompt itself runs.
+    const response = await call("POST", "/workspace/ws_1/opencode/session/ses_1/prompt_async", {
+      parts: [{ type: "text", text: "Fix the build" }],
+    });
+    expect(response.status).toBe(204);
+    expect(engine.prompts()).toHaveLength(1);
+    expect(engine.pushedNames()).toEqual([]);
   });
 });
