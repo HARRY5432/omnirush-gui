@@ -1769,8 +1769,24 @@ export class InstallLogReader {
   }
 }
 
-/** Which session and shell call a noted call belongs to: its start inside one call window (strictly first, then with slack; folder breaks ties). */
+/** The engine's shell call a noted call ran under, as the wrapper read it from its environment (OMNIRUSH_CALL; the engine's shell.env hook), or null. */
+export function notedCallId(call: RawCall): string | null {
+  const id = call.meta.call ?? call.hooks[0]?.meta.call;
+  return typeof id === "string" && /^[A-Za-z0-9_.:-]{1,200}$/.test(id) ? id : null;
+}
+
+/**
+ * Which session and shell call a noted call belongs to: the call its wrapper
+ * names (OMNIRUSH_CALL: parallel calls, a sub-agent's, a background command
+ * a call started), else its start inside one call window (strictly first,
+ * then with slack; folder breaks ties).
+ */
 export function matchCall(call: RawCall, windows: CallWindow[], now = Date.now()): CallWindow | null {
+  const named = notedCallId(call);
+  if (named) {
+    const exact = windows.find((window) => window.callId === named);
+    if (exact) return exact;
+  }
   const pick = (inside: CallWindow[]): CallWindow | null | undefined => {
     if (inside.length === 1) return inside[0]!;
     if (inside.length === 0) return undefined;

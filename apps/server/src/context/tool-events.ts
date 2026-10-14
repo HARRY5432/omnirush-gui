@@ -16,6 +16,17 @@ function text(value: unknown): string | null {
   return typeof value === "string" && value ? value : null;
 }
 
+/** A session the engine created or updated, with its parent (sub-agents' sessions), or null when `payload` is not one. */
+export function sessionInfoOf(payload: unknown): { id: string; parentId: string | null } | null {
+  if (!isRecord(payload)) return null;
+  if (isRecord(payload.payload) && typeof payload.payload.type === "string") return sessionInfoOf(payload.payload);
+  if (payload.type !== "session.created" && payload.type !== "session.updated") return null;
+  const properties = isRecord(payload.properties) ? payload.properties : null;
+  const info = properties && isRecord(properties.info) ? properties.info : null;
+  const id = info ? text(info.id) : null;
+  return id ? { id, parentId: text(info!.parentID) } : null;
+}
+
 /** A tool start or end of one session, or null when `payload` is not one. */
 export function toolEventOf(payload: unknown): { sessionId: string; event: ToolEvent } | null {
   if (!isRecord(payload)) return null;
@@ -54,8 +65,14 @@ export function toolEventOf(payload: unknown): { sessionId: string; event: ToolE
 export type ToolEventFetch = (url: string, init: { headers: Headers; signal: AbortSignal }) => Promise<Response>;
 
 const MAX_FRAME_CHARS = 4 * 1024 * 1024;
+/** Sessions followed at most per stream (the root and its sub-agents). */
+const MAX_FAMILY = 512;
 
-/** Follows the event stream until `signal` aborts, handing each tool event of `sessionId` to `onEvent`. Never throws. */
+/**
+ * Follows the event stream until `signal` aborts, handing each tool event of
+ * `sessionId` and of the sub-agent sessions it starts (their parent chain
+ * leads to it; `known`: ones started before) to `onEvent`. Never throws.
+ */
 export async function watchToolEvents(input: {
   url: string;
   headers: Headers;
@@ -63,8 +80,11 @@ export async function watchToolEvents(input: {
   signal: AbortSignal;
   fetch: ToolEventFetch;
   onEvent: (event: ToolEvent) => void;
+  /** Sub-agent sessions of `sessionId` started before the stream was followed. */
+  known?: Iterable<string>;
 }): Promise<void> {
   if (input.signal.aborted) return;
+  const family = new Set([input.sessionId, ...(input.known ?? [])]);
   try {
     const headers = new Headers(input.headers);
     headers.set("accept", "text/event-stream");
@@ -89,8 +109,10 @@ export async function watchToolEvents(input: {
         } catch {
           continue;
         }
+        const session = sessionInfoOf(payload);
+        if (session?.parentId && family.has(session.parentId) && family.size < MAX_FAMILY) family.add(session.id);
         const found = toolEventOf(payload);
-        if (found && found.sessionId === input.sessionId) {
+        if (found && family.has(found.sessionId)) {
           try {
             input.onEvent(found.event);
           } catch {

@@ -282,6 +282,19 @@ describe("managed-policy engine plugin: git workflows", () => {
     expect(process.env.PATH?.split(path.delimiter)).toEqual(entries);
   });
 
+  test("shell.env names the shell call and its session for the install log; the PTY (no call) gets neither", async () => {
+    policyServer({ account: null });
+    const hooks = await managedPolicy({ directory: await temporaryRepository() });
+    const output: { env: Record<string, string> } = { env: {} };
+    await hooks["shell.env"]({ cwd: "/", callID: "call_1", sessionID: "ses_1" }, output);
+    expect(output.env.OMNIRUSH_CALL).toBe("call_1");
+    expect(output.env.OMNIRUSH_SESSION).toBe("ses_1");
+    const pty: { env: Record<string, string> } = { env: {} };
+    await hooks["shell.env"]({ cwd: "/" }, pty);
+    expect(pty.env.OMNIRUSH_CALL).toBeUndefined();
+    expect(pty.env.OMNIRUSH_SESSION).toBeUndefined();
+  });
+
   test("the next-engine plugin applies the same rules through its structural hooks", async () => {
     const { calls } = policyServer({ account: { name: "Sam Example", email: "sam@example.com" } });
     const repo = await temporaryRepository();

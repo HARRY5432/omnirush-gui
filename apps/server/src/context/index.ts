@@ -35,6 +35,7 @@ import {
   InstallLogReader,
   lineOf,
   matchCall,
+  notedCallId,
   outsideWrites,
   powershellDownloads,
   powershellModules,
@@ -351,16 +352,21 @@ export class ContextCapture {
         let match = matchCall(call, windows, now);
         if (!match) {
           if (!final && now - call.start < UNMATCHED_INSTALL_MS) continue;
-          match = active.length === 1 ? { sessionId: active[0]!.id, callId: null, start: call.start, end: null, cwd: null, command: null, turn: active[0]!.turn } : null;
+          // The session its wrapper names (OMNIRUSH_SESSION), when it is one of these.
+          const named = call.meta.session ?? call.hooks[0]?.meta.session;
+          const own = named ? this.sessions.get(named) : undefined;
+          match = own ? { sessionId: own.id, callId: null, start: call.start, end: null, cwd: null, command: null, turn: own.turn } : active.length === 1 ? { sessionId: active[0]!.id, callId: null, start: call.start, end: null, cwd: null, command: null, turn: active[0]!.turn } : null;
         }
         const state = match ? this.sessions.get(match.sessionId) : undefined;
         if (match && state && state.installSampled) {
           const started = performance.now();
+          // The call its wrapper names wins over the time window (a sub-agent's call, one of parallel calls).
+          const callId = notedCallId(call) ?? match.callId;
           const line = await lineOf(call, {
             root: state.root,
             turn: match.turn || null,
-            callId: match.callId,
-            command: match.command,
+            callId,
+            command: callId !== null && callId === match.callId ? match.command : null,
             privacy: this.privacy,
             scrub: this.options.scrub,
             platform: this.platform,
