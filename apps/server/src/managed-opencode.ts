@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { realpathSync } from "node:fs";
 import net from "node:net";
 import { randomUUID } from "node:crypto";
 import { globalOpencodeConfigDir } from "@omnirush/paths";
@@ -7,6 +8,7 @@ import { repairEngineStoreBeforeStart } from "./engine-store-repair.js";
 import { engineInstallLogEnv } from "./install-log-host.js";
 
 export type ManagedChildProcess = {
+  pid?: number;
   exitCode: number | null;
   signalCode: NodeJS.Signals | null;
   killed: boolean;
@@ -17,7 +19,55 @@ export type ManagedChildProcess = {
 export type ManagedProcessCloseOptions = {
   termTimeoutMs?: number;
   killTimeoutMs?: number;
+  /** Whether the OS still has the process (default: signal 0 to child.pid). */
+  processExists?: () => boolean;
 };
+
+/**
+ * The engine reads OMNIRUSH_PLUGINS_NO_DEPS (one file per line): when every
+ * configured plugin is one of these files, it does not wait for its config
+ * folders' npm installs before serving a project. Each file is named as given
+ * and as its real path, since the engine compares resolved real paths.
+ */
+export function pluginsNoDepsEnv(
+  files: string[],
+  realpath: (file: string) => string = realpathSync.native,
+): Record<string, string> {
+  const names = new Set<string>();
+  for (const file of files) {
+    names.add(file);
+    try {
+      names.add(realpath(file));
+    } catch {
+      // A plugin that is not on disk is never loaded; its name is enough.
+    }
+  }
+  return names.size ? { OMNIRUSH_PLUGINS_NO_DEPS: [...names].join("\n") } : {};
+}
+
+/**
+ * How long the engine may take to print its listening line. On Windows the
+ * first start after an install or update also waits for the antivirus scan of
+ * the new engine binary, which pushed past 15 s and failed the app's start.
+ */
+export function engineStartTimeoutMs(
+  env: Record<string, string | undefined> = process.env,
+  platform: NodeJS.Platform = process.platform,
+): number {
+  const asked = Number(env.OMNIRUSH_ENGINE_START_TIMEOUT_MS);
+  if (Number.isFinite(asked) && asked > 0) return asked;
+  return platform === "win32" ? 60_000 : 15_000;
+}
+
+function pidExists(pid: number | undefined): boolean {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error instanceof Error && "code" in error && error.code === "EPERM";
+  }
+}
 
 export type ManagedOpencodeServer = {
   url: string;
@@ -83,7 +133,11 @@ export function createManagedProcessClose(
       } catch {
         // Re-check below; kill can race a natural exit.
       }
-      if (!await waitForExit(options.killTimeoutMs ?? 500)) {
+      if (await waitForExit(options.killTimeoutMs ?? (process.platform === "win32" ? 3_000 : 500))) return;
+      // A busy main thread can see its timer before the exit event of a
+      // process that is already gone (seen on Windows): ask the OS.
+      const exists = options.processExists ?? (() => pidExists(child.pid));
+      if (exists()) {
         throw new Error("Managed OmniRush process did not exit after SIGKILL");
       }
     })();
@@ -216,7 +270,8 @@ async function startManagedOpencodeServer(
   let url: string;
   try {
     url = await new Promise<string>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error(`Timeout waiting for OmniRush server after ${options.timeoutMs ?? 15000}ms`)), options.timeoutMs ?? 15000);
+      const timeoutMs = options.timeoutMs ?? engineStartTimeoutMs(env);
+      const timeout = setTimeout(() => reject(new Error(`Timeout waiting for OmniRush server after ${timeoutMs}ms`)), timeoutMs);
       let output = "";
       const done = (value: string) => {
         clearTimeout(timeout);
@@ -244,7 +299,11 @@ async function startManagedOpencodeServer(
       child.once("close", (code) => fail(new ManagedOpencodeExitError(code, output)));
     });
   } catch (error) {
-    await processLifecycle.close();
+    // The start failure is the error to report; a failed cleanup only adds to it.
+    const cleanup = await processLifecycle.close().then(() => null, (closeError: unknown) => closeError);
+    if (cleanup && error instanceof Error) {
+      error.message += ` (and the engine process could not be stopped: ${cleanup instanceof Error ? cleanup.message : String(cleanup)})`;
+    }
     throw error;
   }
 

@@ -20,7 +20,7 @@ async function writeFakeOpencodeBin(root: string): Promise<string> {
     "const portIndex = process.argv.indexOf(\"--port\");",
     "const port = portIndex >= 0 ? process.argv[portIndex + 1] : \"0\";",
     "const capturePath = process.env.OMNIRUSH_CAPTURE_MODELS_URL_FILE;",
-    "if (capturePath) await Bun.write(capturePath, JSON.stringify({ url: process.env.OPENCODE_MODELS_URL ?? null, disableFetch: process.env.OPENCODE_DISABLE_MODELS_FETCH ?? null }));",
+    "if (capturePath) await Bun.write(capturePath, JSON.stringify({ url: process.env.OPENCODE_MODELS_URL ?? null, disableFetch: process.env.OPENCODE_DISABLE_MODELS_FETCH ?? null, ownPluginsNoDeps: /omnirush-mcp-policy\\.(?:ts|js)$/m.test(process.env.OMNIRUSH_PLUGINS_NO_DEPS ?? \"\") }));",
     "console.log(`opencode server listening on http://127.0.0.1:${port}`);",
     "process.on(\"SIGTERM\", () => process.exit(0));",
     "setInterval(() => undefined, 1_000);",
@@ -128,10 +128,10 @@ describe("startEmbeddedServer managed OpenCode models URL", () => {
     expect(await captureEngineModelsEnv({
       devMode: "1",
       modelsUrl: "https://catalog.example.test/models",
-    })).toEqual({ url: "https://catalog.example.test/models", disableFetch: null });
+    })).toEqual({ url: "https://catalog.example.test/models", disableFetch: null, ownPluginsNoDeps: true });
   });
 
   test("gives the engine no catalog URL and turns catalog fetches off by default", async () => {
-    expect(await captureEngineModelsEnv({})).toEqual({ url: null, disableFetch: "1" });
+    expect(await captureEngineModelsEnv({})).toEqual({ url: null, disableFetch: "1", ownPluginsNoDeps: true });
   });
 });

@@ -1592,14 +1592,22 @@ async function bootRuntimeForSelectedWorkspace() {
   return { ok: true, skipped: false, engine, omnirushServer, workspaceId: bootWorkspace.id ?? null };
 }
 
+function startRuntimeBootstrap() {
+  const pending = bootRuntimeForSelectedWorkspace().catch((error) => ({
+    ok: false,
+    error: error instanceof Error ? error.message : String(error),
+  }));
+  runtimeBootstrapPromise = pending;
+  // A failed boot is not kept: the next request (the window's Try again)
+  // boots again instead of being handed the same failure.
+  void pending.then((result) => {
+    if (result?.ok === false && runtimeBootstrapPromise === pending) runtimeBootstrapPromise = null;
+  });
+  return pending;
+}
+
 function ensureRuntimeBootstrap() {
-  if (!runtimeBootstrapPromise) {
-    runtimeBootstrapPromise = bootRuntimeForSelectedWorkspace().catch((error) => ({
-      ok: false,
-      error: error instanceof Error ? error.message : String(error),
-    }));
-  }
-  return runtimeBootstrapPromise;
+  return runtimeBootstrapPromise ?? startRuntimeBootstrap();
 }
 
 function resolveOpencodeConfigPath(scope, projectDir) {
@@ -3140,10 +3148,7 @@ or use: pnpm dev:worktree`);
       });
     }
     if (!desktopActivationRequired(DESKTOP_DISTRIBUTION, bootstrapConfig)) {
-      runtimeBootstrapPromise = bootRuntimeForSelectedWorkspace().catch((error) => ({
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-      }));
+      startRuntimeBootstrap();
     }
 
     queueDeepLinks(forwardedDeepLinks(process.argv));

@@ -25,7 +25,7 @@ import {
   type EnginePoolSnapshot,
   type EngineSpawnTemplate,
 } from "./engine-pool.js";
-import { createManagedOpencodeServer, type ManagedOpencodeServer, type OpencodeExecutionSnapshot } from "./managed-opencode.js";
+import { createManagedOpencodeServer, pluginsNoDepsEnv, type ManagedOpencodeServer, type OpencodeExecutionSnapshot } from "./managed-opencode.js";
 import {
   clearTrustedOpencodeProcess,
   collectBusyEngineSessions,
@@ -38,7 +38,7 @@ import {
 } from "./server.js";
 import { ensureLocalWorkspaceFiles } from "./workspace-init.js";
 import { findManagedEngineWorkspace } from "./workspaces.js";
-import { keepOmniRushRuntimeConfigFileFresh, writeOmniRushRuntimeConfigFile } from "./omnirush-runtime-config.js";
+import { keepOmniRushRuntimeConfigFileFresh, omnirushOwnPluginPaths, writeOmniRushRuntimeConfigFile } from "./omnirush-runtime-config.js";
 import { migrateOmniRushCloudMcpRuntimeConfig } from "./cloud-mcp-health.js";
 import { migrateWorkspaceRuntimeConfigToEngineGlobal } from "./runtime-opencode-config-store.js";
 import { migrateLegacyOmniRushUiMcpCommand, type OmniRushUiMcpLaunch } from "./omnirush-ui-mcp-migration.js";
@@ -273,6 +273,7 @@ export async function startEmbeddedServer(options: EmbeddedServerOptions): Promi
         OMNIRUSH_POLICY_TOKEN: managedDesktopPolicy(config).evaluationToken,
         OPENCODE_CONFIG: runtimeConfigPath,
         ...opencodeModelsEnv,
+        ...pluginsNoDepsEnv(omnirushOwnPluginPaths()),
       };
       engineSpawnTemplate = {
         bin: opencodeBin,

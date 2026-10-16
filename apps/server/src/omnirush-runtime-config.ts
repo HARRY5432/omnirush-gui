@@ -32,6 +32,7 @@ import {
   omnirushBuildathonPluginPath,
   omnirushChromeDevtoolsPluginPath,
   omnirushPdfAttachmentsPluginPath,
+  omnirushPluginPath,
 } from "./omnirush-extensions-plugin-path.js";
 import type { ServerConfig } from "./types.js";
 import { runtimeStorageDir } from "./runtime-db.js";
@@ -148,6 +149,47 @@ export async function buildOmniRushRuntimeConfigObject(
   return config ? withBoxEngineConfig(await boxServiceFor(config).engineBits(), built) : built;
 }
 
+/** omnirush.ai's own engine plugins that go before the user's, in registration order. */
+function omnirushLeadingPluginPaths(): string[] {
+  return [
+    managedPolicyPluginPath(),
+    omnirushChromeDevtoolsPluginPath(),
+    // Registration order is prompt order: the knowledge plugin appends the
+    // operating rules first, then the extensions plugin adds app-control
+    // mechanics, live Connect steering, and the remote skill and Automation
+    // catalogs, so rules precede state and state precedes data.
+    omnirushCapabilitiesKnowledgePluginPath(),
+    omnirushExtensionsPreviewPluginPath(),
+    omnirushBudgetWrapPluginPath(),
+    omnirushOfficeAttachmentsPluginPath(),
+    omnirushSpreadsheetsPluginPath(),
+    omnirushPdfAttachmentsPluginPath(),
+    omnirushAnthropicAdaptiveThinkingPluginPath(),
+    omnirushAnthropicToolSchemaPluginPath(),
+    omnirushReasoningEffortPluginPath(),
+    omnirushTitleRecoveryPluginPath(),
+    omnirushSwarmPluginPath(),
+    // Buildathon projects only (the app lists them): the event's reproducibility rules.
+    omnirushBuildathonPluginPath(),
+  ];
+}
+
+/**
+ * Every engine plugin file omnirush.ai ships. They are bundled and need no
+ * npm install, so the engine is told (OMNIRUSH_PLUGINS_NO_DEPS) not to hold a
+ * project's first request until its `.opencode` folder's background install
+ * of @opencode-ai/plugin ends: on Windows that install took minutes, and
+ * every prompt in a new project failed meanwhile. User plugins still wait.
+ */
+export function omnirushOwnPluginPaths(): string[] {
+  return [
+    ...omnirushLeadingPluginPaths(),
+    managedPolicyPluginPath(true),
+    omnirushMcpPolicyPluginPath(),
+    omnirushPluginPath("omnirush-box"),
+  ];
+}
+
 /**
  * The folder of omnirush.ai's own on-demand skills (the omnirush-swarm skill),
  * handed to the engine through `skills.paths`. It lives beside the runtime
@@ -256,25 +298,7 @@ export function buildOmniRushRuntimeConfigObjectFromSnapshot(
       },
     },
     plugin: [
-      managedPolicyPluginPath(),
-      omnirushChromeDevtoolsPluginPath(),
-      // Registration order is prompt order: the knowledge plugin appends the
-      // operating rules first, then the extensions plugin adds app-control
-      // mechanics, live Connect steering, and the remote skill and Automation
-      // catalogs, so rules precede state and state precedes data.
-      omnirushCapabilitiesKnowledgePluginPath(),
-      omnirushExtensionsPreviewPluginPath(),
-      omnirushBudgetWrapPluginPath(),
-      omnirushOfficeAttachmentsPluginPath(),
-      omnirushSpreadsheetsPluginPath(),
-      omnirushPdfAttachmentsPluginPath(),
-      omnirushAnthropicAdaptiveThinkingPluginPath(),
-      omnirushAnthropicToolSchemaPluginPath(),
-      omnirushReasoningEffortPluginPath(),
-      omnirushTitleRecoveryPluginPath(),
-      omnirushSwarmPluginPath(),
-      // Buildathon projects only (the app lists them): the event's reproducibility rules.
-      omnirushBuildathonPluginPath(),
+      ...omnirushLeadingPluginPaths(),
       ...runtimePluginList(runtimeConfig),
       // This must be last: user/runtime plugins may not reintroduce MCP
       // configuration or replace the deny rules.

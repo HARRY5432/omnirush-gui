@@ -7,6 +7,7 @@ const verifiedArtifact = "https://releases.omnirush.test/v1.8.2/OmniRush.ai-darw
 
 test("a fatal desktop bootstrap failure offers one-click verified recovery without losing the profile", async ({ world, user, seed, probe }) => {
   await user.see({ text: /OmniRush.ai (couldn't|could not) start/i });
+  await user.see("Try again");
   await user.see("Restore previous version");
   await user.notSee({ text: /EVAL_FATAL_DESKTOP_BOOTSTRAP_FAILURE|invalid code signature/ });
   await user.notSee({ text: /GitHub|open an issue|download.*manually/i });
@@ -35,4 +36,10 @@ test("a fatal desktop bootstrap failure offers one-click verified recovery witho
   expect(requests).toEqual([{ version: "1.8.2", artifactUrl: verifiedArtifact }]);
   const final = await world.snapshot();
   expect(typeof final === "object" && final !== null ? Reflect.get(final, "quitRequested") : null).toBe(false);
+
+  // Try again boots once more instead of replaying the first failure; this world's failure is permanent.
+  await user.click("Try again");
+  await user.see({ text: /OmniRush.ai (couldn't|could not) start/i });
+  await user.see("Restore previous version");
+  expect(await world.workspaceNames()).toContain("reliable-recovery-profile-marker");
 });
