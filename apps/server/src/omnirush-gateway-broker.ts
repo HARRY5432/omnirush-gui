@@ -1371,7 +1371,7 @@ export class OmniRushGatewayBroker {
    * it reads as the oldest backend. Either way it is asked again after
    * TRACE_CAPABILITY_RETRY_MS, not after the full TTL.
    */
-  async sessionUploadCapabilities(options: { strict?: boolean } = {}): Promise<TraceCapabilities> {
+  async sessionUploadCapabilities(options: { strict?: boolean; maxAgeMs?: number } = {}): Promise<TraceCapabilities> {
     const none: TraceCapabilities = { schema_versions: [1, 2], canonical_trace: false };
     if (!this.state) {
       if (options.strict) throw new Error("capabilities unavailable: signed out");
@@ -1380,9 +1380,11 @@ export class OmniRushGatewayBroker {
     const state = this.state;
     const gatewayUrl = state.gatewayUrl;
     const key = this.capabilityKey(state);
+    // `maxAgeMs`: an answer older than that is asked again (the automatic compaction's check before it compacts).
     if (this.capabilityCache?.gatewayUrl === gatewayUrl
       && this.capabilityCache.accountKey === key
-      && this.capabilityCache.expiresAt > Date.now()) {
+      && this.capabilityCache.expiresAt > Date.now()
+      && (options.maxAgeMs === undefined || Date.now() - (this.capabilityCache.expiresAt - TRACE_CAPABILITY_TTL_MS) < options.maxAgeMs)) {
       return this.capabilityCache.capabilities;
     }
     const failed = () => {

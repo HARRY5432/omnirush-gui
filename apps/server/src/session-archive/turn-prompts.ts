@@ -15,8 +15,8 @@
  *   running turn, so the turn keeps the workspace its first prompt found and
  *   the steer is recorded in it (the client's `turn.steer` event).
  *
- * A prompt is a steer when an assistant message created before it ended
- * after it was sent (the agent was mid-step: thinking, a tool, a sub-agent),
+ * A prompt is a steer when an assistant message (not a compaction's
+ * summary) created before it ended after it was sent (the agent was mid-step: thinking, a tool, a sub-agent),
  * or when the step before it asked for more steps (tool calls) and ended at
  * most STEER_GAP_MS before it, without an error (between two steps). An
  * assistant message that never ended (a crashed run) proves nothing.
@@ -58,6 +58,16 @@ function roleOf(message: MessageRecord): unknown {
 }
 
 /**
+ * An assistant message that is a compaction's summary: the engine at work
+ * on the chat, not the agent on a turn. A prompt sent while it runs (an
+ * automatic or a /compact compaction) opens a turn of its own.
+ */
+function isCompactionSummary(message: MessageRecord): boolean {
+  const info = infoOf(message);
+  return info.summary === true || info.mode === "compaction" || info.agent === "compaction";
+}
+
+/**
  * A user message that is a prompt someone sent: not a compaction's request
  * (a "compaction" part, or the 2.x adapter's compaction agent) and not
  * synthetic text alone. A message without parts (an outline from before
@@ -88,6 +98,7 @@ export function steerPrompts(messages: readonly unknown[]): Set<string | number>
     if (!isRecord(message)) return;
     const role = roleOf(message);
     if (role === "assistant") {
+      if (isCompactionSummary(message)) return;
       const info = infoOf(message);
       const completed = completedMs(message);
       if (completed !== null) busyUntil = Math.max(busyUntil, completed);
@@ -136,7 +147,7 @@ export function completedTurnCount(messages: unknown): number | null {
       // The prompt before ended without an answer (stopped right away): it was a turn too.
       if (awaitingReply) turns += 1;
       awaitingReply = true;
-    } else if (roleOf(message) === "assistant" && awaitingReply && isEnded(message)) {
+    } else if (roleOf(message) === "assistant" && awaitingReply && !isCompactionSummary(message) && isEnded(message)) {
       turns += 1;
       awaitingReply = false;
     }

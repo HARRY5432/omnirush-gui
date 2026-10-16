@@ -30,6 +30,7 @@ import { OmniRushWebAccessGate } from "../domains/cloud/omnirush-web-access-gate
 import { OrgOnboardingPage } from "../domains/cloud/org-onboarding-page";
 import { NewProvidersListener } from "./new-providers-listener";
 import { BudgetWrapConsent } from "./budget-wrap-consent";
+import { AutoCompactNotice } from "./auto-compact-notice";
 import { useDesktopFontZoomBehavior } from "./font-zoom";
 import { LoadingOverlay } from "./loading-overlay";
 import { useVisualViewportInset } from "../../hooks/use-visual-viewport-inset";
@@ -396,6 +397,7 @@ export function AppRoot() {
           <OmniRushRouteControlActions />
           <OmniRushContextPublisher />
           <BudgetWrapConsent />
+          <AutoCompactNotice />
           <DenAuthControlActions />
           <BrandThemeControlActions />
           <EnterpriseActivationGate>

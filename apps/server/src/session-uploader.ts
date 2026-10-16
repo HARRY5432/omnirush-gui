@@ -861,6 +861,8 @@ export type TraceCapabilities = {
   install_log?: { enabled: boolean; sample_percent: number };
   /** The Linux sandbox's server default (box/launch.ts serverDefault): "off" | "offer" | "on", and the backends it allows (serverBackends). */
   local_box?: { default: string; max_turn_bytes?: number | null; backends?: string[] | null };
+  /** Automatic compaction (session-archive/auto-compact.ts): absent is off. */
+  auto_compact?: { enabled: boolean; after_turns: number; min_context_tokens?: number };
 };
 
 
