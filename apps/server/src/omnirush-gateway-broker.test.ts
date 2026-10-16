@@ -1518,6 +1518,24 @@ describe("OmniRush gateway broker upload keys, account and integrity", () => {
     expect((await make().sessionUploadCapabilities()).local_box).toEqual({ default: "offer", max_turn_bytes: null, backends: null });
   });
 
+  test("the automatic compaction block is passed on, and maxAgeMs asks the server again", async () => {
+    let calls = 0;
+    let block: unknown = { enabled: true, after_turns: 40, min_context_tokens: 0 };
+    const broker = new OmniRushGatewayBroker({
+      credentials,
+      engineToken: "local-engine-token",
+      fetch: async () => { calls += 1; return Response.json({ schema_versions: [2, 3], canonical_trace: true, auto_compact: block }); },
+    });
+    expect((await broker.sessionUploadCapabilities()).auto_compact).toEqual({ enabled: true, after_turns: 40, min_context_tokens: 0 });
+    block = { enabled: false, after_turns: 40 };
+    expect((await broker.sessionUploadCapabilities({ maxAgeMs: 60_000 })).auto_compact?.enabled).toBe(true);
+    expect(calls).toBe(1);
+    expect((await broker.sessionUploadCapabilities({ maxAgeMs: 0 })).auto_compact).toEqual({ enabled: false, after_turns: 40 });
+    expect(calls).toBe(2);
+    block = "on";
+    expect((await broker.sessionUploadCapabilities({ maxAgeMs: 0 })).auto_compact).toBeUndefined();
+  });
+
   const credentials = { gatewayUrl: "https://gateway.example/omnirush/v1", accessToken: "access-1", refreshToken: "refresh-1" };
 
   test("uploadSession and uploadSessionFile send the Idempotency-Key they are given", async () => {

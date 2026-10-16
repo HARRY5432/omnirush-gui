@@ -29,7 +29,7 @@ const infoOf = (message: unknown): unknown => (isRecord(message) && isRecord(mes
 const toMs = (value: unknown): number | null => (typeof value === "number" && Number.isFinite(value) ? value : null);
 
 /** Why a prompt counted as it did: a steer (`working`, `busy_unread`) or a turn start (the rest). */
-export type SteerReason = "idle" | "working" | "busy_unread" | "not_started" | "ending" | "status_unreadable";
+export type SteerReason = "idle" | "working" | "busy_unread" | "not_started" | "ending" | "compacting" | "status_unreadable";
 export type SteerVerdict = { steer: boolean; busy: boolean | null; reason: SteerReason; error?: string };
 
 /** A tool call relative to a steer: `sub_agent` is the task tool's child session. */
@@ -45,11 +45,17 @@ function isPrompt(message: unknown): boolean {
   return !(content.length > 0 && content.every((part) => part.type === "text" && part.synthetic === true));
 }
 
+/** A compaction's summary (the engine compacting the chat): no agent step, a prompt sent then opens a turn. */
+export function compactionSummary(message: unknown): boolean {
+  const info = infoOf(message);
+  return isRecord(info) && info.role === "assistant" && (info.summary === true || info.mode === "compaction" || info.agent === "compaction");
+}
+
 /** Whether the agent is mid-turn on `newest` (the session's newest message): an assistant step that has not ended normally. */
 export function workingOn(newest: unknown): boolean {
   const info = infoOf(newest);
   if (!isRecord(info) || info.role !== "assistant") return false;
-  if (info.error != null) return false;
+  if (info.error != null || compactionSummary(newest)) return false;
   const completed = toMs(isRecord(info.time) ? info.time.completed : undefined);
   return !(completed !== null && typeof info.finish === "string" && NORMAL_FINISH.has(info.finish));
 }
@@ -150,6 +156,7 @@ export function createSteerTracker(target: EngineTarget, { timeoutMs = 1_500, fe
       try {
         const [last] = (await newest(sessionId, 1)).slice(-1);
         if (workingOn(last)) return { steer: true, busy: true, reason: "working" };
+        if (compactionSummary(last)) return { steer: false, busy: true, reason: "compacting" };
         const info = infoOf(last);
         return { steer: false, busy: true, reason: isRecord(info) && info.role === "user" ? "not_started" : "ending" };
       } catch (error) {

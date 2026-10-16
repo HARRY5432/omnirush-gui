@@ -205,6 +205,8 @@ import { startCaptureService, type CaptureService } from "./capture-client.js";
 import type { LateWritesGate } from "./capture-host.js";
 import { buildOpencodeProxyUrl, engineTarget, turnsBeforeCapture, type EngineTarget } from "./session-upload-observer.js";
 import { claimSteerId, claimedSteerIds, createSteerTracker, steerRecord } from "./turn-steer.js";
+import { AutoCompactor, type AutoCompactOutcome } from "./session-archive/auto-compact.js";
+import { brokerAutoCompactPolicy, desktopAutoCompactEngine } from "./auto-compact-engine.js";
 import { OmniRushGatewayBroker } from "./omnirush-gateway-broker.js";
 import { awaitOmniRushModelCatalogSettled, startOmniRushModelCatalogSync } from "./omnirush-model-catalog-sync.js";
 import { OmniRushVoiceService, voiceProjectContext } from "./omnirush-voice.js";
@@ -234,6 +236,16 @@ const agentDiagnosticsLastRunByServer = new WeakMap<ServerConfig, Map<string, nu
 const agentDiagnosticsInFlightByServer = new WeakMap<ServerConfig, Set<string>>();
 const commandAdmissionsByServer = new WeakMap<ServerConfig, Map<string, { fingerprint: string; admittedAt: number }>>();
 const captureServicesByServer = new WeakMap<ServerConfig, CaptureService>();
+/** Automatic compaction (session-archive/auto-compact.ts), one per server: its counts live as long as the app. */
+const autoCompactorsByServer = new WeakMap<ServerConfig, AutoCompactor>();
+/**
+ * How long a prompt waits for its chat's automatic compaction: the window
+ * aborts a prompt request after 30 s, and the prompt's own capture steps
+ * may take up to about 13 s more. Past it the prompt goes out and the
+ * engine runs it right after the compaction.
+ */
+const AUTO_COMPACT_HOLD_MS = 10_000;
+const AUTO_COMPACT_SEED_WAIT_MS = 5_000;
 const turnActivityByServer = new WeakMap<ServerConfig, TurnActivity>();
 
 /** Whether the agent works on this server's engine (turn-activity.ts), for an embedding app that asked (onTurnActivity). */
@@ -1114,6 +1126,17 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
       });
     },
   });
+  // Automatic compaction: the server's policy (auto_compact) through the capabilities cache; the
+  // window shows a short notice (the "auto.compact.notice" query) while a chat compacts.
+  if (gatewayBroker.enabled) {
+    autoCompactorsByServer.set(config, new AutoCompactor({
+      policy: brokerAutoCompactPolicy((options) => gatewayBroker.sessionUploadCapabilities(options)),
+      holdMs: AUTO_COMPACT_HOLD_MS,
+      seedWaitMs: AUTO_COMPACT_SEED_WAIT_MS,
+      log: (level, message, attributes) => logger.log(level, message, attributes),
+      notify: (sessionID, stage) => { void uiControl.request("query", { id: "auto.compact.notice", args: { sessionID, stage } }); },
+    }));
+  }
   if (gatewayBroker.enabled) sessionIntegrityByServer.set(config, (sessionId, options) => gatewayBroker.sessionIntegrity(sessionId, options));
   voiceServicesByServer.set(config, new OmniRushVoiceService(gatewayBroker, {
     log: (level, message, attributes) => logger.log(level, message, attributes),
@@ -2228,6 +2251,16 @@ export async function proxyOpencodeRequest(input: {
   // and end snapshot behind.
   const captured = Boolean(capture?.uploadEnabled && uploadedSessionId && workspace && workspace.workspaceType !== "remote"
     && (capture.hasSession(uploadedSessionId) || await engineHasSession(baseUrl, auth, directory, uploadedSessionId)));
+  // Automatic compaction (session-archive/auto-compact.ts): a chat with the server's number of prompts
+  // since its last compaction is compacted before this prompt (never mid-turn, never a sub-agent's chat).
+  const autoCompactor = workspace && workspace.workspaceType !== "remote" && uploadedSessionId && isUploadPromptDispatch(method, proxyPath)
+    ? autoCompactorsByServer.get(input.config)
+    : undefined;
+  if (autoCompactor && uploadedSessionId) {
+    const outcome = await autoCompactor.beforePrompt(uploadedSessionId, desktopAutoCompactEngine(engineTarget(baseUrl, headers, search), uploadedSessionId), body)
+      .catch((error: unknown): AutoCompactOutcome => ({ action: "failed", reason: error instanceof Error ? error.message : String(error) }));
+    if (outcome.action !== "none") createServerLogger(input.config).log("info", "Automatic compaction.", { "auto_compact.action": outcome.action, "auto_compact.reason": outcome.reason ?? "", "auto_compact.turns": outcome.turns ?? -1 });
+  }
   // Steering (turn-steer.ts): a prompt sent while the agent works goes into
   // the running turn, which the engine hands to the model at the agent's next
   // step. Classified before anything is taken for it, with two small reads at
