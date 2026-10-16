@@ -7,6 +7,7 @@ import {
   buildOmniRushRuntimeConfig,
   buildOmniRushRuntimeConfigObjectFromSnapshot,
   keepOmniRushRuntimeConfigFileFresh,
+  omnirushOwnPluginPaths,
   omnirushRuntimeConfigFilePath,
   omnirushRuntimeSkillsDir,
   writeOmniRushRuntimeConfigFile,
@@ -95,6 +96,14 @@ describe("omnirush runtime config file", () => {
     const plugins = Array.isArray(parsed.plugin) ? parsed.plugin : [];
     expect(plugins.some((plugin) => typeof plugin === "string" && plugin.includes("omnirush-mcp-policy"))).toBe(true);
     expect(String(plugins.at(-1))).toContain("omnirush-mcp-policy");
+  });
+
+  test("every plugin omnirush.ai configures is named as its own, so the engine never holds a project for their install", () => {
+    const parsed = buildOmniRushRuntimeConfigObjectFromSnapshot({ plugin: ["user-plugin@1.0.0"] }, undefined, {}, undefined, undefined, undefined);
+    const plugins = Array.isArray(parsed.plugin) ? parsed.plugin.map(String) : [];
+    const own = new Set(omnirushOwnPluginPaths());
+    expect(plugins.filter((plugin) => !own.has(plugin))).toEqual(["user-plugin@1.0.0"]);
+    expect([...own].some((plugin) => /omnirush-box\.(?:ts|js)$/.test(plugin))).toBe(true);
   });
 
   test("managed browser restrictions use scalar actions in global and agent permissions", () => {

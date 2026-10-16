@@ -111,11 +111,18 @@ export function LoadingOverlay() {
         {error ? (
           <div className="flex w-full flex-col gap-3 text-[12px] leading-5">
             <div className="text-base font-medium text-dls-primary">omnirush.ai couldn't start</div>
-            <div className="text-dls-secondary">Return to a version that works on this computer.</div>
+            <div className="text-dls-secondary">Try again. If it keeps failing, return to a version that works on this computer.</div>
+            <button
+              type="button"
+              className="rounded-md bg-dls-accent px-3 py-2 font-medium text-dls-accent-foreground"
+              onClick={() => window.location.reload()}
+            >
+              Try again
+            </button>
             <button
               type="button"
               disabled={!releases.some((release) => release.marking === "previous")}
-              className="rounded-md bg-dls-accent px-3 py-2 font-medium text-dls-accent-foreground disabled:opacity-50"
+              className="rounded-md border border-dls-border px-3 py-2 font-medium text-dls-primary disabled:opacity-50"
               onClick={() => void runRecovery(window.__OMNIRUSH_ELECTRON__?.recovery?.restorePrevious)}
             >
               Restore previous version

@@ -3,7 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 
-import { createManagedOpencodeServer } from "./managed-opencode.js";
+import {
+  createManagedOpencodeServer,
+  createManagedProcessClose,
+  engineStartTimeoutMs,
+  pluginsNoDepsEnv,
+  type ManagedChildProcess,
+} from "./managed-opencode.js";
 import { createManagedOpencodeV2Server } from "./managed-opencode-v2.js";
 
 const roots: string[] = [];
@@ -152,5 +158,58 @@ describe("managed OpenCode startup", () => {
     expect(thrown.message).toContain("startup diagnostics from stdout");
     expect(thrown.message).toContain("fatal provider configuration mismatch");
     expect((await readFile(attemptsPath, "utf8")).trim().split("\n")).toEqual(["start"]);
+  });
+});
+
+describe("managed OpenCode on slow machines (Windows)", () => {
+  test("the start wait is longer on Windows and can be set", () => {
+    expect(engineStartTimeoutMs({}, "win32")).toBe(60_000);
+    expect(engineStartTimeoutMs({}, "linux")).toBe(15_000);
+    expect(engineStartTimeoutMs({ OMNIRUSH_ENGINE_START_TIMEOUT_MS: "90000" }, "linux")).toBe(90_000);
+    expect(engineStartTimeoutMs({ OMNIRUSH_ENGINE_START_TIMEOUT_MS: "soon" }, "darwin")).toBe(15_000);
+  });
+
+  test("a start that never listens fails with the start timeout", async () => {
+    const root = await createRoot();
+    const bin = await writeExecutable(root, "never-listens.mjs", ["setInterval(() => {}, 1000);"]);
+    const error = await createManagedOpencodeServer({ bin, cwd: root, env: { OMNIRUSH_ENGINE_START_TIMEOUT_MS: "300" } })
+      .then(() => null, (thrown: unknown) => thrown);
+    expect(error).toBeInstanceOf(Error);
+    expect(error instanceof Error ? error.message : "").toBe("Timeout waiting for OmniRush server after 300ms");
+  });
+
+  function stubbornChild(): ManagedChildProcess & { signals: (NodeJS.Signals | number | undefined)[] } {
+    const signals: (NodeJS.Signals | number | undefined)[] = [];
+    return {
+      pid: 4242,
+      exitCode: null,
+      signalCode: null,
+      killed: false,
+      signals,
+      kill: (signal) => { signals.push(signal); return true; },
+      once: () => undefined,
+    };
+  }
+
+  test("close succeeds when the process is gone but its exit event has not arrived", async () => {
+    const child = stubbornChild();
+    const lifecycle = createManagedProcessClose(child, { termTimeoutMs: 5, killTimeoutMs: 5, processExists: () => false });
+    await lifecycle.close();
+    expect(child.signals).toEqual(["SIGTERM", "SIGKILL"]);
+  });
+
+  test("close still reports a process that is really still running", async () => {
+    const child = stubbornChild();
+    const lifecycle = createManagedProcessClose(child, { termTimeoutMs: 5, killTimeoutMs: 5, processExists: () => true });
+    await expect(lifecycle.close()).rejects.toThrow("Managed OmniRush process did not exit after SIGKILL");
+  });
+
+  test("our bundled plugins are named to the engine, also by their real path", () => {
+    const env = pluginsNoDepsEnv(["/app/link/a.js", "/app/b.js", "/gone/c.js"], (file) => {
+      if (file === "/gone/c.js") throw new Error("ENOENT");
+      return file.replace("/link", "/real");
+    });
+    expect(env.OMNIRUSH_PLUGINS_NO_DEPS?.split("\n")).toEqual(["/app/link/a.js", "/app/real/a.js", "/app/b.js", "/gone/c.js"]);
+    expect(pluginsNoDepsEnv([])).toEqual({});
   });
 });
