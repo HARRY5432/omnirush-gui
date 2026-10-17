@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import { useEffect, useState } from "react";
-import type { RecoveryActionResult, RecoveryRelease } from "@/app/lib/desktop";
+import type { RecoveryActionResult, RecoveryRelease, StartFailureAnswer } from "@/app/lib/desktop";
 import type { DenAppVersionMetadata, DenDesktopConfig } from "@/app/lib/den";
 import { readFreshDenAppVersionMetadata } from "@/app/lib/version-gate";
 import { useDesktopConfig } from "@/react-app/domains/cloud/desktop-config-provider";
@@ -21,6 +21,12 @@ async function loadRecoveryPolicy(
   ]);
 }
 
+// One start-failure report per page load (Try again reloads the page).
+let startFailureReported: Promise<StartFailureAnswer | null> | null = null;
+
+export const RESET_APP_DATA_CONFIRM =
+  "Reset app data?\n\nomnirush.ai moves its local data (workspace list, chats, local settings) into a backup folder, nothing is deleted, and restarts. You stay signed in and your project files are not touched.";
+
 /**
  * Quiet, opaque boot overlay. Solid surface fill so nothing bleeds through.
  * A minimal typographic beat plus a small dot ticker. Fades once both the
@@ -39,6 +45,21 @@ export function LoadingOverlay() {
   const [releases, setReleases] = useState<RecoveryRelease[]>([]);
   const [showPicker, setShowPicker] = useState(false);
   const [actionState, setActionState] = useState<string | null>(null);
+  const [failureAnswer, setFailureAnswer] = useState<StartFailureAnswer | null>(null);
+
+  useEffect(() => {
+    if (!error) return;
+    const report = window.__OMNIRUSH_ELECTRON__?.startup?.reportFailure;
+    if (!report) return;
+    let cancelled = false;
+    startFailureReported ??= report({ message: error }).catch(() => null);
+    void startFailureReported.then((answer) => {
+      if (!cancelled) setFailureAnswer(answer);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [error]);
 
   useEffect(() => {
     if (!error) return;
@@ -93,6 +114,8 @@ export function LoadingOverlay() {
   };
 
   const useRelease = window.__OMNIRUSH_ELECTRON__?.recovery?.use;
+  const resetAppData = window.__OMNIRUSH_ELECTRON__?.startup?.resetAppData;
+  const hint = failureAnswer?.hint ?? null;
 
   if (!visible || (suppressForGateway && !error)) return null;
 
@@ -111,7 +134,14 @@ export function LoadingOverlay() {
         {error ? (
           <div className="flex w-full flex-col gap-3 text-[12px] leading-5">
             <div className="text-base font-medium text-dls-primary">omnirush.ai couldn't start</div>
-            <div className="text-dls-secondary">Try again. If it keeps failing, return to a version that works on this computer.</div>
+            {hint ? (
+              <div className="flex flex-col gap-1 rounded-md border border-dls-border px-3 py-2 text-left" data-testid="start-failure-hint">
+                <div className="font-medium text-dls-primary">{hint.title}</div>
+                <div className="text-dls-secondary">{hint.body}</div>
+              </div>
+            ) : (
+              <div className="text-dls-secondary">Try again. If it keeps failing, return to a version that works on this computer.</div>
+            )}
             <button
               type="button"
               className="rounded-md bg-dls-accent px-3 py-2 font-medium text-dls-accent-foreground"
@@ -159,6 +189,19 @@ export function LoadingOverlay() {
                   </div>
                 ))}
               </div>
+            ) : null}
+            {resetAppData ? (
+              <button
+                type="button"
+                className="rounded-md border border-dls-border px-3 py-2 font-medium text-dls-primary"
+                onClick={() => {
+                  if (!window.confirm(RESET_APP_DATA_CONFIRM)) return;
+                  setActionState("Restarting with fresh app data…");
+                  void resetAppData().catch(() => setActionState("Reset could not be started. Please retry."));
+                }}
+              >
+                Reset app data
+              </button>
             ) : null}
             {actionState ? <div className="text-dls-secondary">{actionState}</div> : null}
             <details className="text-left text-dls-secondary">

@@ -39,6 +39,18 @@ import { applyBrandAppName } from "./brand-app-name.mjs";
 import { createBrowserLoginSync } from "./browser-login-sync.mjs";
 import { createBrowserPanel } from "./browser-panel.mjs";
 import { createWorkspaceStore } from "./workspace-store.mjs";
+import {
+  START_REPORT_FILE,
+  antivirusHint,
+  buildStartFailureReport,
+  classifyStartFailure,
+  cpuHasAvx2,
+  createStartReporter,
+  inspectEngineBinary,
+  scrubStartMessage,
+  startFailureHint,
+} from "./start-report.mjs";
+import { applyPendingStartReset, scheduleStartReset, startResetTargets } from "./start-reset.mjs";
 import { createTerminalSessions, terminalShells } from "./terminal-sessions.mjs";
 import {
   buildNukeManifest,
@@ -1430,6 +1442,104 @@ const runtimeManager = createRuntimeManager({
   // Session upload envelopes report environment.app_version from the desktop build, not the server package.
   appVersion: app.getVersion(),
 });
+
+// One impersonal report when the app cannot start (start-report.mjs).
+const startReporter = createStartReporter({
+  filePath: path.join(app.getPath("userData"), START_REPORT_FILE),
+  send: (body) => omnirushAccountStore.sendDiagnostic(body),
+  log: (message) => console.warn(message),
+});
+let startAttempt = 0;
+let startAttemptStartedAt = Date.now();
+/** The current start attempt's error, until the window reports the failure. */
+let pendingStartFailure = null;
+/** The attempt last reported, and what the window was told for it. */
+let reportedStart = { attempt: -1, answer: null };
+
+function noteStartAttempt() {
+  startAttempt += 1;
+  startAttemptStartedAt = Date.now();
+  pendingStartFailure = null;
+}
+
+function noteStartFailure(error) {
+  pendingStartFailure = { error, attempt: Math.max(1, startAttempt), elapsedMs: Date.now() - startAttemptStartedAt };
+}
+
+async function readSidecarVersions(files) {
+  for (const file of files) {
+    try {
+      return JSON.parse(await readFile(file, "utf8"));
+    } catch {
+      // Next candidate.
+    }
+  }
+  return null;
+}
+
+function startReportScrubRoots() {
+  const roots = [os.homedir(), os.tmpdir(), process.resourcesPath, process.env.USERPROFILE, process.env.LOCALAPPDATA, process.env.APPDATA];
+  for (const name of ["userData", "appData", "home", "temp"]) {
+    try {
+      roots.push(app.getPath(name));
+    } catch {
+      // Not every path exists on every platform.
+    }
+  }
+  try {
+    roots.push(path.dirname(app.getPath("exe")));
+  } catch {
+    // Ignore.
+  }
+  return roots;
+}
+
+/**
+ * The window shows "couldn't start": classify the attempt's error (or the
+ * window's message when the main process saw none), send one report for
+ * the attempt in the background, and answer with the hint to show.
+ */
+async function reportStartFailure(input = {}) {
+  const failure = pendingStartFailure ?? {
+    error: new Error(String(input?.message ?? "").slice(0, 2000)),
+    attempt: Math.max(1, startAttempt),
+    elapsedMs: Date.now() - startAttemptStartedAt,
+    fromWindow: true,
+  };
+  if (reportedStart.attempt === failure.attempt && reportedStart.answer) return reportedStart.answer;
+  const classified = classifyStartFailure(failure.error, { fallbackPhase: failure.fromWindow ? "renderer" : "unknown" });
+  if (failure.fromWindow && classified.category === "unknown") classified.category = "renderer";
+  const binary = runtimeManager.engineBinaryInfo();
+  const versions = await readSidecarVersions(binary.versionsFiles);
+  const engine = await inspectEngineBinary({ resolved: binary.resolved, bundledCandidates: binary.bundledCandidates, versions });
+  const avHint = antivirusHint(classified, engine, { packaged: app.isPackaged });
+  let userName = "";
+  try {
+    userName = os.userInfo().username;
+  } catch {
+    // No user name to scrub.
+  }
+  const draft = {
+    classified,
+    engine,
+    avHint,
+    message: scrubStartMessage(failure.error, { roots: startReportScrubRoots(), userName }),
+    appVersion: app.getVersion(),
+    engineVersion: versions?.opencode?.version,
+    elapsedMs: failure.elapsedMs,
+    attempt: failure.attempt,
+  };
+  const category = buildStartFailureReport(draft).category;
+  const answer = { category, avHint, hint: startFailureHint(category, { avHint }) };
+  reportedStart = { attempt: failure.attempt, answer };
+  void (async () => {
+    const cpuAvx2 = await cpuHasAvx2().catch(() => null);
+    const outcome = await startReporter.report(buildStartFailureReport({ ...draft, cpuAvx2 }));
+    console.info(`[start-report] ${category}: ${outcome}`);
+  })().catch((error) => console.warn("[start-report] failed", error instanceof Error ? error.name : "error"));
+  return answer;
+}
+
 const initialRunnerBootstrap = workspaceStore.readDesktopBootstrapConfigSync();
 const legacyRunnerBaseUrls = [
   initialRunnerBootstrap.apiBaseUrl,
@@ -1593,10 +1703,14 @@ async function bootRuntimeForSelectedWorkspace() {
 }
 
 function startRuntimeBootstrap() {
-  const pending = bootRuntimeForSelectedWorkspace().catch((error) => ({
-    ok: false,
-    error: error instanceof Error ? error.message : String(error),
-  }));
+  noteStartAttempt();
+  const pending = bootRuntimeForSelectedWorkspace().catch((error) => {
+    noteStartFailure(error);
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  });
   runtimeBootstrapPromise = pending;
   // A failed boot is not kept: the next request (the window's Try again)
   // boots again instead of being handed the same failure.
@@ -1984,6 +2098,16 @@ const desktopCommandHandlers = {
   "runtimeBootstrap": async (event, ...args) => {
       return ensureRuntimeBootstrap();
   },
+  "startupReportFailure": async (event, ...args) => {
+      return reportStartFailure(args[0] ?? {});
+  },
+  "startupResetAppData": async () => {
+      await scheduleStartReset({ userDataPath: app.getPath("userData") });
+      turnGuard.allowQuit();
+      app.relaunch();
+      app.quit();
+      return { ok: true };
+  },
   "runtimeStatus": async (event, ...args) => {
       return runtimeManager.runtimeStatus();
   },
@@ -2250,7 +2374,13 @@ const desktopCommandHandlers = {
       return desktopAutomationRunner.configure(args[0] ?? null);
   },
   "omnirushServerRestart": async (event, ...args) => {
-      return runtimeManager.omnirushServerRestart({ source: "renderer", ...(args[0] ?? {}) });
+      try {
+        return await runtimeManager.omnirushServerRestart({ source: "renderer", ...(args[0] ?? {}) });
+      } catch (error) {
+        // Kept for the start report if the window then shows "couldn't start".
+        noteStartFailure(error);
+        throw error;
+      }
   },
   "pickDirectory": async (event, ...args) => {
       const options = args[0] ?? {};
@@ -3101,6 +3231,15 @@ or use: pnpm dev:worktree`);
     }).catch((error) => {
       console.warn("[nuke] pending cleanup failed", error);
     });
+    await applyPendingStartReset({
+      userDataPath: app.getPath("userData"),
+      targets: startResetTargets({ userDataPath: app.getPath("userData"), env: process.env, homedir: os.homedir() }),
+      log: (message) => console.info(message),
+    });
+    // Start-failure reports queued while signed out or offline.
+    setTimeout(() => {
+      void startReporter.flush().catch(() => undefined);
+    }, 20_000).unref?.();
     const bootstrapConfig = await workspaceStore.getDesktopBootstrapConfig();
     currentDisplayAppName = applyBrandAppName(
       BLANK_SLATE_LAUNCH.enabled || DESKTOP_DISTRIBUTION.flavor === "enterprise"

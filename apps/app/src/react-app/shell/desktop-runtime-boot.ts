@@ -118,16 +118,21 @@ export function useDesktopRuntimeBoot() {
 
         const startServerWithoutDesktopWorkspace = async () => {
           setPhase("starting-engine", "Starting omnirush.ai server");
+          let restartError = "";
           const serverInfo = await omnirushServerRestart({
             reason: "renderer_boot_without_local_workspace",
             source: "desktop-runtime-boot",
             remoteAccessEnabled: preferredRemoteAccess,
           }).catch((error) => {
             console.warn("[desktop-boot] omnirushServerRestart failed:", error);
+            restartError = error instanceof Error ? error.message : safeStringify(error);
             return null;
           });
           if (!isOmniRushServerInfoLike(serverInfo) || !isOmniRushServerReady(serverInfo)) {
-            setError("omnirush.ai server did not finish starting. Please restart omnirush.ai.");
+            // Technical details shows the cause, not only that it failed.
+            setError(restartError
+              ? `omnirush.ai server did not finish starting: ${restartError}`
+              : "omnirush.ai server did not finish starting. Please restart omnirush.ai.");
             return;
           }
           publishOmniRushServerInfo(serverInfo);

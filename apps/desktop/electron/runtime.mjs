@@ -2671,6 +2671,12 @@ export function createRuntimeManager({
     runtimeStatus,
     engineInfo,
     engineDoctor,
+    /** The engine binary a start would use and where the bundled copy belongs (start-report.mjs). */
+    engineBinaryInfo: () => ({
+      resolved: resolveOpencodeBinary(),
+      bundledCandidates: sidecarDirs.flatMap((directory) => binaryFileNames("opencode").map((name) => path.join(directory, name))),
+      versionsFiles: sidecarDirs.map((directory) => path.join(directory, "versions.json")),
+    }),
     engineInstall,
     omnirushServerInfo,
     omnirushServerRestart: (options) => withRuntimeLifecycle(() => omnirushServerRestart(options)),

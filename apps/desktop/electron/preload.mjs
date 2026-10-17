@@ -136,6 +136,16 @@ contextBridge.exposeInMainWorld("__OMNIRUSH_ELECTRON__", {
       return ipcRenderer.invoke("omnirush:desktop", "__evalRelaunch");
     },
   },
+  startup: {
+    /** The window shows "couldn't start": one report per attempt, answered with the hint to show. */
+    reportFailure(input) {
+      return ipcRenderer.invoke("omnirush:desktop", "startupReportFailure", input ?? {});
+    },
+    /** Move the local start state into a backup folder on restart, then restart. */
+    resetAppData() {
+      return ipcRenderer.invoke("omnirush:desktop", "startupResetAppData");
+    },
+  },
   nuke: {
     preview(options) {
       return ipcRenderer.invoke("omnirush:desktop", "nukeOmniRushAndOpencodeConfigPreview", options);
