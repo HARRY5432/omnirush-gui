@@ -743,6 +743,40 @@ describe("SessionArchiver final archives", () => {
     expect(await readdir(join(state, ARCHIVE_STATE_DIRECTORY, "baselines"))).toHaveLength(1);
   });
 
+  test("a final archive after turns that changed nothing takes the last completed turn, never one below the chain's", async () => {
+    const server = new FakeArchiveServer();
+    const { root } = await project();
+    const state = await tempDir("state");
+    const subject = archiver(server, state);
+    const id = "ses_final_turn_seen";
+
+    expect((await subject.captureBase(id, root)).status).toBe("queued");
+    await writeFile(join(root, "src/app.ts"), "export const app = 2;\n");
+    expect(await subject.captureDelta(id, root, 1)).toMatchObject({ status: "queued", sequence: 1 });
+    // Turns 2 and 3 change nothing: no delta.
+    expect(await subject.captureDelta(id, root, 2)).toMatchObject({ status: "skipped", reason: "unchanged" });
+    expect(await subject.captureDelta(id, root, 3)).toMatchObject({ status: "skipped", reason: "unchanged" });
+    // The user edits after turn 3: the final is turn 3's.
+    await writeFile(join(root, "src/user.ts"), "export const user = 1;\n");
+    expect(await subject.captureFinal(id, "idle")).toMatchObject({ status: "queued", sequence: 2 });
+    // A count that went back (a reverted turn) is no turn: the next final stays at 3.
+    expect(await subject.captureDelta(id, root, 2)).toEqual({ status: "skipped", reason: "stale_turn" });
+    await writeFile(join(root, "src/user.ts"), "export const user = 2;\n");
+    expect(await subject.captureFinal(id, "turn_incomplete")).toMatchObject({ status: "queued", sequence: 3 });
+    await writeFile(join(root, "src/app.ts"), "export const app = 4;\n");
+    expect(await subject.captureDelta(id, root, 4)).toMatchObject({ status: "queued", sequence: 4 });
+    // Turn 5 changes nothing; turn 6's count cannot be read: its delta follows turn 5.
+    expect(await subject.captureDelta(id, root, 5)).toMatchObject({ status: "skipped", reason: "unchanged" });
+    await writeFile(join(root, "src/app.ts"), "export const app = 6;\n");
+    expect(await subject.captureDelta(id, root, null)).toMatchObject({ status: "queued", sequence: 5 });
+    expect(await subject.drain()).toMatchObject({ uploaded: 6, pending: 0, dropped: 0 });
+
+    const objects = server.objects();
+    expect(objects.map((object) => [object.request.kind, object.request.turn])).toEqual([["base", 0], ["delta", 1], ["delta", 3], ["delta", 3], ["delta", 4], ["delta", 6]]);
+    const manifests = await Promise.all(objects.map(async (object) => manifestOf(await openArchive(object.object!))));
+    expect(manifests.slice(1).map((manifest) => [manifest.turn, manifest.trigger])).toEqual([[1, "turn"], [3, "final"], [3, "final"], [4, "turn"], [6, "turn"]]);
+  });
+
   test("a plain folder's final archives pass the all-folders refusals and policy again: one while it is on, none while it is off", async () => {
     const server = new FakeArchiveServer();
     server.policy = { all_folders: true };
@@ -1237,14 +1271,14 @@ describe("SessionArchiver touched files", () => {
     await second.stop();
     expect(await readdir(join(state, ARCHIVE_STATE_DIRECTORY, "touched"))).toHaveLength(1);
 
-    // Online again, and the kept answer is old: the base carries every path from both runs, numbered with the turns seen.
+    // Online again, and the kept answer is old: the base carries every path from both runs, numbered with the turns seen (turn 2 ended while the policy was off).
     server.apiHook = null;
     now += POLICY_TTL_MS;
     const third = make();
     expect(await third.captureFinal(id, "idle")).toMatchObject({ status: "queued", kind: "base", sequence: 0 });
     expect((await third.drain()).uploaded).toBe(1);
     const [base] = server.objects();
-    expect(base!.request).toMatchObject({ session_id: id, kind: "base", turn: 1, marker: "touched" });
+    expect(base!.request).toMatchObject({ session_id: id, kind: "base", turn: 2, marker: "touched" });
     expect(await names(base!)).toEqual(["__omnirush__/manifest.json", "chart.svg", "draft.md"]);
   });
 
