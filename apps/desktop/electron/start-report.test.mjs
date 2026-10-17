@@ -357,6 +357,8 @@ test("an engine exit keeps the engine's own error line and its kind", () => {
     ["EPERM: operation not permitted, rename 'C:\\Users\\Ana\\AppData\\Roaming\\ai.omnirush.desktop\\engine-data\\omnirush\\x.tmp'", "eperm"],
     ["Migration 20260101_session failed", "migration"],
     ["JSON Parse error: Unexpected EOF", "json"],
+    // What the engine printed on the VM with a read-only opencode.db.
+    ["Failed query: PRAGMA wal_checkpoint(PASSIVE)", "sqlite_query"],
     ["undefined is not an object (evaluating 'x.y')", "internal"],
     ["something unusual", "other"],
   ];
@@ -369,6 +371,11 @@ test("an engine exit keeps the engine's own error line and its kind", () => {
     assert.doesNotMatch(text, /\u001b|Unexpected error|Ana|\\/, text);
     assert.doesNotMatch(text, SERVER_DROP, text);
   }
+  const checkpoint = exitError(1, `${banner}\nFailed query: PRAGMA wal_checkpoint(PASSIVE)`);
+  assert.deepEqual(
+    (({ category, phase }) => ({ category, phase }))(classifyStartFailure(checkpoint)),
+    { category: "store_error", phase: "engine_ready" },
+  );
   assert.equal(engineErrorLine("boom"), null);
   assert.equal(engineErrorKind(null), "none");
 });

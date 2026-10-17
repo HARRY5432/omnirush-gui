@@ -119,6 +119,8 @@ export function engineErrorKind(line) {
   if (!text) return "none";
   const sqlite = sqliteCodeOf(null, text);
   if (sqlite) return sqlite.toLowerCase();
+  // Drizzle's wrapper around a failed SQLite statement (the SQLite error itself is only in its cause).
+  if (/^Failed query:/i.test(text)) return "sqlite_query";
   if (/migrat/i.test(text)) return "migration";
   if (/\bEPERM\b|operation not permitted/i.test(text)) return "eperm";
   if (/\bEACCES\b|permission denied|access is denied/i.test(text)) return "eacces";
@@ -225,6 +227,8 @@ export function classifyStartFailure(rawError, { fallbackPhase = "unknown" } = {
       return set("config_invalid", "engine_ready");
     }
     if (sqliteCode === "SQLITE_READONLY") return set("store_readonly", "engine_ready", { errorCode: "SQLITE_READONLY" });
+    // The engine's store refused a statement (a read-only, locked or damaged opencode.db).
+    if (engineLine && engineErrorKind(engineLine) === "sqlite_query") return set("store_error", "engine_ready");
     if (sqlite) return set("store_error", "engine_ready", { errorCode: knownCode(sqlite[1]) ?? result.errorCode });
     if ((status !== null && status >= 0xc0000000) || signal) return set("engine_crash", "engine_ready");
     return set("engine_exit", "engine_ready");

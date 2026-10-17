@@ -1545,11 +1545,16 @@ async function reportStartFailure(input = {}) {
     elapsedMs: failure.elapsedMs,
     attempt: failure.attempt,
   };
-  const category = buildStartFailureReport(draft).category;
+  let category = buildStartFailureReport(draft).category;
   // Which store files cannot be written, and whether this start runs elevated (start-store-check.mjs).
   const storeCheck = category === "store_readonly" || category === "store_error"
     ? await checkStoreAccess({ files: startStoreFiles() }).catch(() => null)
     : null;
+  // A store error whose files cannot be written is a read-only store (the engine only says "Failed query").
+  if (category === "store_error" && storeCheck?.blockedStores.length) {
+    category = "store_readonly";
+    classified.category = "store_readonly";
+  }
   const engineStoreFailed = classified.phase === "engine_ready" || storeCheck?.blockedStores.includes("engine") === true;
   // Reset app data moves the engine's data (chats, sessions not yet uploaded) only when its store failed.
   const resetIncludesChats = (category === "store_error" || category === "store_readonly") && engineStoreFailed;
