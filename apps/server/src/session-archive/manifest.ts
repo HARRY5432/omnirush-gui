@@ -14,6 +14,7 @@ import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { clampUploadBytes, isUploadPathDenied, REGENERABLE_DIR_NAMES, stripRemoteUserinfo } from "../session-uploader.js";
 import { ATTACHMENTS_ROOT_NAME } from "./attachments.js";
+import { isArchiveCodeFile, needsCodeCheck, readCleanCodeFile } from "./code-files.js";
 import type { ExcludedList, ExcludedReason } from "./capture-v2.js";
 import { gitSkipReason } from "../command-guard.js";
 import { hintGarbageCollection } from "./files.js";
@@ -172,7 +173,9 @@ export function compareArchivePaths(left: string, right: string): number {
 /**
  * True when a file or symlink must be left out of the archive (section 5.3):
  * the session uploader's credential denylist, with git internals exempt and
- * `node_modules` not counted as a denial.
+ * `node_modules` not counted as a denial. A whole-folder or touched-files
+ * scan still keeps a denylisted source file that passes the content check
+ * of code-files.ts.
  */
 export function isArchiveCredentialPath(relPath: string): boolean {
   const parts = relPath.split("/");
@@ -610,10 +613,15 @@ export async function scanArchiveTree(root: string, options: ScanOptions = {}): 
       note(rel, "special", "file");
       return;
     }
-    if (!includeCredentials && isArchiveCredentialPath(rel)) {
-      excluded.credential += 1;
-      note(rel, "credential", "file");
-      return;
+    // A source file named like a key store is decided by its content once it is known not to be ignored (code-files.ts).
+    let codeCheck = false;
+    if (!includeCredentials && (isArchiveCredentialPath(rel) || (stats.isFile() && needsCodeCheck(rel.split("/"))))) {
+      if (!stats.isFile() || !isArchiveCodeFile(rel.split("/"))) {
+        excluded.credential += 1;
+        note(rel, "credential", "file");
+        return;
+      }
+      codeCheck = true;
     }
     if (stats.isSymbolicLink()) {
       let target: string | null;
@@ -635,6 +643,20 @@ export async function scanArchiveTree(root: string, options: ScanOptions = {}): 
       return;
     }
     const entry: ScannedEntry = { path: rel, type: "file", size: Number(stats.size), sha256: null, ...statFields(stats) };
+    if (codeCheck) {
+      const clean = await readCleanCodeFile(abs, rel, (opened) => isSameFileIdentity(entry, opened));
+      if (!clean) {
+        excluded.credential += 1;
+        note(rel, "credential", "file");
+        return;
+      }
+      // Pass 2 writes exactly the checked bytes.
+      entry.content = clean.bytes;
+      entry.size = clean.bytes.length;
+      entry.sha256 = clean.sha256;
+      entries.push(entry);
+      return;
+    }
     if (isGitConfigPath(rel) && entry.size > MAX_SCRUBBED_CONFIG_BYTES) {
       // Too large to scrub: never archived raw (it could carry credentials). Listed with its size.
       excluded.special += 1;

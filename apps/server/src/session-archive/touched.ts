@@ -39,6 +39,7 @@ import {
   type ExcludedCounts,
   type ScannedEntry,
 } from "./manifest.js";
+import { isArchiveCodeFile, needsCodeCheck, readCleanCodeFile } from "./code-files.js";
 import { stateKey } from "./files.js";
 import { touchedIgnoredPaths } from "./ignore.js";
 import { REGENERABLE_DIR_NAMES } from "../session-uploader.js";
@@ -196,6 +197,7 @@ export async function scanTouchedFiles(root: string, paths: Iterable<string>, op
   const gone = new Set<string>();
   const entries: ScannedEntry[] = [];
   const seen = new Set<string>();
+  const codeChecks = new Set<ScannedEntry>();
   const dirs = new Map<string, Promise<DirState>>();
 
   /** Whether `relDir` is a real folder under real folders (a symlink or a file in the way is "gone": the path is not inside the root). */
@@ -240,9 +242,14 @@ export async function scanTouchedFiles(root: string, paths: Iterable<string>, op
       excluded.app_state += 1;
       return;
     }
-    if (!includeCredentials && isArchiveCredentialPath(path)) {
-      excluded.credential += 1;
-      return;
+    // A source file named like a key store is decided once it is known not to be ignored, by its content (code-files.ts).
+    let codeCheck = false;
+    if (!includeCredentials && (isArchiveCredentialPath(path) || needsCodeCheck(parts))) {
+      if (!isArchiveCodeFile(parts)) {
+        excluded.credential += 1;
+        return;
+      }
+      codeCheck = true;
     }
     if (parts.length > 1) {
       const parent = await dirState(parts, parts.length - 1);
@@ -292,10 +299,40 @@ export async function scanTouchedFiles(root: string, paths: Iterable<string>, op
       excluded.special += 1;
       return;
     }
-    entries.push({ path, type: "file", size: Number(stats.size), sha256: null, ...statFields(stats) });
+    const entry: ScannedEntry = { path, type: "file", size: Number(stats.size), sha256: null, ...statFields(stats) };
+    entries.push(entry);
+    if (codeCheck) codeChecks.add(entry);
   };
 
   await forEachBounded([...paths], STAT_CONCURRENCY, (path) => visit(path, 0));
+
+  // Source files named like key stores: never when git ignores them (even where ignored files are kept), else only with clean content.
+  if (codeChecks.size > 0) {
+    const ignoredCode = await touchedIgnoredPaths(base, [...codeChecks].map((entry) => entry.path), signal);
+    const dropped = new Set<ScannedEntry>();
+    await forEachBounded([...codeChecks], HASH_CONCURRENCY, async (entry) => {
+      signal?.throwIfAborted();
+      const absolute = join(base, ...entry.path.split("/"));
+      access(absolute);
+      const clean = ignoredCode.has(entry.path) ? null : await readCleanCodeFile(absolute, entry.path, (opened) => isSameFileIdentity(entry, opened));
+      if (!clean) {
+        dropped.add(entry);
+        return;
+      }
+      // Pass 2 writes exactly the checked bytes.
+      entry.content = clean.bytes;
+      entry.size = clean.bytes.length;
+      entry.sha256 = clean.sha256;
+    });
+    if (dropped.size > 0) {
+      excluded.credential += dropped.size;
+      // An archived file that now fails the check leaves the chain like a gone one.
+      for (const entry of dropped) gone.add(entry.path);
+      const remaining = entries.filter((entry) => !dropped.has(entry));
+      entries.length = 0;
+      entries.push(...remaining);
+    }
+  }
 
   // Git's answer for just the files found, so the folder is never walked (none asked when ignored files are kept).
   const ignoredPaths = options.includeIgnored === true ? new Set<string>() : await touchedIgnoredPaths(base, entries.map((entry) => entry.path), signal);
@@ -313,6 +350,7 @@ export async function scanTouchedFiles(root: string, paths: Iterable<string>, op
   const buffers: Buffer[] = [];
   await forEachBounded(entries, HASH_CONCURRENCY, async (entry) => {
     signal?.throwIfAborted();
+    if (entry.content) return;
     const cached = cache?.lookup(entry) ?? null;
     if (cached) {
       entry.sha256 = cached;
