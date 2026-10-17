@@ -1479,17 +1479,18 @@ async function readSidecarVersions(files) {
 
 function startReportScrubRoots() {
   const roots = [os.homedir(), os.tmpdir(), process.resourcesPath, process.env.USERPROFILE, process.env.LOCALAPPDATA, process.env.APPDATA];
-  for (const name of ["userData", "appData", "home", "temp"]) {
+  for (const read of [
+    () => app.getPath("userData"),
+    () => app.getPath("appData"),
+    () => app.getPath("home"),
+    () => app.getPath("temp"),
+    () => path.dirname(app.getPath("exe")),
+  ]) {
     try {
-      roots.push(app.getPath(name));
+      roots.push(read());
     } catch {
       // Not every path exists on every platform.
     }
-  }
-  try {
-    roots.push(path.dirname(app.getPath("exe")));
-  } catch {
-    // Ignore.
   }
   return roots;
 }

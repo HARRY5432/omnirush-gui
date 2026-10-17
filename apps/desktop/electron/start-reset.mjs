@@ -62,6 +62,15 @@ export async function scheduleStartReset({ userDataPath, now = () => new Date() 
  * `<userData>/start-reset-<time>/` (or, across drives, beside itself with a
  * `.omnirush-reset-<time>` suffix). Never throws; returns what moved.
  */
+/**
+ * @param {{
+ *   userDataPath: string;
+ *   targets: Array<{ label: string; path: string }>;
+ *   now?: () => Date;
+ *   renameImpl?: (from: string, to: string) => Promise<void>;
+ *   log?: (message: string) => void;
+ * }} options
+ */
 export async function applyPendingStartReset({ userDataPath, targets, now = () => new Date(), renameImpl = rename, log = () => {} }) {
   const marker = path.join(userDataPath, START_RESET_PENDING);
   if (!existsSync(marker)) return { ran: false, moved: [], failed: [] };

@@ -8,17 +8,21 @@ test("couldn't start: one report, the hint it answers with, and Reset app data a
   if (registeredDom) GlobalRegistrator.register({ url: "http://localhost/" });
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
 
+  // Stable values, as the real providers keep them across renders.
+  const desktopConfig = { config: {}, refreshFresh: async () => ({}) };
+  const cloudStatus = { gatewayMode: false, visible: false, viewModel: { variant: "hidden" } };
   mock.module("@/react-app/domains/cloud/desktop-config-provider", () => ({
-    useDesktopConfig: () => ({ config: {}, refreshFresh: async () => ({}) }),
+    useDesktopConfig: () => desktopConfig,
   }));
   mock.module("@/react-app/shell/cloud-workspace-overlay", () => ({
-    useCloudWorkspaceStatus: () => ({ gatewayMode: false, visible: false, viewModel: { variant: "hidden" } }),
+    useCloudWorkspaceStatus: () => cloudStatus,
   }));
   const technical = "spawn C:\\Program Files\\omnirush.ai\\resources\\sidecars\\opencode.exe ENOENT";
+  const bootState = { phase: "error", routeReady: false, message: "Something went wrong", error: technical };
   mock.module("@/react-app/shell/boot-state", () => ({
     bootOverlayCanHide: () => false,
     useBootOverlayVisible: () => true,
-    useBootState: () => ({ phase: "error", routeReady: false, message: "Something went wrong", error: technical }),
+    useBootState: () => bootState,
   }));
 
   const reportFailure = mock(async (_input: { message?: string | null }) => ({

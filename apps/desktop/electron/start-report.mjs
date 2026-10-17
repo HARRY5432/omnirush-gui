@@ -243,7 +243,16 @@ function execText(file, args, timeoutMs) {
  * Whether the CPU has AVX2 (the bundled engine's x64 build needs it), or
  * null when unknown or not applicable (arm64).
  */
-export async function cpuHasAvx2({ platform = process.platform, arch = process.arch, release = os.release(), readText = readFile, run = execText } = {}) {
+/**
+ * @param {{
+ *   platform?: string;
+ *   arch?: string;
+ *   release?: string;
+ *   readText?: (file: string, encoding: "utf8") => Promise<string>;
+ *   run?: (file: string, args: string[], timeoutMs: number) => Promise<string | null>;
+ * }} [options]
+ */
+export async function cpuHasAvx2({ platform = process.platform, arch = process.arch, release = os.release(), readText = (file, encoding) => readFile(file, encoding), run = execText } = {}) {
   if (arch !== "x64") return null;
   try {
     if (platform === "linux") {
@@ -360,8 +369,8 @@ export function buildStartFailureReport({
   avHint,
   cpuAvx2 = null,
   message = null,
-  appVersion,
-  engineVersion,
+  appVersion = "unknown",
+  engineVersion = "unknown",
   electronVersion = process.versions.electron,
   platform = process.platform,
   arch = process.arch,
@@ -492,6 +501,15 @@ function today(nowMs) {
  * older than six days) and sent by `flush()` on a later start.
  *
  * `send(body)` resolves to a fetch Response, or null while signed out.
+ */
+/**
+ * @param {{
+ *   filePath: string;
+ *   send: (body: object) => Promise<{ ok: boolean; status: number } | null>;
+ *   now?: () => number;
+ *   maxPerDay?: number;
+ *   log?: (message: string) => void;
+ * }} options
  */
 export function createStartReporter({ filePath, send, now = Date.now, maxPerDay = MAX_REPORTS_PER_DAY, log = () => {} }) {
   let chain = Promise.resolve();

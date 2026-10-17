@@ -59,7 +59,7 @@ test("start failures are classified from the error the start threw", () => {
     assert.deepEqual(
       { category: result.category, phase: result.phase, errorCode: result.errorCode, avHint: result.avHint },
       { category, phase, errorCode, avHint },
-      error.message,
+      String(error instanceof Error ? error.message : error),
     );
   }
   const workspace = Object.assign(new Error("Workspace path is not accessible: D:\\Clients\\Acme"), {
