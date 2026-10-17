@@ -1501,6 +1501,21 @@ function startReportScrubRoots() {
   return roots;
 }
 
+/** Set by restartApp(): the quit below ends in a restart. */
+let restartAfterQuit = false;
+
+/**
+ * Quit and open again (Fix and restart, Reset / Restore app data). The
+ * relaunch happens at the end of the before-quit teardown: when an update is
+ * staged, its installer opens the new version instead, so the old exe never
+ * starts while the installer replaces it.
+ */
+function restartApp() {
+  restartAfterQuit = true;
+  turnGuard.allowQuit();
+  app.quit();
+}
+
 function startStoreFiles() {
   return storeFiles({ userDataPath: app.getPath("userData"), env: process.env, homedir: os.homedir() });
 }
@@ -1563,7 +1578,10 @@ async function reportStartFailure(input = {}) {
     avHint,
     resetIncludesChats,
     // "Fix and restart": clear read-only marks on the store files, then restart.
-    canRepairStore: category === "store_readonly",
+    // Only when there is a read-only mark to clear: otherwise a restart would fail the same way.
+    canRepairStore: category === "store_readonly" && storeCheck?.repairable === true,
+    // A read-only store that clearing marks cannot fix: Reset app data is the way out.
+    leadWithReset: category === "store_readonly" && storeCheck?.repairable !== true,
     hint: startFailureHint(category, { avHint, storeCheck }),
   };
   if (storeCheck) {
@@ -2142,11 +2160,7 @@ const desktopCommandHandlers = {
       const result = await repairStoreAccess({ files: startStoreFiles() });
       console.info(`[start-report] store repair: fixed=${result.fixed} failed=${result.failed}`);
       // Restart: connections opened read-only stay read-only in this process.
-      setTimeout(() => {
-        turnGuard.allowQuit();
-        app.relaunch();
-        app.quit();
-      }, 1_500).unref?.();
+      setTimeout(() => restartApp(), 1_500).unref?.();
       return { ok: result.failed === 0, ...result };
   },
   "startupResetAppData": async () => {
@@ -2155,11 +2169,7 @@ const desktopCommandHandlers = {
         includeEngineData: reportedStart.answer?.resetIncludesChats === true,
       });
       // A moment for the window to show where the backup goes.
-      setTimeout(() => {
-        turnGuard.allowQuit();
-        app.relaunch();
-        app.quit();
-      }, 4_000).unref?.();
+      setTimeout(() => restartApp(), 4_000).unref?.();
       return { ok: true, backupDir };
   },
   "runtimeStatus": async (event, ...args) => {
@@ -3234,7 +3244,7 @@ or use: pnpm dev:worktree`);
       // Re-check the update feed while services stop, so a download staged
       // before newer releases shipped is replaced by the newest one instead
       // of installing on quit.
-      const updateInstall = prepareInstallOnQuit();
+      const updateInstall = prepareInstallOnQuit({ relaunch: restartAfterQuit });
       try {
         await Promise.all([
           disposeRuntimeBeforeQuit(),
@@ -3247,7 +3257,10 @@ or use: pnpm dev:worktree`);
         scheduleBlankSlateProfileCleanup();
         const installUpdateAndQuit = await updateInstall;
         if (installUpdateAndQuit) installUpdateAndQuit();
-        else app.quit();
+        else {
+          if (restartAfterQuit) app.relaunch();
+          app.quit();
+        }
       }
     });
   });
@@ -3370,9 +3383,7 @@ or use: pnpm dev:worktree`);
         if (response === 1) await shell.openPath(startReset.backupDir);
         if (response === 2) {
           await scheduleStartRestore({ userDataPath: app.getPath("userData"), backupDir: startReset.backupDir });
-          turnGuard.allowQuit();
-          app.relaunch();
-          app.quit();
+          restartApp();
         }
       });
     }

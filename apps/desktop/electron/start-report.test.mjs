@@ -385,7 +385,8 @@ test("the read-only hint names the fix", () => {
   assert.match(plain.title, /can't write its local data/);
   assert.match(plain.body, /read-only.*Fix and restart/);
   const denied = startFailureHint("store_readonly", { platform: "win32", storeCheck: { repairable: false, elevated: false } });
-  assert.match(denied.body, /Reset app data/);
+  assert.match(denied.body, /^Windows refuses.*Use Reset app data/);
+  assert.doesNotMatch(denied.body, /Fix and restart/);
   assert.match(denied.body, /Run as administrator/);
   const admin = startFailureHint("store_readonly", { platform: "win32", storeCheck: { repairable: false, elevated: true } });
   assert.match(admin.title, /running as administrator/);

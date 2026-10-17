@@ -95,12 +95,16 @@ export function isSqliteReadonlyError(error: unknown): boolean {
  * reading once rolls it back. Throws what that open threw (for instance when
  * the file itself cannot be written).
  */
+/** How long the rollback open waits for another connection's lock (a write in progress elsewhere). */
+const ROLLBACK_BUSY_TIMEOUT_MS = 2_000;
+
 export async function rollBackRuntimeSqliteJournal(path: string): Promise<void> {
   if (!existsSync(path)) return;
   if (typeof process.versions.bun === "string") {
     const { Database } = await import("bun:sqlite");
     const sqlite = new Database(path, { create: false, readwrite: true });
     try {
+      sqlite.exec(`PRAGMA busy_timeout = ${ROLLBACK_BUSY_TIMEOUT_MS}`);
       sqlite.query("SELECT count(*) FROM sqlite_master").get();
     } finally {
       sqlite.close();
@@ -110,6 +114,7 @@ export async function rollBackRuntimeSqliteJournal(path: string): Promise<void> 
   const { DatabaseSync } = await importNodeSqlite();
   const sqlite = new DatabaseSync(path);
   try {
+    sqlite.exec(`PRAGMA busy_timeout = ${ROLLBACK_BUSY_TIMEOUT_MS}`);
     sqlite.prepare("SELECT count(*) FROM sqlite_master").get();
     // The rollback ran if the connection could write; a file that is itself read-only opens read-only.
     sqlite.exec("BEGIN IMMEDIATE; ROLLBACK;");

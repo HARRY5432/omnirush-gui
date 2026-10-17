@@ -551,7 +551,9 @@ export function startFailureHint(category, { platform = process.platform, avHint
     if (storeCheck?.elevated === true && windows) {
       return {
         title: "omnirush.ai is running as administrator",
-        body: "Close omnirush.ai and start it normally (not with Run as administrator). If it still can't start, press Fix and restart.",
+        body: storeCheck?.repairable
+          ? "Close omnirush.ai and start it normally (not with Run as administrator). If it still can't start, press Fix and restart."
+          : "Close omnirush.ai and start it normally (not with Run as administrator). If it still can't start, use Reset app data.",
       };
     }
     return {
@@ -561,8 +563,8 @@ export function startFailureHint(category, { platform = process.platform, avHint
           ? "Some of omnirush.ai's data files are marked read-only. Press Fix and restart: it clears the read-only mark and restarts omnirush.ai."
           : "Some of omnirush.ai's data files are read-only. Press Fix and restart: it makes them writable and restarts omnirush.ai.")
         : (windows
-          ? "Windows refuses omnirush.ai write access to its data files. Press Fix and restart. If that doesn't help, use Reset app data: it moves the files to a backup folder (nothing is deleted) and restarts with fresh ones. Don't start omnirush.ai with Run as administrator."
-          : "omnirush.ai can't write its data files. Press Fix and restart. If that doesn't help, use Reset app data: it moves the files to a backup folder (nothing is deleted) and restarts with fresh ones."),
+          ? "Windows refuses omnirush.ai write access to its data files. Use Reset app data: it moves the files to a backup folder (nothing is deleted) and restarts with fresh ones. Don't start omnirush.ai with Run as administrator."
+          : "omnirush.ai can't write its data files. Use Reset app data: it moves the files to a backup folder (nothing is deleted) and restarts with fresh ones."),
     };
   }
   if (category === "store_error") {

@@ -145,6 +145,8 @@ export type StartFailureAnswer = {
   resetIncludesChats?: boolean;
   /** The local databases cannot be written: offer "Fix and restart". */
   canRepairStore?: boolean;
+  /** Show Reset app data first (a restart alone would fail the same way). */
+  leadWithReset?: boolean;
   hint: { title: string; body: string } | null;
 };
 
