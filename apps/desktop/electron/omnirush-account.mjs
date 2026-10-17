@@ -1165,6 +1165,18 @@ export function createDesktopOmniRushAccountStore({
   }
 
   /**
+   * One diagnostic report (POST /diagnostics/crashes, start-report.mjs).
+   * Null while signed out, so the caller queues it.
+   */
+  async function sendDiagnostic(body) {
+    return sendAuthorized("/diagnostics/crashes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  /**
    * The wheel's segments, the expected payout and the recent sessions with
    * why each did or did not earn spins (GET /me/quality), for the spin
    * dialog and the coaching card. Null while signed out, offline or off.
@@ -1398,6 +1410,7 @@ export function createDesktopOmniRushAccountStore({
     authorize,
     status,
     clear,
+    sendDiagnostic,
     qualityDetails,
     qualitySpinTotals,
     spinQuality,

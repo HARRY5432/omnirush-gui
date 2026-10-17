@@ -1552,3 +1552,26 @@ test("no client version, no client header", async () => {
   await createDesktopOmniRushAccountStore(options).status();
   assert.equal(client, null);
 });
+
+test("a diagnostic report goes to the crash endpoint with the device credential, and is null while signed out", async () => {
+  const requests = [];
+  const { store } = await connectedStore(async (url, init = {}) => {
+    requests.push({ url: String(url), method: init.method, authorization: new Headers(init.headers).get("authorization"), body: JSON.parse(init.body) });
+    return Response.json({ accepted: true }, { status: 201 });
+  });
+  const response = await store.sendDiagnostic({ product: "gui", kind: "start_failure" });
+  assert.equal(response.status, 201);
+  assert.deepEqual(requests, [{
+    url: "https://gateway.example/omnirush/diagnostics/crashes",
+    method: "POST",
+    authorization: "Bearer access-1",
+    body: { product: "gui", kind: "start_failure" },
+  }]);
+
+  const signedOut = createDesktopOmniRushAccountStore(await storeOptions({
+    fetchImpl: async () => {
+      throw new Error("no request while signed out");
+    },
+  }));
+  assert.equal(await signedOut.sendDiagnostic({ product: "gui" }), null);
+});

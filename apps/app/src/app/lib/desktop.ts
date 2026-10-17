@@ -137,6 +137,15 @@ export type RecoveryRelease = {
   marking: "current" | "previous" | null;
 };
 
+/** What the main process tells the couldn't-start screen (start-report.mjs). */
+export type StartFailureAnswer = {
+  category: string;
+  avHint: string;
+  /** Reset app data also moves the engine's data (chats): only when its store failed. */
+  resetIncludesChats?: boolean;
+  hint: { title: string; body: string } | null;
+};
+
 export type RecoveryActionResult = {
   ok: boolean;
   action?: "install" | "installer" | "eval";
@@ -217,6 +226,10 @@ declare global {
       };
       dev?: {
         evalRelaunch?: () => Promise<EvalRelaunchResult>;
+      };
+      startup?: {
+        reportFailure?: (input: { message?: string | null }) => Promise<StartFailureAnswer>;
+        resetAppData?: () => Promise<{ ok: boolean; backupDir?: string }>;
       };
       nuke?: {
         preview?: (options?: NukeOptions) => Promise<NukeManifestPreview>;
