@@ -141,6 +141,13 @@ export function attachmentNoteToUIParts(part: TextPart): UIMessage["parts"] {
   });
 }
 
+/** An assistant message that is a compaction's summary (the engine's compaction agent). */
+export function isCompactionInfo(info: unknown): boolean {
+  if (!info || typeof info !== "object") return false;
+  const value = info as { role?: unknown; summary?: unknown; mode?: unknown; agent?: unknown };
+  return value.role === "assistant" && (value.summary === true || value.mode === "compaction" || value.agent === "compaction");
+}
+
 export function snapshotToUIMessages(snapshot: OmniRushSessionSnapshot): UIMessage[] {
   return snapshot.messages.flatMap((message) => {
     const created = message.info.time?.created;
@@ -148,11 +155,13 @@ export function snapshotToUIMessages(snapshot: OmniRushSessionSnapshot): UIMessa
     const completed = time && "completed" in time ? time.completed : undefined;
     // The engine's finish reason ("stop", "length", "tool-calls", ...): the Good session checklist reads it.
     const finish = message.info.role === "assistant" ? message.info.finish : undefined;
+    // A compaction's request or summary (the auto-retry never answers one: good-session.ts).
+    const compaction = isCompactionInfo(message.info) || (message.info.role === "user" && message.parts.some((part) => part.type === "compaction"));
     const uiMessage = {
       id: message.info.id,
       role: message.info.role,
       ...(typeof created === "number"
-        ? { metadata: { opencode: { created, ...(typeof completed === "number" ? { completed } : {}), ...(finish ? { finish } : {}) } } }
+        ? { metadata: { opencode: { created, ...(typeof completed === "number" ? { completed } : {}), ...(finish ? { finish } : {}), ...(compaction ? { compaction } : {}) } } }
         : {}),
       parts: message.parts.flatMap<UIMessage["parts"][number]>((part) => {
         if (part.type === "text") {

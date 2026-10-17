@@ -849,6 +849,14 @@ function lastTurnEnd(messages: readonly UIMessage[]): TurnEnding {
   const turn = messages.slice(start).filter((message) => message.role === "assistant");
   const last = turn.at(-1);
   if (!last) return { ended: "none", endedAt: null, retryable: false };
+  // A compaction (its request or summary, also one being stopped) is no agent turn: never retried.
+  const request = start > 0 ? messages[start - 1] : undefined;
+  const compaction = (request && messageOpencode(request).compaction === true) || turn.some((message) => messageOpencode(message).compaction === true);
+  const ending = turnEndOf(turn, last);
+  return compaction ? { ...ending, retryable: false } : ending;
+}
+
+function turnEndOf(turn: readonly UIMessage[], last: UIMessage): TurnEnding {
   const completed = messageOpencode(last).completed;
   const endedAt = typeof completed === "number" ? completed : null;
   const error = sessionErrorOf(last);

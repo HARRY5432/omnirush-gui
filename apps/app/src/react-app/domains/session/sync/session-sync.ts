@@ -16,6 +16,7 @@ import { SYNTHETIC_SESSION_ERROR_MESSAGE_PREFIX, type OpencodeEvent, type Pendin
 import {
   attachmentNoteToUIParts,
   createSessionErrorUIMessage,
+  isCompactionInfo,
   snapshotToUIMessages,
 } from "./usechat-adapter";
 import {
@@ -1121,11 +1122,13 @@ function applyEvent(entry: SyncEntry, workspaceId: string, event: OpencodeEvent)
     if (!isTrackedSession(entry, info.sessionID)) return;
     const created = info.time?.created;
     const completed = info.time?.completed;
+    // A compaction's summary (the auto-retry never answers one: good-session.ts).
+    const compaction = isCompactionInfo(info);
     const next = {
       id: info.id,
       role: info.role,
       ...(typeof created === "number"
-        ? { metadata: { opencode: { created, ...(typeof completed === "number" ? { completed } : {}) } } }
+        ? { metadata: { opencode: { created, ...(typeof completed === "number" ? { completed } : {}), ...(compaction ? { compaction } : {}) } } }
         : {}),
       parts: [],
     } satisfies UIMessage;

@@ -573,6 +573,16 @@ describe("how the last turn ended (session_qc._completion)", () => {
     expect(messageFacts([prompt(), assistant("a1", [tool("bash", { command: "npm test" })], { finish: "tool-calls" }), assistant("a2", [{ type: "text", text: "Done." }], { finish: "stop" })]).ended).toBe("pass");
   });
 
+  test("a compaction's request or summary is never retried, also one being stopped (no closed summary yet)", () => {
+    // The summary of a compaction the person stops: no text, not closed yet, read as a cut-off step.
+    const stopping = [prompt(), assistant("a", [{ type: "text", text: "Done." }], { finish: "stop" }), { id: "c", role: "user", metadata: { opencode: { compaction: true } }, parts: [] } as UIMessage, assistant("s", [], { compaction: true })];
+    expect(messageFacts(stopping).retryable).toBe(false);
+    const request = [prompt(), { id: "c", role: "user", metadata: { opencode: { compaction: true } }, parts: [] } as UIMessage, assistant("s", [tool("bash", { command: "x" }, "input-streaming")])];
+    expect(messageFacts(request).retryable).toBe(false);
+    // The same cut-off step after a prompt someone sent is retryable.
+    expect(messageFacts([prompt(), assistant("s", [tool("bash", { command: "x" }, "input-streaming")])]).retryable).toBe(true);
+  });
+
   test("the Stop button and gateway errors are excused; other errors cut; no answer yet is none", () => {
     expect(messageFacts([prompt(), errorMessage({ kind: "aborted", title: "Task interrupted", technicalDetails: "Error type: MessageAbortedError" })]).ended).toBe("stopped");
     expect(messageFacts([prompt(), errorMessage({ kind: "generic", title: "Bad gateway", technicalDetails: "Error type: APIError\nStatus: 502" })]).ended).toBe("gateway");

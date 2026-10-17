@@ -92,6 +92,26 @@ describe("auto compaction", () => {
     expect(removed).toEqual(["s1", "c1"]);
     expect(compactor.count("s")).toBe(1);
   });
+
+  test("the grace runs out before the engine closed the stopped summary: still broken, removed", async () => {
+    let list: unknown[] = chat(3);
+    const removed: string[] = [];
+    const unclosed = { info: { id: "s1", parentID: "c1", role: "assistant", summary: true, mode: "compaction", agent: "compaction", time: { created: 401 } }, parts: [] };
+    const engine: AutoCompactEngine = {
+      messages: async () => list,
+      session: async () => ({ id: "ses" }),
+      busy: async () => false,
+      summarize: (_model, signal) => new Promise<void>((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason))),
+      removeMessage: async (id) => { removed.push(id); },
+    };
+    const compactor = new AutoCompactor({ policy: async () => ({ enabled: true, afterTurns: 3, minContextTokens: 0 }), stopGraceMs: 20 });
+    const held = compactor.beforePrompt("s", engine, { model: MODEL });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    list = [...chat(3), compactRequest("c1", 400), unclosed];
+    compactor.stopped("s");
+    expect((await held).action).toBe("failed");
+    expect(removed).toEqual(["s1", "c1"]);
+  });
 });
 
 describe("the desktop's glue", () => {

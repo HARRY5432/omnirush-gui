@@ -233,9 +233,10 @@ export type CompactionResult = {
 /**
  * How the compaction that just ran ended, from the chat's messages read
  * after it: its summary is the newest one not in `before` (the ids seen
- * before it started).
+ * before it started). `cut`: our wait for it ended early (stopped, timed
+ * out, failed), so a summary the engine never closed is broken too.
  */
-export function compactionResult(messages: unknown, before: Set<string>): CompactionResult {
+export function compactionResult(messages: unknown, before: Set<string>, options: { cut?: boolean } = {}): CompactionResult {
   if (!Array.isArray(messages)) return { state: "none", leftovers: [] };
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
@@ -243,8 +244,9 @@ export function compactionResult(messages: unknown, before: Set<string>): Compac
     const id = idOf(message);
     if (!id || before.has(id)) return { state: "none", leftovers: [] };
     const info = infoOf(message as Json);
-    if (info.error == null) return { state: "summarized", leftovers: [] };
-    const error = isRecord(info.error) && typeof info.error.name === "string" ? info.error.name : "error";
+    const closed = isRecord(info.time) && typeof info.time.completed === "number";
+    if (info.error == null && (closed || !options.cut)) return { state: "summarized", leftovers: [] };
+    const error = info.error == null ? "unfinished" : isRecord(info.error) && typeof info.error.name === "string" ? info.error.name : "error";
     const leftovers = [id];
     const parentID = typeof info.parentID === "string" ? info.parentID : null;
     const request = parentID ? messages.find((entry) => idOf(entry) === parentID) : undefined;
@@ -329,6 +331,15 @@ export class AutoCompactor {
     })().finally(() => this.seeding.delete(sessionId));
     this.seeding.set(sessionId, run);
     return run;
+  }
+
+  /** Waits (at most `ms`) until the engine runs nothing for the chat. */
+  private async idle(engine: AutoCompactEngine, ms: number): Promise<void> {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      if (await engine.busy().catch(() => null) === false) return;
+      await new Promise((resolve) => { const timer = setTimeout(resolve, Math.min(250, Math.max(0, until - Date.now()))); (timer as { unref?: () => void }).unref?.(); });
+    }
   }
 
   /** Removes a broken compaction's summary and request; resolves how many went. */
@@ -440,8 +451,10 @@ export class AutoCompactor {
       () => null,
       (error: unknown) => error ?? new Error("summarize failed"),
     ).then(async (failure) => {
+      // Our wait ended early: give the engine a moment to finish stopping, so its summary is closed before it is read.
+      if (failure !== null) await this.idle(engine, this.options.stopGraceMs ?? STOP_GRACE_MS);
       // Summarize answers once the engine is done, also when it was stopped: the chat says how it ended.
-      const result = compactionResult(await engine.messages().catch(() => null), before);
+      const result = compactionResult(await engine.messages().catch(() => null), before, { cut: failure !== null || stoppedByPerson });
       if (failure === null && result.state !== "broken") {
         this.log("info", "auto compaction finished", { sessionId, elapsed_ms: Date.now() - started });
         this.notify(sessionId, "finished");
