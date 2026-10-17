@@ -5,7 +5,7 @@ import { describe, expect, test } from "bun:test";
 
 import { brokerAutoCompactPolicy, desktopAutoCompactEngine } from "../auto-compact-engine.js";
 import { compactionSummary, workingOn } from "../turn-steer.js";
-import { AutoCompactor, autoCompactPolicy, RETRY_AFTER_TURNS, turnsSinceCompaction, type AutoCompactEngine, type ModelRef } from "./auto-compact.js";
+import { AutoCompactor, autoCompactPolicy, compactionResult, RETRY_AFTER_TURNS, turnsSinceCompaction, type AutoCompactEngine, type ModelRef } from "./auto-compact.js";
 import { completedTurnCount, steerPrompts } from "./turn-prompts.js";
 
 const MODEL: ModelRef = { providerID: "omnirush", modelID: "astra" };
@@ -47,7 +47,8 @@ describe("auto compaction", () => {
     const outcome = await compactor.beforePrompt("s", engine, new TextEncoder().encode(JSON.stringify({ parts: [], model: { providerID: "omnirush", modelID: "sol" } })).buffer);
     expect(outcome.action).toBe("compacted");
     expect(calls.summarize).toEqual([{ providerID: "omnirush", modelID: "sol" }]);
-    expect(calls.messages).toBe(1);
+    // The seed (also the check before compacting), then how it ended.
+    expect(calls.messages).toBe(2);
     expect(compactor.count("s")).toBe(1);
   });
 
@@ -65,6 +66,31 @@ describe("auto compaction", () => {
     expect((await retry.beforePrompt("s", failing.engine)).action).toBe("failed");
     expect(retry.count("s")).toBe(Math.max(0, 3 - RETRY_AFTER_TURNS) + 1);
     expect(busy.calls.summarize.length + child.calls.summarize.length).toBe(0);
+  });
+
+  test("a stopped compaction: its request and broken summary are removed, the held prompt goes, no quick retry", async () => {
+    // Left in the chat, the engine would run the stopped compaction again with the next prompt.
+    const aborted = { info: { id: "s1", parentID: "c1", role: "assistant", summary: true, mode: "compaction", agent: "compaction", time: { created: 401, completed: 402 }, error: { name: "MessageAbortedError" } }, parts: [] };
+    expect(compactionResult([...chat(3), compactRequest("c1", 400), aborted], new Set())).toEqual({ state: "broken", error: "MessageAbortedError", leftovers: ["s1", "c1"] });
+    let list: unknown[] = chat(3);
+    let release = () => {};
+    const removed: string[] = [];
+    const engine: AutoCompactEngine = {
+      messages: async () => list,
+      session: async () => ({ id: "ses" }),
+      busy: async () => false,
+      summarize: () => new Promise<void>((resolve) => { release = resolve; }),
+      removeMessage: async (id) => { removed.push(id); },
+    };
+    const compactor = new AutoCompactor({ policy: async () => ({ enabled: true, afterTurns: 3, minContextTokens: 0 }) });
+    const held = compactor.beforePrompt("s", engine, { model: MODEL });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(compactor.stopped("s")).toBe(true);
+    list = [...chat(3), compactRequest("c1", 400), aborted];
+    release();
+    expect((await held).action).toBe("failed");
+    expect(removed).toEqual(["s1", "c1"]);
+    expect(compactor.count("s")).toBe(1);
   });
 });
 
@@ -96,5 +122,11 @@ describe("the desktop's glue", () => {
     await engine.summarize(MODEL, new AbortController().signal);
     expect(seen[0]).toEqual({ url: "http://127.0.0.1:4096/session/status?directory=%2Fw", method: "GET", auth: "Basic x" });
     expect(seen[1]).toEqual({ url: "http://127.0.0.1:4096/session/ses_1/summarize?directory=%2Fw", method: "POST", auth: "Basic x", body: JSON.stringify(MODEL) });
+    await engine.removeMessage!("msg_1");
+    await engine.abort!();
+    expect(seen.slice(2).map(({ url, method }) => `${method} ${url}`)).toEqual([
+      "DELETE http://127.0.0.1:4096/session/ses_1/message/msg_1?directory=%2Fw",
+      "POST http://127.0.0.1:4096/session/ses_1/abort?directory=%2Fw",
+    ]);
   });
 });

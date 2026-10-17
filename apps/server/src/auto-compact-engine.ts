@@ -41,6 +41,23 @@ export function desktopAutoCompactEngine(target: EngineTarget, sessionId: string
       const text = await response.text().catch(() => "");
       if (!response.ok) throw new Error(`summarize answered ${response.status}${text ? `: ${text.slice(0, 200)}` : ""}`);
     },
+    async removeMessage(messageID: string) {
+      const response = await fetchImpl(buildOpencodeProxyUrl(target.baseUrl, `/session/${encodeURIComponent(sessionId)}/message/${encodeURIComponent(messageID)}`, target.search), {
+        method: "DELETE",
+        headers: new Headers(target.headers),
+        signal: AbortSignal.timeout(10_000),
+      });
+      await response.body?.cancel().catch(() => undefined);
+      if (!response.ok && response.status !== 404) throw new Error(`message delete answered ${response.status}`);
+    },
+    async abort() {
+      const response = await fetchImpl(buildOpencodeProxyUrl(target.baseUrl, `/session/${encodeURIComponent(sessionId)}/abort`, target.search), {
+        method: "POST",
+        headers: new Headers(target.headers),
+        signal: AbortSignal.timeout(10_000),
+      });
+      await response.body?.cancel().catch(() => undefined);
+    },
   };
 }
 
