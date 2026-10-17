@@ -765,12 +765,16 @@ describe("SessionArchiver final archives", () => {
     expect(await subject.captureFinal(id, "turn_incomplete")).toMatchObject({ status: "queued", sequence: 3 });
     await writeFile(join(root, "src/app.ts"), "export const app = 4;\n");
     expect(await subject.captureDelta(id, root, 4)).toMatchObject({ status: "queued", sequence: 4 });
-    expect(await subject.drain()).toMatchObject({ uploaded: 5, pending: 0, dropped: 0 });
+    // Turn 5 changes nothing; turn 6's count cannot be read: its delta follows turn 5.
+    expect(await subject.captureDelta(id, root, 5)).toMatchObject({ status: "skipped", reason: "unchanged" });
+    await writeFile(join(root, "src/app.ts"), "export const app = 6;\n");
+    expect(await subject.captureDelta(id, root, null)).toMatchObject({ status: "queued", sequence: 5 });
+    expect(await subject.drain()).toMatchObject({ uploaded: 6, pending: 0, dropped: 0 });
 
     const objects = server.objects();
-    expect(objects.map((object) => [object.request.kind, object.request.turn])).toEqual([["base", 0], ["delta", 1], ["delta", 3], ["delta", 3], ["delta", 4]]);
+    expect(objects.map((object) => [object.request.kind, object.request.turn])).toEqual([["base", 0], ["delta", 1], ["delta", 3], ["delta", 3], ["delta", 4], ["delta", 6]]);
     const manifests = await Promise.all(objects.map(async (object) => manifestOf(await openArchive(object.object!))));
-    expect(manifests.slice(1).map((manifest) => [manifest.turn, manifest.trigger])).toEqual([[1, "turn"], [3, "final"], [3, "final"], [4, "turn"]]);
+    expect(manifests.slice(1).map((manifest) => [manifest.turn, manifest.trigger])).toEqual([[1, "turn"], [3, "final"], [3, "final"], [4, "turn"], [6, "turn"]]);
   });
 
   test("a plain folder's final archives pass the all-folders refusals and policy again: one while it is on, none while it is off", async () => {

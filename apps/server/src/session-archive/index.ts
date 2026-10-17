@@ -717,8 +717,8 @@ export class SessionArchiver {
    * folder (marker `folder`) or touched files (marker `touched`) while their
    * policy is off. A session whose base could not be captured yet (key
    * unavailable, or no touched file yet) gets its base instead. A null turn
-   * (the engine's messages could not be read) follows the last archived
-   * turn. Whatever it captures, the turn counts as the session's activity
+   * (the engine's messages could not be read) follows the last turn seen
+   * (archived, or counted at a turn end that changed nothing). Whatever it captures, the turn counts as the session's activity
    * (the app-start window).
    */
   captureDelta(sessionId: string, root: string, turn: number | null): Promise<CaptureResult> {
@@ -736,7 +736,7 @@ export class SessionArchiver {
       if (resolve(root) !== state.root) this.log("warn", "OmniRush archive delta root differs from the session root; using the session root", { sessionId });
       const touched = state.marker === TOUCHED_MARKER;
       if (state.next_sequence === 0 && !touched) return this.captureBaseLocked(sessionId, state.root, turn ?? 0, generation);
-      const next = state.next_sequence === 0 ? turn ?? state.turn_seen ?? 0 : turn ?? (state.last_turn ?? 0) + 1;
+      const next = state.next_sequence === 0 ? turn ?? state.turn_seen ?? 0 : turn ?? Math.max(state.last_turn ?? 0, state.turn_seen ?? 0) + 1;
       if (state.last_turn !== null && next <= state.last_turn) return { status: "skipped", reason: "stale_turn" };
       // A plain folder's or touched files' archives pause while their policy is off; the next one after it is on again catches up.
       if ((state.marker === FOLDER_MARKER || state.marker === PROJECT_MARKER || touched) && !(await this.policyAllows(state.marker, generation))) return { status: "skipped", reason: "not_archivable" };
