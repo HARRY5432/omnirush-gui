@@ -1441,9 +1441,12 @@ export function registerUpdaterIpc({
    * and quits, or to null when nothing should install (no staged download, a
    * restart already installed it, or a newer release could not be fetched in
    * time: the stale download is then skipped and the next launch updates).
-   * Never rejects.
+   * With `relaunch` (the app restarts itself: Fix and restart, Reset app
+   * data) the install opens the new version when it is done, and the caller
+   * must not app.relaunch() as well: the old exe would start while the
+   * installer replaces it. Never rejects.
    */
-  async function prepareInstallOnQuit() {
+  async function prepareInstallOnQuit({ relaunch = false } = {}) {
     try {
       const updater = autoUpdaterInstance;
       if (!updater || !updateDownloaded || installTriggered) return null;
@@ -1463,7 +1466,7 @@ export function registerUpdaterIpc({
       if (installMode === "appimage" || installMode === "mac-swap") {
         return () => {
           installTriggered = true;
-          void selfInstall(installMode, { relaunch: false })
+          void selfInstall(installMode, { relaunch })
             .catch((error) => console.warn("[updater] install on quit failed", error?.message ?? error))
             .finally(() => quitApp());
         };
@@ -1471,14 +1474,16 @@ export function registerUpdaterIpc({
       return () => {
         installTriggered = true;
         quitInstallInProgress = true;
-        // Quit means quit: install silently without relaunching.
-        updater.autoRunAppAfterInstall = false;
+        // Quit means quit: install silently without relaunching, unless the
+        // app is restarting itself; then the installer opens the new version.
+        updater.autoRunAppAfterInstall = relaunch;
         setTimeout(() => quitApp(), quitInstallFallbackMs);
         try {
           allowQuit();
-          updater.quitAndInstall(true, false);
+          updater.quitAndInstall(true, relaunch);
         } catch (error) {
           console.warn("[updater] install on quit failed", error?.message ?? error);
+          if (relaunch) app.relaunch();
           quitApp();
         }
       };

@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 import { existsSync } from "node:fs";
-import { openRuntimeSqliteDatabase, runtimeDbPath, type RuntimeSqliteDatabase } from "./runtime-db.js";
+import { isSqliteReadonlyError, openRuntimeSqliteDatabase, runtimeDbPath, type RuntimeSqliteDatabase } from "./runtime-db.js";
 import type { ServerConfig } from "./types.js";
 
 type WorkspaceKvSchemaVersionColumn = {
@@ -112,11 +112,27 @@ function rowFromUnknown(row: unknown): WorkspaceKvStoredRow | undefined {
   };
 }
 
+async function forgetRuntimeDb(path: string): Promise<void> {
+  const opened = dbByPath.get(path);
+  dbByPath.delete(path);
+  tableDbByPath.delete(path);
+  const runtime = await opened?.catch(() => null);
+  try {
+    runtime?.close();
+  } catch {
+    // Already closed.
+  }
+}
+
 async function runtimeDb(path: string): Promise<RuntimeSqliteDatabase> {
   const existing = dbByPath.get(path);
   if (existing) return existing;
   const db = openRuntimeSqliteDatabase(path);
   dbByPath.set(path, db);
+  // A failed open is not kept: the next start (Try again) opens again.
+  db.catch(() => {
+    if (dbByPath.get(path) === db) dbByPath.delete(path);
+  });
   return db;
 }
 
@@ -197,6 +213,10 @@ async function workspaceKvDb(path: string, config: WorkspaceKvTableConfig): Prom
   if (existing) return existing;
   const db = openTableDb(path, config);
   tableDbs.set(config.tableName, db);
+  const tables = tableDbs;
+  db.catch(() => {
+    if (tables.get(config.tableName) === db) tables.delete(config.tableName);
+  });
   return db;
 }
 
@@ -233,8 +253,16 @@ export function createWorkspaceKvStore<T>(options: WorkspaceKvStoreOptions<T>) {
     valueJson: string,
     updatedAt: number,
   ): Promise<void> {
-    const db = await workspaceKvDb(runtimeDbPath(serverConfig), config);
-    db.upsert({ workspaceId, valueJson, updatedAt });
+    const path = runtimeDbPath(serverConfig);
+    const db = await workspaceKvDb(path, config);
+    try {
+      db.upsert({ workspaceId, valueJson, updatedAt });
+    } catch (error) {
+      // A connection opened while the file was read-only stays read-only:
+      // drop it so a write after the file is fixed opens it again.
+      if (isSqliteReadonlyError(error)) await forgetRuntimeDb(path);
+      throw error;
+    }
   }
 
   return {

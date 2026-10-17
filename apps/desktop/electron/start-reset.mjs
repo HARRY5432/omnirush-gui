@@ -7,7 +7,7 @@
  * history and sessions not yet uploaded) stays too, unless the failure
  * points at the engine's store.
  *
- * Files that belong together (runtime.sqlite with its -wal/-shm) move all
+ * Files that belong together (runtime.sqlite with its -journal/-wal/-shm) move all
  * together or not at all. "Restore previous app data" moves a backup back.
  *
  * Both happen on the next launch, before anything opens those files
@@ -51,7 +51,8 @@ export function startResetTargets({ userDataPath, env = process.env, homedir, pl
     config("server.json"),
     {
       label: "config/runtime.sqlite",
-      paths: ["runtime.sqlite", "runtime.sqlite-wal", "runtime.sqlite-shm"].map((name) => path.join(configDir, name)),
+      // The journal too: a hot one left next to a fresh store would be played into it.
+      paths: ["runtime.sqlite", "runtime.sqlite-journal", "runtime.sqlite-wal", "runtime.sqlite-shm"].map((name) => path.join(configDir, name)),
     },
     config("runtime-opencode-config.json"),
     config("engine-instances.json"),

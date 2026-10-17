@@ -117,7 +117,33 @@ export function LoadingOverlay() {
 
   const useRelease = window.__OMNIRUSH_ELECTRON__?.recovery?.use;
   const resetAppData = window.__OMNIRUSH_ELECTRON__?.startup?.resetAppData;
+  const repairStore = failureAnswer?.canRepairStore ? window.__OMNIRUSH_ELECTRON__?.startup?.repairStore : undefined;
   const hint = failureAnswer?.hint ?? null;
+  const leadWithReset = failureAnswer?.leadWithReset === true;
+  const resetButton = (primary: boolean) => (
+    <button
+      type="button"
+      data-testid="start-failure-reset"
+      className={primary
+        ? "rounded-md bg-dls-accent px-3 py-2 font-medium text-[var(--dls-accent-fg)]"
+        : "rounded-md border border-dls-border px-3 py-2 font-medium text-dls-primary"}
+      onClick={() => {
+        if (!resetAppData) return;
+        const confirmText = failureAnswer?.resetIncludesChats ? RESET_APP_DATA_CONFIRM_WITH_CHATS : RESET_APP_DATA_CONFIRM;
+        if (!window.confirm(confirmText)) return;
+        setActionState("Restarting with fresh app data…");
+        void resetAppData()
+          .then((result) => {
+            if (result.backupDir) {
+              setActionState(`Restarting with fresh app data. Your previous app data is kept in ${result.backupDir}; after the restart, choose Restore previous app data to go back to it.`);
+            }
+          })
+          .catch(() => setActionState("Reset could not be started. Please retry."));
+      }}
+    >
+      Reset app data
+    </button>
+  );
 
   if (!visible || (suppressForGateway && !error)) return null;
 
@@ -144,9 +170,29 @@ export function LoadingOverlay() {
             ) : (
               <div className="text-dls-secondary">Try again. If it keeps failing, return to a version that works on this computer.</div>
             )}
+            {resetAppData && leadWithReset ? resetButton(true) : null}
+            {repairStore ? (
+              <button
+                type="button"
+                className="rounded-md bg-dls-accent px-3 py-2 font-medium text-[var(--dls-accent-fg)]"
+                data-testid="start-failure-repair-store"
+                onClick={() => {
+                  setActionState("Fixing access to omnirush.ai's local data and restarting…");
+                  void repairStore()
+                    .then((result) => {
+                      if (!result.ok) setActionState("Some files could not be changed. Restarting anyway; if it still can't start, use Reset app data.");
+                    })
+                    .catch(() => setActionState("The fix could not be started. Use Reset app data."));
+                }}
+              >
+                Fix and restart
+              </button>
+            ) : null}
             <button
               type="button"
-              className="rounded-md bg-dls-accent px-3 py-2 font-medium text-dls-accent-foreground"
+              className={repairStore || leadWithReset
+                ? "rounded-md border border-dls-border px-3 py-2 font-medium text-dls-primary"
+                : "rounded-md bg-dls-accent px-3 py-2 font-medium text-[var(--dls-accent-fg)]"}
               onClick={() => window.location.reload()}
             >
               Try again
@@ -192,26 +238,7 @@ export function LoadingOverlay() {
                 ))}
               </div>
             ) : null}
-            {resetAppData ? (
-              <button
-                type="button"
-                className="rounded-md border border-dls-border px-3 py-2 font-medium text-dls-primary"
-                onClick={() => {
-                  const confirmText = failureAnswer?.resetIncludesChats ? RESET_APP_DATA_CONFIRM_WITH_CHATS : RESET_APP_DATA_CONFIRM;
-                  if (!window.confirm(confirmText)) return;
-                  setActionState("Restarting with fresh app data…");
-                  void resetAppData()
-                    .then((result) => {
-                      if (result.backupDir) {
-                        setActionState(`Restarting with fresh app data. Your previous app data is kept in ${result.backupDir}; after the restart, choose Restore previous app data to go back to it.`);
-                      }
-                    })
-                    .catch(() => setActionState("Reset could not be started. Please retry."));
-                }}
-              >
-                Reset app data
-              </button>
-            ) : null}
+            {resetAppData && !leadWithReset ? resetButton(false) : null}
             {actionState ? <div className="text-dls-secondary">{actionState}</div> : null}
             <details className="text-left text-dls-secondary">
               <summary className="cursor-pointer">Technical details</summary>

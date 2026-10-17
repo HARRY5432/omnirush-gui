@@ -14,7 +14,10 @@ import {
   osBuild,
   profileFlags,
   reportVersion,
+  engineErrorKind,
+  engineErrorLine,
   scrubStartMessage,
+  sqliteCodeOf,
   startFailureHint,
 } from "./start-report.mjs";
 
@@ -95,7 +98,7 @@ test("messages keep no paths, names, addresses or tokens", () => {
   }
   assert.equal(scrubStartMessage(spawnError("ENOENT"), { roots }), "spawn <path>");
   assert.equal(scrubStartMessage(new Error("   ")), null);
-  assert.match(scrubStartMessage(exitError(1, "line two\nerror: database is locked")), /exited with code 1 \| error: database is locked/);
+  assert.match(scrubStartMessage(exitError(1, "line two\nerror: database is locked")), /exited with code 1 \| engine_error=sqlite_busy \| error: database is locked/);
 });
 
 // The server's last check (omnirush/crash_reports.py _PERSONAL): a message
@@ -314,4 +317,92 @@ test("reporter: once sent, queued while signed out, capped per day, flushed late
   // A failing transport never throws.
   const failing = createStartReporter({ filePath: path.join(dir, "other.json"), send: async () => { throw new TypeError("fetch failed"); } });
   assert.equal(await failing.report(body("g")), "queued");
+});
+
+/** node:sqlite's error for a write to a read-only file, or a read-only read that met a hot journal (776). */
+function nodeSqliteError(errcode, errstr) {
+  return Object.assign(new Error(errstr), { code: "ERR_SQLITE_ERROR", errcode, errstr });
+}
+
+test("a read-only store is its own category, in the server and in the engine", () => {
+  // The 3.5.4 reports: phase/category "unknown", error_code null.
+  for (const errcode of [8, 776, 1032]) {
+    const result = classifyStartFailure(nodeSqliteError(errcode, "attempt to write a readonly database"));
+    assert.deepEqual(
+      { category: result.category, phase: result.phase, errorCode: result.errorCode },
+      { category: "store_readonly", phase: "server", errorCode: "SQLITE_READONLY" },
+    );
+  }
+  const tagged = Object.assign(new Error("attempt to write a readonly database (runtime store)"), { code: "SQLITE_READONLY" });
+  assert.equal(classifyStartFailure(tagged).category, "store_readonly");
+  // Only the text left (the window's message): still recognised.
+  assert.equal(classifyStartFailure(new Error("attempt to write a readonly database")).category, "store_readonly");
+  const engine = exitError(1, "\u001b[91m\u001b[1mError: \u001b[0mUnexpected error\nattempt to write a readonly database");
+  assert.deepEqual(
+    (({ category, phase, errorCode }) => ({ category, phase, errorCode }))(classifyStartFailure(engine)),
+    { category: "store_readonly", phase: "engine_ready", errorCode: "SQLITE_READONLY" },
+  );
+  assert.equal(classifyStartFailure(nodeSqliteError(5, "database is locked")).errorCode, "SQLITE_BUSY");
+  assert.equal(classifyStartFailure(nodeSqliteError(11, "database disk image is malformed")).category, "store_error");
+  assert.equal(sqliteCodeOf(null, "SQLiteError: SQLITE_READONLY_ROLLBACK"), "SQLITE_READONLY");
+  assert.equal(sqliteCodeOf(null, "nothing"), null);
+});
+
+test("an engine exit keeps the engine's own error line and its kind", () => {
+  // Report B: the banner was kept and the engine's line after it was lost.
+  const banner = "\u001b[91m\u001b[1mError: \u001b[0mUnexpected error";
+  const cases = [
+    ["attempt to write a readonly database", "sqlite_readonly"],
+    ["database is locked", "sqlite_busy"],
+    ["EPERM: operation not permitted, rename 'C:\\Users\\Ana\\AppData\\Roaming\\ai.omnirush.desktop\\engine-data\\omnirush\\x.tmp'", "eperm"],
+    ["Migration 20260101_session failed", "migration"],
+    ["JSON Parse error: Unexpected EOF", "json"],
+    // What the engine printed on the VM with a read-only opencode.db.
+    ["Failed query: PRAGMA wal_checkpoint(PASSIVE)", "sqlite_query"],
+    ["undefined is not an object (evaluating 'x.y')", "internal"],
+    ["something unusual", "other"],
+  ];
+  for (const [line, kind] of cases) {
+    const error = exitError(1, `${banner}\n${line}\n    at foo (C:\\x\\y.js:1:2)`);
+    assert.equal(engineErrorLine(error.message), line);
+    assert.equal(engineErrorKind(line), kind);
+    const text = scrubStartMessage(error, { roots: ["C:\\Users\\Ana"], userName: "Ana" });
+    assert.ok(text.startsWith(`OmniRush server exited with code 1 | engine_error=${kind} | `), text);
+    assert.doesNotMatch(text, /\u001b|Unexpected error|Ana|\\/, text);
+    assert.doesNotMatch(text, SERVER_DROP, text);
+  }
+  const checkpoint = exitError(1, `${banner}\nFailed query: PRAGMA wal_checkpoint(PASSIVE)`);
+  assert.deepEqual(
+    (({ category, phase }) => ({ category, phase }))(classifyStartFailure(checkpoint)),
+    { category: "store_error", phase: "engine_ready" },
+  );
+  assert.equal(engineErrorLine("boom"), null);
+  assert.equal(engineErrorKind(null), "none");
+});
+
+test("the read-only hint names the fix", () => {
+  const plain = startFailureHint("store_readonly", { platform: "win32", storeCheck: { repairable: true, elevated: false } });
+  assert.match(plain.title, /can't write its local data/);
+  assert.match(plain.body, /read-only.*Fix and restart/);
+  const denied = startFailureHint("store_readonly", { platform: "win32", storeCheck: { repairable: false, elevated: false } });
+  assert.match(denied.body, /^Windows refuses.*Use Reset app data/);
+  assert.doesNotMatch(denied.body, /Fix and restart/);
+  assert.match(denied.body, /Run as administrator/);
+  const admin = startFailureHint("store_readonly", { platform: "win32", storeCheck: { repairable: false, elevated: true } });
+  assert.match(admin.title, /running as administrator/);
+  assert.ok(startFailureHint("store_readonly", { platform: "linux" }));
+});
+
+test("a server that does not know store_readonly gets store_error", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "start-report-legacy-"));
+  const sent = [];
+  const reporter = createStartReporter({
+    filePath: path.join(dir, "start-reports.json"),
+    send: async (body) => {
+      sent.push(body.category);
+      return body.category === "store_readonly" ? { ok: false, status: 422 } : { ok: true, status: 200 };
+    },
+  });
+  assert.equal(await reporter.report({ category: "store_readonly", occurred_at: new Date().toISOString() }), "sent");
+  assert.deepEqual(sent, ["store_readonly", "store_error"]);
 });

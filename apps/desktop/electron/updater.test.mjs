@@ -1141,6 +1141,23 @@ describe("installing the newest published release", () => {
     }
   });
 
+  it("a restart (Fix and restart, Reset app data) installs the staged update and lets the installer open the new version", async () => {
+    const { tempDir, handlers, installs, updater, prepareInstallOnQuit } = await publishingFeedHarness({
+      quitInstallFallbackMs: 0,
+    });
+    try {
+      await handlers.get("omnirush:updater:check")(null, "stable");
+      await handlers.get("omnirush:updater:download")();
+      const installAndQuit = await prepareInstallOnQuit({ relaunch: true });
+      assert.equal(typeof installAndQuit, "function");
+      installAndQuit();
+      assert.deepEqual(installs, [{ version: "2.2.1", isSilent: true, isForceRunAfter: true }]);
+      assert.equal(updater.autoRunAppAfterInstall, true);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("on quit, skips the stale download when the newer release cannot be fetched", async () => {
     const { tempDir, handlers, feed, installs, prepareInstallOnQuit } = await publishingFeedHarness();
     try {

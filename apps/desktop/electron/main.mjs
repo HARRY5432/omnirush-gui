@@ -56,6 +56,7 @@ import {
   scheduleStartRestore,
   startResetTargets,
 } from "./start-reset.mjs";
+import { checkStoreAccess, repairStoreAccess, storeFiles } from "./start-store-check.mjs";
 import { createTerminalSessions, terminalShells } from "./terminal-sessions.mjs";
 import {
   buildNukeManifest,
@@ -1500,6 +1501,25 @@ function startReportScrubRoots() {
   return roots;
 }
 
+/** Set by restartApp(): the quit below ends in a restart. */
+let restartAfterQuit = false;
+
+/**
+ * Quit and open again (Fix and restart, Reset / Restore app data). The
+ * relaunch happens at the end of the before-quit teardown: when an update is
+ * staged, its installer opens the new version instead, so the old exe never
+ * starts while the installer replaces it.
+ */
+function restartApp() {
+  restartAfterQuit = true;
+  turnGuard.allowQuit();
+  app.quit();
+}
+
+function startStoreFiles() {
+  return storeFiles({ userDataPath: app.getPath("userData"), env: process.env, homedir: os.homedir() });
+}
+
 /**
  * The window shows "couldn't start": classify the attempt's error (or the
  * window's message when the main process saw none), send one report for
@@ -1540,10 +1560,33 @@ async function reportStartFailure(input = {}) {
     elapsedMs: failure.elapsedMs,
     attempt: failure.attempt,
   };
-  const category = buildStartFailureReport(draft).category;
+  let category = buildStartFailureReport(draft).category;
+  // Which store files cannot be written, and whether this start runs elevated (start-store-check.mjs).
+  const storeCheck = category === "store_readonly" || category === "store_error"
+    ? await checkStoreAccess({ files: startStoreFiles() }).catch(() => null)
+    : null;
+  // A store error whose files cannot be written is a read-only store (the engine only says "Failed query").
+  if (category === "store_error" && storeCheck?.blockedStores.length) {
+    category = "store_readonly";
+    classified.category = "store_readonly";
+  }
+  const engineStoreFailed = classified.phase === "engine_ready" || storeCheck?.blockedStores.includes("engine") === true;
   // Reset app data moves the engine's data (chats, sessions not yet uploaded) only when its store failed.
-  const resetIncludesChats = category === "store_error" && classified.phase === "engine_ready";
-  const answer = { category, avHint, resetIncludesChats, hint: startFailureHint(category, { avHint }) };
+  const resetIncludesChats = (category === "store_error" || category === "store_readonly") && engineStoreFailed;
+  const answer = {
+    category,
+    avHint,
+    resetIncludesChats,
+    // "Fix and restart": clear read-only marks on the store files, then restart.
+    // Only when there is a read-only mark to clear: otherwise a restart would fail the same way.
+    canRepairStore: category === "store_readonly" && storeCheck?.repairable === true,
+    // A read-only store that clearing marks cannot fix: Reset app data is the way out.
+    leadWithReset: category === "store_readonly" && storeCheck?.repairable !== true,
+    hint: startFailureHint(category, { avHint, storeCheck }),
+  };
+  if (storeCheck) {
+    console.info(`[start-report] store check: blocked=${storeCheck.blockedStores.join(",") || "none"} read-only=${storeCheck.runtime.readOnlyFlags + storeCheck.engine.readOnlyFlags} not-writable=${storeCheck.runtime.notWritable + storeCheck.engine.notWritable} hot-journal=${storeCheck.runtime.hotJournal} elevated=${storeCheck.elevated}`);
+  }
   reportedStart = { attempt: failure.attempt, answer };
   void (async () => {
     const outcome = await startReporter.report(buildStartFailureReport(draft));
@@ -2113,17 +2156,20 @@ const desktopCommandHandlers = {
   "startupReportFailure": async (event, ...args) => {
       return reportStartFailure(args[0] ?? {});
   },
+  "startupRepairStore": async () => {
+      const result = await repairStoreAccess({ files: startStoreFiles() });
+      console.info(`[start-report] store repair: fixed=${result.fixed} failed=${result.failed}`);
+      // Restart: connections opened read-only stay read-only in this process.
+      setTimeout(() => restartApp(), 1_500).unref?.();
+      return { ok: result.failed === 0, ...result };
+  },
   "startupResetAppData": async () => {
       const { backupDir } = await scheduleStartReset({
         userDataPath: app.getPath("userData"),
         includeEngineData: reportedStart.answer?.resetIncludesChats === true,
       });
       // A moment for the window to show where the backup goes.
-      setTimeout(() => {
-        turnGuard.allowQuit();
-        app.relaunch();
-        app.quit();
-      }, 4_000).unref?.();
+      setTimeout(() => restartApp(), 4_000).unref?.();
       return { ok: true, backupDir };
   },
   "runtimeStatus": async (event, ...args) => {
@@ -3198,7 +3244,7 @@ or use: pnpm dev:worktree`);
       // Re-check the update feed while services stop, so a download staged
       // before newer releases shipped is replaced by the newest one instead
       // of installing on quit.
-      const updateInstall = prepareInstallOnQuit();
+      const updateInstall = prepareInstallOnQuit({ relaunch: restartAfterQuit });
       try {
         await Promise.all([
           disposeRuntimeBeforeQuit(),
@@ -3211,7 +3257,10 @@ or use: pnpm dev:worktree`);
         scheduleBlankSlateProfileCleanup();
         const installUpdateAndQuit = await updateInstall;
         if (installUpdateAndQuit) installUpdateAndQuit();
-        else app.quit();
+        else {
+          if (restartAfterQuit) app.relaunch();
+          app.quit();
+        }
       }
     });
   });
@@ -3334,9 +3383,7 @@ or use: pnpm dev:worktree`);
         if (response === 1) await shell.openPath(startReset.backupDir);
         if (response === 2) {
           await scheduleStartRestore({ userDataPath: app.getPath("userData"), backupDir: startReset.backupDir });
-          turnGuard.allowQuit();
-          app.relaunch();
-          app.quit();
+          restartApp();
         }
       });
     }

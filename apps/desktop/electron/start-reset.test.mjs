@@ -27,6 +27,7 @@ async function fixture() {
   await writeFile(path.join(configDir, "server.json"), "{}");
   await writeFile(path.join(configDir, "runtime.sqlite"), "sqlite");
   await writeFile(path.join(configDir, "runtime.sqlite-wal"), "wal");
+  await writeFile(path.join(configDir, "runtime.sqlite-journal"), "journal");
   await writeFile(path.join(configDir, "runtime.sqlite-shm"), "shm");
   await writeFile(path.join(configDir, "env.json"), "{}");
   const env = { OMNIRUSH_SERVER_CONFIG: path.join(configDir, "server.json") };
@@ -44,7 +45,7 @@ test("targets: start state only; engine data only when asked; the runtime databa
   assert.ok(all.includes(path.join(configDir, "server.json")));
   assert.ok(!all.some((entry) => /engine-data|omnirush-account|env\.json|private-credentials/.test(entry)));
   assert.deepEqual(plain.find((target) => target.label === "config/runtime.sqlite").paths.map((entry) => path.basename(entry)),
-    ["runtime.sqlite", "runtime.sqlite-wal", "runtime.sqlite-shm"]);
+    ["runtime.sqlite", "runtime.sqlite-journal", "runtime.sqlite-wal", "runtime.sqlite-shm"]);
   assert.ok(targetsFor({ includeEngineData: true }).some((target) => target.label === "app/engine-data"));
 });
 
@@ -63,6 +64,8 @@ test("a reset moves the start state into the announced backup folder and keeps c
   assert.deepEqual(result.failed, []);
   assert.deepEqual(new Set(result.moved), new Set(["app/omnirush-workspaces.json", "config/server.json", "config/runtime.sqlite"]));
   assert.equal(await readFile(path.join(backupDir, "config", "runtime.sqlite-wal"), "utf8"), "wal");
+  assert.equal(await readFile(path.join(backupDir, "config", "runtime.sqlite-journal"), "utf8"), "journal");
+  assert.ok(!existsSync(path.join(configDir, "runtime.sqlite-journal")));
   assert.ok(!existsSync(path.join(configDir, "runtime.sqlite")));
   assert.equal(await readFile(path.join(userDataPath, "engine-data", "omnirush", "opencode.db"), "utf8"), "chats");
   assert.ok(existsSync(path.join(userDataPath, "omnirush-account.bin")));

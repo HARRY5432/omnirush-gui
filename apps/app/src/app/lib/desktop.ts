@@ -143,6 +143,10 @@ export type StartFailureAnswer = {
   avHint: string;
   /** Reset app data also moves the engine's data (chats): only when its store failed. */
   resetIncludesChats?: boolean;
+  /** The local databases cannot be written: offer "Fix and restart". */
+  canRepairStore?: boolean;
+  /** Show Reset app data first (a restart alone would fail the same way). */
+  leadWithReset?: boolean;
   hint: { title: string; body: string } | null;
 };
 
@@ -230,6 +234,7 @@ declare global {
       startup?: {
         reportFailure?: (input: { message?: string | null }) => Promise<StartFailureAnswer>;
         resetAppData?: () => Promise<{ ok: boolean; backupDir?: string }>;
+        repairStore?: () => Promise<{ ok: boolean; fixed: number; failed: number }>;
       };
       nuke?: {
         preview?: (options?: NukeOptions) => Promise<NukeManifestPreview>;
