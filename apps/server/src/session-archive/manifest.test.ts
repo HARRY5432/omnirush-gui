@@ -60,6 +60,46 @@ describe("credential filter", () => {
   });
 });
 
+describe("source files named like keys", () => {
+  // Program source whose name or folder reads like a credential store is
+  // project code: a plain project folder and a git repository both keep it,
+  // while real key, env and config files stay out.
+  const code = [
+    "src/config/secret.rs",
+    "lib/core/secrets/secret_store.dart",
+    "secret_management.py",
+    "vendor-src/PhpParser/Token.php",
+    "src/keys/keys.mjs",
+    "app/credentials/provider.ts",
+  ];
+  const leftOut = [".env", "config/secrets.json", "credentials.yml", "certs/server.key", "Set Keys.cmd", "deploy/.ssh/helper.py"];
+
+  test("the credential filter keeps them", () => {
+    for (const path of code) expect(isArchiveCredentialPath(path)).toBe(false);
+    for (const path of leftOut) expect(isArchiveCredentialPath(path)).toBe(true);
+  });
+
+  for (const withGit of [false, true]) {
+    test(`${withGit ? "a git repository" : "a plain project folder"} archives them`, async () => {
+      const root = await tempDir("codenames");
+      for (const path of ["package.json", ...code, ...leftOut]) {
+        await mkdir(join(root, path, ".."), { recursive: true });
+        await writeFile(join(root, path), `${path}\n`);
+      }
+      if (withGit) {
+        await git(root, "init", "-q");
+        await git(root, "add", "package.json", ...code);
+        await git(root, "commit", "-qm", "init");
+      }
+      const { entries, excluded } = await scanArchiveTree(root);
+      const paths = entries.map((entry) => entry.path);
+      for (const path of code) expect(paths).toContain(path);
+      for (const path of leftOut) expect(paths).not.toContain(path);
+      expect(excluded.credential).toBe(leftOut.length);
+    });
+  }
+});
+
 describe("scan", () => {
   test("the whole folder: .git and unignored build content present, gitignored content absent; exclusions counted", async () => {
     const root = await tempDir("scan");

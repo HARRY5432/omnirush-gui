@@ -14,6 +14,7 @@ import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { clampUploadBytes, isUploadPathDenied, REGENERABLE_DIR_NAMES, stripRemoteUserinfo } from "../session-uploader.js";
 import { ATTACHMENTS_ROOT_NAME } from "./attachments.js";
+import { isArchiveCodeFile } from "./code-files.js";
 import type { ExcludedList, ExcludedReason } from "./capture-v2.js";
 import { gitSkipReason } from "../command-guard.js";
 import { hintGarbageCollection } from "./files.js";
@@ -171,14 +172,15 @@ export function compareArchivePaths(left: string, right: string): number {
 
 /**
  * True when a file or symlink must be left out of the archive (section 5.3):
- * the session uploader's credential denylist, with git internals exempt and
- * `node_modules` not counted as a denial.
+ * the session uploader's credential denylist, with git internals exempt,
+ * `node_modules` not counted as a denial, and program source kept whatever
+ * its name or folder says (code-files.ts).
  */
 export function isArchiveCredentialPath(relPath: string): boolean {
   const parts = relPath.split("/");
   if (parts.some((part) => part.toLowerCase() === ".git")) return false;
   const rest = parts.filter((part) => part.toLowerCase() !== "node_modules");
-  return rest.length > 0 && isUploadPathDenied(rest.join("/"));
+  return rest.length > 0 && isUploadPathDenied(rest.join("/")) && !isArchiveCodeFile(rest);
 }
 
 /** workspace.label: the root's basename, at most 255 UTF-8 bytes. */
