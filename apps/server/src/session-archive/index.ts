@@ -320,7 +320,7 @@ const sessionStateSchema = z.object({
   final_due: z.boolean().optional(),
   /** When the session was deleted in the app: no final archive at app start. */
   ended: z.string().nullable().optional(),
-  /** A touched-files chain without its base yet: the completed turns last seen, the turn of a base a final archive captures. */
+  /** The completed turns last seen at a turn's end: the turn of a touched-files base a final archive captures, and of any final archive. */
   turn_seen: z.number().int().nonnegative().optional(),
   /**
    * When the session was last active: its base, a prompt (captureBase once
@@ -728,8 +728,10 @@ export class SessionArchiver {
       const loaded = await this.loadSession(sessionId);
       if (!loaded) return { status: "skipped", reason: "no_base" };
       if (loaded.stopped || this.stoppedSessions.has(sessionId)) return { status: "skipped", reason: "stopped" };
-      // A turn ended: the session was active, whatever this capture does.
-      const state: SessionState = { ...loaded, last_activity_at: this.now().toISOString() };
+      // A turn ended: the session was active, whatever this capture does. Its count is kept (turn_seen):
+      // a turn that changed nothing gets no delta, and a final archive after it is numbered with it.
+      const seen = turn !== null && turn > (loaded.turn_seen ?? -1) ? { turn_seen: turn } : {};
+      const state: SessionState = { ...loaded, ...seen, last_activity_at: this.now().toISOString() };
       if (generation === this.generation) await this.saveSession(state);
       if (resolve(root) !== state.root) this.log("warn", "OmniRush archive delta root differs from the session root; using the session root", { sessionId });
       const touched = state.marker === TOUCHED_MARKER;
@@ -779,7 +781,8 @@ export class SessionArchiver {
     if (this.disabled || !this.uploader.configured) return { status: "skipped", reason: "disabled" };
     const state = await this.loadSession(sessionId);
     const unbased = state?.next_sequence === 0 && state.marker === TOUCHED_MARKER;
-    const turn = unbased ? state.turn_seen ?? 0 : state && state.next_sequence > 0 ? state.last_turn : null;
+    // The completed turns: the last archived one, or a later turn that changed nothing (5.8.1). Never below the parent's.
+    const turn = unbased ? state.turn_seen ?? 0 : state && state.next_sequence > 0 && state.last_turn !== null ? Math.max(state.last_turn, state.turn_seen ?? 0) : null;
     if (!state || turn === null) return { status: "skipped", reason: "no_base" };
     if (state.stopped || this.stoppedSessions.has(sessionId)) return { status: "skipped", reason: "stopped" };
     const skip = async (skipReason: CaptureSkipReason): Promise<CaptureResult> => {
