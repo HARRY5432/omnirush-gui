@@ -56,6 +56,7 @@ import {
   scheduleStartRestore,
   startResetTargets,
 } from "./start-reset.mjs";
+import { checkStoreAccess, repairStoreAccess, storeFiles } from "./start-store-check.mjs";
 import { createTerminalSessions, terminalShells } from "./terminal-sessions.mjs";
 import {
   buildNukeManifest,
@@ -1500,6 +1501,10 @@ function startReportScrubRoots() {
   return roots;
 }
 
+function startStoreFiles() {
+  return storeFiles({ userDataPath: app.getPath("userData"), env: process.env, homedir: os.homedir() });
+}
+
 /**
  * The window shows "couldn't start": classify the attempt's error (or the
  * window's message when the main process saw none), send one report for
@@ -1541,9 +1546,24 @@ async function reportStartFailure(input = {}) {
     attempt: failure.attempt,
   };
   const category = buildStartFailureReport(draft).category;
+  // Which store files cannot be written, and whether this start runs elevated (start-store-check.mjs).
+  const storeCheck = category === "store_readonly" || category === "store_error"
+    ? await checkStoreAccess({ files: startStoreFiles() }).catch(() => null)
+    : null;
+  const engineStoreFailed = classified.phase === "engine_ready" || storeCheck?.blockedStores.includes("engine") === true;
   // Reset app data moves the engine's data (chats, sessions not yet uploaded) only when its store failed.
-  const resetIncludesChats = category === "store_error" && classified.phase === "engine_ready";
-  const answer = { category, avHint, resetIncludesChats, hint: startFailureHint(category, { avHint }) };
+  const resetIncludesChats = (category === "store_error" || category === "store_readonly") && engineStoreFailed;
+  const answer = {
+    category,
+    avHint,
+    resetIncludesChats,
+    // "Fix and restart": clear read-only marks on the store files, then restart.
+    canRepairStore: category === "store_readonly",
+    hint: startFailureHint(category, { avHint, storeCheck }),
+  };
+  if (storeCheck) {
+    console.info(`[start-report] store check: blocked=${storeCheck.blockedStores.join(",") || "none"} read-only=${storeCheck.runtime.readOnlyFlags + storeCheck.engine.readOnlyFlags} not-writable=${storeCheck.runtime.notWritable + storeCheck.engine.notWritable} hot-journal=${storeCheck.runtime.hotJournal} elevated=${storeCheck.elevated}`);
+  }
   reportedStart = { attempt: failure.attempt, answer };
   void (async () => {
     const outcome = await startReporter.report(buildStartFailureReport(draft));
@@ -2112,6 +2132,17 @@ const desktopCommandHandlers = {
   },
   "startupReportFailure": async (event, ...args) => {
       return reportStartFailure(args[0] ?? {});
+  },
+  "startupRepairStore": async () => {
+      const result = await repairStoreAccess({ files: startStoreFiles() });
+      console.info(`[start-report] store repair: fixed=${result.fixed} failed=${result.failed}`);
+      // Restart: connections opened read-only stay read-only in this process.
+      setTimeout(() => {
+        turnGuard.allowQuit();
+        app.relaunch();
+        app.quit();
+      }, 1_500).unref?.();
+      return { ok: result.failed === 0, ...result };
   },
   "startupResetAppData": async () => {
       const { backupDir } = await scheduleStartReset({

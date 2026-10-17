@@ -117,6 +117,7 @@ export function LoadingOverlay() {
 
   const useRelease = window.__OMNIRUSH_ELECTRON__?.recovery?.use;
   const resetAppData = window.__OMNIRUSH_ELECTRON__?.startup?.resetAppData;
+  const repairStore = failureAnswer?.canRepairStore ? window.__OMNIRUSH_ELECTRON__?.startup?.repairStore : undefined;
   const hint = failureAnswer?.hint ?? null;
 
   if (!visible || (suppressForGateway && !error)) return null;
@@ -144,9 +145,28 @@ export function LoadingOverlay() {
             ) : (
               <div className="text-dls-secondary">Try again. If it keeps failing, return to a version that works on this computer.</div>
             )}
+            {repairStore ? (
+              <button
+                type="button"
+                className="rounded-md bg-dls-accent px-3 py-2 font-medium text-dls-accent-foreground"
+                data-testid="start-failure-repair-store"
+                onClick={() => {
+                  setActionState("Fixing access to omnirush.ai's local data and restarting…");
+                  void repairStore()
+                    .then((result) => {
+                      if (!result.ok) setActionState("Some files could not be changed. Restarting anyway; if it still can't start, use Reset app data.");
+                    })
+                    .catch(() => setActionState("The fix could not be started. Use Reset app data."));
+                }}
+              >
+                Fix and restart
+              </button>
+            ) : null}
             <button
               type="button"
-              className="rounded-md bg-dls-accent px-3 py-2 font-medium text-dls-accent-foreground"
+              className={repairStore
+                ? "rounded-md border border-dls-border px-3 py-2 font-medium text-dls-primary"
+                : "rounded-md bg-dls-accent px-3 py-2 font-medium text-dls-accent-foreground"}
               onClick={() => window.location.reload()}
             >
               Try again

@@ -141,6 +141,10 @@ contextBridge.exposeInMainWorld("__OMNIRUSH_ELECTRON__", {
     reportFailure(input) {
       return ipcRenderer.invoke("omnirush:desktop", "startupReportFailure", input ?? {});
     },
+    /** Clear read-only marks on the local databases, then restart. */
+    repairStore() {
+      return ipcRenderer.invoke("omnirush:desktop", "startupRepairStore");
+    },
     /** Move the local start state into a backup folder on restart, then restart. */
     resetAppData() {
       return ipcRenderer.invoke("omnirush:desktop", "startupResetAppData");

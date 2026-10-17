@@ -32,8 +32,10 @@ export const START_FAILURE_CATEGORIES = [
   "unknown", "engine_missing", "engine_blocked", "engine_modified", "engine_timeout",
   "engine_exit", "engine_crash", "engine_cpu_unsupported", "engine_stuck",
   "config_incompatible", "config_invalid", "workspace_inaccessible", "port_in_use",
-  "store_error", "disk_full", "server_bundle_missing", "server_not_ready", "renderer",
+  "store_error", "store_readonly", "disk_full", "server_bundle_missing", "server_not_ready", "renderer",
 ];
+/** Categories a server older than them refuses (HTTP 422): sent again as the older one. */
+const LEGACY_CATEGORIES = { store_readonly: "store_error" };
 
 const ERROR_NAMES = new Set([
   "Error", "TypeError", "ReferenceError", "SyntaxError", "RangeError",
@@ -54,7 +56,82 @@ const STATUS_ILLEGAL_INSTRUCTION = 0xc000001d;
 // Win32 ERROR_VIRUS_INFECTED / ERROR_VIRUS_DELETED.
 const VIRUS_CODES = new Set([225, 226]);
 
-const SQLITE_PATTERN = /\b(SQLITE_[A-Z]+)\b|database disk image is malformed|file is not a database|database is locked/;
+const SQLITE_PATTERN = /\b(SQLITE_[A-Z]+)\b|database disk image is malformed|file is not a database|database is locked|attempt to write a readonly database|unable to open database file|disk I\/O error/;
+
+/** SQLite's primary result codes the report names (node:sqlite: `errcode`, extended codes in the high bits). */
+const SQLITE_PRIMARY = {
+  5: "SQLITE_BUSY", 6: "SQLITE_BUSY", 8: "SQLITE_READONLY", 10: "SQLITE_IOERR", 11: "SQLITE_CORRUPT",
+  13: "SQLITE_FULL", 14: "SQLITE_CANTOPEN", 26: "SQLITE_NOTADB",
+};
+const SQLITE_MESSAGES = [
+  [/attempt to write a readonly database/i, "SQLITE_READONLY"],
+  [/database disk image is malformed/i, "SQLITE_CORRUPT"],
+  [/file is not a database/i, "SQLITE_NOTADB"],
+  [/database (?:table )?is locked/i, "SQLITE_BUSY"],
+  [/unable to open database file/i, "SQLITE_CANTOPEN"],
+  [/disk I\/O error/i, "SQLITE_IOERR"],
+  [/database or disk is full/i, "SQLITE_FULL"],
+];
+
+/** The SQLite code an error or text carries (SQLITE_READONLY, ...), else null. */
+export function sqliteCodeOf(error, text = messageOf(error)) {
+  const errcode = error && typeof error === "object" ? error.errcode : undefined;
+  if (Number.isInteger(errcode) && SQLITE_PRIMARY[errcode & 0xff]) return SQLITE_PRIMARY[errcode & 0xff];
+  const code = typeof error?.code === "string" ? error.code : "";
+  const named = `${code} ${text}`.match(/\bSQLITE_([A-Z]+)/);
+  if (named) {
+    const primary = `SQLITE_${named[1]}`;
+    if (ERROR_CODES.has(primary)) return primary;
+    const base = Object.values(SQLITE_PRIMARY).find((value) => primary.startsWith(`${value}_`));
+    if (base) return base;
+  }
+  for (const [pattern, value] of SQLITE_MESSAGES) if (pattern.test(text)) return value;
+  return null;
+}
+
+// Terminal colours the engine prints around its error banner.
+const ANSI = /\u001b\[[0-9;?]*[ -\/]*[@-~]/g;
+
+function stripAnsi(text) {
+  return String(text ?? "").replace(ANSI, "");
+}
+
+/**
+ * The engine's own error line from its exit output: the line after its
+ * "Error: Unexpected error" banner (the engine prints the thrown message
+ * there), else the first line that reads like an error. Null when none.
+ */
+export function engineErrorLine(message) {
+  const lines = stripAnsi(message).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (!/exited with code/.test(lines[0] ?? "")) return null;
+  const rest = lines.slice(1);
+  const banner = rest.findIndex((line) => /^(?:Error:\s*)?Unexpected error\b/i.test(line));
+  if (banner >= 0) return rest.slice(banner + 1).find((line) => !/^at\s/.test(line)) ?? null;
+  return rest.find((line) => /error|lacks|illegal|EADDRINUSE|SQLITE|denied|permission|readonly|database|EPERM|EACCES|EBUSY|ENOENT/i.test(line)) ?? rest[0] ?? null;
+}
+
+/**
+ * What kind of error the engine's line is: an impersonal enum the report
+ * carries next to the scrubbed line.
+ */
+export function engineErrorKind(line) {
+  const text = String(line ?? "");
+  if (!text) return "none";
+  const sqlite = sqliteCodeOf(null, text);
+  if (sqlite) return sqlite.toLowerCase();
+  if (/migrat/i.test(text)) return "migration";
+  if (/\bEPERM\b|operation not permitted/i.test(text)) return "eperm";
+  if (/\bEACCES\b|permission denied|access is denied/i.test(text)) return "eacces";
+  if (/\bEBUSY\b|resource busy|being used by another process/i.test(text)) return "ebusy";
+  if (/\bENOENT\b|no such file/i.test(text)) return "enoent";
+  if (/\bENOSPC\b|no space left/i.test(text)) return "enospc";
+  if (/JSON|Unexpected token|parse/i.test(text)) return "json";
+  if (/config/i.test(text)) return "config";
+  if (/plugin|npm|install/i.test(text)) return "plugin";
+  if (/\bE(?:CONNREFUSED|CONNRESET|TIMEDOUT|NOTFOUND|AI_AGAIN)\b|fetch failed|network/i.test(text)) return "network";
+  if (/is not a function|undefined is not|cannot read propert|null is not/i.test(text)) return "internal";
+  return "other";
+}
 
 function innermost(error) {
   let current = error;
@@ -103,12 +180,15 @@ export function classifyStartFailure(rawError, { fallbackPhase = "unknown" } = {
   const exitCode = exitCodeOf(error, message);
   const status = unsigned(exitCode);
   const signal = typeof error?.signal === "string" && /^SIG[A-Z0-9]{2,10}$/.test(error.signal) ? error.signal : null;
-  const sqlite = message.match(SQLITE_PATTERN);
+  const plain = stripAnsi(message);
+  const engineLine = engineErrorLine(plain);
+  const sqliteCode = sqliteCodeOf(error, engineLine ?? plain);
+  const sqlite = sqliteCode || SQLITE_PATTERN.test(plain) ? [null, sqliteCode] : null;
   const result = {
     category: "unknown",
     phase: fallbackPhase,
     errorName: name && ERROR_NAMES.has(name) ? name : (rawError instanceof Error ? "Error" : "none"),
-    errorCode: knownCode(code),
+    errorCode: knownCode(code) ?? (code === "ERR_SQLITE_ERROR" ? sqliteCode : null),
     exitCode: Number.isInteger(exitCode) ? exitCode : null,
     signal,
     avHint: "none",
@@ -144,6 +224,7 @@ export function classifyStartFailure(rawError, { fallbackPhase = "unknown" } = {
     if (/ConfigJsonError|ConfigInvalidError|configuration is invalid|JSON Parse error/i.test(message)) {
       return set("config_invalid", "engine_ready");
     }
+    if (sqliteCode === "SQLITE_READONLY") return set("store_readonly", "engine_ready", { errorCode: "SQLITE_READONLY" });
     if (sqlite) return set("store_error", "engine_ready", { errorCode: knownCode(sqlite[1]) ?? result.errorCode });
     if ((status !== null && status >= 0xc0000000) || signal) return set("engine_crash", "engine_ready");
     return set("engine_exit", "engine_ready");
@@ -154,6 +235,7 @@ export function classifyStartFailure(rawError, { fallbackPhase = "unknown" } = {
   if (/did not stay running|did not report a base URL|did not report an access token|did not finish starting/i.test(message)) {
     return set("server_not_ready", "server_ready");
   }
+  if (sqliteCode === "SQLITE_READONLY") return set("store_readonly", "server", { errorCode: "SQLITE_READONLY" });
   if (sqlite) return set("store_error", "server", { errorCode: knownCode(sqlite[1]) ?? result.errorCode });
   return result;
 }
@@ -189,7 +271,7 @@ const IPV6 = /(?:\b[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{0,4}){3,7}\b|\b[0-9A-Fa-f]{1,
  * @param {{ roots?: Array<string | undefined>; userName?: string; hostName?: string; category?: string }} [options]
  */
 export function scrubStartMessage(rawError, { roots = [], userName = "", hostName = "", category = "" } = {}) {
-  const message = messageOf(innermost(rawError));
+  const message = stripAnsi(messageOf(innermost(rawError)));
   if (!message.trim()) return null;
   if (category === "config_invalid" || category === "config_incompatible") {
     const errorName = innermost(rawError) instanceof Error ? innermost(rawError).name : "";
@@ -198,8 +280,14 @@ export function scrubStartMessage(rawError, { roots = [], userName = "", hostNam
   }
   const lines = message.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const picked = [lines[0]];
-  const diagnostic = lines.slice(1).find((line) => /error|lacks|illegal|EADDRINUSE|SQLITE|denied|permission/i.test(line));
-  if (diagnostic) picked.push(diagnostic);
+  // An engine exit: its own error line (after the "Unexpected error" banner) and what kind it is.
+  const engineLine = engineErrorLine(message);
+  if (engineLine) {
+    picked.push(`engine_error=${engineErrorKind(engineLine)}`, engineLine);
+  } else {
+    const diagnostic = lines.slice(1).find((line) => /error|lacks|illegal|EADDRINUSE|SQLITE|denied|permission|readonly/i.test(line));
+    if (diagnostic) picked.push(diagnostic);
+  }
   let text = picked.join(" | ");
   const knownRoots = [...new Set(roots.filter((root) => typeof root === "string" && root.trim().length >= 3))]
     .sort((left, right) => right.length - left.length);
@@ -403,7 +491,7 @@ export function buildStartFailureReport({
 }
 
 /** What the start screen tells the user for a category (null: the generic text). */
-export function startFailureHint(category, { platform = process.platform, avHint = "none" } = {}) {
+export function startFailureHint(category, { platform = process.platform, avHint = "none", storeCheck = null } = {}) {
   const windows = platform === "win32";
   if (category === "engine_missing" || avHint === "binary_missing") {
     return {
@@ -453,6 +541,24 @@ export function startFailureHint(category, { platform = process.platform, avHint
       body: windows
         ? "It may be on a disconnected drive, offline in OneDrive, or blocked by Controlled folder access (Windows Security > Ransomware protection: allow omnirush.ai). Reconnect it, or use Reset app data."
         : "It may be on a disconnected drive or no longer exist. Reconnect it, or use Reset app data.",
+    };
+  }
+  if (category === "store_readonly") {
+    if (storeCheck?.elevated === true && windows) {
+      return {
+        title: "omnirush.ai is running as administrator",
+        body: "Close omnirush.ai and start it normally (not with Run as administrator). If it still can't start, press Fix and restart.",
+      };
+    }
+    return {
+      title: "omnirush.ai can't write its local data",
+      body: storeCheck?.repairable
+        ? (windows
+          ? "Some of omnirush.ai's data files are marked read-only. Press Fix and restart: it clears the read-only mark and restarts omnirush.ai."
+          : "Some of omnirush.ai's data files are read-only. Press Fix and restart: it makes them writable and restarts omnirush.ai.")
+        : (windows
+          ? "Windows refuses omnirush.ai write access to its data files. Press Fix and restart. If that doesn't help, use Reset app data: it moves the files to a backup folder (nothing is deleted) and restarts with fresh ones. Don't start omnirush.ai with Run as administrator."
+          : "omnirush.ai can't write its data files. Press Fix and restart. If that doesn't help, use Reset app data: it moves the files to a backup folder (nothing is deleted) and restarts with fresh ones."),
     };
   }
   if (category === "store_error") {
@@ -538,6 +644,9 @@ export function createStartReporter({ filePath, send, now = Date.now, maxPerDay 
     }
     if (!response) return "retry";
     if (response.ok) return "sent";
+    if (response.status === 422 && LEGACY_CATEGORIES[body?.category]) {
+      return deliver({ ...body, category: LEGACY_CATEGORIES[body.category] });
+    }
     if (response.status === 401 || response.status === 408 || response.status >= 500) return "retry";
     return "drop";
   }
