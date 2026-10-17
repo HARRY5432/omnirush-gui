@@ -148,7 +148,7 @@ export function LoadingOverlay() {
             {repairStore ? (
               <button
                 type="button"
-                className="rounded-md bg-dls-accent px-3 py-2 font-medium text-dls-accent-foreground"
+                className="rounded-md bg-dls-accent px-3 py-2 font-medium text-[var(--dls-accent-fg)]"
                 data-testid="start-failure-repair-store"
                 onClick={() => {
                   setActionState("Fixing access to omnirush.ai's local data and restarting…");
@@ -166,7 +166,7 @@ export function LoadingOverlay() {
               type="button"
               className={repairStore
                 ? "rounded-md border border-dls-border px-3 py-2 font-medium text-dls-primary"
-                : "rounded-md bg-dls-accent px-3 py-2 font-medium text-dls-accent-foreground"}
+                : "rounded-md bg-dls-accent px-3 py-2 font-medium text-[var(--dls-accent-fg)]"}
               onClick={() => window.location.reload()}
             >
               Try again
