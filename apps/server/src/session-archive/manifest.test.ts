@@ -18,6 +18,7 @@ import {
   type ScannedEntry,
 } from "./manifest.js";
 import { cleanupTempDirs, tempDir } from "./test-helpers.js";
+import { scanTouchedFiles } from "./touched.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -62,8 +63,11 @@ describe("credential filter", () => {
 
 describe("source files named like keys", () => {
   // Program source whose name or folder reads like a credential store is
-  // project code: a plain project folder and a git repository both keep it,
-  // while real key, env and config files stay out.
+  // project code: a plain project folder and a git repository both keep it
+  // when the client credential rules find nothing in its text. Real key, env
+  // and config files stay out, and so does such a source file that holds a
+  // credential, is not UTF-8 text, is over the size cap or is gitignored.
+  // Every value below is invented for the test.
   const code = [
     "src/config/secret.rs",
     "lib/core/secrets/secret_store.dart",
@@ -72,30 +76,44 @@ describe("source files named like keys", () => {
     "src/keys/keys.mjs",
     "app/credentials/provider.ts",
   ];
-  const leftOut = [".env", "config/secrets.json", "credentials.yml", "certs/server.key", "Set Keys.cmd", "deploy/.ssh/helper.py"];
+  const special: Record<string, string | Buffer> = {
+    "config/keys.js": 'module.exports = { mongoURI: "mongodb://appuser:Q7v2LmX9pR4tW8@db.internal.invalid:27017/app" };\n',
+    "secrets.py": 'API_KEY = "Zq7Lm2Rt9Vb4Nw8Kp1Xc6Hd3"\n',
+    "src/secrets/blob.ts": Buffer.from([0x2f, 0x2f, 0x20, 0xff, 0xfe, 0x0a]),
+    "src/keys/big.ts": `// ${"x".repeat(1024 * 1024)}\n`,
+  };
+  const leftOut = [".env", "config/secrets.json", "credentials.yml", "certs/server.key", "Set Keys.cmd", "deploy/.ssh/helper.py", ...Object.keys(special)];
+  const ignoredCode = "local/keys/local_keys.ts";
 
-  test("the credential filter keeps them", () => {
-    for (const path of code) expect(isArchiveCredentialPath(path)).toBe(false);
-    for (const path of leftOut) expect(isArchiveCredentialPath(path)).toBe(true);
+  test("the path rule alone still denies them (the scans decide by content)", () => {
+    for (const path of code) expect(isArchiveCredentialPath(path)).toBe(true);
+    expect(isArchiveCredentialPath("src/app.ts")).toBe(false);
   });
 
   for (const withGit of [false, true]) {
-    test(`${withGit ? "a git repository" : "a plain project folder"} archives them`, async () => {
+    test(`${withGit ? "a git repository" : "a plain project folder"} archives the clean ones only`, async () => {
       const root = await tempDir("codenames");
-      for (const path of ["package.json", ...code, ...leftOut]) {
+      for (const path of ["package.json", ".gitignore", ignoredCode, ...code, ...leftOut]) {
         await mkdir(join(root, path, ".."), { recursive: true });
-        await writeFile(join(root, path), `${path}\n`);
+        await writeFile(join(root, path), path === ".gitignore" ? "local/\n" : special[path] ?? `// ${path}\n`);
       }
       if (withGit) {
         await git(root, "init", "-q");
-        await git(root, "add", "package.json", ...code);
+        await git(root, "add", "package.json", ".gitignore", ...code);
         await git(root, "commit", "-qm", "init");
       }
       const { entries, excluded } = await scanArchiveTree(root);
       const paths = entries.map((entry) => entry.path);
       for (const path of code) expect(paths).toContain(path);
-      for (const path of leftOut) expect(paths).not.toContain(path);
+      for (const path of [...leftOut, ignoredCode]) expect(paths).not.toContain(path);
       expect(excluded.credential).toBe(leftOut.length);
+      const secretRs = entries.find((entry) => entry.path === "src/config/secret.rs")!;
+      expect(secretRs.content?.toString("utf8")).toBe("// src/config/secret.rs\n");
+      // A touched path goes through the same rule, also where ignored files are kept (the archiver's keepers).
+      for (const includeIgnored of [false, true]) {
+        const kept = await scanTouchedFiles(root, [...code, ...leftOut, ignoredCode], { includeIgnored });
+        expect(kept.entries.map((entry) => entry.path).sort()).toEqual([...code].sort());
+      }
     });
   }
 });
