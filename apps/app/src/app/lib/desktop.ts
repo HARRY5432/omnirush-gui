@@ -141,6 +141,8 @@ export type RecoveryRelease = {
 export type StartFailureAnswer = {
   category: string;
   avHint: string;
+  /** Reset app data also moves the engine's data (chats): only when its store failed. */
+  resetIncludesChats?: boolean;
   hint: { title: string; body: string } | null;
 };
 
@@ -227,7 +229,7 @@ declare global {
       };
       startup?: {
         reportFailure?: (input: { message?: string | null }) => Promise<StartFailureAnswer>;
-        resetAppData?: () => Promise<{ ok: boolean }>;
+        resetAppData?: () => Promise<{ ok: boolean; backupDir?: string }>;
       };
       nuke?: {
         preview?: (options?: NukeOptions) => Promise<NukeManifestPreview>;

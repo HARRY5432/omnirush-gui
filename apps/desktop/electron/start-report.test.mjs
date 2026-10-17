@@ -9,7 +9,6 @@ import {
   antivirusHint,
   buildStartFailureReport,
   classifyStartFailure,
-  cpuHasAvx2,
   createStartReporter,
   inspectEngineBinary,
   osBuild,
@@ -94,9 +93,66 @@ test("messages keep no paths, names, addresses or tokens", () => {
     assert.doesNotMatch(text, /[A-Za-z]:[\\/]|\\\\|\/home\/|~[\\/]|@|https?:|Ana|ana|[A-Za-z0-9+/_-]{32,}/, text);
     assert.ok(text.length <= 300);
   }
-  assert.equal(scrubStartMessage(spawnError("ENOENT"), { roots }), "spawn <path> ENOENT");
+  assert.equal(scrubStartMessage(spawnError("ENOENT"), { roots }), "spawn <path>");
   assert.equal(scrubStartMessage(new Error("   ")), null);
-  assert.match(scrubStartMessage(exitError(1, "line two\nerror: ConfigJsonError")), /exited with code 1 \| error: ConfigJsonError/);
+  assert.match(scrubStartMessage(exitError(1, "line two\nerror: database is locked")), /exited with code 1 \| error: database is locked/);
+});
+
+// The server's last check (omnirush/crash_reports.py _PERSONAL): a message
+// matching it is dropped. Scrubbed messages must never match it.
+const SERVER_DROP = new RegExp([
+  String.raw`\\`,
+  String.raw`/[^/\s]+/`,
+  String.raw`[A-Za-z]:/`,
+  String.raw`~/`,
+  "@",
+  String.raw`[a-z][a-z0-9+.-]*://`,
+  String.raw`\b(?:\d{1,3}\.){3}\d{1,3}\b`,
+  String.raw`\b[0-9a-f]{1,4}(?::[0-9a-f]{0,4}){3,7}\b`,
+  "::",
+  String.raw`\bBearer\s`,
+  String.raw`\bsk-[A-Za-z0-9_-]{4,}`,
+  String.raw`\bgh[opsur]_[A-Za-z0-9]{4,}`,
+  String.raw`\b(?:AKIA|ASIA)[0-9A-Z]{8,}`,
+  String.raw`\beyJ[A-Za-z0-9_-]{4,}`,
+  String.raw`[A-Za-z0-9+/_-]{32,}`,
+].join("|"), "i");
+
+/** @type {Array<[string, string[]]>} */
+const ADVERSARIAL = [
+  ["Workspace path is not accessible: C:\\Users\\Bob Jones\\Work\\Acme Client Contract\\notes.txt", ["Bob", "Jones", "Acme", "Contract", "notes"]],
+  ["EPERM: operation not permitted, open C:\\Users\\bob\\OneDrive - Acme Corp\\Documents\\plan.docx", ["bob", "Acme", "Corp", "plan"]],
+  ["spawn \\Device\\HarddiskVolume3\\Users\\Bob Jones\\x.exe EPERM", ["Bob", "Jones", "Harddisk"]],
+  ["cannot read \\Users\\bob\\AppData\\Local\\x", ["bob", "AppData"]],
+  ["ENOENT: no such file, open Users/alice/Documents/secret.docx", ["alice", "secret"]],
+  ["open '/Users/alice/My Projects/acme plan/x.json' failed", ["alice", "acme", "Projects"]],
+  ["provider rejected key sk-live-abc123def456", ["abc123"]],
+  ["token ghp_abcdEFGH1234 and gho_zzzz9999 and ghs_yyyy8888 rejected", ["EFGH", "zzzz", "yyyy"]],
+  ["request failed: Authorization: Bearer abc.def", ["abc.def"]],
+  ["bad token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln", ["eyJ", "c2ln"]],
+  ["aws key AKIAIOSFODNN7EXAMPLE denied", ["IOSFODNN"]],
+  ["connect ECONNREFUSED 203.0.113.7:443", ["203.0.113"]],
+  ["listen failed on fe80::1ff:fe23:4567:890a and 2001:db8:85a3:0:0:8a2e:370:7334", ["fe80", "2001", "8a2e"]],
+  ["engine on DESKTOP-BOBPC exited", ["BOBPC"]],
+];
+
+test("adversarial messages: paths with spaces, single-backslash and driveless paths, keys, IPs and the computer name never survive", () => {
+  for (const [raw, secrets] of ADVERSARIAL) {
+    const text = scrubStartMessage(new Error(raw), { userName: "bob", hostName: "DESKTOP-BOBPC" });
+    assert.ok(text, raw);
+    for (const secret of secrets) assert.ok(!text.toLowerCase().includes(secret.toLowerCase()), `${raw} -> ${text} keeps ${secret}`);
+    assert.doesNotMatch(text, SERVER_DROP, `${raw} -> ${text} would be dropped by the server`);
+  }
+  // Every raw string (except the computer name, which only the client knows) is dropped by the server's check.
+  for (const [raw] of ADVERSARIAL.slice(0, -1)) assert.match(raw, SERVER_DROP, raw);
+});
+
+test("config errors send only the error's type name, never the quoted diagnostic", () => {
+  const invalid = exitError(1, "ConfigJsonError: C:\\Users\\Bob Jones\\.config\\opencode\\opencode.json: Unexpected token at 'apiKey: sk-abc'");
+  assert.equal(scrubStartMessage(invalid, { category: classifyStartFailure(invalid).category }), "ConfigJsonError");
+  const compat = Object.assign(new Error("Configuration is invalid at C:\\Users\\Bob\\.config\\opencode\\opencode.json: permissions"), { name: "OpencodeConfigCompatError" });
+  assert.equal(scrubStartMessage(compat, { category: "config_incompatible" }), "OpencodeConfigCompatError");
+  assert.equal(scrubStartMessage(new Error("Configuration is invalid at x"), { category: "config_invalid" }), "config_invalid");
 });
 
 test("profile, OS build and version fields are booleans or numbers only", () => {
@@ -110,22 +166,6 @@ test("profile, OS build and version fields are booleans or numbers only", () => 
   assert.equal(reportVersion("v1.18.32"), "1.18.32");
   assert.equal(reportVersion("3.5.3-beta.1"), "3.5.3-beta.1");
   assert.equal(reportVersion(undefined), "unknown");
-});
-
-test("AVX2 detection per platform", async () => {
-  assert.equal(await cpuHasAvx2({ platform: "linux", arch: "x64", readText: async () => "flags\t\t: fpu sse2 avx avx2 bmi2\n" }), true);
-  assert.equal(await cpuHasAvx2({ platform: "linux", arch: "x64", readText: async () => "flags\t\t: fpu sse2 sse4_2\n" }), false);
-  assert.equal(await cpuHasAvx2({ platform: "linux", arch: "arm64" }), null);
-  const calls = [];
-  const run = async (file, args) => {
-    calls.push([file, args.at(-1)]);
-    return "False\r\n";
-  };
-  assert.equal(await cpuHasAvx2({ platform: "win32", arch: "x64", release: "10.0.22631", run }), false);
-  assert.match(calls[0][1], /IsProcessorFeaturePresent\(40\)/);
-  assert.equal(await cpuHasAvx2({ platform: "win32", arch: "x64", release: "10.0.17763", run }), null);
-  assert.equal(await cpuHasAvx2({ platform: "win32", arch: "x64", release: "10.0.26100", run: async () => null }), null);
-  assert.equal(await cpuHasAvx2({ platform: "darwin", arch: "x64", run: async () => "AVX2 BMI2 ERMS" }), true);
 });
 
 test("engine binary checks: missing, present and matching, modified", async () => {
@@ -167,8 +207,7 @@ test("the report body carries only the server's fields", () => {
     classified,
     engine,
     avHint: antivirusHint(classified, engine),
-    cpuAvx2: true,
-    message: "spawn <path> ENOENT",
+    message: "spawn <path>",
     appVersion: "3.5.3",
     engineVersion: "1.18.32",
     electronVersion: "38.2.0",
@@ -204,9 +243,8 @@ test("the report body carries only the server's fields", () => {
     attempt: 2,
     engine,
     profile: { non_ascii: true, has_space: true, unc: false, long: false },
-    cpu_avx2: true,
     av_hint: "binary_missing",
-    message: "spawn <path> ENOENT",
+    message: "spawn <path>",
   });
   assert.doesNotMatch(JSON.stringify(report), /José|Users/);
   // ENOENT although the binary is there: something stopped it.
@@ -221,6 +259,8 @@ test("hints name the antivirus fix on Windows and stay null for unknown failures
   assert.match(startFailureHint("engine_missing", { platform: "win32" }).body, /Protection history/);
   assert.match(startFailureHint("unknown", { platform: "win32", avHint: "binary_missing" }).title, /antivirus/);
   assert.match(startFailureHint("engine_timeout", { platform: "win32" }).body, /exclusion/);
+  assert.match(startFailureHint("engine_cpu_unsupported").title, /processor is too old/);
+  assert.doesNotMatch(JSON.stringify(startFailureHint("engine_cpu_unsupported")), /AVX/);
   assert.match(startFailureHint("store_error").body, /Reset app data/);
   assert.equal(startFailureHint("unknown"), null);
   assert.equal(startFailureHint("renderer"), null);

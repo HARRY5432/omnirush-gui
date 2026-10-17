@@ -30,7 +30,7 @@ test("couldn't start: one report, the hint it answers with, and Reset app data a
     avHint: "binary_missing",
     hint: { title: "Your antivirus may have removed omnirush.ai's engine", body: "Open Windows Security > Protection history." },
   }));
-  const resetAppData = mock(async () => ({ ok: true }));
+  const resetAppData = mock(async () => ({ ok: true, backupDir: "C:\\Users\\Ana\\AppData\\Roaming\\ai.omnirush.desktop\\start-reset-20261017-100000" }));
   let confirmAnswer = false;
   const confirms: string[] = [];
   Object.assign(window, {
@@ -75,13 +75,18 @@ test("couldn't start: one report, the hint it answers with, and Reset app data a
     });
     expect(confirms).toEqual([RESET_APP_DATA_CONFIRM]);
     expect(RESET_APP_DATA_CONFIRM).toContain("nothing is deleted");
+    expect(RESET_APP_DATA_CONFIRM).toContain("Your chats");
     expect(resetAppData).toHaveBeenCalledTimes(0);
     confirmAnswer = true;
     await act(async () => {
       reset?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(resetAppData).toHaveBeenCalledTimes(1);
-    expect(container.textContent).toContain("Restarting with fresh app data");
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("start-reset-20261017-100000");
+    expect(container.textContent).toContain("Restore previous app data");
   } finally {
     await act(async () => root.unmount());
     container.remove();

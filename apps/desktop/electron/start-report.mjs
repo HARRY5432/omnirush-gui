@@ -7,8 +7,7 @@
  * phase, error name/code, exit code or signal, versions, OS build, the time
  * to failure, checks of the engine binary (present, size, header, sha256
  * against the bundled versions.json, readable) and of the profile folder
- * (non-ASCII, spaces, UNC, long: booleans only), whether the CPU has AVX2,
- * and an antivirus hint. Never a path, user name, file contents or prompt;
+ * (non-ASCII, spaces, UNC, long: booleans only) and an antivirus hint. Never a path, user name, file contents or prompt;
  * the one free-text field is the error's first line with every path,
  * address and long token replaced, and the server drops it if anything
  * personal is left.
@@ -16,7 +15,6 @@
  * Sent with the device credential when signed in; otherwise (or offline)
  * queued and sent on a later start. At most MAX_REPORTS_PER_DAY a day.
  */
-import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, open, readFile, rename, stat, writeFile } from "node:fs/promises";
@@ -165,16 +163,42 @@ function escapeRegExp(value) {
 }
 
 /**
- * The error's first line (and, for an engine exit, its first diagnostic
- * line) with every path, address, URL, long token and the user's name
- * replaced. Null when nothing useful is left.
+ * Secrets that can sit in an error line: API keys (sk-…, GitHub ghp_/gho_/
+ * ghs_/ghu_/ghr_, AWS AKIA…), bearer credentials and JWT-like segments.
  */
-export function scrubStartMessage(rawError, { roots = [], userName = "" } = {}) {
+const SECRET_PATTERNS = [
+  /\bBearer\s+\S+/gi,
+  /\bsk-[A-Za-z0-9_-]{4,}/g,
+  /\bgh[opsur]_[A-Za-z0-9]{4,}/g,
+  /\b(?:AKIA|ASIA)[0-9A-Z]{8,}/g,
+  /\beyJ[A-Za-z0-9_-]{4,}(?:\.[A-Za-z0-9_-]*)*/g,
+  /\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
+];
+const IPV4 = /\b(?:\d{1,3}\.){3}\d{1,3}\b/g;
+const IPV6 = /(?:\b[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{0,4}){3,7}\b|\b[0-9A-Fa-f]{1,4}::(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4})*)?|::1\b)/g;
+
+/**
+ * The error's first line (and, for an engine exit, its first diagnostic
+ * line) with every path, address, URL, key, token, IP and the user's and
+ * computer's names replaced. A path runs to its closing quote or the end of
+ * the line, never only to the first space (`C:\\Users\\Bob Jones\\…`).
+ * For a config error only the error's type name is kept: its diagnostic
+ * quotes the file. Null when nothing useful is left.
+ *
+ * @param {unknown} rawError
+ * @param {{ roots?: Array<string | undefined>; userName?: string; hostName?: string; category?: string }} [options]
+ */
+export function scrubStartMessage(rawError, { roots = [], userName = "", hostName = "", category = "" } = {}) {
   const message = messageOf(innermost(rawError));
   if (!message.trim()) return null;
+  if (category === "config_invalid" || category === "config_incompatible") {
+    const errorName = innermost(rawError) instanceof Error ? innermost(rawError).name : "";
+    const named = message.match(/\b(Config[A-Za-z]*Error|OpencodeConfigCompatError|JSON Parse error)\b/);
+    return named?.[1] ?? (errorName && errorName !== "Error" ? errorName : category);
+  }
   const lines = message.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const picked = [lines[0]];
-  const diagnostic = lines.slice(1).find((line) => /error|lacks|illegal|EADDRINUSE|SQLITE|config|denied|permission/i.test(line));
+  const diagnostic = lines.slice(1).find((line) => /error|lacks|illegal|EADDRINUSE|SQLITE|denied|permission/i.test(line));
   if (diagnostic) picked.push(diagnostic);
   let text = picked.join(" | ");
   const knownRoots = [...new Set(roots.filter((root) => typeof root === "string" && root.trim().length >= 3))]
@@ -185,16 +209,21 @@ export function scrubStartMessage(rawError, { roots = [], userName = "" } = {}) 
     }
   }
   text = text
-    .replace(/https?:\/\/\S+/gi, "<url>")
-    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "<email>")
-    .replace(/\\\\[^\s"'<>|]+/g, "<path>")
-    .replace(/\b[A-Za-z]:[\\/][^\s"'<>|]*/g, "<path>")
-    .replace(/~[\\/][^\s"'<>|]*/g, "<path>")
-    .replace(/(^|[\s(="'])\/[^\s"'<>|]+/g, "$1<path>")
-    .replace(/[A-Za-z0-9+/_-]{32,}/g, "<id>")
+    .replace(/[a-z][a-z0-9+.-]*:\/\/[^\s"'<>|]+/gi, "<url>")
+    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "<email>");
+  for (const pattern of SECRET_PATTERNS) text = text.replace(pattern, "<secret>");
+  text = text.replace(IPV4, "<ip>").replace(IPV6, "<ip>");
+  for (const name of [userName, hostName]) {
+    const value = String(name ?? "").trim();
+    if (value.length >= 3) text = text.replace(new RegExp(escapeRegExp(value), "gi"), name === hostName ? "<host>" : "<user>");
+  }
+  text = text
+    // A quoted path: everything up to the closing quote.
+    .replace(/(["'`])[^"'`]*[\\/][^"'`]*\1/g, "$1<path>$1")
+    // An unquoted path (drive, UNC, \Device\…, \Users\…, Users/…, ~/…, /x/…): to the end of the line.
+    .replace(/(^|[\s(=:|])[^\s"'`(=|]*[\\/][^"'`|]*/g, "$1<path>")
+    .replace(/[A-Za-z0-9+_-]{24,}/g, "<id>")
     .replace(/@/g, " at ");
-  const name = String(userName ?? "").trim();
-  if (name.length >= 3) text = text.replace(new RegExp(escapeRegExp(name), "gi"), "<user>");
   text = text.replace(/\s+/g, " ").trim();
   if (!text) return null;
   return text.length > MESSAGE_LIMIT ? `${text.slice(0, MESSAGE_LIMIT - 1)}…` : text;
@@ -229,54 +258,6 @@ const VERSION = /^\d{1,6}\.\d{1,6}\.\d{1,6}(?:[-+][A-Za-z0-9.-]{1,50})?$/;
 export function reportVersion(value) {
   const text = String(value ?? "").trim().replace(/^v/, "");
   return VERSION.test(text) ? text : "unknown";
-}
-
-function execText(file, args, timeoutMs) {
-  return new Promise((resolve) => {
-    execFile(file, args, { timeout: timeoutMs, windowsHide: true, encoding: "utf8" }, (error, stdout) => {
-      resolve(error ? null : String(stdout ?? ""));
-    });
-  });
-}
-
-/**
- * Whether the CPU has AVX2 (the bundled engine's x64 build needs it), or
- * null when unknown or not applicable (arm64).
- */
-/**
- * @param {{
- *   platform?: string;
- *   arch?: string;
- *   release?: string;
- *   readText?: (file: string, encoding: "utf8") => Promise<string>;
- *   run?: (file: string, args: string[], timeoutMs: number) => Promise<string | null>;
- * }} [options]
- */
-export async function cpuHasAvx2({ platform = process.platform, arch = process.arch, release = os.release(), readText = (file, encoding) => readFile(file, encoding), run = execText } = {}) {
-  if (arch !== "x64") return null;
-  try {
-    if (platform === "linux") {
-      const info = await readText("/proc/cpuinfo", "utf8");
-      return /^flags\s*:.*\bavx2\b/m.test(info);
-    }
-    if (platform === "darwin") {
-      const out = await run("/usr/sbin/sysctl", ["-n", "machdep.cpu.leaf7_features"], 3000);
-      return out === null ? null : /\bAVX2\b/.test(out);
-    }
-    if (platform === "win32") {
-      // PF_AVX2_INSTRUCTIONS_AVAILABLE (40) is reported from Windows 10 2004 (build 19041).
-      const build = Number(osBuild(release).split(".")[2] ?? 0);
-      if (!(build >= 19041)) return null;
-      const script = "Add-Type -Namespace W -Name K -MemberDefinition '[DllImport(\"kernel32.dll\")] public static extern bool IsProcessorFeaturePresent(uint f);'; [W.K]::IsProcessorFeaturePresent(40)";
-      const out = await run("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script], 8000);
-      if (out === null) return null;
-      if (/\bTrue\b/.test(out)) return true;
-      if (/\bFalse\b/.test(out)) return false;
-    }
-  } catch {
-    return null;
-  }
-  return null;
 }
 
 async function sha256Of(filePath) {
@@ -367,7 +348,6 @@ export function buildStartFailureReport({
   classified,
   engine,
   avHint,
-  cpuAvx2 = null,
   message = null,
   appVersion = "unknown",
   engineVersion = "unknown",
@@ -417,7 +397,6 @@ export function buildStartFailureReport({
       readable: engine.readable,
     },
     profile: profileFlags(home),
-    cpu_avx2: cpuAvx2,
     av_hint: avHint,
     message,
   };
@@ -458,8 +437,8 @@ export function startFailureHint(category, { platform = process.platform, avHint
   }
   if (category === "engine_cpu_unsupported") {
     return {
-      title: "This processor isn't supported by the engine yet",
-      body: "omnirush.ai's engine needs a processor with AVX2. We've been sent a report. The omnirush CLI (npm i -g omnirush) works on this computer meanwhile.",
+      title: "This computer's processor is too old for omnirush.ai's engine",
+      body: "The engine stopped on an instruction this processor does not support. Please tell us in support which computer this is; the omnirush CLI (npm i -g omnirush) may work here meanwhile.",
     };
   }
   if (category === "config_incompatible" || category === "config_invalid") {

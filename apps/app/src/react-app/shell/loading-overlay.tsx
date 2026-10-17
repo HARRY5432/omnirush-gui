@@ -25,7 +25,9 @@ async function loadRecoveryPolicy(
 let startFailureReported: Promise<StartFailureAnswer | null> | null = null;
 
 export const RESET_APP_DATA_CONFIRM =
-  "Reset app data?\n\nomnirush.ai moves its local data (workspace list, chats, local settings) into a backup folder, nothing is deleted, and restarts. You stay signed in and your project files are not touched.";
+  "Reset app data?\n\nomnirush.ai moves its local settings (workspace list, local server data) into a backup folder, nothing is deleted, and restarts. Your chats, sign-in and project files stay. After the restart you can restore the previous data.";
+export const RESET_APP_DATA_CONFIRM_WITH_CHATS =
+  "Reset app data?\n\nomnirush.ai's local chat database looks damaged. omnirush.ai moves its local data, including chat history, into a backup folder, nothing is deleted, and restarts. Your sign-in and project files stay. After the restart you can restore the previous data.";
 
 /**
  * Quiet, opaque boot overlay. Solid surface fill so nothing bleeds through.
@@ -195,9 +197,16 @@ export function LoadingOverlay() {
                 type="button"
                 className="rounded-md border border-dls-border px-3 py-2 font-medium text-dls-primary"
                 onClick={() => {
-                  if (!window.confirm(RESET_APP_DATA_CONFIRM)) return;
+                  const confirmText = failureAnswer?.resetIncludesChats ? RESET_APP_DATA_CONFIRM_WITH_CHATS : RESET_APP_DATA_CONFIRM;
+                  if (!window.confirm(confirmText)) return;
                   setActionState("Restarting with fresh app data…");
-                  void resetAppData().catch(() => setActionState("Reset could not be started. Please retry."));
+                  void resetAppData()
+                    .then((result) => {
+                      if (result.backupDir) {
+                        setActionState(`Restarting with fresh app data. Your previous app data is kept in ${result.backupDir}; after the restart, choose Restore previous app data to go back to it.`);
+                      }
+                    })
+                    .catch(() => setActionState("Reset could not be started. Please retry."));
                 }}
               >
                 Reset app data

@@ -44,13 +44,18 @@ import {
   antivirusHint,
   buildStartFailureReport,
   classifyStartFailure,
-  cpuHasAvx2,
   createStartReporter,
   inspectEngineBinary,
   scrubStartMessage,
   startFailureHint,
 } from "./start-report.mjs";
-import { applyPendingStartReset, scheduleStartReset, startResetTargets } from "./start-reset.mjs";
+import {
+  applyPendingStartReset,
+  applyPendingStartRestore,
+  scheduleStartReset,
+  scheduleStartRestore,
+  startResetTargets,
+} from "./start-reset.mjs";
 import { createTerminalSessions, terminalShells } from "./terminal-sessions.mjs";
 import {
   buildNukeManifest,
@@ -1524,18 +1529,24 @@ async function reportStartFailure(input = {}) {
     classified,
     engine,
     avHint,
-    message: scrubStartMessage(failure.error, { roots: startReportScrubRoots(), userName }),
+    message: scrubStartMessage(failure.error, {
+      roots: startReportScrubRoots(),
+      userName,
+      hostName: os.hostname(),
+      category: classified.category,
+    }),
     appVersion: app.getVersion(),
     engineVersion: versions?.opencode?.version,
     elapsedMs: failure.elapsedMs,
     attempt: failure.attempt,
   };
   const category = buildStartFailureReport(draft).category;
-  const answer = { category, avHint, hint: startFailureHint(category, { avHint }) };
+  // Reset app data moves the engine's data (chats, sessions not yet uploaded) only when its store failed.
+  const resetIncludesChats = category === "store_error" && classified.phase === "engine_ready";
+  const answer = { category, avHint, resetIncludesChats, hint: startFailureHint(category, { avHint }) };
   reportedStart = { attempt: failure.attempt, answer };
   void (async () => {
-    const cpuAvx2 = await cpuHasAvx2().catch(() => null);
-    const outcome = await startReporter.report(buildStartFailureReport({ ...draft, cpuAvx2 }));
+    const outcome = await startReporter.report(buildStartFailureReport(draft));
     console.info(`[start-report] ${category}: ${outcome}`);
   })().catch((error) => console.warn("[start-report] failed", error instanceof Error ? error.name : "error"));
   return answer;
@@ -2103,11 +2114,17 @@ const desktopCommandHandlers = {
       return reportStartFailure(args[0] ?? {});
   },
   "startupResetAppData": async () => {
-      await scheduleStartReset({ userDataPath: app.getPath("userData") });
-      turnGuard.allowQuit();
-      app.relaunch();
-      app.quit();
-      return { ok: true };
+      const { backupDir } = await scheduleStartReset({
+        userDataPath: app.getPath("userData"),
+        includeEngineData: reportedStart.answer?.resetIncludesChats === true,
+      });
+      // A moment for the window to show where the backup goes.
+      setTimeout(() => {
+        turnGuard.allowQuit();
+        app.relaunch();
+        app.quit();
+      }, 4_000).unref?.();
+      return { ok: true, backupDir };
   },
   "runtimeStatus": async (event, ...args) => {
       return runtimeManager.runtimeStatus();
@@ -3232,9 +3249,18 @@ or use: pnpm dev:worktree`);
     }).catch((error) => {
       console.warn("[nuke] pending cleanup failed", error);
     });
-    await applyPendingStartReset({
+    const startRestore = await applyPendingStartRestore({
       userDataPath: app.getPath("userData"),
-      targets: startResetTargets({ userDataPath: app.getPath("userData"), env: process.env, homedir: os.homedir() }),
+      log: (message) => console.info(message),
+    });
+    const startReset = await applyPendingStartReset({
+      userDataPath: app.getPath("userData"),
+      targetsFor: ({ includeEngineData }) => startResetTargets({
+        userDataPath: app.getPath("userData"),
+        env: process.env,
+        homedir: os.homedir(),
+        includeEngineData,
+      }),
       log: (message) => console.info(message),
     });
     // Start-failure reports queued while signed out or offline.
@@ -3293,6 +3319,36 @@ or use: pnpm dev:worktree`);
 
     queueDeepLinks(forwardedDeepLinks(process.argv));
     const win = await createMainWindow();
+    if (startReset.ran && startReset.moved.length > 0) {
+      runDetachedTask("show app data reset notice", async () => {
+        const { response } = await dialog.showMessageBox(win, {
+          type: "info",
+          message: "omnirush.ai started with fresh app data",
+          detail: `Your previous app data was moved, not deleted, to:\n${startReset.backupDir}\n\n`
+            + "To go back to it, choose Restore previous app data: omnirush.ai restarts and moves it back."
+            + (startReset.failed.length ? `\n\n${startReset.failed.length} item(s) were in use and stayed in place.` : ""),
+          buttons: ["OK", "Open backup folder", "Restore previous app data"],
+          defaultId: 0,
+          cancelId: 0,
+        });
+        if (response === 1) await shell.openPath(startReset.backupDir);
+        if (response === 2) {
+          await scheduleStartRestore({ userDataPath: app.getPath("userData"), backupDir: startReset.backupDir });
+          turnGuard.allowQuit();
+          app.relaunch();
+          app.quit();
+        }
+      });
+    }
+    if (startRestore.ran) {
+      runDetachedTask("show app data restore notice", () => dialog.showMessageBox(win, {
+        type: startRestore.failed.length ? "warning" : "info",
+        message: startRestore.failed.length ? "Some previous app data could not be restored" : "Previous app data restored",
+        detail: `Backup folder:\n${startRestore.backupDir}`
+          + (startRestore.failed.length ? `\n\nNot restored: ${startRestore.failed.map((entry) => entry.label).join(", ")}` : ""),
+        buttons: ["OK"],
+      }));
+    }
     if (firstLaunchWorkspaceFailure) {
       runDetachedTask("show default workspace warning", () => dialog.showMessageBox(win, {
         type: "warning",
