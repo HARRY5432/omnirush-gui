@@ -7,7 +7,7 @@ import {
   OMNIRUSH_UI_MCP_REGISTRY_COMMAND_MESSAGE,
   withoutOmniRushUiMcpRegistryEntries,
 } from "./omnirush-ui-mcp-command.js";
-import { importNodeSqlite, runtimeDbPath } from "./runtime-db.js";
+import { importNodeSqlite, readRuntimeSqliteWithRecovery, runtimeDbPath } from "./runtime-db.js";
 import type { ServerConfig } from "./types.js";
 import { createWorkspaceKvStore, isRecord } from "./workspace-kv-store.js";
 
@@ -198,24 +198,26 @@ export async function listRuntimeOpencodeConfigRows(config: ServerConfig): Promi
     FROM runtime_opencode_configs
   `;
   try {
-    let rows: unknown[];
-    if (typeof process.versions.bun === "string") {
-      const { Database } = await import("bun:sqlite");
-      const sqlite = new Database(path, { readonly: true, create: false });
-      try {
-        rows = sqlite.query(sql).all();
-      } finally {
-        sqlite.close();
+    // The first read at every start: a hot journal left by a cut-short write
+    // would fail it (and so the start) every time unless rolled back here.
+    const rows = await readRuntimeSqliteWithRecovery(path, async (): Promise<unknown[]> => {
+      if (typeof process.versions.bun === "string") {
+        const { Database } = await import("bun:sqlite");
+        const sqlite = new Database(path, { readonly: true, create: false });
+        try {
+          return sqlite.query(sql).all();
+        } finally {
+          sqlite.close();
+        }
       }
-    } else {
       const { DatabaseSync } = await importNodeSqlite();
       const sqlite = new DatabaseSync(path, { readOnly: true });
       try {
-        rows = sqlite.prepare(sql).all();
+        return sqlite.prepare(sql).all();
       } finally {
         sqlite.close();
       }
-    }
+    });
     return rows.flatMap((row) => {
       const parsed = runtimeOpencodeConfigRow(row);
       return parsed ? [parsed] : [];
