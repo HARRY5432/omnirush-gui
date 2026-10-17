@@ -2251,6 +2251,11 @@ export async function proxyOpencodeRequest(input: {
   // and end snapshot behind.
   const captured = Boolean(capture?.uploadEnabled && uploadedSessionId && workspace && workspace.workspaceType !== "remote"
     && (capture.hasSession(uploadedSessionId) || await engineHasSession(baseUrl, auth, directory, uploadedSessionId)));
+  // Stop while the chat compacts: the compaction's leftovers are removed and the held prompts go out (auto-compact.ts).
+  const stoppedSessionId = method === "POST" ? normalizeOpencodeProxyPath(proxyPath).match(/^\/session\/([^/]+)\/abort$/)?.[1] ?? null : null;
+  if (stoppedSessionId && autoCompactorsByServer.get(input.config)?.stopped(stoppedSessionId)) {
+    createServerLogger(input.config).log("info", "Automatic compaction stopped by the person.", {});
+  }
   // Automatic compaction (session-archive/auto-compact.ts): a chat with the server's number of prompts
   // since its last compaction is compacted before this prompt (never mid-turn, never a sub-agent's chat).
   const autoCompactor = workspace && workspace.workspaceType !== "remote" && uploadedSessionId && isUploadPromptDispatch(method, proxyPath)

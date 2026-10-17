@@ -19,6 +19,13 @@
  * caller asks only for a prompt that opens a turn (not a steer). Sub-agent
  * chats are never compacted on their own. A failed compaction is tried
  * again RETRY_AFTER_TURNS prompts later; the prompt goes out regardless.
+ * One the person stopped (Esc) is tried again only after a full
+ * `after_turns`.
+ *
+ * A compaction that ended without a summary (stopped, failed, timed out)
+ * leaves its request in the chat, and the engine would run that request
+ * again with the next prompt, answering the prompt with a summary instead.
+ * Its request and broken summary are removed before the prompt goes out.
  *
  * The prompt waits for the compaction at most `holdMs`; past that it goes
  * out and the engine runs it right after the compaction.
@@ -31,8 +38,10 @@ export const AUTO_COMPACT_FAILED_NOTICE = "Could not compact the conversation. C
 export const RETRY_AFTER_TURNS = 5;
 /** How long the first prompt of a chat waits for the read that starts its count. */
 export const SEED_WAIT_MS = 10_000;
-/** The longest a compaction may run before it counts as failed. */
+/** The longest a compaction may run before it counts as failed (and the engine is told to stop it). */
 export const COMPACTION_TIMEOUT_MS = 10 * 60_000;
+/** After the person stops a compaction, how long the engine has to end it before the wait for it is given up. */
+export const STOP_GRACE_MS = 5_000;
 
 export type AutoCompactPolicy = { enabled: boolean; afterTurns: number; minContextTokens: number };
 export type ModelRef = { providerID: string; modelID: string };
@@ -47,6 +56,10 @@ export type AutoCompactEngine = {
   busy(): Promise<boolean | null>;
   /** Runs the engine's compaction on `model`; resolves once it finished, rejects when it failed. */
   summarize(model: ModelRef, signal: AbortSignal): Promise<void>;
+  /** Removes one message from the chat (a compaction's leftover request or broken summary). */
+  removeMessage?(messageID: string): Promise<void>;
+  /** Stops what the engine runs for the chat (a compaction past its time). */
+  abort?(): Promise<void>;
 };
 
 export type AutoCompactStage = "started" | "finished" | "failed";
@@ -60,6 +73,7 @@ export type AutoCompactorOptions = {
   holdMs?: number;
   seedWaitMs?: number;
   timeoutMs?: number;
+  stopGraceMs?: number;
 };
 
 export type AutoCompactOutcome = {
@@ -194,12 +208,66 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function idOf(message: unknown): string | null {
+  if (!isRecord(message)) return null;
+  const id = infoOf(message).id;
+  return typeof id === "string" && id ? id : null;
+}
+
+/** The ids of the chat's compaction summaries. */
+function summaryIds(messages: unknown): Set<string> {
+  const ids = new Set<string>();
+  if (Array.isArray(messages)) for (const message of messages) if (isCompactionSummary(message)) { const id = idOf(message); if (id) ids.add(id); }
+  return ids;
+}
+
+export type CompactionResult = {
+  /** "summarized": a summary without an error; "broken": one with an error (stopped, failed); "none": no new summary. */
+  state: "summarized" | "broken" | "none";
+  /** The engine's error name on a broken summary (MessageAbortedError: the person stopped it). */
+  error?: string;
+  /** What to remove for a broken one: the summary and its compaction request. */
+  leftovers: string[];
+};
+
+/**
+ * How the compaction that just ran ended, from the chat's messages read
+ * after it: its summary is the newest one not in `before` (the ids seen
+ * before it started). `cut`: our wait for it ended early (stopped, timed
+ * out, failed), so a summary the engine never closed is broken too.
+ */
+export function compactionResult(messages: unknown, before: Set<string>, options: { cut?: boolean } = {}): CompactionResult {
+  if (!Array.isArray(messages)) return { state: "none", leftovers: [] };
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!isCompactionSummary(message)) continue;
+    const id = idOf(message);
+    if (!id || before.has(id)) return { state: "none", leftovers: [] };
+    const info = infoOf(message as Json);
+    const closed = isRecord(info.time) && typeof info.time.completed === "number";
+    if (info.error == null && (closed || !options.cut)) return { state: "summarized", leftovers: [] };
+    const error = info.error == null ? "unfinished" : isRecord(info.error) && typeof info.error.name === "string" ? info.error.name : "error";
+    const leftovers = [id];
+    const parentID = typeof info.parentID === "string" ? info.parentID : null;
+    const request = parentID ? messages.find((entry) => idOf(entry) === parentID) : undefined;
+    // Only a request that is nothing but the compaction (never a prompt someone sent).
+    if (parentID && isRecord(request) && infoOf(request).role === "user") {
+      const parts = Array.isArray(request.parts) ? request.parts.filter(isRecord) : [];
+      if (parts.length > 0 && parts.every((part) => part.type === "compaction")) leftovers.push(parentID);
+    }
+    return { state: "broken", error, leftovers };
+  }
+  return { state: "none", leftovers: [] };
+}
+
 export class AutoCompactor {
   /** Prompts sent per chat since its last compaction (an upper bound, module docstring). */
   private readonly counts = new Map<string, number>();
   private readonly seeding = new Map<string, Promise<unknown>>();
   private readonly children = new Set<string>();
   private readonly running = new Map<string, Promise<boolean>>();
+  /** The running compactions' stop handles (the person stopped the chat: give the engine STOP_GRACE_MS, then let go). */
+  private readonly stops = new Map<string, () => void>();
 
   constructor(private readonly options: AutoCompactorOptions) {}
 
@@ -211,6 +279,19 @@ export class AutoCompactor {
   /** The chat was compacted another way (the person, the engine): count from zero. */
   noteCompacted(sessionId: string): void {
     if (!this.running.has(sessionId)) this.counts.set(sessionId, 0);
+  }
+
+  /**
+   * The person stopped the chat (Esc) while it compacts: the engine ends the
+   * compaction, its leftovers are removed, and the held prompts go out. If
+   * the engine has not answered within STOP_GRACE_MS, the wait ends anyway.
+   * Returns whether a compaction was running.
+   */
+  stopped(sessionId: string): boolean {
+    const stop = this.stops.get(sessionId);
+    if (!stop) return false;
+    stop();
+    return true;
   }
 
   forget(sessionId: string): void {
@@ -250,6 +331,25 @@ export class AutoCompactor {
     })().finally(() => this.seeding.delete(sessionId));
     this.seeding.set(sessionId, run);
     return run;
+  }
+
+  /** Waits (at most `ms`) until the engine runs nothing for the chat. */
+  private async idle(engine: AutoCompactEngine, ms: number): Promise<void> {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      if (await engine.busy().catch(() => null) === false) return;
+      await new Promise((resolve) => { const timer = setTimeout(resolve, Math.min(250, Math.max(0, until - Date.now()))); (timer as { unref?: () => void }).unref?.(); });
+    }
+  }
+
+  /** Removes a broken compaction's summary and request; resolves how many went. */
+  private async removeLeftovers(engine: AutoCompactEngine, ids: string[]): Promise<number> {
+    if (!engine.removeMessage || ids.length === 0) return 0;
+    let removed = 0;
+    for (const id of ids) {
+      try { await engine.removeMessage(id); removed += 1; } catch (error) { this.log("warn", "auto compaction leftover not removed", { messageID: id, error: errorText(error) }); }
+    }
+    return removed;
   }
 
   private add(sessionId: string, base?: number): void {
@@ -330,24 +430,53 @@ export class AutoCompactor {
     this.notify(sessionId, "started");
     this.log("info", "auto compaction started", { sessionId, turns, context_tokens: context, after_turns: current.afterTurns });
     const started = Date.now();
+    const before = summaryIds(messages);
     const controller = new AbortController();
+    let stoppedByPerson = false;
+    let timedOut = false;
     const timeoutMs = this.options.timeoutMs ?? COMPACTION_TIMEOUT_MS;
-    const timer = setTimeout(() => controller.abort(new Error("compaction timed out")), timeoutMs);
+    const timer = setTimeout(() => {
+      timedOut = true;
+      // The engine goes on compacting after our wait ends: tell it to stop, so its leftovers can be removed.
+      void (engine.abort?.() ?? Promise.resolve()).catch(() => undefined).finally(() => controller.abort(new Error("compaction timed out")));
+    }, timeoutMs);
     (timer as { unref?: () => void }).unref?.();
+    let grace: ReturnType<typeof setTimeout> | undefined;
+    this.stops.set(sessionId, () => {
+      stoppedByPerson = true;
+      grace ??= setTimeout(() => controller.abort(new Error("compaction stopped")), this.options.stopGraceMs ?? STOP_GRACE_MS);
+      (grace as { unref?: () => void }).unref?.();
+    });
     const run: Promise<boolean> = engine.summarize(model, controller.signal).then(
-      () => {
+      () => null,
+      (error: unknown) => error ?? new Error("summarize failed"),
+    ).then(async (failure) => {
+      // Our wait ended early: give the engine a moment to finish stopping, so its summary is closed before it is read.
+      if (failure !== null) await this.idle(engine, this.options.stopGraceMs ?? STOP_GRACE_MS);
+      // Summarize answers once the engine is done, also when it was stopped: the chat says how it ended.
+      const result = compactionResult(await engine.messages().catch(() => null), before, { cut: failure !== null || stoppedByPerson });
+      if (failure === null && result.state !== "broken") {
         this.log("info", "auto compaction finished", { sessionId, elapsed_ms: Date.now() - started });
         this.notify(sessionId, "finished");
         return true;
-      },
-      (error: unknown) => {
-        this.log("warn", "auto compaction failed", { sessionId, elapsed_ms: Date.now() - started, error: errorText(error) });
-        this.later(sessionId, current);
-        this.notify(sessionId, "failed");
-        return false;
-      },
-    ).finally(() => {
+      }
+      const removed = await this.removeLeftovers(engine, result.leftovers);
+      const byPerson = stoppedByPerson || result.error === "MessageAbortedError";
+      this.log("warn", byPerson ? "auto compaction stopped" : "auto compaction failed", {
+        sessionId,
+        elapsed_ms: Date.now() - started,
+        error: failure === null ? result.error ?? null : errorText(failure),
+        timed_out: timedOut,
+        removed,
+      });
+      // Stopped by the person: the count started again at this prompt (a full after_turns); otherwise RETRY_AFTER_TURNS.
+      if (!byPerson) this.later(sessionId, current);
+      this.notify(sessionId, "failed");
+      return false;
+    }).finally(() => {
       clearTimeout(timer);
+      clearTimeout(grace);
+      this.stops.delete(sessionId);
       this.running.delete(sessionId);
     });
     this.running.set(sessionId, run);

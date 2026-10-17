@@ -1,6 +1,6 @@
 # Session-archive modules that are the same files in omnirush-cli (assets/extensions/omnirush/capture/session-archive/)
 # and omnirush-gui (apps/server/src/session-archive/). A change to one must be ported to the other and this list updated in both.
-4291c19235d4027c441b2787dcec31ed01fa3067ea6d33fbdc8177eab279684a  auto-compact.ts
+c7f2e9a9c126ea9dfef714d36385e611e2190b0af8043cd52368a08bd0590af5  auto-compact.ts
 8fd84683b5542236f0c88750e3d9bd756e15a304d263141b57998b17c4a1ab9c  late-writes.ts
 4d9a13a5df136cd6e13d0aeb67983249ca4a6913b66c5a8f768daa63da511dda  tool-start.ts
 38dc65a461de6905134c22837f5230d03383ec0bdd6df35090dd269160446edf  turn-overlap.ts
