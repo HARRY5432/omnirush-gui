@@ -18,10 +18,11 @@
 // background, and a shell call waits for it (boxsh).
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { boxKey, containerName, gcBoxes, installShell, openBox, recordFile, savedTurns, type Box, type BoxInstallLog, type BoxLabel, type BoxLog, type BoxRuntime, type CheckpointSummary } from "./box.js";
+import * as client from "./client.js";
+import { boxKey, containerName, gcBoxes, installShell, openBox, recordFile, reviveFile, savedTurns, type Box, type BoxInstallLog, type BoxLabel, type BoxLog, type BoxRuntime, type CheckpointSummary } from "./box.js";
 import { driverFor, normalizeBackend } from "./backends/index.js";
 import type { BoxExec } from "./backends/types.js";
 import { detectStack, imageFor, loadPins, type BoxImage } from "./images.js";
@@ -235,6 +236,11 @@ export type ReadyPlan = {
    * POSIX wrappers), mounted into a new box and put on its PATH.
    */
   start: (options?: { pkglog?: BoxInstallLog | null }) => Promise<Box>;
+  /**
+   * Open the box again (boxd stopped: its idle limit, a crash, the WSL distro
+   * restarted). The backend starts boxd again when it does not answer; installs are kept.
+   */
+  restart?: () => Promise<Box>;
   /** What the box start is doing ("starting", "pulling", "ready", "failed"; null before it starts). */
   readonly phase: string | null;
 };
@@ -274,12 +280,20 @@ export async function planBox({ env = process.env, home, root, log = () => {}, r
   if (env.OMNIRUSH_BOX_GC !== "off") setTimeout(() => gcInBackground(runtime, home, { log }), 30_000).unref?.();
   let opening: Promise<Box> | null = null;
   let phase: string | null = null;
+  let startedWith: BoxInstallLog | null = null;
+  const start = ({ pkglog = null }: { pkglog?: BoxInstallLog | null } = {}): Promise<Box> => {
+    if (!opening) startedWith = pkglog;
+    opening ??= openBox({ root, runtime, env, home, log, pull: false, shims, pkglog, revive: true, onState: (state) => { phase = state; } });
+    return opening;
+  };
   return {
     box: { key, home, root, runtime },
     notice: null,
     shell,
-    start: ({ pkglog = null } = {}) => {
-      opening ??= openBox({ root, runtime, env, home, log, pull: false, shims, pkglog, onState: (state) => { phase = state; } });
+    start,
+    restart: () => {
+      if (!opening) return start();
+      opening = openBox({ root, runtime, env, home, log, pull: false, shims, pkglog: startedWith, revive: true });
       return opening;
     },
     get phase() { return phase; },
@@ -320,6 +334,15 @@ export function engineConfig(bits: { shell: string; plugin: string } | null, con
   };
 }
 
+/** How often a project's box looks for a restart request from boxsh. */
+export const REVIVE_POLL_MS = 400;
+
+/** The record's error when boxd stopped and could not start again: why, and what the user can do. */
+export function reviveError(error: string | null | undefined): string {
+  const why = String(error || "it did not answer").replace(/\s+/g, " ").slice(0, 240);
+  return `the sandbox stopped and could not start again (${why}). Restart OmniRush (installs are kept), reset this folder's sandbox for a fresh one, or turn the sandbox off for this folder to run it on this computer`;
+}
+
 /** Turn the record off (the project went on without the box). */
 export function recordOff(home: string, key: string, reason: string): void {
   try {
@@ -357,6 +380,10 @@ export type BoxRun = {
   /** environment.sandbox for a chat's uploads; null while it is not (or no longer) the chat's. */
   label: (sessionId: string) => BoxLabel | null;
   setTurn: (turn: number) => void;
+  /** Start boxd again when it does not answer (resolves the Box now in use). */
+  heal: (why: string) => Promise<Box | null>;
+  /** Stop watching for restart requests (the project's box is let go). */
+  close: () => void;
   /** `sessionTurn`: the chat's own number of the prompt the checkpoint comes before (written as session_turn). */
   freeze: (label: string, options: { sessionId: string; turn?: number | null; sessionTurn?: number | null; chain?: string | null }) => Promise<Frozen | null>;
 };
@@ -369,11 +396,14 @@ export type BoxRun = {
  * "off"; the shell runs on this machine, its chats are not labelled); later
  * failures are logged and that turn has no checkpoint.
  */
-export function boxRun(plan: ReadyPlan, { log = () => {}, readyWaitMs = 30_000, onNative = () => {}, tmpRoot, pkglog = null }: { log?: BoxLog; readyWaitMs?: number; onNative?: (reason: string) => void; tmpRoot?: string; pkglog?: BoxInstallLog | null } = {}): BoxRun {
+export function boxRun(plan: ReadyPlan, { log = () => {}, readyWaitMs = 30_000, onNative = () => {}, onRevive = () => {}, tmpRoot, pkglog = null, pollMs = REVIVE_POLL_MS, ping = client.ping }: { log?: BoxLog; readyWaitMs?: number; onNative?: (reason: string) => void; onRevive?: (event: { ok: boolean; why: string; error?: string }) => void; tmpRoot?: string; pkglog?: BoxInstallLog | null; pollMs?: number; ping?: typeof client.ping } = {}): BoxRun {
   const { key, home, runtime, root } = plan.box;
   let box: Box | null = null;
   let native = false;
   const checkpoints = new Map<string, number>();
+  const requestFile = reviveFile(home, key);
+  // A restart request nobody answered before (the app quit): this start answers it.
+  try { rmSync(requestFile, { force: true }); } catch { /* not there */ }
   const opening = plan.start({ pkglog }).then((opened) => { box = opened; return opened; });
   const goNative = (reason: string) => {
     if (native) return;
@@ -397,10 +427,64 @@ export function boxRun(plan: ReadyPlan, { log = () => {}, readyWaitMs = 30_000, 
     };
     tick();
   });
+  // boxd stopped while the app ran (its idle limit, a crash, OOM, the WSL distro
+  // restarted, sleep): start it again, once at a time. Asked by a shell call that
+  // could not reach it (boxsh writes boxes/<key>.revive) and checked at each
+  // turn's checkpoint. A box that cannot start again stays "failed" with the
+  // reason and what to do (every shell call says it); the app says it once.
+  // Never this computer instead.
+  let healing: Promise<Box | null> | null = null;
+  let lostSaid = false;
+  let lastTurn: number | null = null;
+  const heal = (why: string): Promise<Box | null> => {
+    if (healing) return healing;
+    const since = Date.now();
+    healing = (async () => {
+      try {
+        const first = await opening;
+        if (native || !first.ready || !plan.restart) return box;
+        const current = box ?? first;
+        if (current.ready && current.endpoint && (await ping(current.endpoint, { timeoutMs: 1_500 }))) return current;
+        log("warn", "box not answering; starting it again", { why, key });
+        const again = await plan.restart();
+        box = again;
+        if (lastTurn !== null) again.setTurn(lastTurn);
+        if (again.ready) {
+          log("info", "box started again", { why, key });
+          lostSaid = false;
+          onRevive({ ok: true, why });
+        } else {
+          log("warn", "box could not start again", { why, key, error: again.error });
+          const error = reviveError(again.error);
+          again.fail(error);
+          if (!lostSaid) {
+            lostSaid = true;
+            onRevive({ ok: false, why, error });
+          }
+        }
+        return again;
+      } catch (error) {
+        log("warn", "box restart failed", { why, error: error instanceof Error ? error.message : String(error) });
+        return box;
+      } finally {
+        healing = null;
+        // Answered: boxsh reads the record now. A request made after this check started waits for the next one.
+        try { if (statSync(requestFile).mtimeMs <= since) rmSync(requestFile, { force: true }); } catch { /* none */ }
+      }
+    })();
+    return healing;
+  };
+  const watcher = setInterval(() => {
+    if (!native && !healing && existsSync(requestFile)) heal("request").catch(() => {});
+  }, pollMs);
+  watcher.unref?.();
   const ready = async (): Promise<Box | null> => {
     if (native) return null;
     const opened = await Promise.race([opening, limit()]);
-    if (opened?.ready) return opened;
+    if (opened?.ready) {
+      if (healing) await healing;
+      return box?.ready ? box : null;
+    }
     if ([...checkpoints.values()].every((count) => count === 0)) goNative(opened?.error || "the sandbox did not start in time");
     return null;
   };
@@ -417,15 +501,21 @@ export function boxRun(plan: ReadyPlan, { log = () => {}, readyWaitMs = 30_000, 
     get box() { return box; },
     ready,
     label: (sessionId) => (box?.ready && !native && (checkpoints.get(sessionId) ?? 0) > 0 ? box.label() : null),
-    setTurn: (turn) => box?.setTurn(turn),
+    setTurn: (turn) => { lastTurn = turn; box?.setTurn(turn); },
+    heal,
+    close: () => clearInterval(watcher),
     /**
      * The old sandbox's freeze(label, { turn, chain }) -> { save(dir), discard() } | null:
      * the checkpoint is taken now and placed by save(); `final` (the state a
      * chat ends with) is a leaf, so a resumed chat chains on from its last turn.
      */
     freeze: async (label, { sessionId, turn = null, sessionTurn = null, chain = null }) => {
-      const opened = await ready();
-      if (!opened) return null;
+      await ready();
+      if (native || !box) return null;
+      // Each turn starts with a box that answers (started again when it stopped since the last turn,
+      // or tried again when it could not start at the last try).
+      const opened = await heal("turn");
+      if (!opened?.ready) return null;
       const n = Number(turn ?? /^turn-(\d+)$/.exec(label)?.[1] ?? 0) || null;
       const name = n ? `turn-${n}` : label;
       const dir = chain ?? path.join(pending, `${process.pid}-${Date.now()}`);

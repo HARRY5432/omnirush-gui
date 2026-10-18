@@ -1673,6 +1673,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
       if (boxes.hasChats() && await Promise.race([archiveFinals.catch(() => false), new Promise<false>((resolvePromise) => setTimeout(() => resolvePromise(false), 1_000).unref?.())])) {
         await boxes.finals({ budgetMs: 10_000 }).catch(() => []);
       }
+      boxes.close();
       const captureStopped = capture.stop({ archiveFinals });
       bestPracticesReloads.stop();
       let recoveryError: unknown;

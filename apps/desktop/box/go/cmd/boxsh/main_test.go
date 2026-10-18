@@ -1,10 +1,14 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -103,5 +107,111 @@ func TestWaitReadyThroughDownload(t *testing.T) {
 	write("starting")
 	if _, err := waitReady("abc123"); err == nil || !strings.Contains(err.Error(), "did not start in time") {
 		t.Fatalf("a start that hangs still times out: %v", err)
+	}
+}
+
+func writeRec(t *testing.T, home, key string, rec map[string]any) {
+	t.Helper()
+	data, _ := json.Marshal(rec)
+	if err := os.MkdirAll(filepath.Join(home, "boxes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "boxes", key+".json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReviveAsksAndWaitsForTheNewRecord(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("OMNIRUSH_BOX_HOME", home)
+	t.Setenv("OMNIRUSH_BOX_REVIVE_WAIT_MS", "3000")
+	writeRec(t, home, "k1", map[string]any{"state": "ready", "port": 44897, "updated": 100, "revive": true, "backend": "bwrap", "token": "t1"})
+	rec, _ := readRecord("k1")
+	go func() {
+		// The session sees the request, starts boxd again and writes where it is.
+		for i := 0; i < 100; i++ {
+			if _, err := os.Stat(reviveFile("k1")); err == nil {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		writeRec(t, home, "k1", map[string]any{"state": "ready", "port": 45001, "updated": 200, "revive": true, "backend": "bwrap", "token": "t2"})
+		_ = os.Remove(reviveFile("k1"))
+	}()
+	again, why := revive("k1", rec, errors.New("dial tcp 127.0.0.1:44897: connect: connection refused"))
+	if again == nil || again.Port != 45001 || again.Token != "t2" {
+		t.Fatalf("got %+v (%s)", again, why)
+	}
+}
+
+func TestReviveFailsWithTheSessionsReason(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("OMNIRUSH_BOX_HOME", home)
+	t.Setenv("OMNIRUSH_BOX_REVIVE_WAIT_MS", "3000")
+	writeRec(t, home, "k1", map[string]any{"state": "ready", "port": 44897, "updated": 100, "revive": true, "backend": "bwrap"})
+	rec, _ := readRecord("k1")
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		writeRec(t, home, "k1", map[string]any{"state": "failed", "error": "the sandbox stopped and could not start again (x). Restart OmniRush (installs are kept), or `omnirush sandbox off`", "revive": true, "backend": "bwrap"})
+	}()
+	again, why := revive("k1", rec, errors.New("refused"))
+	if again != nil || !strings.Contains(why, "omnirush sandbox off") {
+		t.Fatalf("got %+v %q", again, why)
+	}
+}
+
+func TestReviveOnlyWhenTheAppRestartsAndNotTwice(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("OMNIRUSH_BOX_HOME", home)
+	t.Setenv("OMNIRUSH_BOX_REVIVE_WAIT_MS", "200")
+	// An app that does not restart boxd (no "revive"): no request, no wait.
+	writeRec(t, home, "k1", map[string]any{"state": "ready", "port": 44897, "backend": "bwrap"})
+	rec, _ := readRecord("k1")
+	start := time.Now()
+	if again, _ := revive("k1", rec, errors.New("refused")); again != nil || time.Since(start) > 100*time.Millisecond {
+		t.Fatal("waited for an app that does not restart")
+	}
+	if _, err := os.Stat(reviveFile("k1")); err == nil {
+		t.Fatal("asked an app that does not restart")
+	}
+	// Nobody answers: the first call waits once; a later one (request older than the wait) fails at once.
+	writeRec(t, home, "k1", map[string]any{"state": "ready", "port": 44897, "revive": true, "backend": "bwrap"})
+	rec, _ = readRecord("k1")
+	if again, why := revive("k1", rec, errors.New("refused")); again != nil || !strings.Contains(why, "did not start again") {
+		t.Fatalf("got %+v %q", again, why)
+	}
+	time.Sleep(50 * time.Millisecond)
+	start = time.Now()
+	if again, why := revive("k1", rec, errors.New("refused")); again != nil || !strings.Contains(why, "no answer") || time.Since(start) > 100*time.Millisecond {
+		t.Fatalf("waited again: %q", why)
+	}
+}
+
+func TestIsDialError(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+	_, err = net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), time.Second)
+	if err == nil || !isDialError(err) {
+		t.Fatalf("refused dial: %v", err)
+	}
+	if isDialError(errors.New("EOF")) {
+		t.Fatal("a read error is not a dial error")
+	}
+}
+
+func TestRetryFailedSaysWhatBroke(t *testing.T) {
+	dial := &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connect: connection refused")}
+	if got := retryFailed(dial); !strings.Contains(got, "not reachable after a restart") {
+		t.Fatal(got)
+	}
+	for _, err := range []error{errors.New("EOF"), &net.OpError{Op: "read", Net: "tcp", Err: errors.New("connection reset by peer")}} {
+		got := retryFailed(err)
+		if !strings.Contains(got, "broke during the command") || strings.Contains(got, "not reachable") {
+			t.Fatal(got)
+		}
 	}
 }

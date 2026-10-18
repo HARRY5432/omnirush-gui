@@ -94,6 +94,8 @@ export type BoxRecord = {
   v: 1; key: string; root: string; croot: string; container: string; backend: string; runtime: string; runtime_args: string[];
   host: string; port: number; token: string; state: string; error: string; uid: number; gid: number;
   home: string; shell: string; path_prefix: string; env_file: string; updated: number; pid: number;
+  /** The app restarts boxd when boxsh asks (boxes/<key>.revive). */
+  revive?: boolean;
 };
 
 export function readRecord(home: string, key: string): BoxRecord | null {

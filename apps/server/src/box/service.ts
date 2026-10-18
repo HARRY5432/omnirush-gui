@@ -233,7 +233,7 @@ export class BoxService {
     const chosen = now.ok ? now.backend ?? now.name : null;
     for (const project of this.projects.values()) {
       if (project.run && project.run.backend === chosen) continue;
-      project.run = null;
+      this.dropRun(project);
       project.notice = null;
       project.nextPlanAt = 0;
     }
@@ -253,7 +253,7 @@ export class BoxService {
     await Promise.allSettled([...this.projects.values()].map((project) => project.planning));
     for (const project of this.projects.values()) {
       if (!project.run || !allow || allow.includes(project.run.backend)) continue;
-      project.run = null;
+      this.dropRun(project);
       project.notice = null;
       project.nextPlanAt = 0;
     }
@@ -341,7 +341,7 @@ export class BoxService {
       const { on, hostBuilds: gate } = await this.mode(workspace);
       if (!on) {
         if (gate?.native && project.notice !== gate.notice) this.log("info", "box: the server's default not applied, the folder has this computer's builds", { key, things: gate.things });
-        project.run = null;
+        this.dropRun(project);
         project.notice = gate?.native ? gate.notice : null;
         await this.writeProjects();
         return null;
@@ -352,7 +352,7 @@ export class BoxService {
         // one, where every command fails. Planned again, the box restarts on the new folder (openBox).
         if (!box?.ready || !box.endpoint || !(await this.folderReplaced({ endpoint: box.endpoint, croot: box.croot }).catch(() => false))) return project.run;
         this.log("info", "box folder replaced while it ran: starting it again", { key });
-        project.run = null;
+        this.dropRun(project);
         project.nextPlanAt = 0;
       }
       if (Date.now() < project.nextPlanAt) return null;
@@ -363,17 +363,27 @@ export class BoxService {
         : plan.runtime && !plan.runtime.ok ? { reason: "no_runtime", runtime: runtimeWhy(plan.runtime) }
         : { reason: "helpers_missing" };
       if (!plan.box) {
-        project.run = null;
+        this.dropRun(project);
         project.notice = plan.notice;
         project.nextPlanAt = Date.now() + REPLAN_MS;
         await this.writeProjects();
         return null;
       }
       project.notice = null;
+      project.run?.close();
       project.run = boxRun(plan, {
         log: this.log,
         pkglog: this.installLog ? { root: this.installLog.root, bin: this.installLog.bin, py: this.installLog.py } : null,
         tmpRoot: join(this.home, "pending"),
+        // boxd stopped while the app ran: started again (installs kept), or once why not and what to do.
+        onRevive: (event) => {
+          if (event.ok) {
+            this.log("info", "box started again after it stopped", { key, why: event.why });
+            if (project.notice?.startsWith("Sandbox stopped:")) project.notice = null;
+          } else {
+            project.notice = `Sandbox stopped: ${event.error}.`;
+          }
+        },
         onNative: (reason) => {
           project.notice = `Sandbox off for now: ${reason}.`;
           project.nextPlanAt = Date.now() + REPLAN_MS;
@@ -524,7 +534,7 @@ export class BoxService {
    */
   async retry(workspace: BoxWorkspace): Promise<BoxStatus> {
     const project = this.projects.get(boxKey(boxRoot(workspace)));
-    if (project && (project.run?.native || project.run?.box?.state === "failed")) project.run = null;
+    if (project && (project.run?.native || project.run?.box?.state === "failed")) this.dropRun(project);
     if (project) {
       project.notice = null;
       project.nextPlanAt = 0;
@@ -544,7 +554,7 @@ export class BoxService {
     const runtime = await this.detect();
     const project = this.projects.get(key);
     if (project) {
-      project.run = null;
+      this.dropRun(project);
       project.nextPlanAt = 0;
     }
     await this.writeProjects();
@@ -639,6 +649,17 @@ export class BoxService {
   }
 
   /** At quit: every chat with checkpoints gets its `final` leaf (bounded); the sessions that got one. */
+  /** Let a project's box run go (no more restart requests answered for it). */
+  private dropRun(project: Project): void {
+    project.run?.close();
+    project.run = null;
+  }
+
+  /** The app quits: stop watching every project's box for restart requests. */
+  close(): void {
+    for (const project of this.projects.values()) project.run?.close();
+  }
+
   async finals({ budgetMs = 20_000 }: { budgetMs?: number } = {}): Promise<string[]> {
     const done: string[] = [];
     const work = (async () => {

@@ -626,9 +626,11 @@ func writeJSONFile(file string, v any) error {
 	return os.Rename(tmp, file)
 }
 
-// alive: the pid runs and is our launcher (not a reused pid).
+// alive: the pid runs and is our launcher (not a reused pid: after a
+// restart of the machine or of the WSL distro, pids start over, and the
+// recorded one can be this very boxrun, which would then kill itself).
 func alive(s *state) bool {
-	if s == nil || s.Pid <= 0 {
+	if s == nil || s.Pid <= 0 || s.Pid == os.Getpid() || s.Pid == os.Getppid() {
 		return false
 	}
 	if syscall.Kill(s.Pid, 0) != nil {
