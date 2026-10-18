@@ -375,6 +375,43 @@ describe("session upload observer", () => {
     expect(sessionUploader.entries.find((entry) => entry.kind === "flush")).toMatchObject({ final: { outcome: "aborted" } });
   });
 
+  test("a turn whose model stream died right after a tool call goes up with that call closed as aborted", async () => {
+    const clock = fakeClock();
+    const engine = startEngine();
+    const sessionUploader = new FakeUploader();
+    const archive = fakeArchive();
+    const dropped = message("msg_assistant_0001", "assistant", "Editing");
+    dropped.info = { ...dropped.info, time: { created: 1, completed: 50 }, finish: "error", error: { name: "APIError", data: { message: "The upstream stream ended" } } };
+    const call = { id: "prt_tool_0001", messageID: "msg_assistant_0001", sessionID: SESSION, type: "tool", tool: "edit", callID: "call_x|fc_y", state: { status: "running", input: { filePath: "a.ts" }, time: { start: 40 } } };
+    dropped.parts = [...dropped.parts, call];
+    engine.control.messages = [message("msg_user_0001", "user", "Edit a.ts"), dropped];
+    engine.control.status = () => (clock.elapsed() < 60_000 ? "busy" : "idle");
+
+    await observe({ sessionUploader, archive, observers: createSessionObservers(), target: engine.target, timing: clock.timing });
+
+    expect(sessionUploader.trace("turn.tools_closed")).toEqual([{ count: 1 }]);
+    const final = sessionUploader.entries.find((entry) => entry.kind === "flush" && entry.final !== undefined) as { final: { messages: EngineMessage[] } };
+    const part = final.final.messages[1]!.parts[1] as { callID: string; state: Record<string, unknown> };
+    expect(part.callID).toBe("call_x|fc_y");
+    expect(part.state).toEqual({ status: "error", input: { filePath: "a.ts" }, error: "Tool execution aborted", metadata: { interrupted: true }, time: { start: 40, end: 50 } });
+    // The engine's own copy is left as it is.
+    expect((engine.control.messages[1]!.parts[1] as { state: { status: string } }).state.status).toBe("running");
+  });
+
+  test("a turn whose calls all finished records no closing", async () => {
+    const clock = fakeClock();
+    const engine = startEngine();
+    const sessionUploader = new FakeUploader();
+    const reply = message("msg_assistant_0001", "assistant", "Done");
+    reply.parts = [...reply.parts, { id: "prt_tool_0001", type: "tool", tool: "read", callID: "c1", state: { status: "completed", input: {}, output: "ok", time: { start: 1, end: 2 } } }];
+    engine.control.messages = [message("msg_user_0001", "user", "Read"), reply];
+    engine.control.status = () => (clock.elapsed() < 60_000 ? "busy" : "idle");
+
+    await observe({ sessionUploader, archive: fakeArchive(), observers: createSessionObservers(), target: engine.target, timing: clock.timing });
+
+    expect(sessionUploader.trace("turn.tools_closed")).toEqual([]);
+  });
+
   test("a status read that times out twice, then answers, does not end the observation", async () => {
     const clock = fakeClock();
     const engine = startEngine();

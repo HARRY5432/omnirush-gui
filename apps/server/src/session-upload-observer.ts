@@ -15,6 +15,7 @@ import { watchToolCallEnds } from "./session-archive/files-used.js";
 import { turnWriters, type WriterSessionMessages } from "./session-archive/turn-writers.js";
 import { watchToolStarts } from "./session-archive/tool-start.js";
 import { watchToolEvents } from "./context/tool-events.js";
+import { closeOpenToolParts } from "./context/open-tools.js";
 import type { ContextCapture } from "./context/index.js";
 
 /** The engine a captured request went to: base URL, request headers (the engine's auth), query and API generation. */
@@ -339,7 +340,8 @@ async function captureChildSessions(input: {
     input.visited.add(childId);
     const history = await readEngineHistory(engineMessages(input.fetchEngine, `/session/${encodeURIComponent(childId)}/message`, true), input.checkpoints[childId])
       .catch(nullOnErrorStatus);
-    const newMessages = history?.delta ?? [];
+    // A sub-agent may still run: only the calls of its answers that ended are closed.
+    const newMessages = history ? closeOpenToolParts(history.delta, { engineIdle: false }).messages : [];
     if (newMessages.length > 0) input.onChild?.(childId, input.depth, newMessages);
     if (history && history.omitted > 0) {
       input.sessionUploader.recordTrace(input.rootSessionId, "session.messages_omitted", { child_session_id: childId, count: history.omitted });
@@ -843,7 +845,8 @@ export async function readSessionTranscript(target: EngineTarget, sessionId: str
   const path = v2 ? `/api/session/${encodeURIComponent(sessionId)}/context` : `/session/${encodeURIComponent(sessionId)}/message`;
   try {
     const history = await readEngineHistory(engineMessages(fetchEngine, path, !v2), undefined, MAX_BACKLOG_MESSAGE_BYTES);
-    return messageParts(history.delta, history.sizes).map((part) => part.messages);
+    // The session may be running: only the calls of answers that ended are closed.
+    return messageParts(closeOpenToolParts(history.delta, { engineIdle: false }).messages, history.sizes).map((part) => part.messages);
   } catch {
     return null;
   }
@@ -855,6 +858,20 @@ export async function readSessionTranscript(target: EngineTarget, sessionId: str
  * the last part, and each earlier part takes the next older ones. One part,
  * empty, when there are no messages.
  */
+/**
+ * A turn that is over keeps no tool call open: those the engine left pending
+ * or running (a dropped model stream, a stop, an engine gone with the app)
+ * go up closed as aborted (context/open-tools.ts), and the trace says how
+ * many. While the engine still runs (a turn cut by the next prompt), only
+ * the calls of answers that ended are closed.
+ */
+function closeTurnTools(uploader: Pick<SessionUploader, "recordTrace">, sessionId: string, history: EngineHistory, engineIdle: boolean): void {
+  const { messages, closed } = closeOpenToolParts(history.delta, { engineIdle });
+  if (closed === 0) return;
+  history.delta = messages;
+  uploader.recordTrace(sessionId, "turn.tools_closed", { count: closed });
+}
+
 function messageParts(messages: readonly unknown[], sizes: readonly number[], maxBytes = MAX_TURN_MESSAGE_BYTES): MessagePart[] {
   const parts: MessagePart[] = [];
   let part: MessagePart = { messages: [], bytes: 0 };
@@ -1045,6 +1062,7 @@ export function observeUploadedSession(input: {
         observer.lastMessageIds.set(sessionId, lastId);
         void sessionUploader.setSessionCheckpoint(sessionId, lastId);
       }
+      closeTurnTools(sessionUploader, sessionId, history, status === "idle" || status === "quit");
       if (history.checkpointMissing && !v2) {
         // The messages the last upload ended with are gone: a revert was made
         // final. Earlier uploads still hold the reverted turns, so the trace
