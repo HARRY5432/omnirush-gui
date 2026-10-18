@@ -329,6 +329,12 @@ async function captureChildSessions(input: {
   beforeRecord: (bytes: number) => void;
   /** Each child's new messages, as recorded (turn-writers.ts). */
   onChild?: (childId: string, depth: number, messages: readonly unknown[]) => void;
+  /**
+   * Open tool calls of the children (context/open-tools.ts): `engineIdle`
+   * when the engine no longer runs them (recovered, the app quits), else
+   * only those of answers that ended; `closed` counts what was closed.
+   */
+  toolsClosed?: { engineIdle: boolean; closed: number };
 }): Promise<void> {
   if (input.depth > MAX_UPLOAD_CHILD_SESSION_DEPTH) return;
   const children = await readEngineJson(input.fetchEngine, `/session/${encodeURIComponent(input.parentSessionId)}/children`, 1024 * 1024)
@@ -340,8 +346,10 @@ async function captureChildSessions(input: {
     input.visited.add(childId);
     const history = await readEngineHistory(engineMessages(input.fetchEngine, `/session/${encodeURIComponent(childId)}/message`, true), input.checkpoints[childId])
       .catch(nullOnErrorStatus);
-    // A sub-agent may still run: only the calls of its answers that ended are closed.
-    const newMessages = history ? closeOpenToolParts(history.delta, { engineIdle: false }).messages : [];
+    // A sub-agent may still run: unless the engine no longer does, only the calls of its answers that ended are closed.
+    const closing = history ? closeOpenToolParts(history.delta, { engineIdle: input.toolsClosed?.engineIdle ?? false }) : null;
+    if (closing && input.toolsClosed) input.toolsClosed.closed += closing.closed;
+    const newMessages = closing?.messages ?? [];
     if (newMessages.length > 0) input.onChild?.(childId, input.depth, newMessages);
     if (history && history.omitted > 0) {
       input.sessionUploader.recordTrace(input.rootSessionId, "session.messages_omitted", { child_session_id: childId, count: history.omitted });
@@ -853,25 +861,34 @@ export async function readSessionTranscript(target: EngineTarget, sessionId: str
 }
 
 /**
+ * A turn that is over keeps no tool call open: those the engine left pending
+ * or running (a dropped model stream, an engine gone with the app, a stop it
+ * did not get to record) go up closed as aborted (context/open-tools.ts).
+ * While the engine still runs (a turn cut by the next prompt), only the calls
+ * of answers that ended are closed. Returns how many were closed.
+ */
+function closeTurnTools(history: EngineHistory, engineIdle: boolean): number {
+  const { messages, closed } = closeOpenToolParts(history.delta, { engineIdle });
+  if (closed > 0) history.delta = messages;
+  return closed;
+}
+
+/** The trace says how many open tool calls the upload closed, the sub-agents' among them. */
+function recordToolsClosed(uploader: Pick<SessionUploader, "recordTrace">, sessionId: string, root: number, subAgents: number): void {
+  if (root + subAgents === 0) return;
+  uploader.recordTrace(sessionId, "turn.tools_closed", { count: root + subAgents, ...(subAgents > 0 ? { sub_agents: subAgents } : {}) });
+}
+
+/** The app quits while a turn runs: how long the engine gets to stop it before the turn is read. */
+const QUIT_ABORT_WAIT_MS = 2_000;
+const QUIT_ABORT_POLL_MS = 200;
+
+/**
  * A settled turn's messages (oldest first) cut into the parts its trace
  * flushes carry, oldest part first: the newest messages up to `maxBytes` make
  * the last part, and each earlier part takes the next older ones. One part,
  * empty, when there are no messages.
  */
-/**
- * A turn that is over keeps no tool call open: those the engine left pending
- * or running (a dropped model stream, a stop, an engine gone with the app)
- * go up closed as aborted (context/open-tools.ts), and the trace says how
- * many. While the engine still runs (a turn cut by the next prompt), only
- * the calls of answers that ended are closed.
- */
-function closeTurnTools(uploader: Pick<SessionUploader, "recordTrace">, sessionId: string, history: EngineHistory, engineIdle: boolean): void {
-  const { messages, closed } = closeOpenToolParts(history.delta, { engineIdle });
-  if (closed === 0) return;
-  history.delta = messages;
-  uploader.recordTrace(sessionId, "turn.tools_closed", { count: closed });
-}
-
 function messageParts(messages: readonly unknown[], sizes: readonly number[], maxBytes = MAX_TURN_MESSAGE_BYTES): MessagePart[] {
   const parts: MessagePart[] = [];
   let part: MessagePart = { messages: [], bytes: 0 };
@@ -1034,12 +1051,52 @@ export function observeUploadedSession(input: {
    * history when it was read already; a turn ended by the next prompt keeps
    * only the messages from before that prompt.
    */
+  /**
+   * The app quits while the turn runs (an app quit, a restart, a sign-out:
+   * the engine closes with this server): the engine is asked to stop it, as
+   * the Stop button does, so it records its own "Tool execution aborted" for
+   * a tool still running and its store and the upload agree. Bounded: asked
+   * once, waited for at most QUIT_ABORT_WAIT_MS. Resolves with null when the
+   * session was idle already, else whether the engine went idle.
+   */
+  const stopRunningTurn = async (): Promise<boolean | null> => {
+    try {
+      if ((await readStatus()) === "idle") return null;
+    } catch {
+      return false;
+    }
+    const { baseUrl, headers, search } = target();
+    const path = v2 ? `/api/session/${encodeURIComponent(sessionId)}/interrupt` : `/session/${encodeURIComponent(sessionId)}/abort`;
+    try {
+      const response = await loopbackFetch(buildOpencodeProxyUrl(baseUrl, path, search), { method: "POST", headers: new Headers(headers), signal: AbortSignal.timeout(1_000) });
+      await response.body?.cancel().catch(() => undefined);
+      if (!response.ok) return false;
+    } catch {
+      return false;
+    }
+    const deadline = timing.now() + QUIT_ABORT_WAIT_MS;
+    for (let polls = 0; polls < QUIT_ABORT_WAIT_MS / QUIT_ABORT_POLL_MS && timing.now() < deadline; polls += 1) {
+      try {
+        if ((await readStatus()) === "idle") return true;
+      } catch {
+        return false;
+      }
+      await timing.sleep(QUIT_ABORT_POLL_MS, stopped).catch(() => undefined);
+    }
+    return false;
+  };
+
   let recovering = input.recovered === true;
   const settle = async (status: string, read?: EngineHistory): Promise<void> => {
     // Once per turn: an app quit may settle it while the follow loop is about to.
     const turn = turnState();
     if (turn.settled) return;
     turn.settled = true;
+    // The app quits while the turn runs: the engine stops it before it is read.
+    if (status === "quit" && !read) {
+      const stoppedNow = await stopRunningTurn();
+      if (stoppedNow !== null) sessionUploader.recordTrace(sessionId, "turn.stopped_on_quit", { idle: stoppedNow });
+    }
     // When the engine went idle (not a cut while it ran): the next prompt's late-writes settle measures from it.
     if (typeof turn.idleAt === "number") observer.turnEnds?.set(sessionId, turn.idleAt);
     const recovered = recovering;
@@ -1056,13 +1113,14 @@ export function observeUploadedSession(input: {
       sessionUploader.recordTrace(sessionId, "session.messages_failed", { error: errorMessage(error) });
     }
     let parts: MessagePart[] = [{ messages: [], bytes: 0 }];
+    let rootToolsClosed = 0;
     if (history) {
       const lastId = traceMessageId(history.outline.at(-1));
       if (lastId) {
         observer.lastMessageIds.set(sessionId, lastId);
         void sessionUploader.setSessionCheckpoint(sessionId, lastId);
       }
-      closeTurnTools(sessionUploader, sessionId, history, status === "idle" || status === "quit");
+      rootToolsClosed = closeTurnTools(history, status === "idle" || status === "quit");
       if (history.checkpointMissing && !v2) {
         // The messages the last upload ended with are gone: a revert was made
         // final. Earlier uploads still hold the reverted turns, so the trace
@@ -1096,6 +1154,8 @@ export function observeUploadedSession(input: {
       pending += bytes;
     };
     const children: WriterSessionMessages[] = [];
+    // Quitting (the engine closes with the app) or recovered: the sub-agents' calls end with it.
+    const childTools = { engineIdle: status === "quit" || recovered, closed: 0 };
     // The v2 daemon has no subagent children route; only its root turn is captured.
     if (!v2) {
       try {
@@ -1110,12 +1170,14 @@ export function observeUploadedSession(input: {
           known: new Set(await sessionUploader.childSessionIds(sessionId)),
           visited: new Set([sessionId]),
           beforeRecord: room,
+          toolsClosed: childTools,
         });
       } catch (error) {
         if (stopped.aborted) throw error;
         sessionUploader.recordTrace(sessionId, "session.children_failed", { error: errorMessage(error) });
       }
     }
+    recordToolsClosed(sessionUploader, sessionId, rootToolsClosed, childTools.closed);
     // Sub-agents that wrote files in the workspace: who wrote what, and the files the root and a sub-agent (or two) both wrote.
     if (history && children.length > 0 && input.turnFiles) {
       const writers = turnWriters(input.turnFiles.root, [{ sessionId, role: "root", depth: 0, messages: history.delta }, ...children]);
