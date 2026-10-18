@@ -34,6 +34,11 @@ const (
 // MaxFrame bounds one frame's payload.
 const MaxFrame = 1 << 20
 
+// MaxRequestLine bounds the first line (a snapshot's tar or stat lists every
+// path). Older boxd builds took 4 MiB: clients send long path lists in
+// batches well under that, whatever boxd a box runs.
+const MaxRequestLine = 64 << 20
+
 // Request is the first line of a connection.
 type Request struct {
 	V     int               `json:"v"`
@@ -131,7 +136,7 @@ func WriteRequest(w io.Writer, req Request) error {
 // ReadRequest reads the first line (bounded) and checks the token.
 func ReadRequest(r *bufio.Reader, token string) (Request, error) {
 	var req Request
-	line, err := readLine(r, 4<<20)
+	line, err := readLine(r, MaxRequestLine)
 	if err != nil {
 		return req, err
 	}

@@ -113,13 +113,20 @@ export async function exec(box: BoxEndpoint, argv: string[], { cwd, env, root = 
 }
 
 /** lstat of each path, in order (type "missing" for a path that is gone). */
-export async function stat(box: BoxEndpoint, paths: string[], { timeoutMs = 60_000 }: { timeoutMs?: number } = {}): Promise<BoxStat[]> {
+export async function stat(box: BoxEndpoint, paths: string[], { timeoutMs = 60_000, budget = REQUEST_LINE_BUDGET }: { timeoutMs?: number; budget?: number } = {}): Promise<BoxStat[]> {
   const out: BoxStat[] = [];
-  for (let i = 0; i < paths.length; i += 20_000) {
-    const result = await request(box, { op: "stat", paths: paths.slice(i, i + 20_000) }, { timeoutMs });
-    out.push(...JSON.parse(result.data.toString("utf8")));
+  const { batches, skipped } = batchPaths(paths, { budget, overhead: lineOverhead(box, { op: "stat" }) });
+  // A path no request can carry (never in practice: a path is at most 4 KiB) is "other": not looked at.
+  const tooLong = new Set(skipped.map((item) => item.path));
+  const answers = new Map<string, BoxStat>();
+  for (const part of batches) {
+    const result = await request(box, { op: "stat", paths: part }, { timeoutMs });
+    const entries: BoxStat[] = JSON.parse(result.data.toString("utf8"));
+    if (!tooLong.size) out.push(...entries);
+    else for (const entry of entries) answers.set(entry.path, entry);
   }
-  return out;
+  if (!tooLong.size) return out;
+  return paths.map((p) => answers.get(p) ?? { path: p, type: "other", uid: 0, gid: 0 });
 }
 
 /**
@@ -139,16 +146,37 @@ export async function changes(box: BoxEndpoint, skip: string[], keep: string[], 
 }
 
 /** Every entry below the folders, stat fields included. */
-export async function walk(box: BoxEndpoint, roots: string[], { max = 400_000, timeoutMs = 120_000 }: { max?: number; timeoutMs?: number } = {}): Promise<{ entries?: BoxStat[]; truncated?: boolean }> {
-  const result = await request(box, { op: "walk", paths: roots, wait: max }, { timeoutMs });
-  return JSON.parse(result.data.toString("utf8"));
+export async function walk(box: BoxEndpoint, roots: string[], { max = 400_000, timeoutMs = 120_000, budget = REQUEST_LINE_BUDGET }: { max?: number; timeoutMs?: number; budget?: number } = {}): Promise<{ entries?: BoxStat[]; truncated?: boolean }> {
+  const { batches } = batchPaths(roots, { budget, overhead: lineOverhead(box, { op: "walk", wait: max }) });
+  if (batches.length <= 1) {
+    const result = await request(box, { op: "walk", paths: batches[0] ?? [], wait: max }, { timeoutMs });
+    return JSON.parse(result.data.toString("utf8"));
+  }
+  const entries: BoxStat[] = [];
+  let truncated = false;
+  for (const part of batches) {
+    const left = max - entries.length;
+    if (left <= 0) { truncated = true; break; }
+    const result = await request(box, { op: "walk", paths: part, wait: left }, { timeoutMs });
+    const parsed: { entries?: BoxStat[]; truncated?: boolean } = JSON.parse(result.data.toString("utf8"));
+    entries.push(...(parsed.entries ?? []));
+    if (parsed.truncated) { truncated = true; break; }
+  }
+  return { entries, truncated };
 }
 
+export type TarResult = { bytes: number; sha256: string; ms?: number; warning: string | null; skipped?: SkippedPath[] };
+
 /**
- * Tar exactly these paths into `file`: { bytes, sha256, ms, warning }. The
- * tar streams to disk: the box's connection waits while the file catches up.
+ * Tar exactly these paths into `file`: { bytes, sha256, ms, warning } (and
+ * `skipped`, the paths no request could carry). The tar streams to disk: the
+ * box's connection waits while the file catches up. Many paths go in several
+ * requests (each line within the budget), written one after the other as a
+ * single archive: each part but the last loses its end-of-archive marker.
+ * The paths go in byte order (boxd's), so a folder comes before what is in it.
  */
-export async function tarTo(box: BoxEndpoint, paths: string[], file: string, { timeoutMs = 15 * 60_000 }: { timeoutMs?: number } = {}): Promise<{ bytes: number; sha256: string; ms?: number; warning: string | null }> {
+export async function tarTo(box: BoxEndpoint, paths: string[], file: string, { timeoutMs = 15 * 60_000, budget = REQUEST_LINE_BUDGET }: { timeoutMs?: number; budget?: number } = {}): Promise<TarResult> {
+  const { batches, skipped } = batchPaths(byteSorted(paths), { budget, overhead: lineOverhead(box, { op: "tar" }) });
   const stream = createWriteStream(file, { mode: 0o600 });
   const hash = createHash("sha256");
   const controller = new AbortController();
@@ -160,29 +188,195 @@ export async function tarTo(box: BoxEndpoint, paths: string[], file: string, { t
     controller.abort();
   });
   await once(stream, "open");
-  let result: BoxReply;
+  const write = (pieces: Buffer[]): Promise<unknown> | null => {
+    if (!pieces.length) return draining;
+    const copy = Buffer.concat(pieces);
+    hash.update(copy);
+    bytes += copy.length;
+    // One drain wait at a time, however many frames arrive before it.
+    if (!stream.write(copy) && !draining) {
+      draining = once(stream, "drain").finally(() => { draining = null; });
+      draining.catch(() => undefined); // a write error is `failed`
+    }
+    return draining;
+  };
+  let ms: number | undefined;
+  const warnings: string[] = [];
   try {
-    result = await request(box, { op: "tar", paths }, {
-      timeoutMs,
-      signal: controller.signal,
-      onData: (chunk) => {
-        const copy = Buffer.from(chunk);
-        hash.update(copy);
-        bytes += copy.length;
-        // One drain wait at a time, however many frames arrive before it.
-        if (!stream.write(copy) && !draining) {
-          draining = once(stream, "drain").finally(() => { draining = null; });
-          draining.catch(() => undefined); // a write error is `failed`
-        }
-        return draining;
-      },
-    });
-  } catch (error) {
-    throw failed ?? error;
+    // Nothing any request could carry: still a valid (empty) archive.
+    if (!batches.length) await write([Buffer.alloc(1024)]);
+    for (let index = 0; index < batches.length; index += 1) {
+      const body = index < batches.length - 1 ? archiveBody() : null;
+      let result: BoxReply;
+      try {
+        result = await request(box, { op: "tar", paths: batches[index] }, {
+          timeoutMs,
+          signal: controller.signal,
+          onData: (chunk) => write(body ? body.push(chunk) : [chunk]),
+        });
+      } catch (error) {
+        throw failed ?? error;
+      }
+      if (failed) throw failed;
+      if (result.exit.code !== 0) throw new Error(`box tar failed: ${result.stderr.trim() || result.exit.code}${batches.length > 1 ? ` (part ${index + 1} of ${batches.length})` : ""}`);
+      body?.end();
+      if (typeof result.exit.ms === "number") ms = (ms ?? 0) + result.exit.ms;
+      const warning = result.stderr.trim();
+      if (warning && !warnings.includes(warning)) warnings.push(warning);
+    }
   } finally {
     await new Promise<void>((resolve) => stream.end(() => resolve()));
   }
   if (failed) throw failed;
-  if (result.exit.code !== 0) throw new Error(`box tar failed: ${result.stderr.trim() || result.exit.code}`);
-  return { bytes, sha256: hash.digest("hex"), ms: result.exit.ms, warning: result.stderr.trim() || null };
+  return { bytes, sha256: hash.digest("hex"), ms, warning: warnings.join("\n") || null, ...(skipped.length ? { skipped } : {}) };
+}
+
+// --- path lists in requests -------------------------------------------------------
+
+/**
+ * boxd reads a request line of at most 4 MiB (box/go/proto ReadRequest; 64
+ * MiB from this version on, but a box may run an older boxd): a list of
+ * paths goes in requests whose line stays well under it.
+ */
+export const REQUEST_LINE_MAX = 4 << 20;
+export const REQUEST_LINE_BUDGET = 3 << 20;
+
+export type SkippedPath = { path: string; reason: string };
+
+/** The bytes of a request's line (newline included) with no paths. */
+export function lineOverhead(box: BoxEndpoint, req: BoxRequest): number {
+  return Buffer.byteLength(JSON.stringify({ v: PROTO_VERSION, token: box.token, ...req, paths: [] })) + 1;
+}
+
+/**
+ * `paths` in order, cut into batches whose request line (`overhead` plus the
+ * JSON of the list, newline included) stays within `budget` bytes. A path
+ * that alone does not fit is left out: { batches, skipped }.
+ */
+export function batchPaths(paths: string[], { budget = REQUEST_LINE_BUDGET, overhead = 0 }: { budget?: number; overhead?: number } = {}): { batches: string[][]; skipped: SkippedPath[] } {
+  const batches: string[][] = [];
+  const skipped: SkippedPath[] = [];
+  let current: string[] = [];
+  let size = overhead;
+  for (const p of paths) {
+    // Its JSON string, and the comma before it unless it starts a batch.
+    const bytes = Buffer.byteLength(JSON.stringify(p));
+    if (overhead + bytes > budget) { skipped.push({ path: p, reason: "path_too_long" }); continue; }
+    if (current.length && size + bytes + 1 > budget) {
+      batches.push(current);
+      current = [];
+      size = overhead;
+    }
+    size += bytes + (current.length ? 1 : 0);
+    current.push(p);
+  }
+  if (current.length) batches.push(current);
+  return { batches, skipped };
+}
+
+/** Sorted by their UTF-8 bytes (Go's sort.Strings, what boxd's tar uses). */
+export function byteSorted(paths: string[]): string[] {
+  return paths.map((p) => [Buffer.from(p, "utf8"), p] as const).sort((a, b) => Buffer.compare(a[0], b[0])).map((item) => item[1]);
+}
+
+// Entry types with no data, whatever their size field says (Go's archive/tar reader).
+const HEADER_ONLY = new Set([0x31, 0x32, 0x33, 0x34, 0x35, 0x36]);
+
+/** A tar header's numeric field: octal text, or base-256 (high bit set). */
+function tarNumber(field: Buffer): number {
+  if ((field[0] ?? 0) & 0x80) {
+    let value = BigInt((field[0] ?? 0) & 0x7f);
+    for (let i = 1; i < field.length; i += 1) value = (value << 8n) | BigInt(field[i] ?? 0);
+    return Number(value);
+  }
+  const text = field.toString("latin1").replace(/[\0 ]+$/g, "").replace(/^[\0 ]+/, "");
+  if (!/^[0-7]*$/.test(text)) throw new Error("box tar: a header has a bad number");
+  return text ? parseInt(text, 8) : 0;
+}
+
+/** The `size` record of a PAX extended header's data, or null. */
+function paxSize(data: Buffer): number | null {
+  let at = 0;
+  while (at < data.length) {
+    const space = data.indexOf(0x20, at);
+    if (space < 0) break;
+    const length = Number(data.subarray(at, space).toString("latin1"));
+    if (!Number.isInteger(length) || length <= 0 || at + length > data.length) break;
+    const record = data.subarray(space + 1, at + length - 1).toString("utf8");
+    const eq = record.indexOf("=");
+    if (eq > 0 && record.slice(0, eq) === "size") {
+      const value = Number(record.slice(eq + 1));
+      if (Number.isSafeInteger(value) && value >= 0) return value;
+    }
+    at += length;
+  }
+  return null;
+}
+
+/**
+ * One part of a tar written in several: passes the archive through up to its
+ * end-of-archive marker (the first all-zero header block) and drops the
+ * marker and the zero padding after it, so the next part follows on as the
+ * same archive. push(chunk) -> the pieces to write; end() throws when the
+ * part did not end as an archive does.
+ */
+export function archiveBody(): { push: (chunk: Buffer) => Buffer[]; end: () => void } {
+  const block = Buffer.alloc(512);
+  let filled = 0;
+  let left = 0;
+  let pax: Buffer[] | null = null;
+  let paxLength = 0;
+  let nextSize: number | null = null;
+  let ended = false;
+  return {
+    push(chunk) {
+      const out: Buffer[] = [];
+      let i = 0;
+      while (i < chunk.length) {
+        if (ended) {
+          for (; i < chunk.length; i += 1) if (chunk[i] !== 0) throw new Error("box tar: data after the end of the archive");
+          break;
+        }
+        if (left > 0) {
+          const n = Math.min(left, chunk.length - i);
+          const piece = chunk.subarray(i, i + n);
+          out.push(piece);
+          if (pax) pax.push(Buffer.from(piece));
+          left -= n;
+          i += n;
+          if (left === 0 && pax) {
+            nextSize = paxSize(Buffer.concat(pax).subarray(0, paxLength));
+            pax = null;
+          }
+          continue;
+        }
+        const n = Math.min(512 - filled, chunk.length - i);
+        chunk.copy(block, filled, i, i + n);
+        filled += n;
+        i += n;
+        if (filled < 512) break;
+        filled = 0;
+        if (!block.some((byte) => byte !== 0)) { ended = true; continue; }
+        let sum = 0;
+        for (let k = 0; k < 512; k += 1) sum += k >= 148 && k < 156 ? 0x20 : block[k] ?? 0;
+        if (tarNumber(block.subarray(148, 156)) !== sum) throw new Error("box tar: a header's checksum does not match");
+        const type = block[156] ?? 0;
+        let size = tarNumber(block.subarray(124, 136));
+        const extended = type === 0x78 || type === 0x67; // x, g
+        if (!extended && nextSize !== null) { size = nextSize; nextSize = null; }
+        if (HEADER_ONLY.has(type)) size = 0;
+        out.push(Buffer.from(block));
+        left = Math.ceil(size / 512) * 512;
+        if (type === 0x78 && size > 0) {
+          if (size > 8 << 20) throw new Error("box tar: an extended header is too large");
+          pax = [];
+          paxLength = size;
+        }
+      }
+      return out;
+    },
+    end() {
+      if (!ended) throw new Error("box tar: a part ended before its end-of-archive marker");
+    },
+  };
 }

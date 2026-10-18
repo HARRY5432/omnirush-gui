@@ -315,7 +315,7 @@ export type CheckpointSummary = {
   checkpoint: Record<string, unknown>;
   skipped: Array<{ path: string; size: number; reason: string }>;
   deps?: Record<string, unknown>;
-  stats: { source: string; diff_entries: number; kept: number; copied: number; removed: number; diff_ms: number; stat_ms: number; tar_ms: number; total_ms: number; warning?: string };
+  stats: { source: string; diff_entries: number; kept: number; copied: number; removed: number; diff_ms: number; stat_ms: number; tar_ms: number; total_ms: number; warning?: string; tar_error?: string };
 };
 
 export type Checkpoint = {
@@ -600,7 +600,7 @@ export class Box {
     const skipped: Array<{ path: string; size: number; reason: string }> = [];
     let depBytes = 0;
     let total = 0;
-    const changed: string[] = [];
+    let changed: string[] = [];
     let depsCut = false;
     for (const p of [...candidates.filter((x) => !isDep(x)), ...candidates.filter(isDep)]) {
       const entry = sized.get(p);
@@ -614,12 +614,38 @@ export class Box {
       total += size;
       changed.push(p);
     }
-    const skippedSet = new Set(skipped.map((item) => item.path));
     const label = asked ?? `turn-${turn}`;
     const stage = path.join(dir, `.stage-${label}-${process.pid}-${randomBytes(3).toString("hex")}`);
     mkdirSync(stage, { recursive: true });
-    let tarInfo: Awaited<ReturnType<typeof client.tarTo>> | null = null;
-    if (changed.length) tarInfo = await client.tarTo(endpoint, changed, path.join(stage, `${label}.tar`));
+    let tarInfo: client.TarResult | null = null;
+    let tarError: string | null = null;
+    // Paths the tar does not carry after all.
+    const leaveOut = (items: client.SkippedPath[]) => {
+      for (const { path: p, reason } of items) {
+        const entry = sized.get(p);
+        skipped.push({ path: p, size: entry?.type === "file" ? entry.size ?? 0 : 0, reason });
+      }
+      const out = new Set(items.map((item) => item.path));
+      changed = changed.filter((p) => !out.has(p));
+    };
+    if (changed.length) {
+      try {
+        tarInfo = await client.tarTo(endpoint, changed, path.join(stage, `${label}.tar`));
+      } catch (error) {
+        // A tar that cannot be written never stops the turn: the checkpoint is
+        // incomplete, its paths left out (so the next checkpoint tries them again).
+        tarError = firstLine(error instanceof Error ? error.message : String(error)) || "tar failed";
+        this.log("warn", "box checkpoint tar failed", { label, paths: changed.length, error: tarError });
+        rmSync(path.join(stage, `${label}.tar`), { force: true });
+        leaveOut(changed.map((p) => ({ path: p, reason: "tar_failed" })));
+      }
+      if (tarInfo?.skipped?.length) leaveOut(tarInfo.skipped);
+      if (tarInfo && !changed.length) {
+        tarInfo = null;
+        rmSync(path.join(stage, `${label}.tar`), { force: true });
+      }
+    }
+    const skippedSet = new Set(skipped.map((item) => item.path));
     const tTar = Date.now();
     // What a later checkpoint compares with: a path left out stays "unknown", so it is tried again.
     const signatures: Record<string, string> = {};
@@ -640,13 +666,13 @@ export class Box {
       full,
       ...(leaf ? { leaf: true as const } : {}),
       delta: { parent, changed, removed },
-      checkpoint: { schema: RECORD_SCHEMA, id, parent, turn: turn ?? null, image: { ref: image.ref ?? null, digest: image.digest ?? null }, status: "complete", capturedAt: new Date().toISOString() },
+      checkpoint: { schema: RECORD_SCHEMA, id, parent, turn: turn ?? null, image: { ref: image.ref ?? null, digest: image.digest ?? null }, status: tarError ? "incomplete" : "complete", capturedAt: new Date().toISOString() },
       skipped,
       ...(depsInfo ? { deps: { ...depsInfo, bytes: depBytes, cut: depsCut } } : {}),
-      stats: { source, diff_entries: entries.length, kept: Object.keys(now).length, copied: changed.length, removed: removed.length, diff_ms: tDiff - t0, stat_ms: tStat - tDiff, tar_ms: tTar - tStat, total_ms: Date.now() - t0, ...(tarInfo?.warning ? { warning: tarInfo.warning } : {}) },
+      stats: { source, diff_entries: entries.length, kept: Object.keys(now).length, copied: changed.length, removed: removed.length, diff_ms: tDiff - t0, stat_ms: tStat - tDiff, tar_ms: tTar - tStat, total_ms: Date.now() - t0, ...(tarInfo?.warning ? { warning: tarInfo.warning } : {}), ...(tarError ? { tar_error: tarError } : {}) },
     };
     writeJson(path.join(stage, `${label}.json`), summary, 0o600);
-    this.log("info", "box checkpoint", { label, full, copied: changed.length, removed: removed.length, bytes: summary.bytes, ms: summary.stats.total_ms });
+    this.log(tarError ? "warn" : "info", "box checkpoint", { label, full, copied: changed.length, removed: removed.length, bytes: summary.bytes, ms: summary.stats.total_ms, ...(tarError ? { status: "incomplete" } : {}) });
     let settled = false;
     const record = this.describe();
     return {

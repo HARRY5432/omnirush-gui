@@ -429,7 +429,14 @@ export function boxRun(plan: ReadyPlan, { log = () => {}, readyWaitMs = 30_000, 
       const n = Number(turn ?? /^turn-(\d+)$/.exec(label)?.[1] ?? 0) || null;
       const name = n ? `turn-${n}` : label;
       const dir = chain ?? path.join(pending, `${process.pid}-${Date.now()}`);
-      const taken = await opened.checkpoint(dir, n, { label: name, leaf: !n, sessionTurn: n ? sessionTurn : null });
+      let taken: Awaited<ReturnType<Box["checkpoint"]>>;
+      try {
+        taken = await opened.checkpoint(dir, n, { label: name, leaf: !n, sessionTurn: n ? sessionTurn : null });
+      } catch (error) {
+        // A checkpoint that fails never fails the turn: it goes on with no checkpoint.
+        log("warn", "box checkpoint failed; the turn goes on without one", { label: name, error: error instanceof Error ? error.message : String(error) });
+        return null;
+      }
       checkpoints.set(sessionId, (checkpoints.get(sessionId) ?? 0) + 1);
       const summary: CheckpointSummary = taken.summary;
       return {
