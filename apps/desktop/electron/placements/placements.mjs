@@ -140,8 +140,11 @@ export function parseAnswer(body) {
   if (enabled && Array.isArray(body.placements)) {
     for (const raw of body.placements.slice(0, 50)) {
       const placement = parsePlacement(raw);
-      if (!placement || seen.has(placement.id)) continue;
-      seen.add(placement.id);
+      if (!placement) continue;
+      // One id may run in both slots (one entry per slot); per-day count, dismiss and click stay keyed by id.
+      const key = `${placement.slot}\n${placement.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
       placements.push(placement);
     }
   }
@@ -353,7 +356,8 @@ export function createPlacements({
 
   const save = () => (allowed ? writeState(stateFile, state) : false);
   const answer = () => cachedAnswer(state, now());
-  const known = (id) => answer()?.placements.find((p) => p.id === id) ?? null;
+  /** The placement with `id` (in `slot` when given: one id may have an entry per slot). */
+  const known = (id, slot = null) => answer()?.placements.find((p) => p.id === id && (!slot || p.slot === slot)) ?? null;
 
   const schedule = () => {
     if (stopped || !started) return;
@@ -452,7 +456,7 @@ export function createPlacements({
       if (!allowed || !SLOTS.includes(slot)) return null;
       const at = now();
       if (slot === "home_banner" && runClaims.has(slot)) {
-        const kept = known(runClaims.get(slot));
+        const kept = known(runClaims.get(slot), slot);
         return kept && eligibleKept(kept, at) ? placementView(kept) : null;
       }
       if (slot === "turn_footer") {
@@ -476,7 +480,7 @@ export function createPlacements({
     /** The placement this run claimed for `slot` (not counted again), or null. */
     current(slot) {
       const id = runClaims.get(slot);
-      const placement = id ? known(id) : null;
+      const placement = id ? known(id, slot) : null;
       return placement && eligibleKept(placement, now()) ? placementView(placement) : null;
     },
     /** It was drawn on screen. */
@@ -533,7 +537,7 @@ export function createPlacements({
         const batch = state.events.slice(0, MAX_EVENT_BATCH);
         let result = null;
         try {
-          result = await request(EVENTS_PATH, { method: "POST", body: { events: batch }, timeoutMs });
+          result = await request(`${EVENTS_PATH}?client=${client === "desktop" ? "desktop" : "cli"}`, { method: "POST", body: { events: batch }, timeoutMs });
         } catch {
           result = null;
         }

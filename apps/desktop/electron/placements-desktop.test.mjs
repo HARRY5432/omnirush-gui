@@ -131,6 +131,29 @@ test("shared: caps, snooze and expiry", async () => {
   assert.equal(e.claim("home_banner"), null, "ended");
 });
 
+test("shared: one id in both slots: both entries kept, the count shared by id", async () => {
+  const both = [placement({ id: "plc_both", slot: "home_banner", max_per_day: 2 }), placement({ id: "plc_both", slot: "turn_footer", title: "Turn copy", max_per_day: 2 })];
+  assert.equal(parseAnswer(answer(both)).placements.length, 2);
+  const { d } = desktop({ routes: () => ({ status: 200, data: answer(both) }) });
+  assert.equal((await d.placement({ slot: "home_banner" })).slot, "home_banner");
+  const turn = await d.placement({ slot: "turn_footer", sessionId: "ses_1" });
+  assert.equal(turn.slot, "turn_footer");
+  assert.equal(turn.title, "Turn copy");
+  assert.equal(d.service.state().shown.plc_both.count, 2);
+  assert.equal(await d.placement({ slot: "turn_footer", sessionId: "ses_2" }), null, "shared max_per_day");
+  assert.deepEqual(await d.action({ id: "plc_both", action: "dismiss" }), { ok: true });
+  assert.equal(d.service.current("turn_footer"), null);
+});
+
+test("shared: events go to /client/placements/events?client=desktop", async () => {
+  const paths = [];
+  const { d } = desktop({ routes: (p) => { paths.push(p); return p.startsWith("/client/placements/events") ? { status: 204 } : { status: 200, data: answer() }; } });
+  const p = await d.placement({ slot: "home_banner" });
+  await d.action({ id: p.id, action: "impression" });
+  assert.equal(await d.service.flush(), 1);
+  assert.equal(paths.at(-1), "/client/placements/events?client=desktop");
+});
+
 test("shared: the file is the CLI's (PARITY.sha256)", () => {
   const dir = path.join(here, "placements");
   const rows = fs.readFileSync(path.join(dir, "PARITY.sha256"), "utf8").split("\n").filter((line) => line && !line.startsWith("#"));
