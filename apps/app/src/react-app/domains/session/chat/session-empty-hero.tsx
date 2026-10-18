@@ -6,6 +6,7 @@ import type { ComposerAttachment } from "@/app/types";
 import { CODING_STARTER_CARDS, resolveOrganizationPromptCardContent } from "@/components/chat/task-suggestions";
 import { useCheckDesktopRestriction, useOrgRestrictions } from "@/react-app/domains/cloud/desktop-config-provider";
 import { BuildathonPromoCard } from "@/react-app/domains/buildathon/buildathon-promo";
+import { PlacementHomeCard } from "@/react-app/domains/placements/placements";
 import {
   NewTaskComposer,
   type NewTaskComposerContext,
@@ -171,6 +172,8 @@ export function SessionEmptyHero(props: SessionEmptyHeroProps) {
       </div>
 
       <BuildathonPromoCard />
+
+      <PlacementHomeCard />
     </div>
   );
 }

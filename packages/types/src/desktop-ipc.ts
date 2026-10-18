@@ -385,6 +385,28 @@ export type OmniRushBuildathonLinkResult =
   | { ok: false; error: string; closed?: boolean };
 export type OmniRushBuildathonTagResult = "tagged" | "refused" | "retry";
 
+/** A sponsored placement as the window draws it (apps/desktop/electron/placements/placements.mjs placementView). */
+export type OmniRushPlacementSlot = "home_banner" | "turn_footer";
+export type OmniRushPlacement = {
+  id: string;
+  slot: OmniRushPlacementSlot;
+  /** "Sponsored · <sponsor>" */
+  label: string;
+  sponsor: string;
+  /** Plain text, at most 60 characters. */
+  title: string;
+  /** Plain text, at most 140 characters (may be empty). */
+  body: string;
+  /** At most 20 characters. */
+  ctaLabel: string;
+  /** https only; opened by the main process after a click. */
+  url: string;
+  /** https only, or null. */
+  imageUrl: string | null;
+  snoozeDays: number;
+};
+export type OmniRushPlacementAction = "impression" | "open" | "dismiss";
+
 export type OmniRushSessionStatus = {
   sessionId: string;
   status: "on_track" | "at_risk" | "failing" | "unknown";
@@ -940,6 +962,8 @@ export type DesktopCommandMap = {
   };
   omnirushBuildathon: { args: []; result: OmniRushBuildathonAnswer };
   omnirushBuildathonJoin: { args: []; result: OmniRushBuildathonLinkResult };
+  omnirushPlacement: { args: [input: { slot: OmniRushPlacementSlot; sessionId?: string }]; result: OmniRushPlacement | null };
+  omnirushPlacementAction: { args: [input: { id: string; action: OmniRushPlacementAction }]; result: { ok: boolean; opened?: boolean } };
   omnirushBuildathonSessions: { args: []; result: OmniRushBuildathonSession[] | null };
   omnirushBuildathonLink: { args: [input: { code: string }]; result: OmniRushBuildathonLinkResult };
   omnirushBuildathonChecklist: {
