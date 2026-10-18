@@ -44,3 +44,22 @@ func TestRequestAuth(t *testing.T) {
 		t.Fatal("empty token accepted")
 	}
 }
+
+func TestRequestLineLimit(t *testing.T) {
+	line := func(n int) string {
+		var b bytes.Buffer
+		_ = WriteRequest(&b, Request{Op: "tar", Token: "t1", Paths: []string{""}})
+		head := strings.TrimSuffix(b.String(), "\"]}\n")
+		return head + strings.Repeat("a", n-len(head)-3) + "\"]}\n"
+	}
+	big := line(MaxRequestLine)
+	if len(big) != MaxRequestLine+1 {
+		t.Fatal(len(big))
+	}
+	if _, err := ReadRequest(bufio.NewReader(strings.NewReader(big)), "t1"); err != nil {
+		t.Fatal("a line at the limit was refused:", err)
+	}
+	if _, err := ReadRequest(bufio.NewReader(strings.NewReader(line(MaxRequestLine+1))), "t1"); err == nil || !strings.Contains(err.Error(), "too long") {
+		t.Fatal("a line past the limit was accepted:", err)
+	}
+}
