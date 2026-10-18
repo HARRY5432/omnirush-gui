@@ -102,7 +102,9 @@ async function writeJsonFileAtomic(outputPath, value) {
   JSON.parse(content);
   await mkdir(path.dirname(outputPath), { recursive: true });
   const tempPath = `${outputPath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
-  await writeFile(tempPath, content, "utf8");
+  // Owner-only: these hold server tokens and workspace state. The rename
+  // replaces any older 0644 file with this one's mode.
+  await writeFile(tempPath, content, { encoding: "utf8", mode: 0o600 });
   try {
     await renameWithRetry(tempPath, outputPath);
   } catch (error) {
@@ -229,7 +231,7 @@ export function createWorkspaceStore({
       if (!existsSync(legacy)) return false;
       await mkdir(path.dirname(current), { recursive: true });
       const raw = await readFile(legacy, "utf8");
-      await writeFile(current, raw, "utf8");
+      await writeFile(current, raw, { encoding: "utf8", mode: 0o600 });
       console.info("[migration] copied workspace-state.json to omnirush-workspaces.json");
       return true;
     } catch (error) {
@@ -427,7 +429,7 @@ export function createWorkspaceStore({
   async function migrateLegacyDesktopBootstrapConfig(configPath, legacyCandidate) {
     try {
       await mkdir(path.dirname(configPath), { recursive: true });
-      await writeFile(configPath, legacyCandidate.raw, "utf8");
+      await writeFile(configPath, legacyCandidate.raw, { encoding: "utf8", mode: 0o600 });
       console.info("[desktop-bootstrap] migrated legacy config", {
         from: legacyCandidate.path,
         to: configPath,

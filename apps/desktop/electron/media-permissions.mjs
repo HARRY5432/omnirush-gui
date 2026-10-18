@@ -55,3 +55,56 @@ export function installMediaPermissionHandlers(session, getMainWindow) {
     })
   ));
 }
+
+// The built-in browser shows arbitrary websites. Only harmless, page-local
+// capabilities are granted; camera, microphone, location, notifications,
+// clipboard reads, screen capture, devices and the rest are denied.
+const BROWSER_PANEL_ALLOWED_PERMISSIONS = new Set([
+  "clipboard-sanitized-write",
+  "fileSystem",
+  "fullscreen",
+  "keyboardLock",
+  "mediaKeySystem",
+  "pointerLock",
+  "storage-access",
+  "top-level-storage-access",
+]);
+
+function isDesktopSchemeUrl(url) {
+  return /^omnirush(?:-dev)?:/i.test(String(url ?? "").trim());
+}
+
+/**
+ * @param {string} permission
+ */
+export function isBrowserPanelPermissionAllowed(permission) {
+  return BROWSER_PANEL_ALLOWED_PERMISSIONS.has(permission);
+}
+
+/**
+ * Permission policy for the built-in browser's session (persist:omnirush-browser).
+ * Handing a link to the OS ("openExternal") asks the user first, except
+ * omnirush:// links, which only the browser panel's own confirmation forwards.
+ *
+ * @param {Electron.Session} browserSession
+ * @param {{ confirmExternal: (url: string, sourceUrl: string) => Promise<boolean> }} options
+ */
+export function installBrowserPanelPermissionHandlers(browserSession, { confirmExternal }) {
+  browserSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+    if (permission !== "openExternal") {
+      callback(isBrowserPanelPermissionAllowed(permission));
+      return;
+    }
+    const request = /** @type {{ externalURL?: string, requestingUrl?: string }} */ (details ?? {});
+    const externalUrl = String(request.externalURL ?? "");
+    if (!externalUrl || isDesktopSchemeUrl(externalUrl)) {
+      callback(false);
+      return;
+    }
+    const sourceUrl = String(request.requestingUrl ?? webContents?.getURL?.() ?? "");
+    Promise.resolve()
+      .then(() => confirmExternal(externalUrl, sourceUrl))
+      .then((allowed) => callback(allowed === true), () => callback(false));
+  });
+  browserSession.setPermissionCheckHandler((_webContents, permission) => isBrowserPanelPermissionAllowed(permission));
+}

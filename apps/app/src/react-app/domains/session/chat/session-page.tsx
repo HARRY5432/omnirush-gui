@@ -791,7 +791,7 @@ export function SessionPage(props: SessionPageProps) {
   const openBrowserUrlControlAction = useMemo<OmniRushControlAction>(() => ({
     id: "browser.open_url",
     label: "Open URL in built-in browser",
-    description: "Open a built-in browser tab and return its tab_id and CDP handle. The tab is protected from suspension for its task lifetime until browser.release_tab declares all running and queued browser work complete.",
+    description: "Open a built-in browser tab and return its tab_id and target_id (browser_url is a CDP endpoint in development builds only and null in released apps; use the browser_* tools). The tab is protected from suspension for its task lifetime until browser.release_tab declares all running and queued browser work complete.",
     sideEffect: "navigation",
     requiresArgs: true,
     args: [
@@ -819,7 +819,7 @@ export function SessionPage(props: SessionPageProps) {
   const restoreBrowserTabControlAction = useMemo<OmniRushControlAction>(() => ({
     id: "browser.restore_tab",
     label: "Restore browser tab",
-    description: "Acquire a fresh protected CDP handle for a tab owned by this conversation. A suspended tab reloads its saved URL, not its previous document, retaining tab_id with a new target_id. A live tab keeps its document. Always use the returned handle. Protection lasts until browser.release_tab.",
+    description: "Acquire a fresh protected handle (tab_id, target_id; browser_url only in development builds) for a tab owned by this conversation. A suspended tab reloads its saved URL, not its previous document, retaining tab_id with a new target_id. A live tab keeps its document. Always use the returned handle. Protection lasts until browser.release_tab.",
     sideEffect: "mutation",
     requiresArgs: true,
     args: [{ name: "tabId", type: "string", required: true, description: "The logical tab_id returned by browser.open_url or browser.restore_tab." }],

@@ -11,6 +11,8 @@ import {
 } from "react";
 
 import { MODEL_PREF_KEY, THINKING_PREF_KEY } from "../../app/constants";
+import { desktopBridge } from "../../app/lib/desktop";
+import { isElectronRuntime } from "../../app/lib/runtime-env";
 import { coerceReleaseChannel } from "../../app/lib/release-channels";
 import type { ModelRef, ReleaseChannel, SettingsTab, View } from "../../app/types";
 import {
@@ -168,6 +170,13 @@ export function LocalProvider({ children }: LocalProviderProps) {
   useEffect(() => {
     writePersisted(LOCAL_PREFERENCES_KEY, prefs);
   }, [prefs]);
+
+  // Desktop error reports (apps/desktop/electron/sentry.mjs) follow the same
+  // "Share anonymous usage" setting as product analytics.
+  useEffect(() => {
+    if (!isElectronRuntime()) return;
+    void desktopBridge.desktopSentrySetConsent(prefs.analyticsEnabled).catch(() => undefined);
+  }, [prefs.analyticsEnabled]);
 
   useEffect(() => {
     const updateDefaultModel = () => {

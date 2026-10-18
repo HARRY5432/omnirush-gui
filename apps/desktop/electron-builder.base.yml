@@ -34,6 +34,15 @@ extraResources:
       - "**/*.mdx"
       - "docs.json"
 asar: true
+# Electron fuses, flipped in the packaged binary before signing. runAsNode
+# stays on: the bundled UI-control and computer-use MCPs, the nuke worker and
+# cleanup helpers run this binary with ELECTRON_RUN_AS_NODE=1. Asar integrity
+# validation stays off until it is verified on signed macOS/Windows builds.
+electronFuses:
+  runAsNode: true
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  onlyLoadAppFromAsar: true
 asarUnpack:
   - node_modules/koffi/**
   - node_modules/.pnpm/@lydell+node-pty*/**

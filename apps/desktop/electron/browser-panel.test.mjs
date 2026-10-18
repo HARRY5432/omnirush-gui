@@ -17,6 +17,8 @@ export const dialog = { async showMessageBox(_window, options) { effects.push({ 
 export const requestHooks = [];
 export const browserSession = new EventEmitter();
 browserSession.webRequest = { onBeforeRequest(_filter, listener) { requestHooks.push(listener); } };
+browserSession.setPermissionRequestHandler = (handler) => { browserSession.permissionRequest = handler; };
+browserSession.setPermissionCheckHandler = (handler) => { browserSession.permissionCheck = handler; };
 export const session = { fromPartition() {
   if (!controls.ready) throw new Error("Session can only be received when app is ready");
   return browserSession;
@@ -186,8 +188,9 @@ function createPanel(checkPolicy = async (_request) => {}, remoteDebugPort = 0) 
     handle(channel, handler) { handlers.set(channel, handler); },
     on(channel, handler) { handlers.set(channel, handler); },
   };
+  const deepLinks = [];
   const panel = createBrowserPanel({
-    getWindow: () => mainWindow, remoteDebugPort, onDeepLink: () => {},
+    getWindow: () => mainWindow, remoteDebugPort, onDeepLink: (urls) => deepLinks.push(...urls),
     checkPolicy: async (request) => { policies.push(request); await checkPolicy(request); },
   });
   panel.registerIpc(ipcMain);
@@ -216,7 +219,7 @@ function createPanel(checkPolicy = async (_request) => {}, remoteDebugPort = 0) 
     const choose = (itemId) => emit("omnirush:menu-overlay:choose", { sender: view.webContents }, { requestId: request.id, itemId });
     return { view, request, choose };
   }
-  return { invoke, emit, mainContents, onScreen, commands, children, messages, views, policies, openLinkMenu, panel, approve };
+  return { invoke, emit, mainContents, onScreen, commands, children, messages, views, policies, openLinkMenu, panel, approve, deepLinks };
 }
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -1349,4 +1352,94 @@ test("parent observations preserve popup approval and grants, but deliberate lif
     assert.deepEqual(await child.request("http://localhost:4173/after-ending"), { cancel: true }, "a surviving popup remains guarded after its parent's lifetime ends");
     assert.deepEqual(child.destinations, ["http://localhost:4173/preview", "http://localhost:4173/next"], ending);
   }
+});
+
+test("released builds hand out no DevTools endpoint with automation handles", async () => {
+  const { invoke, views, approve } = createPanel(undefined, 0);
+  invoke("omnirush:browser:show", PANEL_BOUNDS, "A");
+  invoke("omnirush:browser:createTab", "https://a.example", "A");
+  const opening = invoke("omnirush:browser:openUrl", "https://b.example/", "builtin", { sessionId: "B" });
+  await flush();
+  invoke("omnirush:browser:setVisibleSession", "B");
+  approve();
+  const opened = await opening;
+  assert.equal(opened.browser_url, null, "no CDP port is open, so none is advertised");
+  assert.equal(opened.target_id, views()[1].webContents.getOrCreateDevToolsTargetId());
+  assert.equal(opened.url, "https://b.example/");
+});
+
+test("an omnirush:// navigation from a page reaches the app only after the user confirms", async () => {
+  const { invoke, views, deepLinks } = createPanel();
+  invoke("omnirush:browser:show", PANEL_BOUNDS, "A");
+  invoke("omnirush:browser:createTab", "https://page.example/", "A");
+  await flush();
+  const contents = views().at(-1).webContents;
+  const prompts = [];
+  controls.confirm = async (options) => { prompts.push(options); return 0; };
+  const declined = "omnirush://den-auth?grant=SECRET-GRANT&denBaseUrl=https%3A%2F%2Fden.attacker.example";
+  contents.emit("did-start-navigation", declined, false, true);
+  await flush();
+  await flush();
+  assert.deepEqual(deepLinks, [], "a declined link never reaches the app");
+  assert.equal(prompts.length, 1);
+  assert.equal(prompts[0].defaultId, 0, "Cancel is the default");
+  assert.match(prompts[0].detail, /page\.example/);
+  assert.match(prompts[0].detail, /Server: den\.attacker\.example/);
+  assert.doesNotMatch(prompts[0].detail, /SECRET-GRANT/, "the grant is never shown");
+
+  controls.confirm = async () => 1;
+  const accepted = "omnirush://den-auth?grant=OK&denBaseUrl=https%3A%2F%2Fden.example.com";
+  contents.emit("did-start-navigation", accepted, false, true);
+  await flush();
+  await flush();
+  assert.deepEqual(deepLinks, [accepted]);
+  // Let the panel's deferred about:blank reset finish before the next test.
+  await new Promise((resolve) => setTimeout(resolve, 250));
+});
+
+test("the built-in browser denies camera, microphone and location and asks before other apps open", async () => {
+  const { invoke } = createPanel();
+  invoke("omnirush:browser:createTab", "about:blank", "A");
+  await flush();
+  const request = (permission, details = {}) => new Promise((resolve) => browserSession.permissionRequest(null, permission, resolve, details));
+  assert.equal(await request("media", { mediaTypes: ["audio", "video"] }), false);
+  assert.equal(await request("media", { mediaTypes: ["audio"] }), false);
+  assert.equal(await request("geolocation"), false);
+  assert.equal(await request("notifications"), false);
+  assert.equal(await request("display-capture"), false);
+  assert.equal(await request("fullscreen"), true);
+  assert.equal(browserSession.permissionCheck(null, "media", "https://page.example"), false);
+  assert.equal(browserSession.permissionCheck(null, "clipboard-sanitized-write", "https://page.example"), true);
+
+  const prompts = [];
+  controls.confirm = async (options) => { prompts.push(options); return 1; };
+  assert.equal(await request("openExternal", { externalURL: "omnirush://den-auth?grant=x", requestingUrl: "https://page.example/" }), false);
+  assert.equal(prompts.length, 0, "omnirush:// never goes to the OS protocol handler");
+  assert.equal(await request("openExternal", { externalURL: "mailto:someone@example.com", requestingUrl: "https://page.example/" }), true);
+  assert.match(prompts[0].message, /"mailto:"/);
+  controls.confirm = async () => 0;
+  assert.equal(await request("openExternal", { externalURL: "ms-settings:privacy", requestingUrl: "https://page.example/" }), false);
+});
+
+test("the main window only shows the app document and pages the main process loads", () => {
+  const { panel } = createPanel();
+  const entry = "file:///opt/OmniRush/resources/app-dist/index.html";
+  assert.equal(panel.isMainWindowAllowedNavigation(entry), false, "nothing is allowed before the entry is known");
+  panel.setMainWindowEntryUrl(entry);
+  assert.equal(panel.isMainWindowAllowedNavigation(`${entry}#/session/1`), true);
+  assert.equal(panel.isMainWindowAllowedNavigation("about:blank"), true);
+  for (const url of [
+    "file:///home/user/Downloads/page.html",
+    "file://attacker.example/share/index.html",
+    "data:text/html,<script>1</script>",
+    "http://127.0.0.1:8080/",
+    "http://localhost:5173/",
+    "https://example.com/",
+  ]) assert.equal(panel.isMainWindowAllowedNavigation(url), false, url);
+  const shutdown = `data:text/html;charset=utf-8,${encodeURIComponent("<p>Stopping</p>")}`;
+  panel.allowMainWindowInternalUrl(shutdown);
+  assert.equal(panel.isMainWindowAllowedNavigation(shutdown), true);
+  panel.setMainWindowEntryUrl("http://localhost:5173/");
+  assert.equal(panel.isMainWindowAllowedNavigation("http://localhost:5173/#/settings"), true);
+  assert.equal(panel.isMainWindowAllowedNavigation("http://localhost:5174/"), false);
 });

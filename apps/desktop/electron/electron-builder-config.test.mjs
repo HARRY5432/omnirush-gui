@@ -32,6 +32,16 @@ describe("Electron distribution configs", () => {
     });
   });
 
+  it("disables the Node debugging and NODE_OPTIONS fuses but keeps run-as-node", async () => {
+    const config = await readConfig("electron-builder.base.yml");
+    assert.deepEqual(config.electronFuses, {
+      runAsNode: true,
+      enableNodeOptionsEnvironmentVariable: false,
+      enableNodeCliInspectArguments: false,
+      onlyLoadAppFromAsar: true,
+    });
+  });
+
   it("ships only architecture-specific sidecars for every desktop OS", async () => {
     const config = await readConfig("electron-builder.base.yml");
     const cases = [

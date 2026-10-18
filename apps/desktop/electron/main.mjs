@@ -16,7 +16,7 @@ import {
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { globalOpencodeConfigDir, workspaceOpencodeConfigCandidates } from "@omnirush/paths";
 
 import { configureFakeMediaForTests, installMediaPermissionHandlers } from "./media-permissions.mjs";
@@ -75,6 +75,7 @@ import {
 } from "./connect-link-branding.mjs";
 import { resolveConnectLinkPublicKeys } from "./connect-link-keys.mjs";
 import { openExternalUrl } from "./open-external.mjs";
+import { classifyLocalOpen, isNetworkPath, localPathFromFileUrl } from "./open-local-path.mjs";
 import { resolveAppIdentifier, resolveUserDataPath } from "./dev-profile.mjs";
 import { fetchAgentContextDiagnosticsResponse } from "./agent-context-diagnostics-fetch.mjs";
 import { downloadBinaryToPath, uploadMultipartFromBytes } from "./binary-transfer.mjs";
@@ -107,6 +108,7 @@ import { UPDATE_GATE_CHANNEL, createUpdateGate } from "./update-gate.mjs";
 import { createExternalFetch, createExternalFileUpload } from "./external-fetch.mjs";
 import {
   clearOmniRushSentrySession,
+  setOmniRushSentryConsent,
   initOmniRushSentry,
   setOmniRushSentrySession,
 } from "./sentry.mjs";
@@ -991,9 +993,13 @@ if (process.platform === "darwin" && INITIAL_APP_ICON_IMAGE && !INITIAL_APP_ICON
   app.dock.setIcon(INITIAL_APP_ICON_IMAGE);
 }
 
-// Expose Chrome DevTools Protocol so the opencode-chrome-devtools plugin can
-// drive the built-in browser panel.  Use OMNIRUSH_ELECTRON_REMOTE_DEBUG_PORT to
-// pin a specific port; otherwise probe for a free one starting at 9223.
+// Chrome DevTools Protocol over TCP. The agent's browser tools do not use it:
+// they reach the built-in browser through the authenticated UI-control bridge
+// (/browser/task), which drives each tab in-process via webContents.debugger.
+// An open port lets any local process (sandboxed agent code shares the host
+// network) attach without credentials and control the whole app, so packaged
+// builds open none unless OMNIRUSH_ELECTRON_REMOTE_DEBUG_PORT pins one (test
+// harnesses). Development builds still probe for a free port from 9223.
 // Must resolve before app.commandLine.appendSwitch (before `ready`).
 function probePort(port) {
   return new Promise((resolve) => {
@@ -1018,13 +1024,18 @@ const explicitCdpPort = Number.parseInt(
 );
 const remoteDebugPort = Number.isFinite(explicitCdpPort) && explicitCdpPort > 0
   ? explicitCdpPort
-  : await findFreeCdpPort([9223, 9224, 9225, 9226, 9227]);
+  : app.isPackaged ? 0 : await findFreeCdpPort([9223, 9224, 9225, 9226, 9227]);
 if (remoteDebugPort > 0) {
+  if (app.isPackaged) {
+    console.warn(`[omnirush] OMNIRUSH_ELECTRON_REMOTE_DEBUG_PORT opened an unauthenticated DevTools port on 127.0.0.1:${remoteDebugPort}; any local process can control this app until it quits.`);
+  }
   app.commandLine.appendSwitch("remote-debugging-port", String(remoteDebugPort));
   app.commandLine.appendSwitch("remote-debugging-address", "127.0.0.1");
+} else if (app.isPackaged) {
+  // A --remote-debugging-port argument (e.g. an edited shortcut) opens no port either.
+  app.commandLine.removeSwitch("remote-debugging-port");
 }
-// Make the resolved port available to the embedded server so it flows into
-// agent instructions via ensureOmniRushAgent → resolveAgentTemplate.
+// Child processes and relaunches see the resolved port; 0 means none.
 process.env.OMNIRUSH_ELECTRON_REMOTE_DEBUG_PORT = String(remoteDebugPort);
 if (isDevMode && !app.isPackaged) {
   const cdpAddress = remoteDebugPort > 0 ? `http://127.0.0.1:${remoteDebugPort}` : "disabled";
@@ -1644,7 +1655,7 @@ function showShutdownScreen() {
   if (!win || win.isDestroyed()) return;
   try {
     win.show();
-    void win.webContents.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(`<!doctype html>
+    const shutdownScreenUrl = `data:text/html;charset=utf-8,${encodeURIComponent(`<!doctype html>
 <html>
   <head>
     <meta charset="utf-8" />
@@ -1665,7 +1676,9 @@ function showShutdownScreen() {
       <div class="body">Closing local workers and background services...</div>
     </main>
   </body>
-</html>`)}`).catch(() => undefined);
+</html>`)}`;
+    browserPanel.allowMainWindowInternalUrl(shutdownScreenUrl);
+    void win.webContents.loadURL(shutdownScreenUrl).catch(() => undefined);
   } catch {
     // Ignore renderer teardown races during quit.
   }
@@ -2215,6 +2228,9 @@ const desktopCommandHandlers = {
   "desktopSentryClearSession": async (event, ...args) => {
       return { enabled: clearOmniRushSentrySession() };
   },
+  "desktopSentrySetConsent": async (event, ...args) => {
+      return { enabled: setOmniRushSentryConsent(args[0] === true) };
+  },
   "desktopIntegrationStatus": async (event, ...args) => {
       return linuxDesktopIntegration.getStatus();
   },
@@ -2595,11 +2611,13 @@ const desktopCommandHandlers = {
   "__openPath": async (event, ...args) => {
       const target = String(args[0] ?? "").trim();
       if (!target) return "Path is required.";
-      return shell.openPath(target);
+      return openLocalPath(target);
   },
   "__revealItemInDir": async (event, ...args) => {
       const target = String(args[0] ?? "").trim();
       if (!target) return "Path is required.";
+      // Even checking a UNC path makes Windows authenticate to that host.
+      if (isNetworkPath(target)) return "This path cannot be opened.";
       if (existsSync(target)) {
         shell.showItemInFolder(target);
         return undefined;
@@ -2615,7 +2633,7 @@ const desktopCommandHandlers = {
   },
   "__getFileIcon": async (event, ...args) => {
       const target = String(args[0] ?? "").trim();
-      if (!target) return null;
+      if (!target || isNetworkPath(target)) return null;
       const requestedSize = args[1];
       /** @type {"small" | "normal" | "large"} */
       let validSize = "normal";
@@ -2722,6 +2740,7 @@ const desktopCommandHandlers = {
       const target = String(args[0] ?? "").trim();
       const appPath = String(args[1] ?? "").trim();
       if (!target || !appPath) return "Target and app path are required.";
+      if (isNetworkPath(target) || isNetworkPath(appPath)) return "This path cannot be opened.";
       const platform = process.platform;
       try {
         if (platform === "darwin") {
@@ -2893,7 +2912,38 @@ function assertDesktopActivation() {
   }
 }
 
+/**
+ * shell.openPath with open-local-path.mjs's policy: network paths are refused
+ * and programs or scripts are revealed in their folder instead of run.
+ * @param {string} target
+ * @param {{ workspaceRoots?: string[] | null }} [options]
+ * @returns {Promise<string>} "" on success, else an error message (shell.openPath contract)
+ */
+async function openLocalPath(target, { workspaceRoots = null } = {}) {
+  const decision = classifyLocalOpen(target, { workspaceRoots });
+  if (decision === "deny") return "This path cannot be opened.";
+  if (decision === "reveal") {
+    if (!existsSync(target)) return `Could not find "${target}" on disk.`;
+    shell.showItemInFolder(target);
+    return "";
+  }
+  return shell.openPath(target);
+}
+
+/**
+ * The desktop bridge is privileged (files, shell, terminal, tokens). Only the
+ * app's own top-level document may call it, never a frame or another view.
+ * @param {Electron.IpcMainInvokeEvent} event
+ */
+function assertMainWindowSender(event) {
+  const contents = mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents : null;
+  if (!contents || event.sender !== contents || event.senderFrame !== contents.mainFrame) {
+    throw new Error("The OmniRush.ai desktop bridge only answers the app window.");
+  }
+}
+
 async function handleDesktopInvoke(event, command, ...args) {
+  assertMainWindowSender(event);
   if (!enterprisePreactivationCommandAllowed(command)) {
     assertDesktopActivation();
   }
@@ -3023,13 +3073,19 @@ async function createMainWindow() {
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith("file://")) {
-      try {
-        runDetachedTask("open local file", () => shell.openPath(fileURLToPath(url)));
-      } catch {
-        runDetachedTask("open local file externally", () => openExternalUrl(url));
+    if (/^file:/i.test(url)) {
+      // A link to the app's own document (a sanitized "#" href) opens nothing.
+      if (browserPanel.isMainWindowAllowedNavigation(url)) return { action: "deny" };
+      // Transcript links: a file URL naming a host (UNC) is never opened, and
+      // only non-executable files inside a workspace open; others are revealed.
+      const target = localPathFromFileUrl(url);
+      if (target) {
+        runDetachedTask("open local file", async () => openLocalPath(target, {
+          workspaceRoots: await workspaceStore.listLocalWorkspacePaths(),
+        }));
+      } else {
+        console.warn("[shell] refused to open a network file link");
       }
-
       return { action: "deny" };
     }
 
@@ -3056,24 +3112,33 @@ async function createMainWindow() {
   // to replace the entire workspace UI with the website, with no way back
   // (#2000). Catch those at `did-start-navigation`, cancel the load, and
   // reroute the URL into a built-in browser tab instead.
-  mainWindow.webContents.on("did-start-navigation", (_event, url, isInPlace, isMainFrame) => {
+  mainWindow.webContents.on("did-start-navigation", (details, url, isInPlace, isMainFrame) => {
     if (!isMainFrame || isInPlace) return;
     if (browserPanel.isMainWindowAllowedNavigation(url)) return;
-    try {
-      mainWindow?.webContents.stop();
-    } catch {
-      // best effort — routing below still gives the user a way back
-    }
+    // A page's own navigation (it has an initiator frame) reaches will-navigate
+    // next, which cancels and reroutes it. Stopping inside this event aborts the
+    // main process (SIGTRAP), so the browser-initiated case stops on the next turn.
+    if (details?.initiator) return;
+    setImmediate(() => {
+      try {
+        mainWindow?.webContents.stop();
+      } catch {
+        // best effort — routing below still gives the user a way back
+      }
+    });
     browserPanel.routeBlockedMainWindowNavigation(url);
   });
 
   const startUrl = process.env.OMNIRUSH_ELECTRON_START_URL?.trim() || process.env.ELECTRON_START_URL?.trim();
   if (startUrl) {
+    browserPanel.setMainWindowEntryUrl(startUrl);
     await mainWindow.loadURL(startUrl);
   } else {
     const packagedIndexPath = path.join(process.resourcesPath, "app-dist", "index.html");
     const devIndexPath = path.resolve(__dirname, "../../app/dist/index.html");
-    await mainWindow.loadFile(app.isPackaged ? packagedIndexPath : devIndexPath);
+    const indexPath = app.isPackaged ? packagedIndexPath : devIndexPath;
+    browserPanel.setMainWindowEntryUrl(pathToFileURL(indexPath).href);
+    await mainWindow.loadFile(indexPath);
   }
 
   return mainWindow;
@@ -3086,7 +3151,8 @@ ipcMain.on("omnirush:desktop-distribution-sync", (event) => {
   event.returnValue = DESKTOP_DISTRIBUTION;
 });
 ipcMain.handle("omnirush:desktop", handleDesktopInvoke);
-ipcMain.handle("omnirush:shell:openExternal", async (_event, url) => {
+ipcMain.handle("omnirush:shell:openExternal", async (event, url) => {
+  assertMainWindowSender(event);
   if (typeof url !== "string" || url.trim().length === 0) {
     return { ok: false, error: "empty url" };
   }
