@@ -51,6 +51,11 @@ export function boxSnapshotsDir(stateDir: string): string {
 
 // --- snapshot rules -------------------------------------------------------------
 
+/** The chain's signature of a path a checkpoint left out: never equal to a real one. */
+export const UNKNOWN_SIGNATURE = "?";
+/** How many paths of a failed tar a checkpoint lists in `skipped` (the rest: `skipped_omitted`). */
+export const SKIPPED_LISTED = 1000;
+
 const H = HOME_IN_BOX;
 /** Never part of a turn's environment: runtime state, logs, download caches the ledger replays. */
 export const NOISE_PREFIXES = [
@@ -314,6 +319,8 @@ export type CheckpointSummary = {
   delta: { parent: string | null; changed: string[]; removed: string[] };
   checkpoint: Record<string, unknown>;
   skipped: Array<{ path: string; size: number; reason: string }>;
+  /** Paths left out but not listed in `skipped`, counted by reason. */
+  skipped_omitted?: Record<string, number>;
   deps?: Record<string, unknown>;
   stats: { source: string; diff_entries: number; kept: number; copied: number; removed: number; diff_ms: number; stat_ms: number; tar_ms: number; total_ms: number; warning?: string; tar_error?: string };
 };
@@ -619,14 +626,23 @@ export class Box {
     mkdirSync(stage, { recursive: true });
     let tarInfo: client.TarResult | null = null;
     let tarError: string | null = null;
-    // Paths the tar does not carry after all.
+    // Paths the tar does not carry after all. A failed tar lists its first
+    // SKIPPED_LISTED paths (a failed npm install would make the summary huge), the
+    // rest as a count; every one still gets the "unknown" signature below.
+    const leftOut = new Set<string>();
+    const omitted: Record<string, number> = {};
     const leaveOut = (items: client.SkippedPath[]) => {
+      let listed = skipped.filter((item) => item.reason === "tar_failed").length;
       for (const { path: p, reason } of items) {
         const entry = sized.get(p);
-        skipped.push({ path: p, size: entry?.type === "file" ? entry.size ?? 0 : 0, reason });
+        const size = entry?.type === "file" ? entry.size ?? 0 : 0;
+        leftOut.add(p);
+        if (isDep(p)) depBytes -= size;
+        if (reason === "tar_failed" && listed >= SKIPPED_LISTED) { omitted[reason] = (omitted[reason] ?? 0) + 1; continue; }
+        if (reason === "tar_failed") listed += 1;
+        skipped.push({ path: p, size, reason });
       }
-      const out = new Set(items.map((item) => item.path));
-      changed = changed.filter((p) => !out.has(p));
+      changed = changed.filter((p) => !leftOut.has(p));
     };
     if (changed.length) {
       try {
@@ -645,11 +661,13 @@ export class Box {
         rmSync(path.join(stage, `${label}.tar`), { force: true });
       }
     }
-    const skippedSet = new Set(skipped.map((item) => item.path));
+    for (const item of skipped) leftOut.add(item.path);
     const tTar = Date.now();
-    // What a later checkpoint compares with: a path left out stays "unknown", so it is tried again.
+    // What a later checkpoint compares with. A path left out keeps an "unknown"
+    // signature (not none): the next checkpoint looks at it again, so it is copied
+    // then if it is still there, or listed as removed if it is gone.
     const signatures: Record<string, string> = {};
-    for (const [p, sig] of Object.entries(now)) if (!skippedSet.has(p)) signatures[p] = sig;
+    for (const [p, sig] of Object.entries(now)) signatures[p] = leftOut.has(p) ? UNKNOWN_SIGNATURE : sig;
     const image = this.image();
     const parent = full ? null : chain.last;
     const id = `cp_${createHash("sha256").update(canonical({ schema: RECORD_SCHEMA, box: this.key, container: this.containerId, label, turn, parent, image: image.digest || image.id, changed, removed, sha256: tarInfo?.sha256 ?? null })).digest("hex")}`;
@@ -668,6 +686,7 @@ export class Box {
       delta: { parent, changed, removed },
       checkpoint: { schema: RECORD_SCHEMA, id, parent, turn: turn ?? null, image: { ref: image.ref ?? null, digest: image.digest ?? null }, status: tarError ? "incomplete" : "complete", capturedAt: new Date().toISOString() },
       skipped,
+      ...(Object.keys(omitted).length ? { skipped_omitted: omitted } : {}),
       ...(depsInfo ? { deps: { ...depsInfo, bytes: depBytes, cut: depsCut } } : {}),
       stats: { source, diff_entries: entries.length, kept: Object.keys(now).length, copied: changed.length, removed: removed.length, diff_ms: tDiff - t0, stat_ms: tStat - tDiff, tar_ms: tTar - tStat, total_ms: Date.now() - t0, ...(tarInfo?.warning ? { warning: tarInfo.warning } : {}), ...(tarError ? { tar_error: tarError } : {}) },
     };

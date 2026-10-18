@@ -234,7 +234,7 @@ export async function tarTo(box: BoxEndpoint, paths: string[], file: string, { t
 // --- path lists in requests -------------------------------------------------------
 
 /**
- * boxd reads a request line of at most 4 MiB (box/go/proto ReadRequest; 64
+ * boxd reads a request line of at most 4 MiB (box/go/proto ReadRequest; 16
  * MiB from this version on, but a box may run an older boxd): a list of
  * paths goes in requests whose line stays well under it.
  */

@@ -94,10 +94,10 @@ function members(buf: Buffer): { members: Array<{ name: string; data: Buffer }>;
 
 // --- a fake boxd ---------------------------------------------------------------------------
 
-type Change = { kind: "A"; path: string; type: string; size: number; mode: number; mtime_ns: number; ctime_ns: number; ino: number; uid: number; gid: number };
+type Change = { kind: "A" | "C" | "D"; path: string; type: string; size: number; mode: number; mtime_ns: number; ctime_ns: number; ino: number; uid: number; gid: number };
 
 /** boxd's request-line limit and its tar/stat/walk/changes ops. `fail(paths)` may answer a tar request with an error instead. */
-async function fakeBoxd({ padding = 0, fail = () => null, changes = [], limit = REQUEST_LINE_MAX }: { padding?: number; fail?: (paths: string[]) => string | null; changes?: Change[]; limit?: number } = {}): Promise<{ box: BoxEndpoint; seen: { lines: number[]; ops: Array<{ op: string; count: number }> } }> {
+async function fakeBoxd({ padding = 0, fail = () => null, changes = [], gone = () => false, limit = REQUEST_LINE_MAX }: { padding?: number; fail?: (paths: string[]) => string | null; changes?: Change[] | (() => Change[]); gone?: (path: string) => boolean; limit?: number } = {}): Promise<{ box: BoxEndpoint; seen: { lines: number[]; ops: Array<{ op: string; count: number }> } }> {
   const seen = { lines: [] as number[], ops: [] as Array<{ op: string; count: number }> };
   const server = net.createServer((socket) => {
     socket.on("error", () => undefined);
@@ -130,13 +130,13 @@ async function fakeBoxd({ padding = 0, fail = () => null, changes = [], limit = 
         for (let i = 0; i < tar.length; i += 7777) out.push(frame(0x64, tar.subarray(i, i + 7777)));
         socket.end(Buffer.concat([...out, frame(0x65, Buffer.from("busy: a command was running during the snapshot\n")), exit()]));
       } else if (req.op === "stat") {
-        socket.end(Buffer.concat([frame(0x64, Buffer.from(JSON.stringify(paths.map((p) => ({ path: p, type: "file", size: 1, uid: 0, gid: 0 }))))), exit()]));
+        socket.end(Buffer.concat([frame(0x64, Buffer.from(JSON.stringify(paths.map((p) => (gone(p) ? { path: p, type: "missing", uid: 0, gid: 0 } : { path: p, type: "file", size: 1, uid: 0, gid: 0 }))))), exit()]));
       } else if (req.op === "walk") {
         const entries = paths.map((p) => ({ path: `${p}/x`, type: "file", size: 1, uid: 0, gid: 0 }));
         const wait = req.wait ?? 400_000;
         socket.end(Buffer.concat([frame(0x64, Buffer.from(JSON.stringify({ entries: entries.slice(0, wait), truncated: entries.length > wait }))), exit()]));
       } else if (req.op === "changes") {
-        socket.end(Buffer.concat([frame(0x64, Buffer.from(JSON.stringify(changes))), exit()]));
+        socket.end(Buffer.concat([frame(0x64, Buffer.from(JSON.stringify(typeof changes === "function" ? changes() : changes))), exit()]));
       } else {
         socket.end(exit(0));
       }
@@ -294,10 +294,11 @@ describe("box path lists in requests", () => {
 
 // --- the checkpoint ------------------------------------------------------------------------
 
-function fakeBox(endpoint: BoxEndpoint) {
+function fakeBox(endpoint: BoxEndpoint, { deps = false }: { deps?: boolean } = {}) {
   const work = tmp();
   const root = path.join(work, "proj");
   mkdirSync(root);
+  if (deps) mkdirSync(path.join(root, "node_modules"));
   const logs: Array<{ level: string; message: string }> = [];
   const box = new Box({
     key: "k1", name: "omnirush-box-k1", root, croot: root, runtime: { name: "docker" } as BoxRuntime, home: path.join(work, "home"), runFolder: path.join(work, "run"),
@@ -334,7 +335,7 @@ describe("box checkpoint with many changed files", () => {
     expect(s.checkpoint.status).toBe("incomplete");
     expect(s.tar).toBeNull();
     expect(s.delta.changed).toEqual([]);
-    expect(s.skipped.filter((item) => item.reason === "tar_failed").length).toBe(paths.length);
+    expect(s.skipped.filter((item) => item.reason === "tar_failed").length + (s.skipped_omitted?.tar_failed ?? 0)).toBe(paths.length);
     expect(s.stats.tar_error).toMatch(/request line too long/);
     expect(logs.some((line) => line.level === "warn" && line.message === "box checkpoint tar failed")).toBe(true);
     first.commit();
@@ -343,5 +344,57 @@ describe("box checkpoint with many changed files", () => {
     expect(second.summary.checkpoint.status).toBe("complete");
     expect(second.summary.delta.parent).toBe(s.checkpoint.id as string);
     expect(second.summary.delta.changed.length).toBe(paths.length);
+  });
+
+  test("a path whose tar failed is looked at again: deleted later, it is listed as removed", async () => {
+    // turn-2 carries x; turn-3 changes x and its tar fails; turn-4 finds x deleted.
+    const x = "/usr/local/lib/node_modules/pkg-0/lib/x.js";
+    let state: { changes: Change[]; gone: boolean } = { changes: [{ ...changeOf(x), mtime_ns: 1 }], gone: false };
+    let failing = false;
+    const { box: endpoint } = await fakeBoxd({ changes: () => state.changes, gone: (p) => state.gone && p === x, fail: () => (failing ? "request line too long" : null) });
+    const { box, snaps } = fakeBox(endpoint);
+    const t2 = await box.checkpoint(snaps, 2);
+    expect(t2.summary.delta.changed).toEqual([x]);
+    t2.commit();
+    state = { changes: [{ ...changeOf(x), kind: "C", mtime_ns: 2 }], gone: false };
+    failing = true;
+    const t3 = await box.checkpoint(snaps, 3);
+    expect(t3.summary.checkpoint.status).toBe("incomplete");
+    expect(t3.summary.skipped.map((item) => item.reason)).toEqual(["tar_failed"]);
+    t3.commit();
+    expect(JSON.parse(readFileSync(path.join(snaps, ".chain.json"), "utf8")).signatures[x]).toBe("?");
+    state = { changes: [{ ...changeOf(x), kind: "D", type: "missing" }], gone: true };
+    failing = false;
+    const t4 = await box.checkpoint(snaps, 4);
+    expect(t4.summary.checkpoint.status).toBe("complete");
+    expect(t4.summary.delta.removed).toEqual([x]);
+    expect(t4.summary.delta.parent).toBe(t3.summary.checkpoint.id as string);
+  });
+
+  test("a path whose tar failed and is still there is copied by the next checkpoint", async () => {
+    const x = "/usr/local/lib/node_modules/pkg-0/lib/x.js";
+    let failing = true;
+    const { box: endpoint } = await fakeBoxd({ changes: [changeOf(x)], fail: () => (failing ? "boom" : null) });
+    const { box, snaps } = fakeBox(endpoint);
+    (await box.checkpoint(snaps, 2)).commit();
+    failing = false;
+    const t3 = await box.checkpoint(snaps, 3);
+    expect(t3.summary.delta.changed).toEqual([x]);
+    expect(t3.summary.checkpoint.status).toBe("complete");
+  });
+
+  test("a failed tar lists its first 1000 paths, counts the rest, and leaves their bytes out of deps", async () => {
+    const { box: endpoint } = await fakeBoxd({ changes: manyPaths(3000, "/usr/local/lib/node_modules").map(changeOf), fail: () => "boom" });
+    const { box, snaps } = fakeBox(endpoint, { deps: true });
+    const taken = await box.checkpoint(snaps, 2);
+    const s = taken.summary;
+    // 3003 paths and the project's node_modules/x (the fake walk's one entry).
+    expect(s.skipped.filter((item) => item.reason === "tar_failed").length).toBe(1000);
+    expect(s.skipped_omitted?.tar_failed).toBe(3004 - 1000);
+    expect(s.deps?.entries).toBe(1);
+    expect(s.deps?.bytes).toBe(0);
+    taken.commit();
+    const signatures: Record<string, string> = JSON.parse(readFileSync(path.join(snaps, ".chain.json"), "utf8")).signatures;
+    expect(Object.values(signatures).filter((sig) => sig === "?").length).toBe(3004);
   });
 });

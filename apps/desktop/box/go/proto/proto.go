@@ -37,7 +37,7 @@ const MaxFrame = 1 << 20
 // MaxRequestLine bounds the first line (a snapshot's tar or stat lists every
 // path). Older boxd builds took 4 MiB: clients send long path lists in
 // batches well under that, whatever boxd a box runs.
-const MaxRequestLine = 64 << 20
+const MaxRequestLine = 16 << 20
 
 // Request is the first line of a connection.
 type Request struct {
