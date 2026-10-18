@@ -15,23 +15,36 @@ on:
         required: true
         type: string
 
+# The changelog agent runs model-driven commands, so it is isolated in its own
+# job: read-only token, no persisted git credentials, no signing key, and
+# nothing it writes reaches a later step except its two output files. A
+# separate job on a fresh runner applies those files to a clean checkout of
+# the same base commit, verifies them with that commit's checker, then signs,
+# pushes, and updates the release.
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: changelog-${{ github.event.release.tag_name || inputs.tag }}
   cancel-in-progress: false
 
+env:
+  BASE_BRANCH: dev
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
 jobs:
-  changelog:
+  prepare:
     if: github.repository == 'omnirush-ai/omnirush-gui'
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 30
-    env:
-      BASE_BRANCH: dev
-      TAG: ${{ github.event.release.tag_name || inputs.tag }}
-      BRANCH_NAME: automation/changelog-${{ github.event.release.tag_name || inputs.tag }}-${{ github.run_id }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      stable: ${{ steps.guard.outputs.stable }}
+      documented: ${{ steps.dedupe.outputs.documented }}
+      base_sha: ${{ steps.base.outputs.sha }}
+      prev: ${{ steps.facts.outputs.prev }}
+      tracker_file: ${{ steps.facts.outputs.tracker_file }}
 
     steps:
       - name: Validate tag
@@ -48,9 +61,15 @@ jobs:
         if: steps.guard.outputs.stable == 'true'
         uses: actions/checkout@v6
         with:
-          ref: dev
+          ref: ${{ env.BASE_BRANCH }}
           fetch-depth: 0
-          persist-credentials: true
+          persist-credentials: false
+
+      # Later jobs check out exactly this commit, even if the branch moves.
+      - name: Pin the base commit
+        if: steps.guard.outputs.stable == 'true'
+        id: base
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Skip if already documented
         if: steps.guard.outputs.stable == 'true'
@@ -112,8 +131,10 @@ jobs:
             process.stdout.write(month + " " + day + suffix + "\tchangelog/release-tracker-" + date + ".md\n");
           ' "$PUBLISHED_AT")
 
+          prompt_dir="$RUNNER_TEMP/changelog-prompt"
+          mkdir -p "$prompt_dir"
           git log --no-merges --format='%h %s' "$PREV".."$TAG" | head -400 > /tmp/commits.txt
-          cat > /tmp/changelog_prompt.txt <<PROMPT_EOF
+          cat > "$prompt_dir/changelog_prompt.txt" <<PROMPT_EOF
           Document OmniRush.ai release $TAG in the changelog. Use these facts exactly; do not invent or recompute any of them.
 
           - version: $TAG
@@ -127,39 +148,141 @@ jobs:
 
           Commits between $PREV and $TAG (hash subject):
           PROMPT_EOF
-          cat /tmp/commits.txt >> /tmp/changelog_prompt.txt
-          echo "PREV=$PREV" >> "$GITHUB_ENV"
+          cat /tmp/commits.txt >> "$prompt_dir/changelog_prompt.txt"
+          echo "prev=$PREV" >> "$GITHUB_OUTPUT"
+          echo "tracker_file=$TRACKER_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the agent prompt
+        if: steps.guard.outputs.stable == 'true' && steps.dedupe.outputs.documented == 'false'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: changelog-prompt
+          path: ${{ runner.temp }}/changelog-prompt/changelog_prompt.txt
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+  # Untrusted: everything after the agent starts in this job is treated as
+  # compromised. Read-only token, no credentials on disk, no secrets but the
+  # model key.
+  draft:
+    needs: prepare
+    if: needs.prepare.outputs.stable == 'true' && needs.prepare.outputs.documented == 'false'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      TRACKER_FILE: ${{ needs.prepare.outputs.tracker_file }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.base_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download the agent prompt
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: changelog-prompt
+          path: ${{ runner.temp }}/changelog-prompt
 
       - name: Setup Node
-        if: steps.guard.outputs.stable == 'true'
         uses: actions/setup-node@v6
         with:
           node-version: 24
 
       - name: Install opencode
-        if: steps.guard.outputs.stable == 'true' && steps.dedupe.outputs.documented == 'false'
         run: |
           version="$(node -e "const fs=require('fs'); const parsed=JSON.parse(fs.readFileSync('constants.json','utf8')); process.stdout.write(String(parsed.opencodeVersion||'').trim().replace(/^v/,''));")"
           curl -fsSL https://opencode.ai/install | bash -s -- --version "$version" --no-modify-path
 
       - name: Draft changelog entries
-        if: steps.guard.outputs.stable == 'true' && steps.dedupe.outputs.documented == 'false'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: opencode run --agent changelog "$(cat /tmp/changelog_prompt.txt)"
+        run: opencode run --agent changelog "$(cat "$RUNNER_TEMP/changelog-prompt/changelog_prompt.txt")"
 
-      - name: Discard opencode runtime churn
-        if: steps.guard.outputs.stable == 'true' && steps.dedupe.outputs.documented == 'false'
+      # Only these two files leave the job; the publish job validates them again.
+      - name: Collect the drafted files
         run: |
-          git checkout -- .opencode/
-          git clean -fd .opencode/
+          set -euo pipefail
+          out="$RUNNER_TEMP/changelog-output"
+          mkdir -p "$out/packages/docs" "$out/changelog"
+          for file in packages/docs/changelog.mdx "$TRACKER_FILE"; do
+            if [[ ! -f "$file" || -L "$file" ]]; then
+              echo "The changelog agent did not leave a regular file at $file." >&2
+              exit 1
+            fi
+            cp "$file" "$out/$file"
+          done
+
+      - name: Upload the drafted files
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: changelog-draft
+          path: ${{ runner.temp }}/changelog-output
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+  # Trusted: a fresh runner the agent never ran on, checked out at the pinned
+  # base commit, so the checker and release scripts are the reviewed ones.
+  publish:
+    needs: [prepare, draft]
+    if: >-
+      always()
+      && needs.prepare.outputs.stable == 'true'
+      && (needs.prepare.outputs.documented == 'true' || needs.draft.result == 'success')
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      PREV: ${{ needs.prepare.outputs.prev }}
+      TRACKER_FILE: ${{ needs.prepare.outputs.tracker_file }}
+      DOCUMENTED: ${{ needs.prepare.outputs.documented }}
+      BRANCH_NAME: automation/changelog-${{ github.event.release.tag_name || inputs.tag }}-${{ github.run_id }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.base_sha }}
+          fetch-depth: 0
+          # Only reviewed scripts from the base commit run in this job.
+          persist-credentials: true
+
+      - name: Download the drafted files
+        if: env.DOCUMENTED == 'false'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: changelog-draft
+          path: ${{ runner.temp }}/changelog-draft
+
+      - name: Apply the drafted files
+        if: env.DOCUMENTED == 'false'
+        run: |
+          set -euo pipefail
+          src="$RUNNER_TEMP/changelog-draft"
+          expected="$(printf '%s\n' "changelog/${TRACKER_FILE#changelog/}" packages/docs/changelog.mdx | sort)"
+          actual="$(cd "$src" && find . -mindepth 1 \( -type f -o -type l \) -printf '%P\n' | sort)"
+          if [[ "$actual" != "$expected" ]] || find "$src" -type l | grep -q .; then
+            echo "The drafted artifact must hold exactly packages/docs/changelog.mdx and $TRACKER_FILE as regular files." >&2
+            printf 'Found:\n%s\n' "$actual" >&2
+            exit 1
+          fi
+          install -m 0644 "$src/packages/docs/changelog.mdx" packages/docs/changelog.mdx
+          install -m 0644 "$src/$TRACKER_FILE" "$TRACKER_FILE"
 
       - name: Verify generated output
-        if: steps.guard.outputs.stable == 'true' && steps.dedupe.outputs.documented == 'false'
+        if: env.DOCUMENTED == 'false'
         run: node scripts/check-changelog-output.mjs "$TAG" "$PREV"
 
       - name: Commit release notes
-        if: steps.guard.outputs.stable == 'true' && steps.dedupe.outputs.documented == 'false'
+        if: env.DOCUMENTED == 'false'
         env:
           COMMIT_SIGNING_KEY: ${{ secrets.COMMIT_SIGNING_KEY }}
         run: |
@@ -180,7 +303,7 @@ jobs:
           git commit -S -m "docs(changelog): release notes for $TAG"
 
       - name: Open pull request
-        if: steps.guard.outputs.stable == 'true' && steps.dedupe.outputs.documented == 'false'
+        if: env.DOCUMENTED == 'false'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -200,7 +323,6 @@ jobs:
       # Runs for already-documented tags too, so a manual dispatch can repair a
       # release whose notes were hand-written or whose original dispatch failed.
       - name: Update GitHub Release notes
-        if: steps.guard.outputs.stable == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
