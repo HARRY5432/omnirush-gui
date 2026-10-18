@@ -1,0 +1,574 @@
+// Sponsored placements: at most one quiet line or card on the home screen
+// and one dim line after a finished turn. The same file ships in omnirush-cli
+// (assets/extensions/omnirush/placements/) and omnirush-gui
+// (apps/desktop/electron/placements/); both list it in PARITY.sha256 there.
+//
+// The server decides everything (GET /client/placements?client&version&os).
+// Nothing shows unless it answers `enabled: true` with a usable placement:
+// a 404, an error, a timeout (2 s), `enabled: false`, an empty list or a
+// malformed answer all mean nothing. The answer is cached in the app's data
+// folder and asked again after `refresh_after_s` (at least 15 minutes);
+// start-up never waits for it.
+//
+// Local rules, on top of the server's: a placement's window (starts_at,
+// ends_at), `max_per_day` per placement per local day, `snooze_days` after a
+// dismissal, the home slot once per app run (the same one stays for the run),
+// the turn slot once per session. Copy is plain text, clamped (sponsor 40,
+// title 60, body 140, CTA 20) and always labelled "Sponsored · <sponsor>";
+// links are https only and opened by the app only after a click.
+//
+// Events (impression, click, dismiss: id, kind, time, nothing else) are
+// queued in the same file and sent in batches, best effort; a 404 or an
+// answer that says placements are off drops them.
+//
+// Nothing here touches sessions, prompts, files or uploads. Node builtins
+// only; the transport (`request`) is the app's own authorized call.
+
+import fs from "node:fs";
+import path from "node:path";
+
+export const PLACEMENTS_PATH = "/client/placements";
+export const EVENTS_PATH = "/client/placements/events";
+export const STATE_FILE = "placements.json";
+export const SLOTS = Object.freeze(["home_banner", "turn_footer"]);
+export const LABEL = "Sponsored";
+export const LIMITS = Object.freeze({ id: 64, sponsor: 40, title: 60, body: 140, cta_label: 20 });
+export const FETCH_TIMEOUT_MS = 2_000;
+export const MIN_REFRESH_S = 900;
+export const DEFAULT_REFRESH_S = 3_600;
+export const MAX_REFRESH_S = 86_400;
+/** A cached answer older than this (no fresh one since) shows nothing. */
+export const CACHE_MAX_AGE_MS = 24 * 3_600_000;
+export const DEFAULT_SNOOZE_DAYS = 7;
+export const MAX_SNOOZE_DAYS = 365;
+export const MAX_PER_DAY_LIMIT = 24;
+export const EVENT_KINDS = Object.freeze(["impression", "click", "dismiss"]);
+export const EVENT_FLUSH_MS = 60_000;
+export const MAX_QUEUED_EVENTS = 200;
+export const MAX_EVENT_BATCH = 50;
+/** Sessions whose turn line was shown, kept this many (newest). */
+export const MAX_FOOTER_SESSIONS = 500;
+const DAY_MS = 86_400_000;
+const STATE_VERSION = 1;
+
+// --- copy -------------------------------------------------------------------
+
+// Control characters, bidi overrides and zero-width marks never reach a screen.
+// eslint-disable-next-line no-control-regex
+const UNSAFE_CHARS = /[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁠-⁩﻿]/g;
+
+/** Plain one-line text, at most `max` characters (cut with "…"); "" for anything else. */
+export function clampText(value, max) {
+  if (typeof value !== "string") return "";
+  const text = value.replace(UNSAFE_CHARS, " ").replace(/\s+/g, " ").trim();
+  const chars = Array.from(text);
+  if (chars.length <= max) return text;
+  return `${chars.slice(0, Math.max(0, max - 1)).join("").trimEnd()}…`;
+}
+
+/** An https URL without credentials, else null. */
+export function httpsOnly(value) {
+  if (typeof value !== "string" || !value.trim() || value.length > 2_048) return null;
+  try {
+    const url = new URL(value.trim());
+    if (url.protocol !== "https:" || url.username || url.password || !url.hostname) return null;
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
+function time(value) {
+  if (typeof value !== "string" || !value) return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function intIn(value, min, max, fallback) {
+  const n = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : NaN;
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(n)));
+}
+
+/**
+ * One placement from the server, checked and clamped, or null when it is not
+ * usable (no id, unknown slot, no sponsor or title, no https link, a window
+ * that ends before it starts).
+ */
+export function parsePlacement(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const id = typeof raw.id === "string" && /^[A-Za-z0-9._:-]{1,64}$/.test(raw.id) ? raw.id : null;
+  const slot = SLOTS.includes(raw.slot) ? raw.slot : null;
+  const sponsor = clampText(raw.sponsor, LIMITS.sponsor);
+  const title = clampText(raw.title, LIMITS.title);
+  const url = httpsOnly(raw.url);
+  if (!id || !slot || !sponsor || !title || !url) return null;
+  const startsAt = time(raw.starts_at);
+  const endsAt = time(raw.ends_at);
+  if (raw.starts_at != null && startsAt === null) return null;
+  if (raw.ends_at != null && endsAt === null) return null;
+  if (startsAt !== null && endsAt !== null && endsAt <= startsAt) return null;
+  return {
+    id,
+    slot,
+    sponsor,
+    label: LABEL,
+    title,
+    body: clampText(raw.body, LIMITS.body),
+    ctaLabel: clampText(raw.cta_label, LIMITS.cta_label) || "Learn more",
+    url,
+    imageUrl: httpsOnly(raw.image_url),
+    startsAt,
+    endsAt,
+    maxPerDay: intIn(raw.max_per_day, 1, MAX_PER_DAY_LIMIT, 1),
+    snoozeDays: intIn(raw.snooze_days, 1, MAX_SNOOZE_DAYS, DEFAULT_SNOOZE_DAYS),
+    priority: intIn(raw.priority, -1_000_000, 1_000_000, 0),
+  };
+}
+
+/**
+ * The server's answer: { enabled, refreshAfterS, placements } with only the
+ * usable placements, or null when it is not an answer at all. Off unless
+ * `enabled` is exactly true.
+ */
+export function parseAnswer(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  const refreshAfterS = intIn(body.refresh_after_s, MIN_REFRESH_S, MAX_REFRESH_S, DEFAULT_REFRESH_S);
+  const enabled = body.enabled === true;
+  const seen = new Set();
+  const placements = [];
+  if (enabled && Array.isArray(body.placements)) {
+    for (const raw of body.placements.slice(0, 50)) {
+      const placement = parsePlacement(raw);
+      if (!placement) continue;
+      // One id may run in both slots (one entry per slot); per-day count, dismiss and click stay keyed by id.
+      const key = `${placement.slot}\n${placement.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      placements.push(placement);
+    }
+  }
+  return { enabled: enabled && placements.length > 0, refreshAfterS, placements };
+}
+
+/** "Sponsored · Acme" */
+export function sponsoredLabel(placement) {
+  return `${LABEL} · ${placement.sponsor}`;
+}
+
+/**
+ * The placement as one plain line of at most `width` characters:
+ * "Sponsored · Acme — Title · body". `suffix` (a hint) is kept whole when it fits.
+ */
+export function placementLine(placement, { width = 100, suffix = "" } = {}) {
+  const head = `${sponsoredLabel(placement)} — ${placement.title}${placement.body ? ` · ${placement.body}` : ""}`;
+  const tail = suffix ? `  ${suffix}` : "";
+  const room = Math.max(10, Math.floor(width));
+  if (Array.from(head + tail).length <= room) return head + tail;
+  if (tail && Array.from(tail).length < room - 20) return clampText(head, room - Array.from(tail).length) + tail;
+  return clampText(head, room);
+}
+
+/** The placement as the apps show it (the UI never sees more). */
+export function placementView(placement) {
+  return {
+    id: placement.id,
+    slot: placement.slot,
+    label: sponsoredLabel(placement),
+    sponsor: placement.sponsor,
+    title: placement.title,
+    body: placement.body,
+    ctaLabel: placement.ctaLabel,
+    url: placement.url,
+    imageUrl: placement.imageUrl,
+    snoozeDays: placement.snoozeDays,
+  };
+}
+
+/**
+ * The `os` the server targets by: win, mac or linux.
+ * @param {string} [platform]
+ */
+export function osName(platform = process.platform) {
+  if (platform === "win32") return "win";
+  if (platform === "darwin") return "mac";
+  return "linux";
+}
+
+export function placementsQuery({ client, version, os }) {
+  const query = new URLSearchParams();
+  query.set("client", client === "desktop" ? "desktop" : "cli");
+  query.set("version", typeof version === "string" && version ? version.slice(0, 40) : "0");
+  query.set("os", ["win", "mac", "linux"].includes(os) ? os : osName());
+  return `${PLACEMENTS_PATH}?${query.toString()}`;
+}
+
+/** The local calendar day of `ms` (YYYY-MM-DD). */
+export function localDay(ms) {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+// --- state ------------------------------------------------------------------
+
+/** An empty state. */
+export function emptyState() {
+  return { v: STATE_VERSION, fetched_at: 0, answer: null, shown: {}, snoozed: {}, hidden_until: 0, footer_sessions: [], events: [] };
+}
+
+function record(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+/** The state file, repaired: anything damaged reads as empty. */
+export function readState(file) {
+  let data = null;
+  try {
+    data = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    data = null;
+  }
+  const base = emptyState();
+  if (!data || typeof data !== "object" || Array.isArray(data) || data.v !== STATE_VERSION) return base;
+  const shown = {};
+  for (const [id, entry] of Object.entries(record(data.shown))) {
+    const e = record(entry);
+    if (typeof e.day === "string" && Number.isFinite(e.count)) shown[id] = { day: e.day, count: Math.max(0, Math.floor(e.count)) };
+  }
+  const snoozed = {};
+  for (const [id, until] of Object.entries(record(data.snoozed))) if (Number.isFinite(until)) snoozed[id] = until;
+  return {
+    ...base,
+    fetched_at: Number.isFinite(data.fetched_at) ? data.fetched_at : 0,
+    answer: data.answer && typeof data.answer === "object" ? data.answer : null,
+    shown,
+    snoozed,
+    hidden_until: Number.isFinite(data.hidden_until) ? data.hidden_until : 0,
+    footer_sessions: Array.isArray(data.footer_sessions) ? data.footer_sessions.filter((s) => typeof s === "string").slice(-MAX_FOOTER_SESSIONS) : [],
+    events: Array.isArray(data.events)
+      ? data.events.filter((e) => e && typeof e.id === "string" && EVENT_KINDS.includes(e.kind) && typeof e.at === "string").slice(-MAX_QUEUED_EVENTS)
+      : [],
+  };
+}
+
+export function writeState(file, state) {
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    const tmp = `${file}.${process.pid}.${Date.now().toString(36)}.tmp`;
+    fs.writeFileSync(tmp, `${JSON.stringify(state)}\n`, { mode: 0o600 });
+    fs.renameSync(tmp, file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The cached answer, parsed again (the file may have been edited), or null when absent or too old. */
+export function cachedAnswer(state, now) {
+  if (!state.answer || !Number.isFinite(state.fetched_at) || state.fetched_at <= 0) return null;
+  if (now - state.fetched_at > CACHE_MAX_AGE_MS || state.fetched_at - now > DAY_MS) return null;
+  return parseAnswer(state.answer);
+}
+
+/** Whether the cached answer is due for a fresh one. */
+export function refreshDue(state, now) {
+  if (!state.fetched_at) return true;
+  const answer = state.answer ? parseAnswer(state.answer) : null;
+  const every = (answer?.refreshAfterS ?? DEFAULT_REFRESH_S) * 1000;
+  return now - state.fetched_at >= every || state.fetched_at - now > DAY_MS;
+}
+
+/** Whether `placement` may show in `slot` now (window, snooze, the day's count, hidden). */
+export function eligible(placement, slot, state, now) {
+  if (placement.slot !== slot) return false;
+  if (placement.startsAt !== null && now < placement.startsAt) return false;
+  if (placement.endsAt !== null && now >= placement.endsAt) return false;
+  if (state.hidden_until && now < state.hidden_until) return false;
+  const snoozedUntil = state.snoozed[placement.id];
+  if (Number.isFinite(snoozedUntil) && now < snoozedUntil) return false;
+  const shown = state.shown[placement.id];
+  if (shown && shown.day === localDay(now) && shown.count >= placement.maxPerDay) return false;
+  return true;
+}
+
+/** The placement for `slot` now: the highest priority, then the soonest to end, then the id. */
+export function pickPlacement(answer, slot, state, now) {
+  if (!answer?.enabled) return null;
+  const candidates = answer.placements.filter((p) => eligible(p, slot, state, now));
+  candidates.sort((a, b) => b.priority - a.priority || (a.endsAt ?? Infinity) - (b.endsAt ?? Infinity) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return candidates[0] ?? null;
+}
+
+// --- the service ----------------------------------------------------------------
+
+const noop = () => undefined;
+
+/**
+ * @typedef {{ status: number, data?: any } | null} PlacementsResponse
+ * @typedef {(pathAndQuery: string, init: { method?: string, body?: unknown, timeoutMs?: number }) => Promise<PlacementsResponse>} PlacementsRequest
+ * @typedef {{
+ *   request?: PlacementsRequest | null,
+ *   stateFile: string,
+ *   client: string,
+ *   version?: string,
+ *   os?: string,
+ *   allowed?: boolean,
+ *   now?: () => number,
+ *   log?: (level: string, message: string, data?: object) => void,
+ *   timeoutMs?: number,
+ *   flushMs?: number,
+ *   setTimer?: (fn: () => void, ms: number) => any,
+ *   clearTimer?: (timer: any) => void,
+ * }} PlacementsOptions
+ */
+
+/**
+ * The app's placements. `request(pathAndQuery, { method, body, timeoutMs })`
+ * resolves { status, data } (data: the parsed JSON or null) or null when
+ * signed out, and may throw; it is the app's own authorized call (renewing an
+ * expired sign-in). `allowed: false` (headless, no terminal, CI, switched
+ * off) never asks the server and never shows anything.
+ * @param {PlacementsOptions} options
+ */
+export function createPlacements({
+  request,
+  stateFile,
+  client,
+  version = "",
+  os = osName(),
+  allowed = true,
+  now = Date.now,
+  log = noop,
+  timeoutMs = FETCH_TIMEOUT_MS,
+  flushMs = EVENT_FLUSH_MS,
+  setTimer = (fn, ms) => setTimeout(fn, ms),
+  clearTimer = (timer) => clearTimeout(timer),
+}) {
+  let state = allowed ? readState(stateFile) : emptyState();
+  let refreshTimer = null;
+  let flushTimer = null;
+  let inFlight = null;
+  let stopped = false;
+  let started = false;
+  /** This run's choice per slot: the home slot keeps its placement for the run. */
+  const runClaims = new Map();
+  const footerSessions = new Set(state.footer_sessions);
+
+  const save = () => (allowed ? writeState(stateFile, state) : false);
+  const answer = () => cachedAnswer(state, now());
+  /** The placement with `id` (in `slot` when given: one id may have an entry per slot). */
+  const known = (id, slot = null) => answer()?.placements.find((p) => p.id === id && (!slot || p.slot === slot)) ?? null;
+
+  const schedule = () => {
+    if (stopped || !started) return;
+    if (refreshTimer) clearTimer(refreshTimer);
+    const every = (answer()?.refreshAfterS ?? DEFAULT_REFRESH_S) * 1000;
+    const wait = Math.max(MIN_REFRESH_S * 1000, every - Math.max(0, now() - state.fetched_at));
+    refreshTimer = setTimer(() => {
+      refreshTimer = null;
+      void service.refresh().catch(noop).finally(schedule);
+    }, wait);
+    refreshTimer?.unref?.();
+  };
+
+  const queue = (id, kind) => {
+    if (!allowed || !EVENT_KINDS.includes(kind) || !known(id) || !answer()?.enabled) return false;
+    state.events.push({ id, kind, at: new Date(now()).toISOString() });
+    if (state.events.length > MAX_QUEUED_EVENTS) state.events = state.events.slice(-MAX_QUEUED_EVENTS);
+    save();
+    if (!flushTimer && !stopped && started) {
+      flushTimer = setTimer(() => {
+        flushTimer = null;
+        void service.flush().catch(noop);
+      }, flushMs);
+      flushTimer?.unref?.();
+    }
+    return true;
+  };
+
+  const service = {
+    /** Starts the background refresh (never waited for). */
+    start() {
+      if (!allowed || started || stopped) return service;
+      started = true;
+      if (refreshDue(state, now())) void service.refresh().catch(noop).finally(schedule);
+      else schedule();
+      if (state.events.length) {
+        flushTimer = setTimer(() => {
+          flushTimer = null;
+          void service.flush().catch(noop);
+        }, Math.min(flushMs, 5_000));
+        flushTimer?.unref?.();
+      }
+      return service;
+    },
+    /** Stops the timers and sends what is queued (best effort, bounded by the request timeout). */
+    async stop() {
+      stopped = true;
+      if (refreshTimer) clearTimer(refreshTimer);
+      if (flushTimer) clearTimer(flushTimer);
+      refreshTimer = null;
+      flushTimer = null;
+      if (allowed && state.events.length) await service.flush().catch(noop);
+    },
+    /** Asks the server once; resolves the parsed answer in use afterwards (null: nothing to show). */
+    async refresh() {
+      if (!allowed || typeof request !== "function") return null;
+      if (inFlight) return inFlight;
+      inFlight = (async () => {
+        let result = null;
+        try {
+          result = await request(placementsQuery({ client, version, os }), { method: "GET", timeoutMs });
+        } catch {
+          result = null;
+        }
+        const at = now();
+        if (result && result.status === 200) {
+          const parsed = parseAnswer(result.data);
+          // A malformed answer is an answer that shows nothing.
+          state.answer = parsed ? result.data : { enabled: false };
+          state.fetched_at = at;
+          if (!parsed?.enabled) state.events = [];
+          save();
+          log("info", "placements refreshed", { enabled: Boolean(parsed?.enabled), count: parsed?.placements.length ?? 0 });
+        } else if (result && (result.status === 404 || result.status === 410)) {
+          // An older server: nothing, asked again after the default time.
+          state.answer = { enabled: false };
+          state.fetched_at = at;
+          state.events = [];
+          save();
+        }
+        // Signed out, offline, slow, 5xx: the last answer stays (until it is a day old).
+        return answer();
+      })();
+      try {
+        return await inFlight;
+      } finally {
+        inFlight = null;
+      }
+    },
+    /**
+     * The placement to show in `slot`, counted as shown for the day, or null.
+     * The home slot: once per run (later asks get the same one, not counted
+     * again). The turn slot: once per `sessionId`, ever.
+     */
+    claim(slot, { sessionId = null } = {}) {
+      if (!allowed || !SLOTS.includes(slot)) return null;
+      const at = now();
+      if (slot === "home_banner" && runClaims.has(slot)) {
+        const kept = known(runClaims.get(slot), slot);
+        return kept && eligibleKept(kept, at) ? placementView(kept) : null;
+      }
+      if (slot === "turn_footer") {
+        if (typeof sessionId !== "string" || !sessionId || footerSessions.has(sessionId)) return null;
+      }
+      const placement = pickPlacement(answer(), slot, state, at);
+      if (!placement) return null;
+      const day = localDay(at);
+      const shown = state.shown[placement.id];
+      state.shown[placement.id] = { day, count: shown && shown.day === day ? shown.count + 1 : 1 };
+      // Old days are forgotten.
+      for (const [id, entry] of Object.entries(state.shown)) if (entry.day !== day && id !== placement.id) delete state.shown[id];
+      if (slot === "turn_footer") {
+        footerSessions.add(sessionId);
+        state.footer_sessions = [...state.footer_sessions.filter((s) => s !== sessionId), sessionId].slice(-MAX_FOOTER_SESSIONS);
+      }
+      runClaims.set(slot, placement.id);
+      save();
+      return placementView(placement);
+    },
+    /** The placement this run claimed for `slot` (not counted again), or null. */
+    current(slot) {
+      const id = runClaims.get(slot);
+      const placement = id ? known(id, slot) : null;
+      return placement && eligibleKept(placement, now()) ? placementView(placement) : null;
+    },
+    /** It was drawn on screen. */
+    impression(id) {
+      return queue(id, "impression");
+    },
+    /** The click: its https link (the app opens it) or null. */
+    click(id) {
+      const placement = known(id);
+      if (!placement) return null;
+      queue(id, "click");
+      return placement.url;
+    },
+    /** × / hide: snoozed for its `snooze_days`; gone from this run. */
+    dismiss(id) {
+      const placement = known(id);
+      if (!allowed || !placement) return false;
+      queue(id, "dismiss");
+      state.snoozed[id] = now() + placement.snoozeDays * DAY_MS;
+      for (const [slot, claimed] of runClaims) if (claimed === id) runClaims.delete(slot);
+      save();
+      return true;
+    },
+    /** Hides every placement for `days` (0 shows them again). */
+    hideAll(days = 30) {
+      const n = intIn(days, 0, MAX_SNOOZE_DAYS, 30);
+      state.hidden_until = n > 0 ? now() + n * DAY_MS : 0;
+      if (n > 0) runClaims.clear();
+      return save() || !allowed;
+    },
+    /** What `omnirush placements` prints. */
+    status() {
+      const current = answer();
+      return {
+        allowed,
+        enabled: Boolean(current?.enabled),
+        count: current?.placements.length ?? 0,
+        fetchedAt: state.fetched_at || null,
+        hiddenUntil: state.hidden_until && state.hidden_until > now() ? state.hidden_until : null,
+        snoozed: Object.values(state.snoozed).filter((until) => until > now()).length,
+        queued: state.events.length,
+      };
+    },
+    /** Sends the queued events (at most MAX_EVENT_BATCH per request). */
+    async flush() {
+      if (!allowed || typeof request !== "function" || !state.events.length) return 0;
+      if (!answer()?.enabled) {
+        state.events = [];
+        save();
+        return 0;
+      }
+      let sent = 0;
+      while (state.events.length) {
+        const batch = state.events.slice(0, MAX_EVENT_BATCH);
+        let result = null;
+        try {
+          result = await request(`${EVENTS_PATH}?client=${client === "desktop" ? "desktop" : "cli"}`, { method: "POST", body: { events: batch }, timeoutMs });
+        } catch {
+          result = null;
+        }
+        if (!result) break;
+        if (result.status >= 200 && result.status < 300) {
+          state.events = state.events.slice(batch.length);
+          sent += batch.length;
+          save();
+          continue;
+        }
+        if (result.status >= 400 && result.status < 500 && result.status !== 401 && result.status !== 408 && result.status !== 429) {
+          // Refused (no route, off, bad batch): dropped, never retried.
+          state.events = [];
+          save();
+        }
+        break;
+      }
+      return sent;
+    },
+    /** Tests and the status command. */
+    state: () => state,
+  };
+
+  // A placement kept for the run stays while its window, snooze and hide allow it.
+  function eligibleKept(placement, at) {
+    if (!answer()?.enabled) return false;
+    if (placement.endsAt !== null && at >= placement.endsAt) return false;
+    if (state.hidden_until && at < state.hidden_until) return false;
+    const snoozedUntil = state.snoozed[placement.id];
+    return !(Number.isFinite(snoozedUntil) && at < snoozedUntil);
+  }
+
+  return service;
+}

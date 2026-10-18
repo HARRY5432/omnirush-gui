@@ -1148,18 +1148,19 @@ export function createDesktopOmniRushAccountStore({
    * A request to the account server with the device credential, refreshed
    * once on a 401 (as the profile check does). Null while signed out.
    */
-  async function sendAuthorized(pathname, init = {}, refreshesLeft = 1, credentials = undefined) {
+  async function sendAuthorized(pathname, init = {}, refreshesLeft = 1, credentials = undefined, search = "") {
     const current = credentials === undefined ? await load() : credentials;
     if (!current) return null;
     const url = controlPlaneBase(current.gatewayUrl);
     url.pathname += pathname;
+    if (search) url.search = search;
     const headers = new Headers(init.headers);
     headers.set("Authorization", `Bearer ${current.accessToken}`);
     const response = await send(url, { ...init, headers, signal: init.signal ?? AbortSignal.timeout(20_000) });
     if (response.status === 401 && refreshesLeft > 0) {
       const refreshed = await refresh(current.accessToken);
       if (!refreshed) return response;
-      return sendAuthorized(pathname, init, refreshesLeft - 1, refreshed);
+      return sendAuthorized(pathname, init, refreshesLeft - 1, refreshed, search);
     }
     return response;
   }
@@ -1313,6 +1314,27 @@ export function createDesktopOmniRushAccountStore({
   }
 
   /**
+   * One sponsored-placements call (placements-desktop.mjs): `pathAndQuery`
+   * under the account server, the device credential, `timeoutMs` at most.
+   * Resolves { status, data } (data: the JSON of a 200, else null), or null
+   * while signed out. Throws on network errors and timeouts.
+   * @param {string} pathAndQuery
+   * @param {{ method?: string, body?: unknown, timeoutMs?: number }} [init]
+   * @returns {Promise<{ status: number, data: any } | null>}
+   */
+  async function placementsRequest(pathAndQuery, { method = "GET", body = undefined, timeoutMs = 2_000 } = {}) {
+    const [pathname, query = ""] = String(pathAndQuery).split("?");
+    const response = await sendAuthorized(`${pathname}`, {
+      method,
+      ...(body !== undefined ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {}),
+      signal: AbortSignal.timeout(timeoutMs),
+    }, 1, undefined, query);
+    if (!response) return null;
+    const data = response.status === 200 ? await response.json().catch(() => null) : null;
+    return { status: response.status, data };
+  }
+
+  /**
    * Join the event from the app (POST /me/buildathon/join; only offered when
    * the promo says `join: true`). The answer is the enrolled status.
    * @returns {Promise<import("@omnirush/types/desktop-ipc").OmniRushBuildathonLinkResult>}
@@ -1420,5 +1442,6 @@ export function createDesktopOmniRushAccountStore({
     buildathonLink,
     buildathonJoin,
     buildathonTagSession,
+    placementsRequest,
   };
 }

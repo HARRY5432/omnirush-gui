@@ -75,6 +75,7 @@ import {
 } from "./connect-link-branding.mjs";
 import { resolveConnectLinkPublicKeys } from "./connect-link-keys.mjs";
 import { openExternalUrl } from "./open-external.mjs";
+import { createDesktopPlacements } from "./placements-desktop.mjs";
 import { classifyLocalOpen, isNetworkPath, localPathFromFileUrl } from "./open-local-path.mjs";
 import { resolveAppIdentifier, resolveUserDataPath } from "./dev-profile.mjs";
 import { fetchAgentContextDiagnosticsResponse } from "./agent-context-diagnostics-fetch.mjs";
@@ -1407,6 +1408,15 @@ const omnirushAccountStore = createDesktopOmniRushAccountStore({
   }),
 });
 
+// Sponsored placements (placements-desktop.mjs): a quiet card on the home
+// screen and one line after a finished turn, only when the server sends one.
+const desktopPlacements = createDesktopPlacements({
+  request: (pathAndQuery, init) => omnirushAccountStore.placementsRequest(pathAndQuery, init),
+  userDataPath: app.getPath("userData"),
+  version: app.getVersion(),
+  openUrl: (url) => openExternalUrl(url),
+});
+
 function omnirushUiMcpLaunch() {
   return resolveOmniRushUiMcpLaunch({
     devMode: process.env.OMNIRUSH_DEV_MODE === "1",
@@ -2408,6 +2418,14 @@ const desktopCommandHandlers = {
       const input = args[0] && typeof args[0] === "object" ? args[0] : {};
       return omnirushAccountStore.spinQuality({ idempotencyKey: typeof input.idempotencyKey === "string" ? input.idempotencyKey : undefined });
   },
+  // Sponsored placements: a placement to draw or null (never an error), and
+  // what happened to it (impression, open = the click, dismiss).
+  "omnirushPlacement": async (event, ...args) => {
+      return desktopPlacements.placement(args[0] && typeof args[0] === "object" ? args[0] : {}).catch(() => null);
+  },
+  "omnirushPlacementAction": async (event, ...args) => {
+      return desktopPlacements.action(args[0] && typeof args[0] === "object" ? args[0] : {}).catch(() => ({ ok: false }));
+  },
   // Buildathon: shown only to enrolled accounts; every failure is a null
   // (or a "retry"), never a thrown error, so the app quietly shows nothing.
   "omnirushBuildathon": async (event) => {
@@ -3304,6 +3322,8 @@ or use: pnpm dev:worktree`);
     showShutdownScreen();
     desktopAutomationRunner.stop();
     browserLoginSync.shutdown();
+    // The queued placement events: best effort, never waited for (the rest go next start).
+    void desktopPlacements.stop().catch(() => undefined);
     // The uploads finish as the services stop: the computer stays awake for them.
     const releaseKeepAwake = keepAwake.hold();
     runDetachedTask("stop services before quit", async () => {
@@ -3434,6 +3454,8 @@ or use: pnpm dev:worktree`);
 
     queueDeepLinks(forwardedDeepLinks(process.argv));
     const win = await createMainWindow();
+    // In the background: the window never waits for it.
+    desktopPlacements.start();
     if (startReset.ran && startReset.moved.length > 0) {
       runDetachedTask("show app data reset notice", async () => {
         const { response } = await dialog.showMessageBox(win, {

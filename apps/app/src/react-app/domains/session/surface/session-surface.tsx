@@ -100,6 +100,7 @@ import { PermissionApprovalPanel } from "@/react-app/domains/session/chat/permis
 import { QuestionPanel } from "@/react-app/domains/session/modals/question-modal";
 import { QueuedMessagesPanel } from "@/react-app/domains/session/modals/queued-messages-panel";
 import { GoodSessionChecklistBar, noteUserStop } from "@/react-app/domains/quality/good-session";
+import { PlacementTurnFooter } from "@/react-app/domains/placements/placements";
 import { deriveOpenTargets, sameOpenTargets, selectAutoOpenTarget, type OpenTarget } from "@/react-app/domains/session/artifacts/open-target";
 import { usePanelTabStore } from "@/react-app/domains/session/panel/panel-tab-store";
 import {
@@ -3474,6 +3475,10 @@ export function SessionSurface(props: SessionSurfaceProps) {
           onFinishIt={handleMessageListSetPrompt}
           onAutoRetry={handleAutoRetry}
           client={props.client}
+        />
+        <PlacementTurnFooter
+          sessionId={props.sessionId}
+          turnRunning={chatStreaming || (effectiveActivityStatus !== "idle" && effectiveActivityStatus !== "error")}
         />
         <ReactSessionComposer
           runModeControl={<WorkspaceRunModeMenu client={props.client} workspaceId={props.workspaceId} busy={chatStreaming || preparingCloudTools || Boolean(props.activePermission || props.activeQuestion)} />}
