@@ -37,6 +37,8 @@ export type OpenContext = {
   /** The download's output lines as they come (its progress). */
   onLine?: RunOptions["onLine"];
   spawnImpl?: SpawnLike;
+  /** boxd's ping (tests); client.ping otherwise. */
+  ping?: (endpoint: BoxEndpoint, options?: { timeoutMs?: number }) => Promise<Record<string, unknown> | null>;
 };
 
 export type Opened =

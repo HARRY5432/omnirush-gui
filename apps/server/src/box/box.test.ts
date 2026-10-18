@@ -334,7 +334,7 @@ describe("box service", () => {
       key: "k", container: "c", runtimeBin: "docker", runtimeArgs: [], backend: "docker", exec: null, root, native: false, box: null,
       ready: async () => null,
       label: () => null,
-      setTurn: () => {},
+      setTurn: () => {}, heal: async () => null, close: () => {},
       freeze: async (label, { sessionId, turn = null, sessionTurn = null }) => {
         frozen.push(`${sessionId} ${label} ${sessionTurn}`);
         return { label, turn, copied: 0, carried: 0, save: async () => ({ label, changed: 0, bytes: 0 }), discard: async () => null };
@@ -378,7 +378,7 @@ describe("box service", () => {
       key: boxKey(root), container: "c", runtimeBin: "docker", runtimeArgs: [], backend: "docker", exec: null, root, native: false, box: null,
       ready: async () => null,
       label: () => null,
-      setTurn: () => {},
+      setTurn: () => {}, heal: async () => null, close: () => {},
       freeze: async (label, { sessionId, turn = null }) => {
         frozen.push(`${sessionId} ${label}`);
         return { label, turn, copied: 0, carried: 0, save: async () => ({ label, changed: 0, bytes: 0 }), discard: async () => null };
@@ -420,7 +420,7 @@ describe("box service", () => {
       key: boxKey(root), container: "c", runtimeBin: "docker", runtimeArgs: [], backend: "docker", exec: null, root, native: false, box: null,
       ready: async () => null,
       label: () => null,
-      setTurn: () => {},
+      setTurn: () => {}, heal: async () => null, close: () => {},
       freeze: async (label, { sessionId, turn = null }) => {
         frozen.push(`${sessionId} ${label}`);
         if (failNext) { failNext = false; throw new Error("checkpoint failed"); }
@@ -456,7 +456,7 @@ describe("box service", () => {
     const workspace: BoxWorkspace = { id: "ws_o", path: root, workspaceType: "local" };
     const run: BoxRun = {
       key: boxKey(root), container: "c", runtimeBin: "docker", runtimeArgs: [], backend: "docker", exec: null, root, native: false, box: null,
-      ready: async () => null, label: () => null, setTurn: () => {},
+      ready: async () => null, label: () => null, setTurn: () => {}, heal: async () => null, close: () => {},
       freeze: async (label, { turn = null }) => ({ label, turn, copied: 0, carried: 0, save: async () => ({ label, changed: 0, bytes: 0 }), discard: async () => null }),
     };
     rememberServerDefault(stateDir, { local_box: { default: "off" } });
@@ -508,7 +508,7 @@ describe("box service", () => {
     const boxes = service({ stateDir, workspaces: [workspace], settings: new Map(), env: { OMNIRUSH_BOX_HOME: await temp("boxhome") } });
     const run: BoxRun = {
       key: boxKey(root), container: "c", runtimeBin: "docker", runtimeArgs: [], backend: "docker", exec: null, root, native: false, box: null,
-      ready: async () => null, label: () => null, setTurn: () => {}, freeze: async () => null,
+      ready: async () => null, label: () => null, setTurn: () => {}, heal: async () => null, close: () => {}, freeze: async () => null,
     };
     const projects = boxes["projects"];
     projects.set(boxKey(root), { run, notice: null, planning: null, nextPlanAt: Date.now() + 60_000, waitingImage: false });
@@ -543,7 +543,7 @@ describe("box service", () => {
     box.setState("ready", null);
     const run: BoxRun = {
       key: boxKey(root), container: "c", runtimeBin: "docker", runtimeArgs: [], backend: "docker", exec: null, root, native: false, box,
-      ready: async () => box, label: () => null, setTurn: () => {}, freeze: async () => null,
+      ready: async () => box, label: () => null, setTurn: () => {}, heal: async () => null, close: () => {}, freeze: async () => null,
     };
     boxes["projects"].set(boxKey(root), { run, notice: null, planning: null, nextPlanAt: 0, waitingImage: false });
     expect(await boxes.ensure(workspace)).toBe(run);

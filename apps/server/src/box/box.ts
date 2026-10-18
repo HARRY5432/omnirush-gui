@@ -198,7 +198,7 @@ type OnState = (state: BoxState, error: string | null) => void;
  * (the record boxsh reads says the same). Throws only for programming
  * errors; a box that cannot start is a Box with state "failed" and `error`.
  */
-export async function openBox({ root, runtime, env = process.env, platform = process.platform, home = boxHome(env), run = runCommand, log = () => {}, shims = null, pkglog = null, pull = true, image: asked = null, onState = () => {}, onLine, spawnImpl, readyMs = 15_000 }: { root: string; runtime: BoxRuntime; env?: Env; platform?: NodeJS.Platform; home?: string; run?: RunCommand; log?: BoxLog; shims?: string | null; pkglog?: BoxInstallLog | null; pull?: boolean; image?: BoxImage | null; onState?: OnState; onLine?: RunOptions["onLine"]; spawnImpl?: SpawnLike; readyMs?: number }): Promise<Box> {
+export async function openBox({ root, runtime, env = process.env, platform = process.platform, home = boxHome(env), run = runCommand, log = () => {}, shims = null, pkglog = null, pull = true, image: asked = null, onState = () => {}, onLine, spawnImpl, readyMs = 15_000, revive = false }: { root: string; runtime: BoxRuntime; env?: Env; platform?: NodeJS.Platform; home?: string; run?: RunCommand; log?: BoxLog; shims?: string | null; pkglog?: BoxInstallLog | null; pull?: boolean; image?: BoxImage | null; onState?: OnState; onLine?: RunOptions["onLine"]; spawnImpl?: SpawnLike; readyMs?: number; revive?: boolean }): Promise<Box> {
   const projectRoot = path.resolve(root);
   const key = boxKey(projectRoot, { platform });
   const name = containerName(key, env);
@@ -206,6 +206,8 @@ export async function openBox({ root, runtime, env = process.env, platform = pro
   const runFolder = runDir(home, key);
   mkdirSync(path.join(runFolder, "state"), { recursive: true });
   const box = new Box({ key, name, root: projectRoot, croot, runtime, home, runFolder, run, log, platform, env });
+  // The app restarts boxd when a shell call finds it stopped (boxsh asks through boxes/<key>.revive).
+  box.revive = revive;
   const driver = driverFor(runtime);
   const lock = await acquireLock(home, key);
   try {
@@ -354,6 +356,8 @@ export class Box {
   readonly container: string;
   state: BoxState = "starting";
   error: string | null = null;
+  /** The record tells boxsh the app restarts boxd when asked. */
+  revive = false;
   endpoint: BoxEndpoint | null = null;
   identity: Record<string, unknown> | null = null;
   pathPrefix = "";
@@ -395,7 +399,7 @@ export class Box {
       runtime: fallback ? this.runtime.bin ?? "" : "", runtime_args: fallback ? this.runtime.prefix ?? [] : [],
       host: this.endpoint?.host ?? "127.0.0.1", port: this.endpoint?.port ?? 0, token: this.endpoint?.token ?? "",
       state: this.state, error: this.error ?? "", uid: this.uid ?? 0, gid: this.gid ?? 0, home: HOME_IN_BOX, shell: "/bin/bash",
-      path_prefix: this.pathPrefix, env_file: `${RUN_DIR}/env`, updated: Date.now(), pid: process.pid,
+      path_prefix: this.pathPrefix, env_file: `${RUN_DIR}/env`, updated: Date.now(), pid: process.pid, revive: this.revive,
     };
     writeJson(recordFile(this.home, this.key), record);
   }
@@ -683,6 +687,11 @@ export class Box {
 type Removed = Array<{ kind: string; name: string; reason: string }>;
 
 /** Boxes on this machine: { key, name, root, running, image, created }[] */
+/** Where boxsh asks the app to start a stopped boxd again (launch.ts boxRun). */
+export function reviveFile(home: string, key: string): string {
+  return path.join(home, "boxes", `${key}.revive`);
+}
+
 export async function listBoxes(runtime: BoxRuntime, { run = runCommand, env = process.env, home = boxHome(env) }: { run?: RunCommand; env?: Env; home?: string } = {}): Promise<ListedBox[]> {
   return driverFor(runtime).list(runtime, { run, env, home });
 }

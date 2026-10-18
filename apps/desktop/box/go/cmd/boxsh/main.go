@@ -53,6 +53,10 @@ type Record struct {
 	Shell     string `json:"shell"`
 	PathPre   string `json:"path_prefix"`
 	EnvFile   string `json:"env_file"`
+	// Revive: the app that wrote the record restarts boxd when asked
+	// (boxes/<key>.revive); Updated is when it last wrote the record (ms).
+	Revive  bool  `json:"revive"`
+	Updated int64 `json:"updated"`
 }
 
 func main() {
@@ -90,12 +94,33 @@ func main() {
 	req := proto.Request{Op: "exec", Token: rec.Token, Argv: argv, Cwd: mapPath(cwd, rec), Env: forwardEnv(os.Environ())}
 	start := time.Now()
 	code, timing, err := runRemote(rec, req)
-	if err != nil {
-		if rec.Runtime == "" && rec.Backend != "" {
-			// A backend with no `exec` of its own (bubblewrap, the WSL distro): boxd is the only way in.
-			fmt.Fprintf(os.Stderr, "omnirush sandbox: the sandbox is not reachable (%v); `omnirush sandbox status` says why\n", err)
+	if err != nil && rec.Runtime == "" && rec.Backend != "" {
+		// A backend with no `exec` of its own (bubblewrap, the WSL distro): boxd is the only
+		// way in. A boxd that stopped (idle limit, crash, the distro restarted) is started
+		// again by the app that owns the session, and the command runs then. Never on this
+		// machine instead.
+		if !isDialError(err) {
+			fmt.Fprintf(os.Stderr, "omnirush sandbox: the connection to the sandbox failed (%v); %s\n", err, recoverHint)
 			os.Exit(125)
 		}
+		again, why := revive(key, rec, err)
+		if again == nil {
+			if strings.Contains(why, "Restart OmniRush") {
+				fmt.Fprintf(os.Stderr, "omnirush sandbox: %s\n", why)
+			} else {
+				fmt.Fprintf(os.Stderr, "omnirush sandbox: the sandbox stopped and was not restarted (%s); %s\n", why, recoverHint)
+			}
+			os.Exit(125)
+		}
+		rec = again
+		req.Token = rec.Token
+		code, timing, err = runRemote(rec, req)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, retryFailed(err))
+			os.Exit(125)
+		}
+	}
+	if err != nil {
 		// boxd is not reachable (restarting, crashed): run it with the runtime's exec instead.
 		code = runtimeExec(rec, req)
 		timing.Fallback = true
@@ -104,6 +129,87 @@ func main() {
 	timing.Code = code
 	logTiming(timing)
 	os.Exit(code)
+}
+
+// recoverHint: what the user can do when the sandbox cannot be reached.
+const recoverHint = "restart OmniRush (installs are kept), `omnirush sandbox reset` for a fresh sandbox, or `omnirush sandbox off` to run this folder on this machine"
+
+// isDialError: nothing reached boxd (no listener, refused, timed out): the
+// command did not start, so running it again cannot run it twice.
+func isDialError(err error) bool {
+	var op *net.OpError
+	return errors.As(err, &op) && op.Op == "dial"
+}
+
+// retryFailed: the line for a command that failed again after boxd was started again.
+func retryFailed(err error) string {
+	if isDialError(err) {
+		return fmt.Sprintf("omnirush sandbox: the sandbox is not reachable after a restart (%v); %s", err, recoverHint)
+	}
+	return fmt.Sprintf("omnirush sandbox: the connection to the sandbox broke during the command (%v); %s", err, recoverHint)
+}
+
+func reviveFile(key string) string {
+	return filepath.Join(boxHome(), "boxes", key+".revive")
+}
+
+// reviveWait: how long a command waits for the sandbox to be started again.
+func reviveWait() time.Duration {
+	if v, err := strconv.Atoi(os.Getenv("OMNIRUSH_BOX_REVIVE_WAIT_MS")); err == nil && v >= 0 {
+		return time.Duration(v) * time.Millisecond
+	}
+	return 60 * time.Second
+}
+
+// revive asks the app that owns the session to start boxd again
+// (boxes/<key>.revive) and waits for the record to say where it is now.
+// Returns the new record, or nil and why not. A request nobody took within
+// the wait (no app restarts this box) is not made again: later commands
+// fail at once instead of each waiting.
+func revive(key string, rec *Record, cause error) (*Record, string) {
+	if !rec.Revive {
+		return nil, fmt.Sprintf("%v", cause)
+	}
+	wait := reviveWait()
+	file := reviveFile(key)
+	if st, err := os.Stat(file); err == nil && time.Since(st.ModTime()) > wait {
+		return nil, fmt.Sprintf("%v; no answer to the restart request", cause)
+	}
+	asked := time.Now()
+	body, _ := json.Marshal(map[string]any{"at": asked.UnixMilli(), "port": rec.Port, "error": cause.Error()})
+	if _, err := os.Stat(file); err != nil {
+		tmp := fmt.Sprintf("%s.%d.tmp", file, os.Getpid())
+		if os.WriteFile(tmp, body, 0o600) == nil {
+			_ = os.Rename(tmp, file)
+		}
+	}
+	fmt.Fprintln(os.Stderr, "omnirush sandbox: the sandbox stopped; starting it again...")
+	deadline := asked.Add(wait)
+	for time.Now().Before(deadline) {
+		time.Sleep(150 * time.Millisecond)
+		now, err := readRecord(key)
+		if err != nil {
+			continue
+		}
+		switch now.State {
+		case "failed":
+			msg := now.Error
+			if msg == "" {
+				msg = "it could not start"
+			}
+			return nil, msg
+		case "off":
+			return nil, "the sandbox was turned off for this session"
+		case "ready":
+			// Started again (a new port or a newer record), or boxd answered after all
+			// (the app took the request and found it running).
+			_, pending := os.Stat(file)
+			if now.Port != rec.Port || now.Updated > rec.Updated || pending != nil {
+				return now, ""
+			}
+		}
+	}
+	return nil, fmt.Sprintf("%v; it did not start again in %v", cause, wait.Round(time.Second))
 }
 
 func (r *Record) shell() string {
@@ -195,6 +301,9 @@ func waitReady(key string) (*Record, error) {
 				msg := rec.Error
 				if msg == "" {
 					msg = "it could not start"
+				}
+				if strings.Contains(msg, "Restart OmniRush") {
+					return nil, errors.New(msg) // says what to do already
 				}
 				return nil, fmt.Errorf("the sandbox is not available (%s); run `omnirush sandbox status`", msg)
 			}

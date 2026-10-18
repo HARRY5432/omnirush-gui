@@ -41,6 +41,7 @@ import bundledPins from "../wsl.json" with { type: "json" };
 import { IDLE_MINUTES, newMeta, upArgs, type BoxMeta } from "./bwrap.js";
 import { boxshExec, num, parseOut, str } from "./shared.js";
 import type { BoxDriver, OpenContext, Opened, PresentImage, SpawnLike } from "./types.js";
+import { ping } from "../client.js";
 
 type Env = NodeJS.ProcessEnv;
 type WslRuntime = Pick<BoxRuntime, "bin" | "distro" | "arch" | "installed">;
@@ -324,7 +325,16 @@ async function open(ctx: OpenContext): Promise<Opened> {
   if (meta && meta.root !== root) return { ok: false, error: `box ${key} belongs to another folder` };
   const live = keepers.get(key);
   if (live && live.child.exitCode === null && meta) {
-    return { ok: true, created: null, endpoint: live.endpoint, alternates: live.alternates, uid: 0, gid: 0, containerId: `wsl_${key}_${meta.instance}`, imageId: meta.config || meta.image, mounts: meta.mounts ?? [] };
+    // The keeper outlives boxd (its idle limit, a crash) and Windows' forward of the
+    // distro's loopback (sleep): reused only when boxd answers, else started again.
+    const asks = ctx.ping ?? ping;
+    const answers = (await asks(live.endpoint, { timeoutMs: 1_500 })) || (live.alternates.length > 0 && (await asks(live.alternates[0]!, { timeoutMs: 1_500 })));
+    if (answers) {
+      return { ok: true, created: null, endpoint: live.endpoint, alternates: live.alternates, uid: 0, gid: 0, containerId: `wsl_${key}_${meta.instance}`, imageId: meta.config || meta.image, mounts: meta.mounts ?? [] };
+    }
+    log("info", "box keeper running but boxd not answering; starting it again", { key });
+    try { live.child.kill(); } catch { /* gone */ }
+    keepers.delete(key);
   }
   let present = await imagePresent(runtime, image, { run, env });
   if (!present && !meta) {
