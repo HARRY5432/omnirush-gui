@@ -14,13 +14,15 @@ import {
 } from "../../../components/ui/dialog";
 import { formatControlPlaneHost } from "../settings/cloud/control-plane-url";
 
-export type ConnectConfirmPhase = "verifying" | "confirm" | "applying" | "error";
+export type ConnectConfirmPhase = "contact" | "verifying" | "confirm" | "applying" | "error";
 
 export type ConnectConfirmDialogProps = {
   open: boolean;
   phase: ConnectConfirmPhase;
   claims: ConnectLinkClaims | null;
   transport: ConnectLinkTransport | null;
+  /** Server an unsigned exchange link would contact, during the "contact" phase. */
+  contactHost: string | null;
   /** Host currently configured, when the app is already connected somewhere. */
   currentHost: string | null;
   error: { code: ConnectLinkVerifyErrorCode; message: string } | null;
@@ -68,6 +70,7 @@ export function ConnectConfirmDialog({
   phase,
   claims,
   transport,
+  contactHost,
   currentHost,
   error,
   onConfirm,
@@ -93,6 +96,23 @@ export function ConnectConfirmDialog({
             <DialogFooter>
               <Button variant="outline" onClick={onDismiss} data-testid="connect-error-dismiss">
                 {t("common.close")}
+              </Button>
+            </DialogFooter>
+          </>
+        ) : phase === "contact" && contactHost ? (
+          <>
+            <DialogHeader>
+              <DialogTitle>{t("connect.contact_title", { host: contactHost })}</DialogTitle>
+              <DialogDescription data-testid="connect-contact-host">
+                {t("connect.contact_body", { host: contactHost })}
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button variant="outline" onClick={onDismiss} data-testid="connect-contact-cancel">
+                {t("common.cancel")}
+              </Button>
+              <Button onClick={onConfirm} data-testid="connect-contact-accept">
+                {t("connect.contact_cta")}
               </Button>
             </DialogFooter>
           </>

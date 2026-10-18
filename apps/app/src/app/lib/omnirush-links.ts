@@ -1,4 +1,4 @@
-import { DEFAULT_DEN_BASE_URL, normalizeDenBaseUrl } from "./den";
+import { DEFAULT_DEN_BASE_URL, denOriginComparisonKey, normalizeDenBaseUrl, resolveDenBaseUrls } from "./den";
 import { normalizeOmniRushServerUrl } from "./omnirush-server";
 
 export type RemoteWorkspaceDefaults = {
@@ -144,6 +144,68 @@ export function parseDenAuthDeepLink(rawUrl: string): DenAuthDeepLink | null {
   };
 }
 
+export type DenAuthDeepLinkReview =
+  | { kind: "blocked"; host: string }
+  | { kind: "confirm"; host: string; currentHost: string | null };
+
+function hostOf(value: string): string {
+  try {
+    return new URL(value).host;
+  } catch {
+    return "";
+  }
+}
+
+function isLoopbackOrigin(origin: string): boolean {
+  try {
+    const { hostname } = new URL(origin);
+    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A den-auth link signs the app in to the control plane it names, so it may
+ * only name one this device is already set up for (`configuredBaseUrls`:
+ * build default, desktop bootstrap or confirmed connect link, local gateway,
+ * development overrides), and the user always confirms it. `allowLoopback`
+ * also accepts local control planes in development builds.
+ */
+export function reviewDenAuthDeepLink(input: {
+  denBaseUrl: string;
+  configuredBaseUrls: ReadonlyArray<string | null | undefined>;
+  currentBaseUrl: string | null;
+  allowLoopback: boolean;
+}): DenAuthDeepLinkReview {
+  const target = resolveDenBaseUrls(input.denBaseUrl);
+  const host = hostOf(target.baseUrl);
+  const allowed = new Set<string>();
+  for (const configured of input.configuredBaseUrls) {
+    if (!normalizeDenBaseUrl(configured)) continue;
+    const resolved = resolveDenBaseUrls(configured);
+    for (const value of [configured, resolved.baseUrl, resolved.apiBaseUrl]) {
+      const origin = denOriginComparisonKey(value);
+      if (origin) allowed.add(origin);
+    }
+  }
+  const targetOrigins = [target.baseUrl, target.apiBaseUrl].map((value) => denOriginComparisonKey(value));
+  const permitted = targetOrigins.every((origin) => (
+    origin !== null && (allowed.has(origin) || (input.allowLoopback && isLoopbackOrigin(origin)))
+  ));
+  if (!host || !permitted) return { kind: "blocked", host };
+  const currentHost = input.currentBaseUrl ? hostOf(resolveDenBaseUrls(input.currentBaseUrl).baseUrl) : "";
+  return { kind: "confirm", host, currentHost: currentHost && currentHost !== host ? currentHost : null };
+}
+
+/** Development-only extra control planes, comma-separated (VITE_DEN_ALLOWED_ORIGINS). */
+export function readDevAllowedDenOrigins(): string[] {
+  const raw = typeof import.meta !== "undefined" && typeof import.meta.env?.VITE_DEN_ALLOWED_ORIGINS === "string"
+    ? import.meta.env.VITE_DEN_ALLOWED_ORIGINS
+    : "";
+  return raw.split(",").map((value: string) => value.trim()).filter(Boolean);
+}
+
 export function parseConnectDeepLink(rawUrl: string): ConnectDeepLink | null {
   let url: URL;
   try {
@@ -177,6 +239,20 @@ export function parseConnectDeepLink(rawUrl: string): ConnectDeepLink | null {
   }
 
   return { rawUrl, key: signed ? `signed:${token}` : `exchange:${apiBaseUrl}:${code}` };
+}
+
+/**
+ * Host an unsigned exchange connect link asks the app to contact, shown to
+ * the user before anything is sent there. Null for other links.
+ */
+export function connectExchangeHost(rawUrl: string): string | null {
+  const link = parseConnectDeepLink(rawUrl);
+  if (!link || !link.key.startsWith("exchange:")) return null;
+  try {
+    return new URL(new URL(rawUrl).searchParams.get("apiBaseUrl")?.trim() ?? "").host || null;
+  } catch {
+    return null;
+  }
 }
 
 function normalizeDebugDeepLinkInput(rawValue: string): string {

@@ -13,12 +13,11 @@ import {
 import {
   clearDenSession,
   createDenClient,
+  DEFAULT_DEN_BASE_URL,
   ensureDenActiveOrganization,
-  denOriginComparisonKey,
   isDenSessionRevokedError,
   readDenBootstrapConfig,
   readDenSettings,
-  resolveDenBaseUrls,
   setDenBootstrapConfig,
   type DenBootstrapConfig,
   type DenOrgSummary,
@@ -35,7 +34,13 @@ import {
   deepLinkBridgeEvent,
   drainPendingDeepLinks,
 } from "../../../app/lib/deep-link-bridge";
-import { parseDenAuthDeepLink } from "../../../app/lib/omnirush-links";
+import { getOmniRushGatewayOrigin } from "../../../app/lib/gateway-runtime";
+import {
+  parseDenAuthDeepLink,
+  readDevAllowedDenOrigins,
+  reviewDenAuthDeepLink,
+  type DenAuthDeepLinkReview,
+} from "../../../app/lib/omnirush-links";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -133,17 +138,10 @@ type PendingServerSwitch = {
   grant: string;
   denBaseUrl: string;
   isEnterpriseActivation: boolean;
-  currentHost: string;
+  /** Set when the link would move this device to a different server. */
+  currentHost: string | null;
   newHost: string;
 };
-
-function hostLabel(value: string): string {
-  try {
-    return new URL(value).host;
-  } catch {
-    return value.replace(/^https?:\/\//, "").replace(/\/+$/, "");
-  }
-}
 
 function readDeepLinkEventUrls(detail: unknown): string[] {
   if (!detail || typeof detail !== "object" || !("urls" in detail)) return [];
@@ -152,31 +150,27 @@ function readDeepLinkEventUrls(detail: unknown): string[] {
   return items.flatMap((url) => typeof url === "string" ? [url] : []);
 }
 
-function pendingServerSwitchForDeepLink(input: {
-  grant: string;
-  denBaseUrl: string;
-  isEnterpriseActivation: boolean;
-}): PendingServerSwitch | null {
+/**
+ * Any page or program can open an omnirush://den-auth link, and it would sign
+ * this app in to the server it names. So every link waits for the user, and
+ * one naming a server this device is not set up for is refused.
+ */
+export function reviewDenAuthDeepLinkForDevice(denBaseUrl: string): DenAuthDeepLinkReview {
   const bootstrap = readDenBootstrapConfig();
-  // An enterprise activation permanently binds the installation to the issuing
-  // Den, so confirm a control-plane change even when no bootstrap file
-  // provisioned one. Otherwise any omnirush://den-auth link can repoint the
-  // control plane and activate the app in a single unattended step.
-  if (bootstrap.source !== "file" && !input.isEnterpriseActivation) return null;
-
-  const currentApiBaseUrl = resolveDenBaseUrls(bootstrap).apiBaseUrl;
-  const newApiBaseUrl = resolveDenBaseUrls(input.denBaseUrl).apiBaseUrl;
-  const currentOrigin = denOriginComparisonKey(currentApiBaseUrl);
-  const newOrigin = denOriginComparisonKey(newApiBaseUrl);
-  if (!currentOrigin || !newOrigin || currentOrigin === newOrigin) return null;
-
-  return {
-    grant: input.grant,
-    denBaseUrl: input.denBaseUrl,
-    isEnterpriseActivation: input.isEnterpriseActivation,
-    currentHost: hostLabel(currentApiBaseUrl),
-    newHost: hostLabel(newApiBaseUrl),
-  };
+  const settings = readDenSettings();
+  return reviewDenAuthDeepLink({
+    denBaseUrl,
+    configuredBaseUrls: [
+      DEFAULT_DEN_BASE_URL,
+      bootstrap.baseUrl,
+      bootstrap.apiBaseUrl,
+      settings.baseUrl,
+      getOmniRushGatewayOrigin(),
+      ...readDevAllowedDenOrigins(),
+    ],
+    currentBaseUrl: bootstrap.baseUrl || settings.baseUrl || null,
+    allowLoopback: typeof import.meta !== "undefined" && import.meta.env?.DEV === true,
+  });
 }
 
 /**
@@ -201,6 +195,7 @@ export function DenAuthProvider({ children }: DenAuthProviderProps) {
   const signalRetryInFlightRef = useRef(false);
   const handledGrantsRef = useRef<Set<string>>(new Set());
   const [pendingServerSwitch, setPendingServerSwitch] = useState<PendingServerSwitch | null>(null);
+  const [blockedDenAuthHost, setBlockedDenAuthHost] = useState<string | null>(null);
 
   const updateStatus = useCallback((nextStatus: DenAuthStatus) => {
     statusRef.current = nextStatus;
@@ -503,22 +498,18 @@ export function DenAuthProvider({ children }: DenAuthProviderProps) {
         if (!parsed || handledGrantsRef.current.has(parsed.grant)) continue;
         handledGrantsRef.current.add(parsed.grant);
 
-        const isEnterpriseActivation =
-          readDesktopDistributionInfo().flavor === "enterprise";
-        const pending = pendingServerSwitchForDeepLink({
-          ...parsed,
-          isEnterpriseActivation,
-        });
-        if (pending) {
-          setPendingServerSwitch(pending);
+        const review = reviewDenAuthDeepLinkForDevice(parsed.denBaseUrl);
+        if (review.kind === "blocked") {
+          setBlockedDenAuthHost(review.host);
           continue;
         }
-
-        exchangeDeepLinkGrant(
-          parsed.grant,
-          parsed.denBaseUrl,
-          isEnterpriseActivation,
-        );
+        setPendingServerSwitch({
+          grant: parsed.grant,
+          denBaseUrl: parsed.denBaseUrl,
+          isEnterpriseActivation: readDesktopDistributionInfo().flavor === "enterprise",
+          currentHost: review.currentHost,
+          newHost: review.host,
+        });
       }
     };
 
@@ -554,14 +545,20 @@ export function DenAuthProvider({ children }: DenAuthProviderProps) {
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>{t("den.switch_server_title")}</AlertDialogTitle>
-            <AlertDialogDescription>
-              {pendingServerSwitch
+            <AlertDialogTitle>
+              {pendingServerSwitch?.currentHost
+                ? t("den.switch_server_title")
+                : t("den.signin_link_confirm_title", { host: pendingServerSwitch?.newHost ?? "" })}
+            </AlertDialogTitle>
+            <AlertDialogDescription data-testid="den-auth-link-confirm-body">
+              {pendingServerSwitch?.currentHost
                 ? t("den.switch_server_body", {
                     currentHost: pendingServerSwitch.currentHost,
                     newHost: pendingServerSwitch.newHost,
                   })
-                : null}
+                : pendingServerSwitch
+                  ? t("den.signin_link_confirm_body", { host: pendingServerSwitch.newHost })
+                  : null}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -580,7 +577,27 @@ export function DenAuthProvider({ children }: DenAuthProviderProps) {
                 );
               }}
             >
-              {t("den.switch_server_confirm")}
+              {pendingServerSwitch?.currentHost ? t("den.switch_server_confirm") : t("den.signin_link_confirm_cta")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog
+        open={blockedDenAuthHost !== null}
+        onOpenChange={(open) => {
+          if (!open) setBlockedDenAuthHost(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("den.signin_link_blocked_title")}</AlertDialogTitle>
+            <AlertDialogDescription data-testid="den-auth-link-blocked-body">
+              {t("den.signin_link_blocked_body", { host: blockedDenAuthHost || t("den.signin_link_no_server") })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogAction onClick={() => setBlockedDenAuthHost(null)}>
+              {t("common.close")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

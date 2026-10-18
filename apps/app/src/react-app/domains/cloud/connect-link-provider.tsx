@@ -16,7 +16,7 @@ import {
   drainPendingDeepLinks,
   type DeepLinkBridgeDetail,
 } from "../../../app/lib/deep-link-bridge";
-import { parseConnectDeepLink } from "../../../app/lib/omnirush-links";
+import { connectExchangeHost, parseConnectDeepLink } from "../../../app/lib/omnirush-links";
 import { isDesktopRuntime } from "../../../app/utils";
 import { ConnectConfirmDialog, type ConnectConfirmPhase } from "./connect-confirm-dialog";
 
@@ -46,6 +46,9 @@ export function ConnectLinkProvider({ children }: ConnectLinkProviderProps) {
   const [error, setError] = useState<ConnectLinkError | null>(null);
   const handledLinksRef = useRef<Set<string>>(new Set());
   const pendingRef = useRef<PendingConnectLink | null>(null);
+  // An unsigned exchange link names its own server; nothing is sent there
+  // until the user agrees to contact that host.
+  const [contact, setContact] = useState<{ rawUrl: string; key: string; host: string } | null>(null);
 
   const beginVerify = useCallback((rawUrl: string, key: string) => {
     handledLinksRef.current.add(key);
@@ -76,6 +79,16 @@ export function ConnectLinkProvider({ children }: ConnectLinkProviderProps) {
     for (const rawUrl of urls) {
       const parsed = parseConnectDeepLink(rawUrl);
       if (!parsed || handledLinksRef.current.has(parsed.key)) continue;
+      const host = connectExchangeHost(parsed.rawUrl);
+      if (host) {
+        handledLinksRef.current.add(parsed.key);
+        setError(null);
+        setPending(null);
+        pendingRef.current = null;
+        setContact({ rawUrl: parsed.rawUrl, key: parsed.key, host });
+        setPhase("contact");
+        break;
+      }
       beginVerify(parsed.rawUrl, parsed.key);
       // One prompt at a time; later links can arrive again as new deep-link
       // events after the current prompt is resolved.
@@ -99,10 +112,16 @@ export function ConnectLinkProvider({ children }: ConnectLinkProviderProps) {
     setPhase("idle");
     setPending(null);
     pendingRef.current = null;
+    setContact(null);
     setError(null);
   }, []);
 
   const confirm = useCallback(() => {
+    if (phase === "contact" && contact) {
+      setContact(null);
+      beginVerify(contact.rawUrl, contact.key);
+      return;
+    }
     const current = pendingRef.current;
     if (!current) return;
     setPhase("applying");
@@ -121,7 +140,7 @@ export function ConnectLinkProvider({ children }: ConnectLinkProviderProps) {
       setError({ code: "invalid_token", message: "Could not apply the connect link." });
       setPhase("error");
     });
-  }, [dismiss]);
+  }, [beginVerify, contact, dismiss, phase]);
 
   return (
     <>
@@ -131,6 +150,7 @@ export function ConnectLinkProvider({ children }: ConnectLinkProviderProps) {
         phase={phase === "idle" ? "verifying" : phase}
         claims={pending?.claims ?? null}
         transport={pending?.transport ?? null}
+        contactHost={contact?.host ?? null}
         currentHost={null}
         error={error}
         onConfirm={confirm}

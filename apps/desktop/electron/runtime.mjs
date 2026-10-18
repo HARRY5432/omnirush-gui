@@ -1,7 +1,7 @@
 import { randomUUID, X509Certificate } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -1510,7 +1510,9 @@ export function createRuntimeManager({
   async function saveTokenStore(store) {
     const filePath = omnirushServerTokenStorePath();
     await mkdir(path.dirname(filePath), { recursive: true });
-    await writeFile(filePath, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+    // Server owner/client tokens: owner-only, including files older builds wrote 0644.
+    await writeFile(filePath, `${JSON.stringify(store, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    await chmod(filePath, 0o600);
   }
 
   async function loadPortState() {

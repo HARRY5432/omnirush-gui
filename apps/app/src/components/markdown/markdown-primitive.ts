@@ -99,6 +99,13 @@ function safeHref(href: string) {
     return "#";
   }
 
+  // `//host/x` and `\\host\x` are network paths: under the packaged
+  // `file://` page they resolve to `file://host/...` (UNC on Windows). URL
+  // parsing drops tabs and newlines and reads `\` as `/`, so check that form.
+  if (/^[\\/]{2}/.test(trimmed.replace(/[\t\n\r]/g, ""))) {
+    return "#";
+  }
+
   if (trimmed.startsWith("#") || trimmed.startsWith("/") || trimmed.startsWith("./") || trimmed.startsWith("../")) {
     return trimmed;
   }

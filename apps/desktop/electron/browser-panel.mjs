@@ -16,6 +16,7 @@ import { listInstalledBrowsers } from "./installed-browsers.mjs";
 import { BrowserTaskError, createBrowserTaskHost } from "./browser-task.mjs";
 import { createWebMcpBroker } from "./webmcp-host.mjs";
 import { createWebMcpFramePolicy } from "./webmcp-policy.mjs";
+import { installBrowserPanelPermissionHandlers } from "./media-permissions.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BROWSER_SESSION_PARTITION = "persist:omnirush-browser";
@@ -23,6 +24,37 @@ const BROWSER_DEFAULT_URL = "about:blank";
 // URL a user-initiated new tab (the "+" button / opening the browser panel)
 // lands on. The agent's programmatic path keeps BROWSER_DEFAULT_URL.
 const BROWSER_NEW_TAB_URL = "https://www.google.com";
+
+function isDesktopDeepLink(url) {
+  return /^omnirush(?:-dev)?:/i.test(String(url ?? ""));
+}
+
+function hostLabel(value) {
+  try {
+    return new URL(value).host || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What a desktop deep link asks for and which server it names, for the
+ * confirmation prompt. Never includes its grant, token, or code.
+ */
+export function describeDesktopDeepLink(url, sourceUrl) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return `From: ${hostLabel(sourceUrl) ?? "a web page"}`;
+  }
+  const route = (parsed.hostname || parsed.pathname.replace(/^\/+|\/+$/g, "")).toLowerCase();
+  const server = ["denBaseUrl", "apiBaseUrl", "omnirushHostUrl", "omnirushUrl"]
+    .map((key) => hostLabel(parsed.searchParams.get(key)?.trim() ?? ""))
+    .find(Boolean);
+  const action = route === "den-auth" ? "Sign in" : route === "connect" ? "Connect to an organization" : route === "connect-remote" ? "Connect a remote workspace" : `Open "${route || "link"}"`;
+  return [`From: ${hostLabel(sourceUrl) ?? "a web page"}`, `Asks to: ${action}`, ...(server ? [`Server: ${server}`] : [])].join("\n");
+}
 // Bound native page allocation across conversations. Refuse new work rather
 // than evicting a live document (unsaved input and CDP handles cannot be restored
 // from a URL). This is a tab bound, not a Chromium process or memory limit.
@@ -96,6 +128,7 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink, che
       // Capture the first response, before a view can load any document.
       webMcpFramePolicy = createWebMcpFramePolicy(browserSession);
       webMcpFramePolicy.install();
+      installBrowserPanelPermissionHandlers(browserSession, { confirmExternal: confirmExternalProtocol });
     }
     return browserSession;
   }
@@ -168,6 +201,48 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink, che
     return `tab_${Date.now().toString(36)}_${browserTabCounter.toString(36)}`;
   }
 
+  /** A page asked the OS to open another app's link (mailto:, zoommtg:, ...). */
+  async function confirmExternalProtocol(url, sourceUrl) {
+    const mainWindow = window();
+    let scheme = "external";
+    try { scheme = new URL(url).protocol.replace(/:$/, ""); } catch { /* keep the generic label */ }
+    /** @type {import("electron").MessageBoxOptions} */
+    const options = {
+      type: "question",
+      buttons: ["Cancel", "Open"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+      title: "Open in another app?",
+      message: `A page in the built-in browser wants to open a "${scheme}:" link in another app.`,
+      detail: `From: ${hostLabel(sourceUrl) ?? "a web page"}`,
+    };
+    const { response } = mainWindow && !mainWindow.isDestroyed()
+      ? await dialog.showMessageBox(mainWindow, options)
+      : await dialog.showMessageBox(options);
+    return response === 1;
+  }
+
+  async function confirmBrowserDeepLink(url, sourceUrl) {
+    if (typeof onDeepLink !== "function") return;
+    const mainWindow = window();
+    /** @type {import("electron").MessageBoxOptions} */
+    const options = {
+      type: "warning",
+      buttons: ["Cancel", "Open link"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+      title: "Open OmniRush.ai link?",
+      message: "A page in the built-in browser wants to open an OmniRush.ai link.",
+      detail: `${describeDesktopDeepLink(url, sourceUrl)}\n\nOnly continue if you started this yourself, for example by signing in on this page.`,
+    };
+    const { response } = mainWindow && !mainWindow.isDestroyed()
+      ? await dialog.showMessageBox(mainWindow, options)
+      : await dialog.showMessageBox(options);
+    if (response === 1) onDeepLink([url]);
+  }
+
   function normalizeBrowserUrl(url, fallback = BROWSER_DEFAULT_URL) {
     const target = typeof url === "string" && url.trim() ? url.trim() : fallback;
     if (!target || target === "about:blank") return "about:blank";
@@ -184,18 +259,43 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink, che
     }
   }
 
+  // The main window holds the privileged desktop bridge, so it may only show
+  // the app's own document (main.mjs registers it before loading) and the
+  // exact internal pages main.mjs loads itself, never other file:, data: or
+  // localhost documents.
+  let mainWindowEntryUrl = null;
+  const mainWindowInternalUrls = new Set();
+
+  function setMainWindowEntryUrl(url) {
+    mainWindowEntryUrl = url;
+  }
+
+  function canonicalUrl(url) {
+    try {
+      return new URL(url).href;
+    } catch {
+      return null;
+    }
+  }
+
+  function allowMainWindowInternalUrl(url) {
+    const canonical = canonicalUrl(url);
+    if (canonical) mainWindowInternalUrls.add(canonical);
+  }
+
   function isMainWindowAllowedNavigation(url) {
-    if (!url) return true;
-    if (url.startsWith("file://") || url.startsWith("data:")) return true;
+    if (!url || url === "about:blank" || mainWindowInternalUrls.has(canonicalUrl(url))) return true;
+    if (!mainWindowEntryUrl) return false;
     try {
       const target = new URL(url);
-      if (target.hostname === "127.0.0.1" || target.hostname === "localhost" || target.hostname === "[::1]") return true;
-      const currentUrl = window()?.webContents.getURL();
-      if (!currentUrl || currentUrl === "about:blank") return true;
-      const current = new URL(currentUrl);
-      return target.origin === current.origin;
+      const entry = new URL(mainWindowEntryUrl);
+      if (entry.protocol !== "file:") return target.origin === entry.origin;
+      if (target.protocol !== "file:" || target.host !== entry.host) return false;
+      // Chromium may re-case a Windows drive letter; those file systems ignore case.
+      const fold = (value) => (process.platform === "win32" || process.platform === "darwin" ? value.toLowerCase() : value);
+      return fold(decodeURIComponent(target.pathname)) === fold(decodeURIComponent(entry.pathname));
     } catch {
-      return true;
+      return false;
     }
   }
 
@@ -205,8 +305,9 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink, che
     runDetachedTask("open linked browser page", () => openBrowserUrlForAutomation(url, "builtin", { ownerSessionId }));
   }
 
+  /** Packaged builds open no DevTools port (main.mjs), so there is none to hand out. */
   function cdpBrowserUrl() {
-    return `http://127.0.0.1:${remoteDebugPort}`;
+    return remoteDebugPort > 0 ? `http://127.0.0.1:${remoteDebugPort}` : null;
   }
 
   /**
@@ -855,12 +956,13 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink, che
       // data: loads are internal plumbing (CDP target-marker pages), not
       // user-visible navigations — don't surface the panel for them.
       if (target === "about:blank" || target.startsWith("data:")) return;
-      // Intercept omnirush:// deep links (e.g. den-auth handoff grants) so
-      // in-app browser auth works without the system protocol handler.
-      if (target.startsWith("omnirush://") || target.startsWith("omnirush-dev://")) {
-        if (typeof onDeepLink === "function") {
-          onDeepLink([target]);
-        }
+      // omnirush:// links (e.g. den-auth handoff grants) can sign the app in or
+      // repoint it, and any page can start such a navigation, so the user
+      // confirms each one before the app sees it (the system protocol
+      // handler stays blocked by the session's openExternal permission).
+      if (isDesktopDeepLink(target)) {
+        const sourceUrl = view.webContents.getURL();
+        runDetachedTask("confirm browser deep link", () => confirmBrowserDeepLink(target, sourceUrl));
         // Navigate the tab to about:blank to prevent the custom-scheme load
         // from erroring, then hide the panel. Avoid closing the tab
         // synchronously during a navigation event to prevent renderer crashes.
@@ -1531,6 +1633,8 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink, che
   return {
     destroy: destroyBrowserView,
     isMainWindowAllowedNavigation,
+    setMainWindowEntryUrl,
+    allowMainWindowInternalUrl,
     browserTask: (args, options) => taskHost.request(args, options),
     listWebMcpTools: (args, options) => taskHost.request({ sessionId: args?.sessionId, operation: "site_tools", args }, options),
     executeWebMcpTool: (args, options) => taskHost.request({ sessionId: args?.sessionId, operation: "site_tool", args }, options),

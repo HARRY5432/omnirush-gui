@@ -71,7 +71,8 @@ export type BrowserPanelOwnerPayload = {
 
 export type OpenBrowserUrlResult = {
   provider: "builtin";
-  browser_url: string;
+  /** DevTools endpoint; null in packaged builds, which open no DevTools port. */
+  browser_url: string | null;
   target_id: string;
   tab_id: string;
   url: string;
