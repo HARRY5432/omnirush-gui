@@ -13,6 +13,7 @@ const nextConfig = {
   // matches the runtime env, and local `next start` mirrors what was built.
   env: {
     VERCEL_ENV: process.env.VERCEL_ENV || "",
+    LANDING_POSTHOG_KEY: process.env.LANDING_POSTHOG_KEY || "",
   },
   async rewrites() {
     return [

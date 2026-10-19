@@ -1,11 +1,8 @@
-export const DEFAULT_POSTHOG_KEY = "phc_4YnPTlDVYPjgwKvLuNxhbHjV5kadgvd7XLzVHWnCXAI";
-
 /**
  * Resolve the PostHog project key. `raw` is VITE_OMNIRUSH_POSTHOG_KEY.
- * Unset uses the default key in prod builds and stays silent in dev builds.
- * Explicit strings are used after trim; an empty string disables analytics in any build.
+ * There is no built-in key: analytics stay off unless a build sets one.
+ * Explicit strings are used after trim; unset or blank disables analytics.
  */
-export function resolvePosthogKey(raw: unknown, isDev: boolean): string {
-  if (typeof raw === "string") return raw.trim(); // explicit value wins; "" disables
-  return isDev ? "" : DEFAULT_POSTHOG_KEY;
+export function resolvePosthogKey(raw: unknown): string {
+  return typeof raw === "string" ? raw.trim() : "";
 }

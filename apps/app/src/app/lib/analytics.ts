@@ -8,8 +8,8 @@
  *   into an explicit survey field (e.g. the onboarding attribution survey).
  * - Fire-and-forget: analytics must never break or slow the app.
  * - Respect the user: a single `analyticsEnabled` preference (Settings ->
- *   Preferences) turns everything off; an explicitly blank PostHog key means
- *   no network.
+ *   Preferences) turns everything off; without a build-time PostHog key
+ *   nothing is sent over the network.
  * - Every capture is mirrored into the local app inspector
  *   (`window.__omnirush.record("analytics.<event>")`) so coded evals can
  *   assert instrumentation without any analytics backend.
@@ -23,10 +23,10 @@ const ENV_APP_VERSION = String(import.meta.env.VITE_OMNIRUSH_APP_VERSION ?? "").
 
 const DEFAULT_POSTHOG_HOST = "https://us.i.posthog.com";
 
-// Packaged releases use the default publishable key; dev builds stay silent
-// unless VITE_OMNIRUSH_POSTHOG_KEY is set. Set it to "" to disable analytics
-// in any build. The inspector mirror still records events locally either way.
-const POSTHOG_KEY = resolvePosthogKey(import.meta.env.VITE_OMNIRUSH_POSTHOG_KEY, import.meta.env.DEV);
+// No built-in key: nothing is sent unless the build sets
+// VITE_OMNIRUSH_POSTHOG_KEY. The inspector mirror still records events
+// locally either way.
+const POSTHOG_KEY = resolvePosthogKey(import.meta.env.VITE_OMNIRUSH_POSTHOG_KEY);
 const POSTHOG_HOST = (ENV_POSTHOG_HOST || DEFAULT_POSTHOG_HOST).replace(/\/+$/, "");
 
 const PREFS_STORAGE_KEY = "omnirush.preferences";

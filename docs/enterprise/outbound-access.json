@@ -274,7 +274,7 @@
       "host": "us.i.posthog.com",
       "kind": "fetched",
       "components": ["renderer"],
-      "purpose": "Optional product analytics endpoint when analytics are enabled and a PostHog key is configured.",
+      "purpose": "Optional product analytics endpoint, used only when a build sets VITE_OMNIRUSH_POSTHOG_KEY and analytics are enabled. Release builds set no key.",
       "requirement": "optional",
       "blockedEffect": "Analytics events are dropped silently; user-facing app behavior is unaffected.",
       "override": "VITE_OMNIRUSH_POSTHOG_HOST; users can disable analytics with the analyticsEnabled preference"

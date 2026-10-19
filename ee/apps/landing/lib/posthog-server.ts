@@ -3,6 +3,9 @@ import { POSTHOG_PROJECT_KEY } from "./posthog-client";
 const POSTHOG_SERVER_TIMEOUT_MS = 400;
 
 export async function capturePosthogServerEvent(event: string, properties: Record<string, unknown>): Promise<void> {
+  if (!POSTHOG_PROJECT_KEY) {
+    return;
+  }
   if (process.env.VERCEL_ENV !== "production" && !process.env.LANDING_POSTHOG_HOST) {
     return;
   }

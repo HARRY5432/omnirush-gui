@@ -8,7 +8,8 @@ declare global {
   }
 }
 
-export const POSTHOG_PROJECT_KEY = "phc_4YnPTlDVYPjgwKvLuNxhbHjV5kadgvd7XLzVHWnCXAI";
+// No built-in key: PostHog stays off unless the build sets LANDING_POSTHOG_KEY.
+export const POSTHOG_PROJECT_KEY = (process.env.LANDING_POSTHOG_KEY ?? "").trim();
 
 export function capturePosthogEvent(event: string, properties?: Record<string, unknown>): void {
   if (typeof window === "undefined") {
