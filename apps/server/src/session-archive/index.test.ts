@@ -594,7 +594,9 @@ describe("SessionArchiver", () => {
     await writeFile(join(root, "src/app.ts"), "export const app = 2;\n");
     expect((await first.captureDelta("ses_lost_record", root, 1)).status).toBe("queued");
     expect((await first.drain()).uploaded).toBe(2);
-    await first.signOut();
+    await first.stop();
+    // The record is lost (a reinstall, an older release's sign-out).
+    await rm(join(state, ARCHIVE_STATE_DIRECTORY), { recursive: true, force: true });
 
     // Signed in again, the session resumed after its two turns: a delta on the server's chain, every file in it.
     const second = archiver(server, state);
@@ -627,7 +629,8 @@ describe("SessionArchiver", () => {
     const first = archiver(server, state);
     expect((await first.captureBase("ses_reopened", root, 0)).status).toBe("queued");
     expect((await first.drain()).uploaded).toBe(1);
-    await first.signOut();
+    await first.stop();
+    await rm(join(state, ARCHIVE_STATE_DIRECTORY), { recursive: true, force: true });
     // Without the chain view (as before): the conflict stops the session.
     const second = archiver(server, state);
     expect((await second.captureBase("ses_reopened", root, 1)).status).toBe("queued");
@@ -672,7 +675,35 @@ describe("SessionArchiver", () => {
     expect(await readFile(join(state, ARCHIVE_STATE_DIRECTORY, "account.json"), "utf8")).toContain("user-b");
   });
 
-  test("signOut aborts uploads in flight and removes every queued archive and record", async () => {
+  test("signed out with archives waiting, another account signs in, then the first again: nothing goes under the other, all of it under its own", async () => {
+    const server = new FakeArchiveServer();
+    const { root } = await project();
+    const state = await tempDir("state");
+    let account: string | null = "user-a";
+    const a1 = archiver(server, state, { accountId: async () => account });
+    await a1.claimAccount();
+    expect((await a1.captureBase("ses_switch_a", root)).status).toBe("queued");
+    await writeFile(join(root, "src/app.ts"), "export const app = 21;\n");
+    expect((await a1.captureDelta("ses_switch_a", root, 1)).status).toBe("queued");
+    await a1.signOut();
+    expect(server.objects()).toEqual([]);
+
+    account = "user-b";
+    const b = archiver(server, state, { accountId: async () => account });
+    await b.claimAccount();
+    expect(await b.drain()).toMatchObject({ uploaded: 0, pending: 0 });
+    expect(server.objects()).toEqual([]);
+    await b.stop();
+
+    account = "user-a";
+    const a2 = archiver(server, state, { accountId: async () => account });
+    await a2.claimAccount();
+    expect((await a2.drain()).uploaded).toBe(2);
+    expect(server.objects().map((archive) => [archive.request.session_id, archive.request.sequence])).toEqual([["ses_switch_a", 0], ["ses_switch_a", 1]]);
+    await a2.stop();
+  });
+
+  test("signOut stops uploads in flight and keeps every queued archive and record on disk for the account", async () => {
     const server = new FakeArchiveServer();
     const { root } = await project();
     const state = await tempDir("state");
@@ -681,17 +712,35 @@ describe("SessionArchiver", () => {
     server.putHook = ({ partNumber }) => (partNumber === 2 ? "network" : undefined);
     await subject.drain();
     await subject.signOut();
-    expect(server.callPaths()).toContain(`POST archives/${base.status === "queued" ? base.archiveId : ""}/abort 200`);
+    const archiveId = base.status === "queued" ? base.archiveId : "";
+    // Nothing is aborted on the server: the upload is resumed after the next sign-in to this account.
+    expect(server.callPaths().filter((path) => path.includes("/abort"))).toEqual([]);
     const archiveDir = join(state, ARCHIVE_STATE_DIRECTORY);
-    await expect(readdir(archiveDir)).rejects.toThrow();
-    // After sign-in the archiver starts clean.
-    subject.setAccessToken(server.token);
+    expect(await readdir(join(archiveDir, "queue"))).toEqual([`${archiveId}.json`]);
+    expect((await readdir(join(archiveDir, "sessions"))).length).toBe(1);
+    // Signed in again (the server restarts; the failed part's backoff has passed): the queued base goes out, the chain goes on.
     server.putHook = null;
-    expect(await subject.captureDelta("ses_signed_out", root, 1)).toEqual({ status: "skipped", reason: "no_base" });
-    expect((await subject.captureBase("ses_signed_back_in", root)).status).toBe("queued");
+    const again = archiver(server, state, { now: () => new Date(Date.now() + 2 * 60 * 60_000) });
+    expect((await again.drain()).uploaded).toBe(1);
+    await writeFile(join(root, "src/app.ts"), "export const app = 9;\n");
+    expect(await again.captureDelta("ses_signed_out", root, 1)).toMatchObject({ status: "queued", kind: "delta", sequence: 1 });
+    await again.stop();
   });
 
-  test("signOut aborts the part PUT in flight within a second, aborts the upload with the credentials it still holds, and sends nothing more", async () => {
+  test("discardAll (archiving turned off on this device) aborts uploads in flight and removes every queued archive and record", async () => {
+    const server = new FakeArchiveServer();
+    const { root } = await project();
+    const state = await tempDir("state");
+    const subject = archiver(server, state);
+    const base = await subject.captureBase("ses_discarded", root);
+    server.putHook = ({ partNumber }) => (partNumber === 2 ? "network" : undefined);
+    await subject.drain();
+    await subject.discardAll();
+    expect(server.callPaths()).toContain(`POST archives/${base.status === "queued" ? base.archiveId : ""}/abort 200`);
+    await expect(readdir(join(state, ARCHIVE_STATE_DIRECTORY))).rejects.toThrow();
+  });
+
+  test("signOut stops the part PUT in flight within a second and sends nothing more; the job stays queued", async () => {
     const server = new FakeArchiveServer();
     const { root } = await project();
     const state = await tempDir("state");
@@ -709,11 +758,8 @@ describe("SessionArchiver", () => {
     expect(slow.puts[0]!.abortedAfterMs!).toBeLessThan(1_000);
     expect(signOutMs).toBeLessThan(1_000);
     expect(await draining).toMatchObject({ uploaded: 0 });
-    // The abort went out with a bearer the server still accepted, and nothing completed the archive.
-    expect(server.callPaths()).toContain(`POST archives/${archiveId}/abort 200`);
-    expect(server.callPaths().filter((path) => path.includes("/complete"))).toEqual([]);
-    expect(server.archives.get(archiveId)!.status).toBe("aborted");
-    await expect(readdir(join(state, ARCHIVE_STATE_DIRECTORY))).rejects.toThrow();
+    expect(server.callPaths().filter((path) => path.includes("/complete") || path.includes("/abort"))).toEqual([]);
+    expect(await readdir(join(state, ARCHIVE_STATE_DIRECTORY, "queue"))).toEqual([`${archiveId}.json`]);
     await Bun.sleep(50);
     expect(slow.puts).toHaveLength(1);
     expect(server.puts.filter((put) => put.partNumber > 1)).toEqual([]);

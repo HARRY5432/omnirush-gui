@@ -32,6 +32,7 @@ import {
   type ProjectMarkerDetector,
 } from "./detect.js";
 import { hintGarbageCollection, readJsonFile, stateKey, writeChunksAtomic, writeJsonAtomic } from "./files.js";
+import { claimArchiveState } from "./account-park.js";
 import {
   ArchiveHashCache,
   archiveLabel,
@@ -668,16 +669,14 @@ export class SessionArchiver {
       }),
     ]).finally(() => clearTimeout(timer));
     if (!id) return;
-    const path = join(this.dir, "account.json");
-    const saved = await readJsonFile(path);
-    const owner = saved && typeof saved === "object" && typeof Reflect.get(saved, "account_id") === "string" ? String(Reflect.get(saved, "account_id")) : null;
-    if (owner === id) return;
-    if (owner) {
-      this.log("warn", "OmniRush project archives queued for another account were removed", {});
-      await this.signOut();
+    // Another account's queue and chain records are set aside for it, never sent under this one (account-park.ts).
+    const claimed = await claimArchiveState(this.dir, id, this.now().getTime());
+    if (claimed.parked) this.log("info", "OmniRush project archives of another account were set aside for it", {});
+    if (claimed.restored) this.log("info", "OmniRush project archives this account left at its sign-out are back", {});
+    if (claimed.parked || claimed.restored) {
+      await this.draining?.catch(() => undefined);
+      this.resetMemory();
     }
-    await mkdir(this.dir, { recursive: true, mode: 0o700 });
-    await writeJsonAtomic(path, { v: 1, account_id: id });
   }
 
   /** The device bearer changed (session uploader token rotation). */
@@ -1130,11 +1129,46 @@ export class SessionArchiver {
   }
 
   /**
-   * The account signed out: abort in-flight uploads (best effort), drop every
-   * queued archive, baseline, hash cache and session record. Archives are the
-   * user's; nothing may be uploaded later under another account.
+   * The account signed out: nothing more is captured or sent in this app
+   * run. Uploads in flight stop here (their multipart uploads stay, resumed
+   * later); the queue and the chain records stay on disk for that account
+   * (account-park.ts): a sign-in to it sends them, a start under another
+   * account sets them aside, and they go after PARKED_MAX_AGE_MS.
    */
   async signOut(): Promise<void> {
+    this.generation += 1;
+    this.touched.clear();
+    this.clearRetryTimer();
+    this.drainController?.abort();
+    await this.draining?.catch(() => undefined);
+    this.resetMemory();
+    this.uploader.setAccessToken(null);
+  }
+
+  /** Forgets what this app run knows of the state on disk (it was set aside or brought back): the next call recovers it again. */
+  private resetMemory(): void {
+    this.key = null;
+    this.disabled = null;
+    this.policy = null;
+    this.policyProbe = null;
+    this.stoppedSessions.clear();
+    this.resettingSessions.clear();
+    this.v2Sessions.clear();
+    this.chainChecked.clear();
+    this.filesUsedSessions.clear();
+    this.filesUsedServer = null;
+    for (const sessionId of [...this.prescans.keys()]) this.dropPrescan(sessionId);
+    this.finalsAccepted = false;
+    this.finalsRefused = false;
+    this.started = null;
+  }
+
+  /**
+   * Archiving turned off on this device: abort in-flight uploads (best
+   * effort), drop every queued archive, baseline, hash cache and session
+   * record, and what other accounts left aside.
+   */
+  async discardAll(): Promise<void> {
     this.generation += 1;
     this.touched.clear();
     this.clearRetryTimer();
@@ -1152,21 +1186,8 @@ export class SessionArchiver {
     } catch (error) {
       this.log("warn", "OmniRush archive sign-out cleanup failed", { error: errorSummary(error) });
     }
-    this.key = null;
-    this.disabled = null;
-    this.policy = null;
-    this.policyProbe = null;
-    this.stoppedSessions.clear();
-    this.resettingSessions.clear();
-    this.v2Sessions.clear();
-    this.chainChecked.clear();
-    this.filesUsedSessions.clear();
-    this.filesUsedServer = null;
-    for (const sessionId of [...this.prescans.keys()]) this.dropPrescan(sessionId);
-    this.finalsAccepted = false;
-    this.finalsRefused = false;
+    this.resetMemory();
     this.uploader.setAccessToken(null);
-    this.started = null;
   }
 
   /**

@@ -38,6 +38,7 @@ import {
   type ApprovalsClient,
 } from "../approval-mode";
 import { DiagnosticsSection } from "./diagnostics-section";
+import { keptPendingLine, sendPendingBeforeSignOut } from "../sign-out-uploads";
 import { BEST_PRACTICES_HELP, useBestPractices, type BestPracticesClient } from "../best-practices";
 import { useLinuxSandbox, type LinuxSandboxClient } from "../linux-sandbox";
 import { LinuxSandboxCard } from "../linux-sandbox-card";
@@ -330,11 +331,13 @@ export function GeneralSettingsView(props: GeneralSettingsViewProps) {
     // default server the next sign-in will use, not the one just left.
     const server = account?.gatewayHost ?? null;
     try {
+      // What is still queued goes first (a few seconds at most); the rest stays on this computer for this account.
+      const kept = account?.connected ? await sendPendingBeforeSignOut(setAccountMessage) : 0;
       const result = await omnirushAccountSignOut();
       resetAnalyticsAccount();
       const next = await omnirushAccountStatus().catch(() => null);
       setAccount(next ?? { connected: false, gatewayConfigured: account?.gatewayConfigured ?? false });
-      setAccountMessage(accountSignOutMessage(result, server));
+      setAccountMessage(kept > 0 ? `${accountSignOutMessage(result, server)} ${keptPendingLine(kept)}` : accountSignOutMessage(result, server));
     } catch (error) {
       setAccountMessage(error instanceof Error ? error.message : "The account could not be signed out.");
     } finally {

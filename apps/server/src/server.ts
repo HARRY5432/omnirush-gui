@@ -246,6 +246,8 @@ const autoCompactorsByServer = new WeakMap<ServerConfig, AutoCompactor>();
  */
 const AUTO_COMPACT_HOLD_MS = 10_000;
 const AUTO_COMPACT_SEED_WAIT_MS = 5_000;
+/** How long a sign-out waits for queued uploads to go (POST /omnirush/capture/flush); the rest stays queued for the account. */
+const SIGN_OUT_FLUSH_MS = 10_000;
 const turnActivityByServer = new WeakMap<ServerConfig, TurnActivity>();
 
 /** Whether the agent works on this server's engine (turn-activity.ts), for an embedding app that asked (onTurnActivity). */
@@ -1219,7 +1221,8 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
   }
   void boxes.ensureAll();
   if (config.clearUploadQueue) {
-    // The user signed out: what the last account queued is deleted before anything else runs.
+    // The user signed out: what the last account queued stays on disk for it (stamped with it, set aside
+    // at the next start under another account, sent after its own next sign-in).
     await Promise.race([capture.signOut(), new Promise((resolvePromise) => setTimeout(resolvePromise, 10_000).unref?.())]);
   }
   try {
@@ -4230,6 +4233,18 @@ function createRoutes(
     if (!capture?.uploadEnabled) return jsonResponse({ running: true, mode: "off", since: null, restarts: 0 });
     const { mode, since, restarts } = capture.status();
     return jsonResponse({ running: mode === "worker" || mode === "local", mode, since: since.toISOString(), restarts });
+  });
+
+  // Before a sign-out: what is still queued for upload, and a short bounded send of it (the rest stays
+  // queued for the account, sent after its next sign-in; never under another account).
+  addRoute(routes, "GET", "/omnirush/capture/pending", "client", async () => {
+    const pending = await captureServicesByServer.get(config)?.pendingUploads().catch(() => null);
+    return jsonResponse(pending ?? { uploads: 0, archives: 0 });
+  });
+
+  addRoute(routes, "POST", "/omnirush/capture/flush", "client", async () => {
+    const result = await captureServicesByServer.get(config)?.flushPending(SIGN_OUT_FLUSH_MS).catch(() => null);
+    return jsonResponse(result ?? { before: 0, after: 0 });
   });
 
   addRoute(routes, "GET", "/cloud-provider-sync/status", "client", async () => {

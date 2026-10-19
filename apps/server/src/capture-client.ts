@@ -120,7 +120,13 @@ export type CaptureService = {
   diagnostics(): Promise<CaptureDiagnostics | null>;
   /** Files used, for the app's one-time notice (null: capture is not running). */
   filesUsedStatus(): Promise<FilesUsedStatus | null>;
+  /** Uploads and project archives queued now (null: capture is not running). */
+  pendingUploads(): Promise<PendingUploads | null>;
+  /** Before a sign-out: sends what is queued for at most `budgetMs`; the rest stays queued for the account. */
+  flushPending(budgetMs: number): Promise<{ before: number; after: number } | null>;
 };
+
+export type PendingUploads = { uploads: number; archives: number };
 
 /** How much longer than the start gate's own cap the main thread waits for the worker's answer. */
 const START_GATE_SLACK_MS = 1_000;
@@ -294,6 +300,16 @@ class CaptureClient implements CaptureService {
 
   async filesUsedStatus(): Promise<FilesUsedStatus | null> {
     return filesUsedStatusOf(await this.query({ kind: "call", id: null, method: "filesUsedStatus", args: [] }));
+  }
+
+  async pendingUploads(): Promise<PendingUploads | null> {
+    const value = await this.query({ kind: "call", id: null, method: "pendingUploads", args: [] });
+    return countsOf(value, ["uploads", "archives"]) as PendingUploads | null;
+  }
+
+  async flushPending(budgetMs: number): Promise<{ before: number; after: number } | null> {
+    const value = await this.query({ kind: "call", id: null, method: "flushPending", args: [budgetMs] });
+    return countsOf(value, ["before", "after"]) as { before: number; after: number } | null;
   }
 
   stop(options: { archiveFinals?: boolean | Promise<boolean> } = {}): Promise<void> {
@@ -671,6 +687,18 @@ async function withinTimeout(answer: boolean | Promise<boolean>, ms: number): Pr
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** `value` when it is an object with a non-negative integer at each of `keys`, else null. */
+function countsOf(value: unknown, keys: readonly string[]): Record<string, number> | null {
+  if (!value || typeof value !== "object") return null;
+  const out: Record<string, number> = {};
+  for (const key of keys) {
+    const count = Reflect.get(value, key);
+    if (!Number.isSafeInteger(count) || count < 0) return null;
+    out[key] = count;
+  }
+  return out;
 }
 
 function filesUsedStatusOf(value: unknown): FilesUsedStatus | null {

@@ -413,6 +413,10 @@ export type OmniRushBestPractices = { enabled: boolean };
  * show once (null when it could not be asked).
  */
 export type OmniRushFilesUsed = { active: boolean | null; available: boolean | null; consentText: string | null };
+/** GET /omnirush/capture/pending: uploads and project archives still queued (a sign-out first sends what it can). */
+export type OmniRushPendingUploads = { uploads: number; archives: number };
+/** The server waits at most 10 s for queued uploads at a sign-out; a little more for the answer. */
+const SIGN_OUT_FLUSH_TIMEOUT_MS = 15_000;
 /** GET /omnirush/capture/status: whether session capture runs; "off" when signed out (nothing to capture). */
 export type OmniRushCaptureStatus = {
   running: boolean;
@@ -1980,6 +1984,10 @@ export function createOmniRushServerClient(options: { baseUrl: string; token?: s
       requestJson<OmniRushFilesUsed>(baseUrl, "/runtime-config/files-used", { token, hostToken, timeoutMs: FILES_USED_TIMEOUT_MS }),
     getCaptureStatus: () =>
       requestJson<OmniRushCaptureStatus>(baseUrl, "/omnirush/capture/status", { token, hostToken, timeoutMs: timeouts.config }),
+    getPendingUploads: () =>
+      requestJson<OmniRushPendingUploads>(baseUrl, "/omnirush/capture/pending", { token, hostToken, timeoutMs: timeouts.config }),
+    flushPendingUploads: () =>
+      requestJson<{ before: number; after: number }>(baseUrl, "/omnirush/capture/flush", { token, hostToken, method: "POST", body: {}, timeoutMs: SIGN_OUT_FLUSH_TIMEOUT_MS }),
     getWorkspaceBox: (workspaceId: string, options?: { fresh?: boolean }) =>
       requestJson<OmniRushWorkspaceBox>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/box${options?.fresh ? "?fresh=1" : ""}`, {
         token, hostToken, timeoutMs: timeouts.config,

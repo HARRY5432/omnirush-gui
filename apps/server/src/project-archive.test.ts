@@ -80,7 +80,7 @@ describe("createProjectArchive", () => {
     expect(await readdir(join(stateDir, ARCHIVE_STATE_DIRECTORY))).toContain("sessions");
   });
 
-  test("sign-out aborts the part PUT in flight within a second and aborts the upload through the broker before the queue goes", async () => {
+  test("sign-out stops the part PUT in flight within a second and keeps the queue for the account", async () => {
     const server = new FakeArchiveServer();
     server.partSize = 256;
     const gateway = broker(server);
@@ -98,10 +98,10 @@ describe("createProjectArchive", () => {
     expect(slow.puts).toEqual([{ part: 2, bytes: 256, abortedAfterMs: expect.any(Number), completed: false }]);
     expect(slow.puts[0]!.abortedAfterMs!).toBeLessThan(1_000);
     const [archiveId] = [...server.archives.keys()];
-    expect(gateway.paths.filter((path) => path.startsWith(`POST archives/${archiveId}/`))).toEqual([`POST archives/${archiveId}/abort`]);
-    expect(server.archives.get(archiveId!)!.status).toBe("aborted");
+    expect(gateway.paths.filter((path) => path.startsWith(`POST archives/${archiveId}/`))).toEqual([]);
+    expect(server.archives.get(archiveId!)!.status).toBe("uploading");
     await archive.settled();
-    expect(await readdir(stateDir)).not.toContain(ARCHIVE_STATE_DIRECTORY);
+    expect(await readdir(join(stateDir, ARCHIVE_STATE_DIRECTORY, "queue"))).toEqual([`${archiveId}.json`]);
     expect(slow.puts).toHaveLength(1);
   });
 

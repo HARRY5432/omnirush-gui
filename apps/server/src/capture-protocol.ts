@@ -37,6 +37,8 @@ export type CaptureCalls = {
   idle: [];
   diagnostics: [];
   filesUsedStatus: [];
+  pendingUploads: [];
+  flushPending: [budgetMs: number];
 };
 
 export type CaptureCallName = keyof CaptureCalls;
@@ -205,5 +207,9 @@ export function invokeCapture(host: CaptureHost, call: CaptureCall): unknown {
       return host.diagnostics();
     case "filesUsedStatus":
       return host.filesUsedStatus();
+    case "pendingUploads":
+      return host.pendingUploads();
+    case "flushPending":
+      return host.flushPending(...call.args);
   }
 }

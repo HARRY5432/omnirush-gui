@@ -22,7 +22,7 @@ import type { UsedToolCall } from "./files-used.js";
 export type ProjectArchiver = Pick<
   SessionArchiver,
   "captureBase" | "captureDelta" | "captureFinal" | "startFinalCandidates" | "recordTouched" | "forgetTouched" | "drain" | "signOut" | "stop"
-> & Partial<Pick<SessionArchiver, "claimAccount" | "startManifest" | "hasStartManifest" | "captureState" | "recordAttachments" | "recordBinary" | "filesUsedToolCallEnded" | "filesUsedTurnStarted" | "filesUsedTurnEnded" | "filesUsedMaybe" | "filesUsedStatus">>;
+> & Partial<Pick<SessionArchiver, "claimAccount" | "discardAll" | "pendingStatus" | "startManifest" | "hasStartManifest" | "captureState" | "recordAttachments" | "recordBinary" | "filesUsedToolCallEnded" | "filesUsedTurnStarted" | "filesUsedTurnEnded" | "filesUsedMaybe" | "filesUsedStatus">>;
 
 /** Engine reads for one session, resolving to the parsed JSON, or null when it cannot be read. */
 export type ArchiveEngineReads = {
@@ -262,13 +262,14 @@ export class ProjectArchiveLifecycle {
    * unfinished, and checks the folders of recent sessions once for changes
    * made after their last archive (a final archive the last shutdown did not
    * get to, or edits while the app was closed); a queue another account left
-   * is removed first (claimAccount). Without an account the queue waits for
-   * it (a user's sign-out removes it, signOut()); with archiving turned off
-   * on this device it is removed.
+   * is set aside for it first (claimAccount, account-park.ts). Without an
+   * account the queue waits for it (a user's sign-out keeps it too); with
+   * archiving turned off on this device it is removed.
    */
   start(): void {
     if (!this.enabled) {
-      if (!this.accountMissing) this.track(this.archiver.signOut().catch((error: unknown) => this.warn("clear", error)));
+      // Archiving turned off on this device: what is queued goes (a signed-out start keeps it for its account).
+      if (!this.accountMissing) this.track((this.archiver.discardAll ?? this.archiver.signOut).call(this.archiver).catch((error: unknown) => this.warn("clear", error)));
       return;
     }
     this.track((async () => {
@@ -534,10 +535,21 @@ export class ProjectArchiveLifecycle {
     this.kick();
   }
 
+  /** Queued archives now (a sign-out first sends what it can). */
+  async pendingStatus(): Promise<{ jobs: number }> {
+    return this.archiver.pendingStatus ? this.archiver.pendingStatus() : { jobs: 0 };
+  }
+
+  /** Sends what is queued now (before a sign-out); resolves when that drain ends. */
+  async drainNow(): Promise<void> {
+    if (!this.active) return;
+    await this.archiver.drain();
+  }
+
   /**
    * The account signed out or was invalidated: nothing is captured or
-   * uploaded any more, uploads in flight are aborted and every queued
-   * archive and session record is deleted.
+   * uploaded any more in this app run and uploads in flight stop. The queue
+   * and the session records stay on disk for that account (account-park.ts).
    */
   async signOut(): Promise<void> {
     this.signedOut = true;
