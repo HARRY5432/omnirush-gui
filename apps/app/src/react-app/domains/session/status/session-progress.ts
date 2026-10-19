@@ -26,7 +26,7 @@ function safeToolActivity(part: UIMessage["parts"][number]): string {
     case "read": return "Reading files";
     case "write": case "edit": case "apply_patch": return "Updating files";
     case "grep": case "glob": return "Searching files";
-    case "webfetch": case "websearch": return "Researching the web";
+    case "webfetch": case "websearch": case "web_search": return "Researching the web";
     case "task": case "subagent": return "Running a delegated task";
     case "todowrite": return "Updating the plan";
     case "question": return "Asking for input";
