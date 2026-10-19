@@ -158,6 +158,8 @@ export type ClassifyContext = {
   cfaOn?: boolean;
   /** The folder's mode lacks the owner write bit (Windows: the read-only attribute). */
   readOnlyMode?: boolean;
+  /** The folder is there (a create that fails with ENOENT is then not a missing folder). */
+  folderExists?: boolean;
   /** The executable to allow (Controlled folder access). */
   engineBin?: string | null;
 };
@@ -181,7 +183,7 @@ export function classifyFailure(outcome: Extract<FolderProbeOutcome, { ok: false
   const env = ctx.env ?? {};
   const code = outcome.code ?? "";
   const win = ctx.platform === "win32";
-  if (code === "ENOENT" && outcome.step === "create") return "missing";
+  if (code === "ENOENT" && outcome.step === "create" && !ctx.folderExists) return "missing";
   if (code === "ENOTDIR") return "not_a_folder";
   if (code === "ENOSPC" || code === "EDQUOT") return "disk_full";
   if (code === "EROFS") return "read_only_volume";
@@ -189,7 +191,8 @@ export function classifyFailure(outcome: Extract<FolderProbeOutcome, { ok: false
     if (/^\\\\/.test(ctx.dir) || /^\/\//.test(ctx.dir)) return "network_folder";
     const oneDrive = [env.OneDrive, env.OneDriveConsumer, env.OneDriveCommercial].some((root) => under(ctx.dir, root, true));
     if (CLOUD_TEXT.test(outcome.message) || (oneDrive && !["EPERM", "EACCES"].includes(code) )) return "cloud_files";
-    if (code === "EPERM" || code === "EACCES") {
+    // Controlled folder access refuses a create with ERROR_FILE_NOT_FOUND (ENOENT) in a folder that is there.
+    if (code === "EPERM" || code === "EACCES" || (code === "ENOENT" && ctx.folderExists)) {
       const parsed = path.win32.parse(path.win32.resolve(ctx.dir));
       const system = [env.ProgramFiles, env["ProgramFiles(x86)"], env.ProgramW6432, env.SystemRoot, env.windir, env.ProgramData]
         .some((root) => under(ctx.dir, root, true));
@@ -227,6 +230,7 @@ const WHY: Record<FolderWriteReason, string> = {
 
 /** How to fix it, for this platform. */
 export function fixHint(reason: FolderWriteReason, platform: NodeJS.Platform, engineBin?: string | null): string {
+  const elsewhere = (where: string) => `Or choose another folder ${where}.`;
   const other = "Or choose another folder.";
   switch (reason) {
     case "missing":
@@ -245,15 +249,15 @@ export function fixHint(reason: FolderWriteReason, platform: NodeJS.Platform, en
         ? `Check the folder's Properties → Security permissions for your account, or use a folder under C:\\Users\\<you>. If Controlled folder access is on, allow OmniRush in Windows Security. ${other}`
         : `Make your user the owner (for example: sudo chown -R "$USER" <folder>) or give it write permission (chmod -R u+w <folder>). ${other}`;
     case "protected_folder":
-      return `Open Windows Security → Virus & threat protection → Ransomware protection → Allow an app through Controlled folder access, and add ${engineBin ? `"${engineBin}"` : "OmniRush's engine"}. ${other} (outside Documents, Desktop, Pictures, Music and Videos)`;
+      return `Open Windows Security → Virus & threat protection → Ransomware protection → Allow an app through Controlled folder access, and add ${engineBin ? `"${engineBin}"` : "OmniRush's engine"}. ${elsewhere("outside Documents, Desktop, Pictures, Music and Videos")}`;
     case "cloud_files":
-      return `Make sure OneDrive is running and signed in, then right-click the folder → "Always keep on this device". ${other} (a local one outside OneDrive, for example C:\\Users\\<you>\\Projects)`;
+      return `Make sure OneDrive is running and signed in, then right-click the folder → "Always keep on this device". ${elsewhere("on this device, outside OneDrive (for example C:\\Users\\<you>\\Projects)")}`;
     case "system_folder":
       return "Choose a folder in your user folder, for example C:\\Users\\<you>\\Projects. Running OmniRush as administrator is not needed.";
     case "network_folder":
       return `Check the network connection and your write access to the share, or copy the project to a local folder. ${other}`;
     case "macos_privacy":
-      return `Open System Settings → Privacy & Security → Files and Folders (or Full Disk Access) and allow OmniRush, then try again. ${other} (outside Desktop, Documents and Downloads)`;
+      return `Open System Settings → Privacy & Security → Files and Folders (or Full Disk Access) and allow OmniRush, then try again. ${elsewhere("outside Desktop, Documents and Downloads")}`;
     case "disk_full":
       return `Free some disk space, then try again. ${other}`;
     default:
@@ -268,6 +272,7 @@ export type CheckOptions = {
   probeEngine?: typeof probeWithEngine;
   probeLocal?: typeof probeInProcess;
   cfa?: () => Promise<boolean>;
+  stat?: (dir: string) => { isDirectory(): boolean; mode: number };
 };
 
 /** Run the write check on a folder. Fails open (ok) only when no probe could run at all. */
@@ -286,16 +291,18 @@ export async function checkFolderWritable(folder: string, options: CheckOptions 
   }
   if (outcome.ok) return { ok: true, via };
   let readOnlyMode = false;
+  let folderExists = false;
   try {
-    const info = statSync(dir);
+    const info = (options.stat ?? statSync)(dir);
     if (!info.isDirectory()) outcome = { ...outcome, code: "ENOTDIR" };
+    folderExists = info.isDirectory();
     readOnlyMode = (info.mode & 0o200) === 0;
   } catch { /* classified from the probe */ }
   const code = outcome.code ?? "";
-  const cfaOn = platform === "win32" && (code === "EPERM" || code === "EACCES")
+  const cfaOn = platform === "win32" && (code === "EPERM" || code === "EACCES" || (code === "ENOENT" && folderExists))
     ? await (options.cfa ?? (() => controlledFolderAccessOn()))().catch(() => false)
     : false;
-  const reason = classifyFailure(outcome, { platform, dir, env, cfaOn, readOnlyMode, engineBin });
+  const reason = classifyFailure(outcome, { platform, dir, env, cfaOn, readOnlyMode, folderExists, engineBin });
   const codeText = outcome.code ? ` (${outcome.code})` : "";
   return {
     ok: false,

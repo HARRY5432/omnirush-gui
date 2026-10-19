@@ -62,6 +62,10 @@ describe("classifyFailure", () => {
     expect(classifyFailure(fail("EPERM"), { ...ctx, dir: "C:\\Users\\sam\\OneDrive\\proj", cfaOn: true })).toBe("protected_folder");
     expect(classifyFailure(fail("EACCES"), { ...ctx, dir: "\\\\nas\\share\\proj" })).toBe("network_folder");
     expect(classifyFailure(fail("EROFS"), { ...ctx, dir: "E:\\" })).toBe("read_only_volume");
+    // Controlled folder access answers a create in a folder that is there with ENOENT (seen on Windows 11 26100).
+    expect(classifyFailure(fail("ENOENT"), { ...ctx, dir: "C:\\Users\\sam\\Documents\\OmniRushTest", folderExists: true, cfaOn: true })).toBe("protected_folder");
+    expect(classifyFailure(fail("ENOENT"), { ...ctx, dir: "C:\\Users\\sam\\Documents\\gone" })).toBe("missing");
+    expect(classifyFailure(fail("EUNKNOWN"), { ...ctx, dir: "\\\\nohost\\share" })).toBe("network_folder");
   });
 });
 
@@ -110,7 +114,8 @@ describe("checkFolderWritable", () => {
       platform: "win32",
       env: winEnv,
       engineBin: engine,
-      probeEngine: async () => fail("EPERM", "EPERM: operation not permitted, open"),
+      probeEngine: async () => fail("ENOENT", "ENOENT: no such file or directory, open"),
+      stat: () => ({ isDirectory: () => true, mode: 0o40777 }),
       cfa: async () => true,
     });
     expect(result.ok).toBe(false);
