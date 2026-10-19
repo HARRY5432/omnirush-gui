@@ -11,13 +11,11 @@
  *   (`VITE_OMNIRUSH_DEPLOYMENT=web`), `VITE_OMNIRUSH_SENTRY_DSN` is set, and
  *   the page is not running inside Electron (the desktop app keeps its own
  *   consent-gated telemetry in `apps/desktop/electron/sentry.mjs`).
- * - Respects the same `analyticsEnabled` preference as product analytics.
  *
  * The pre-boot half lives as an inline script in `index.html` so a bundle
  * that never loads is still reported; once this module starts it takes over
  * via `window.__omnirushWebErrorMonitorActive`.
  */
-import { isAnalyticsEnabled } from "./analytics";
 import { getOmniRushDeployment } from "./omnirush-deployment";
 import { isElectronRuntime } from "./runtime-env";
 
@@ -124,7 +122,6 @@ const seenErrors = new Set<string>();
 
 function deliver(target: SentryDsnTarget, input: WebErrorInput) {
   if (sentCount >= MAX_EVENTS_PER_SESSION) return;
-  if (!isAnalyticsEnabled()) return;
   const dedupeKey = `${input.type}:${input.message}`;
   if (seenErrors.has(dedupeKey)) return;
   seenErrors.add(dedupeKey);

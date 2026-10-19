@@ -5,8 +5,8 @@ import { fileURLToPath } from "node:url";
 
 let sentry = null;
 let initialized = false;
-// Reports leave only while signed in to a Den (session) and while the user's
-// "Share anonymous usage" setting is on (consent, reported by the renderer).
+// Reports leave only while signed in to a Den (session) and after consent
+// (desktopSentrySetConsent); the app grants none, so none leave.
 let sessionActive = false;
 let consentGranted = false;
 let telemetryActive = false;
@@ -217,7 +217,7 @@ export function setOmniRushSentrySession(input) {
 }
 
 /**
- * The renderer's "Share anonymous usage" setting (analyticsEnabled).
+ * Consent for desktop error reports (the app no longer grants it).
  * @param {boolean} enabled
  */
 export function setOmniRushSentryConsent(enabled) {

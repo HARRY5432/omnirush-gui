@@ -5,6 +5,7 @@ import type { FilePart, Part, PermissionRequest, PermissionV2Request, QuestionRe
 import { getReactQueryClient } from "../../../infra/query-client";
 import { closeSessionBrowserTabs } from "@/app/lib/desktop";
 import { captureAnalyticsEvent, takeTaskRunStart } from "@/app/lib/analytics";
+import { gatewayRefusalEvent } from "@/app/lib/gateway-refusal";
 import { trackTaskCompleted, trackTaskFailed } from "@/app/lib/den-telemetry";
 import { observeModelsTaskEvent } from "@/app/lib/models-task-analytics";
 import { createClient, unwrap } from "@/app/lib/opencode";
@@ -946,6 +947,11 @@ function applyEvent(entry: SyncEntry, workspaceId: string, event: OpencodeEvent)
       const errorPresentation = presentOpencodeSessionError(sessionError);
       const errorText = describeOpencodeSessionError(sessionError);
       const runStartedAt = takeTaskRunStart(sessionId);
+      // Once per shown error: the run this app started, or a session it follows.
+      const refusal = gatewayRefusalEvent(errorPresentation);
+      if (refusal && (runStartedAt !== null || isTrackedSession(entry, sessionId))) {
+        captureAnalyticsEvent(refusal.event, refusal.properties);
+      }
       if (runStartedAt !== null) {
         captureAnalyticsEvent("task_run_errored", {
           duration_ms: Date.now() - runStartedAt,

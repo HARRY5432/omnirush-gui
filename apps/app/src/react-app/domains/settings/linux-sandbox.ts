@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { captureAnalyticsEvent, type AnalyticsProperties } from "@/app/lib/analytics";
 import type { OmniRushServerClient, OmniRushWorkspaceBox, OmniRushWorkspaceBoxProgress } from "@/app/lib/omnirush-server";
 
 export type LinuxSandboxClient = Pick<OmniRushServerClient, "getWorkspaceBox" | "setWorkspaceBox" | "setWorkspaceBoxBackend" | "resetWorkspaceBox" | "retryWorkspaceBox">;
@@ -162,6 +163,39 @@ export function linuxSandboxMoving(box: OmniRushWorkspaceBox | null): boolean {
   return Boolean(box?.on && MOVING.has(box.state));
 }
 
+/**
+ * Why commands of a project with the sandbox on run on this computer instead
+ * (the sandbox fell back to the host), for the `sandbox_fallback` event:
+ * coarse labels only (the backend id, never paths or errors). Null while the
+ * sandbox runs, moves, or is off by choice.
+ */
+export function sandboxFallbackProperties(box: OmniRushWorkspaceBox | null): AnalyticsProperties | null {
+  if (!box?.on) return null;
+  let reason: string | null = null;
+  if (box.state === "failed") reason = "start_failed";
+  else if (box.state === "unavailable" && box.backendSetting.value !== "native") reason = box.runtime?.ok ? "not_running" : "no_backend";
+  if (!reason) return null;
+  return {
+    reason,
+    sandbox_mode: box.mode ?? "default",
+    backend: box.backend?.id ?? null,
+    backend_setting: box.backendSetting.value === "auto" ? "auto" : "fixed",
+  };
+}
+
+const fallbackReported = new Set<string>();
+
+/** One `sandbox_fallback` per project and reason while the app runs. */
+export function reportSandboxFallback(workspaceId: string | null, box: OmniRushWorkspaceBox | null): boolean {
+  const properties = sandboxFallbackProperties(box);
+  if (!workspaceId || !properties) return false;
+  const key = `${workspaceId}:${properties.reason}`;
+  if (fallbackReported.has(key)) return false;
+  fallbackReported.add(key);
+  captureAnalyticsEvent("sandbox_fallback", properties);
+  return true;
+}
+
 export type LinuxSandboxProblem = { message: string; retry: (() => void) | null };
 
 /**
@@ -176,6 +210,8 @@ export function useLinuxSandbox(client: LinuxSandboxClient | null, workspaceId: 
   const [notice, setNotice] = useState("");
   const sequence = useRef(0);
   const movingSince = useRef<number | null>(null);
+  // The project the shown status was read for (the fallback event names only that one).
+  const boxFor = useRef<string | null>(null);
 
   const load = useCallback(async (fresh = false) => {
     if (!client || !workspaceId) return;
@@ -183,6 +219,7 @@ export function useLinuxSandbox(client: LinuxSandboxClient | null, workspaceId: 
     const value = await client.getWorkspaceBox(workspaceId, { fresh }).catch(() => null);
     if (sequence.current !== startedAt) return;
     if (value) {
+      boxFor.current = workspaceId;
       setBox(value);
       setProblem((current) => (current?.message === LOAD_FAILED ? null : current));
     } else {
@@ -204,6 +241,10 @@ export function useLinuxSandbox(client: LinuxSandboxClient | null, workspaceId: 
     }
     void load(freshOnOpen);
   }, [load, freshOnOpen, workspaceId]);
+
+  useEffect(() => {
+    if (boxFor.current === workspaceId) reportSandboxFallback(workspaceId, box);
+  }, [box, workspaceId]);
 
   // While it moves: every second for a minute, then every 3 s.
   const moving = linuxSandboxMoving(box);
@@ -239,7 +280,10 @@ export function useLinuxSandbox(client: LinuxSandboxClient | null, workspaceId: 
     try {
       const result = await act();
       if (sequence.current !== startedAt) return;
-      if (result) setBox(result);
+      if (result) {
+        boxFor.current = workspaceId;
+        setBox(result);
+      }
     } catch {
       if (sequence.current !== startedAt) return;
       setProblem({ message: failure, retry: again });

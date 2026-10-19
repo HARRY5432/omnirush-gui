@@ -5,6 +5,7 @@
 // the app only animates the wheel to `segmentIndex` and renders its flags.
 
 import { create } from "zustand";
+import { syncAnalyticsAccount } from "./analytics";
 
 import type {
   OmniRushAccountQuality,
@@ -295,6 +296,8 @@ export function refreshAccountStatus(
   inFlight ??= read(openSessionId ? { sessionId: openSessionId } : undefined)
     .then((status) => {
       useAccountStatusStore.getState().set(status);
+      // Signed in: analytics carry the account id; signed out: reset.
+      syncAnalyticsAccount(status);
       return status;
     })
     .catch(() => {

@@ -11,8 +11,6 @@ import {
 } from "react";
 
 import { MODEL_PREF_KEY, THINKING_PREF_KEY } from "../../app/constants";
-import { desktopBridge } from "../../app/lib/desktop";
-import { isElectronRuntime } from "../../app/lib/runtime-env";
 import { coerceReleaseChannel } from "../../app/lib/release-channels";
 import type { ModelRef, ReleaseChannel, SettingsTab, View } from "../../app/types";
 import {
@@ -59,11 +57,6 @@ export type LocalPreferences = {
    */
   hasCompletedOnboarding: boolean;
   /**
-   * Anonymous product analytics (PostHog). Only sent when the build sets a
-   * PostHog key; opt-out in Settings -> Preferences. Never includes message content.
-   */
-  analyticsEnabled: boolean;
-  /**
    * Native OS notifications from the desktop app. Off by default so upgrading
    * users are not surprised by system popups.
    */
@@ -92,7 +85,6 @@ const INITIAL_PREFS: LocalPreferences = {
   releaseChannel: "stable",
   featureFlags: { microsandboxCreateSandbox: true, workspaceRunMode: false },
   hasCompletedOnboarding: false,
-  analyticsEnabled: true,
   desktopNotifications: DEFAULT_DESKTOP_NOTIFICATION_PREFERENCE,
 };
 
@@ -170,13 +162,6 @@ export function LocalProvider({ children }: LocalProviderProps) {
   useEffect(() => {
     writePersisted(LOCAL_PREFERENCES_KEY, prefs);
   }, [prefs]);
-
-  // Desktop error reports (apps/desktop/electron/sentry.mjs) follow the same
-  // "Share anonymous usage" setting as product analytics.
-  useEffect(() => {
-    if (!isElectronRuntime()) return;
-    void desktopBridge.desktopSentrySetConsent(prefs.analyticsEnabled).catch(() => undefined);
-  }, [prefs.analyticsEnabled]);
 
   useEffect(() => {
     const updateDefaultModel = () => {
