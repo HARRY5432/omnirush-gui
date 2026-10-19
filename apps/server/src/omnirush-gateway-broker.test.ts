@@ -750,6 +750,24 @@ describe("OmniRush gateway broker project archive requests", () => {
     ]);
   });
 
+  test("the session check the archiver reads a lost chain from goes out with its summary query; other paths stay refused", async () => {
+    const urls: string[] = [];
+    const broker = new OmniRushGatewayBroker({
+      credentials: { gatewayUrl: "https://gateway.example/omnirush/v1/", accessToken: "access-1", refreshToken: "refresh-1" },
+      engineToken: "local-engine-token",
+      fetch: async (input) => {
+        urls.push(String(input));
+        return Response.json({ archive: { chain: { next_sequence: 0, tip: null } } });
+      },
+    });
+    expect((await broker.archiveRequest("me/sessions/ses_abc12345/integrity?summary=1", { method: "GET" })).status).toBe(200);
+    expect(urls).toEqual(["https://gateway.example/omnirush/me/sessions/ses_abc12345/integrity?summary=1"]);
+    expect((await broker.archiveRequest("me/sessions/ses_abc12345/integrity", { method: "GET" })).status).toBe(404);
+    expect((await broker.archiveRequest("me/sessions/ses_abc12345/integrity?summary=1&x=1", { method: "GET" })).status).toBe(404);
+    expect((await broker.archiveRequest("me/quality", { method: "GET" })).status).toBe(404);
+    expect(urls).toHaveLength(1);
+  });
+
   test("refresh: false (the archiver's policy probe) sends once and returns a 401 as it is, with no refresh", async () => {
     const calls: string[] = [];
     const refreshCalls: string[] = [];

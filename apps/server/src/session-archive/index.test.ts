@@ -584,6 +584,42 @@ describe("SessionArchiver", () => {
     expect(server.objects().at(-1)!.request).toMatchObject({ session_id: "ses_rotated_key", kind: "base", turn: 1 });
   });
 
+  test("a session whose archive record was lost (sign-out, reinstall) goes on from the server's chain: no base, no stop", async () => {
+    const server = new FakeArchiveServer();
+    server.chainView = true;
+    const { root } = await project();
+    const state = await tempDir("state");
+    const first = archiver(server, state);
+    expect((await first.captureBase("ses_lost_record", root, 0)).status).toBe("queued");
+    await writeFile(join(root, "src/app.ts"), "export const app = 2;\n");
+    expect((await first.captureDelta("ses_lost_record", root, 1)).status).toBe("queued");
+    expect((await first.drain()).uploaded).toBe(2);
+    await first.signOut();
+
+    // Signed in again, the session resumed after its two turns: a delta on the server's chain, every file in it.
+    const second = archiver(server, state);
+    const resumed = await second.captureBase("ses_lost_record", root, 2);
+    expect(resumed).toMatchObject({ status: "queued", kind: "delta", sequence: 2 });
+    expect((await second.drain()).uploaded).toBe(1);
+    await writeFile(join(root, "src/app.ts"), "export const app = 3;\n");
+    expect(await second.captureDelta("ses_lost_record", root, 3)).toMatchObject({ status: "queued", kind: "delta", sequence: 3 });
+    expect((await second.drain()).uploaded).toBe(1);
+    expect(server.objects().filter((archive) => archive.request.session_id === "ses_lost_record").map((archive) => [archive.request.sequence, archive.request.kind])).toEqual([[0, "base"], [1, "delta"], [2, "delta"], [3, "delta"]]);
+    await second.stop();
+
+    // A base the server refuses (409 archive_sequence_conflict): sent again on the chain at once, not stopped.
+    await rm(join(state, ARCHIVE_STATE_DIRECTORY), { recursive: true, force: true });
+    const third = archiver(server, state);
+    expect(await third.captureBase("ses_lost_record", root, 0)).toMatchObject({ status: "queued", kind: "base", sequence: 0 });
+    expect(await third.drain()).toMatchObject({ uploaded: 0, dropped: 1 });
+    for (let i = 0; i < 100 && server.objects().length < 5; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    await third.drain();
+    expect(server.objects().filter((archive) => archive.request.session_id === "ses_lost_record").map((archive) => [archive.request.sequence, archive.request.kind])).toEqual([[0, "base"], [1, "delta"], [2, "delta"], [3, "delta"], [4, "delta"]]);
+    await writeFile(join(root, "src/app.ts"), "export const app = 4;\n");
+    expect(await third.captureDelta("ses_lost_record", root, 4)).toMatchObject({ status: "queued", sequence: 5 });
+    await third.stop();
+  });
+
   test("claimAccount keeps the queue for the same account and removes another account's", async () => {
     const server = new FakeArchiveServer();
     const { root } = await project();

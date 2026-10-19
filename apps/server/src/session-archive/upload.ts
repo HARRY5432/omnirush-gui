@@ -162,6 +162,31 @@ export type UploadOutcome =
   | { status: "retry_later"; reason: string }
   | { status: "aborted" };
 
+/** Where the server's archive chain of a session goes on (GET /me/sessions/{id}/integrity, `archive.chain`). */
+export type ServerChainTip = { archiveId: string; sequence: number; turn: number; kind: string; marker: string | null; status: string; deleted: boolean };
+export type ServerChain =
+  | { status: "ok"; nextSequence: number; tip: ServerChainTip | null }
+  /** A server that does not say where the chain is (no `archive.chain`): nothing can be continued. */
+  | { status: "unsupported" }
+  | { status: "unavailable"; reason: string };
+
+const chainSchema = z.object({
+  archive: z.object({
+    chain: z.object({
+      next_sequence: z.number().int().nonnegative(),
+      tip: z.object({
+        archive_id: z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/),
+        sequence: z.number().int().nonnegative(),
+        turn: z.number().int().nonnegative(),
+        kind: z.string(),
+        marker: z.string().nullable(),
+        status: z.string(),
+        deleted: z.boolean(),
+      }).nullable(),
+    }),
+  }),
+});
+
 const keySchema = z.object({ kid: z.string().regex(/^[0-9a-f]{16}$/), public_key: z.string(), alg: z.string() });
 const partUrlSchema = z.object({ part_number: z.number().int().min(1), url: z.string().min(1) });
 const createSchema = z.object({
@@ -380,6 +405,31 @@ export class ArchiveUploader {
     if (result.kind === "error" && result.status === 404) return { status: "disabled", code: "archive_routes_missing" };
     const outcome = this.common(result);
     if (outcome?.status === "disabled") return { status: "disabled", code: outcome.code };
+    if (result.kind === "error") return { status: "unavailable", reason: `status ${result.status}` };
+    return { status: "unavailable", reason: result.kind === "unavailable" ? result.reason : result.kind };
+  }
+
+  /**
+   * Where the server's chain of a session goes on: its next sequence and the
+   * archive below it (GET /me/sessions/{id}/integrity?summary=1, `archive.chain`).
+   * For a client that lost its own record of the chain (a sign-out, a
+   * reinstall, another machine), whose base would end in 409
+   * archive_sequence_conflict.
+   */
+  async serverChain(sessionId: string, signal?: AbortSignal): Promise<ServerChain> {
+    if (!this.configured) return { status: "unavailable", reason: "not_configured" };
+    const result = await this.call("GET", `me/sessions/${encodeURIComponent(sessionId)}/integrity?summary=1`, undefined, signal);
+    if (result.kind === "ok") {
+      const parsed = chainSchema.safeParse(result.body);
+      if (!parsed.success) return { status: "unsupported" };
+      const { next_sequence: nextSequence, tip } = parsed.data.archive.chain;
+      return {
+        status: "ok",
+        nextSequence,
+        tip: tip ? { archiveId: tip.archive_id, sequence: tip.sequence, turn: tip.turn, kind: tip.kind, marker: tip.marker, status: tip.status, deleted: tip.deleted } : null,
+      };
+    }
+    if (result.kind === "error" && (result.status === 404 || result.status === 405)) return { status: "unsupported" };
     if (result.kind === "error") return { status: "unavailable", reason: `status ${result.status}` };
     return { status: "unavailable", reason: result.kind === "unavailable" ? result.reason : result.kind };
   }
