@@ -254,6 +254,117 @@ function stringField(value: unknown): string | null {
 }
 
 /**
+ * omnirush.ai's stable error object, `error.omnirush`
+ * (`{code, scope?, resets_at?, retry, retry_after?}`), as a field to spread
+ * into an error the broker rewrites: passed on exactly as it came, so the
+ * app can key on it. Empty when the gateway sent none (an older backend,
+ * or an error relayed from upstream).
+ */
+function omnirushField(error: Record<string, unknown> | null): { omnirush?: Record<string, unknown> } {
+  return error && isRecord(error.omnirush) ? { omnirush: error.omnirush } : {};
+}
+
+/** The gateway says the same request cannot succeed if sent again (`error.omnirush.retry === false`). */
+function retryRefused(error: Record<string, unknown> | null): boolean {
+  return Boolean(error && isRecord(error.omnirush) && error.omnirush.retry === false);
+}
+
+/**
+ * What the engine (1.18.32, session/retry.ts) retries an API error on: any
+ * of these in its message or response body, a 5xx, or a status the AI SDK
+ * marks retryable (408, 409, 429). It never reads `x-should-retry`.
+ */
+const ENGINE_RETRY_PATTERNS = [
+  /429|500|502|503|504|524/i,
+  /rate increased too quickly|rate limit|rate-limit|rate_limit|too many requests/i,
+  /overloaded|service unavailable|service_unavailable|service-unavailable|internal error|internal_error|internal server error|server error|server_error|server-error|provider returned error|provider_returned_error|provider-returned-error/i,
+  /terminated|fetch failed|failed to fetch|network[-_\s]error|upstream connect|connection error|connection refused|connection lost|socket connection was closed|socket hang up|reset before headers|getaddrinfo|enotfound|eai_again|econnrefused|econnreset|etimedout/i,
+  /^timeout$|\b(?:request|response|connection|network|stream|read) (?:timeout|timed out|time out)\b/i,
+  /try your request again|retry your request|resource exhausted|resource_exhausted/i,
+  /\btry again (?:later|in\b)|\b(?:currently|temporarily) at capacity\b/i,
+];
+const ENGINE_RETRY_STATUSES = new Set([408, 409, 429]);
+/** The status a final refusal reaches the engine with when its own would be retried; the gateway's is kept in this header. */
+const FINAL_REFUSAL_STATUS = 403;
+const GATEWAY_STATUS_HEADER = "x-omnirush-gateway-status";
+
+function engineWouldRetry(text: string): boolean {
+  return ENGINE_RETRY_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+/**
+ * A final refusal's error body the engine shows once: `error.omnirush` is
+ * passed on as it came unless one of its timing fields (`retry_after`,
+ * `resets_at`, both also in the response headers) happens to spell a
+ * pattern the engine retries on (`retry_after: 15000` holds "500"); only
+ * that field is then left out, so `code`, `scope` and `retry` always arrive.
+ */
+function finalErrorBody(error: Record<string, unknown>): string {
+  const body = JSON.stringify({ error });
+  if (!isRecord(error.omnirush) || !engineWouldRetry(body)) return body;
+  return JSON.stringify({ error: { ...error, omnirush: withoutRetryWords(error.omnirush) } });
+}
+
+/** `error.omnirush` without a timing field that spells one of the engine's retry patterns. */
+function withoutRetryWords(omnirush: Record<string, unknown>): Record<string, unknown> {
+  const kept = { ...omnirush };
+  for (const field of ["retry_after", "resets_at"]) {
+    if (field in kept && engineWouldRetry(JSON.stringify(kept[field]))) delete kept[field];
+  }
+  return kept;
+}
+
+/**
+ * What a stream `error` frame carries that the engine would drop: its AI
+ * SDK keeps only an error's type, code, message and param, so the gateway's
+ * `detail` and `error.omnirush` ride in `param` (as JSON) when the frame has
+ * none. Null when there is nothing to carry or `param` is taken.
+ */
+function carriedParam(payload: Record<string, unknown>, nested: Record<string, unknown> | null): string | null {
+  if (stringField(nested ? nested.param : payload.param)) return null;
+  return carriedFields(payload, nested, {});
+}
+
+function carriedFields(payload: Record<string, unknown>, nested: Record<string, unknown> | null, extra: Record<string, unknown>): string | null {
+  const detail = stringField(payload.detail);
+  const omnirush = nested && isRecord(nested.omnirush) ? nested.omnirush : null;
+  if (!detail && !omnirush && Object.keys(extra).length === 0) return null;
+  const final = omnirush?.retry === false;
+  return JSON.stringify({ ...extra, ...(detail ? { detail } : {}), ...(omnirush ? { omnirush: final ? withoutRetryWords(omnirush) : omnirush } : {}) });
+}
+
+/**
+ * Stream refusals the same request meets again: the request policy cutting
+ * a stream, a capped session, a spent allowance, the model's own safety
+ * check. Inside a stream (after any output) the engine takes an error frame
+ * for a passing fault and sends the request again, up to five times.
+ */
+const FINAL_STREAM_CODES = new Set(["request_policy_refused", "session_quality_cap", "daily_grant_exhausted", "cyber_policy"]);
+
+/**
+ * A final refusal inside a stream as the frame the engine shows once and
+ * never retries (`invalid_prompt`, like the queue timeout): its message as
+ * the user would have read it, and its own code, `detail` and
+ * `error.omnirush` in `param` (JSON) for the app.
+ */
+function finalStreamEvent(payload: Record<string, unknown>, nested: Record<string, unknown> | null, code: string | null, message: string): Uint8Array {
+  const param = stringField(nested ? nested.param : payload.param);
+  const sequence = payload.sequence_number;
+  const frame = {
+    type: "error",
+    sequence_number: typeof sequence === "number" && Number.isFinite(sequence) ? sequence : -1,
+    error: {
+      type: "invalid_request_error",
+      code: "invalid_prompt",
+      message,
+      param: carriedFields(payload, nested, { code: code ?? "omnirush_refused", ...(param ? { param } : {}) }),
+      ...(nested && isRecord(nested.omnirush) ? { omnirush: withoutRetryWords(nested.omnirush) } : {}),
+    },
+  };
+  return new TextEncoder().encode(`event: error\ndata: ${JSON.stringify(frame)}\n\n`);
+}
+
+/**
  * An error frame the engine can show: the gateway's
  * `{type:"error",sequence_number,error:{...}}`, OpenAI's flat
  * `{type:"error",sequence_number,code,message}`, or a relay `event: error` /
@@ -277,11 +388,11 @@ function stringField(value: unknown): string | null {
 const TURN_ENDING_STREAM_CODES = new Set(["omni_queue_timeout"]);
 const QUEUE_TIMEOUT_COPY = "omnirush.ai: every model seat is taken right now, and this turn waited in line too long. Send your message again; your place in line is kept for a few minutes.";
 
-function turnEndingEvent(code: string, sequence: unknown): Uint8Array {
+function turnEndingEvent(code: string, sequence: unknown, omnirush: { omnirush?: Record<string, unknown> }): Uint8Array {
   const frame = {
     type: "error",
     sequence_number: typeof sequence === "number" && Number.isFinite(sequence) ? sequence : -1,
-    error: { type: "invalid_request_error", code: "invalid_prompt", message: QUEUE_TIMEOUT_COPY, param: code },
+    error: { type: "invalid_request_error", code: "invalid_prompt", message: QUEUE_TIMEOUT_COPY, param: code, ...omnirush },
   };
   return new TextEncoder().encode(`event: error\ndata: ${JSON.stringify(frame)}\n\n`);
 }
@@ -290,17 +401,24 @@ function errorEvent(block: Uint8Array, payload: Record<string, unknown>): Uint8A
   const nested = isRecord(payload.error) ? payload.error : null;
   const code = stringField(nested ? nested.code : payload.code);
   const baseCode = code?.replace(/^upstream_/, "") ?? null;
-  if (baseCode && TURN_ENDING_STREAM_CODES.has(baseCode)) return turnEndingEvent(baseCode, payload.sequence_number);
+  const omnirush = omnirushField(nested);
+  if (baseCode && TURN_ENDING_STREAM_CODES.has(baseCode)) return turnEndingEvent(baseCode, payload.sequence_number, omnirush);
   const original = stringField(nested ? nested.message : payload.message);
   const readable = code ? gatewayErrorMessage(code, original) : null;
+  const detail = stringField(payload.detail);
+  if (retryRefused(nested) || (detail && FINAL_STREAM_CODES.has(detail)) || (baseCode && FINAL_STREAM_CODES.has(baseCode))) {
+    const named = detail ?? baseCode ?? "omnirush_refused";
+    return finalStreamEvent(payload, nested, code, readable ?? original ?? `omnirush.ai could not complete the model request (${named}).`);
+  }
   const sequence = payload.sequence_number;
   const parsed = payload.type === "error"
     && typeof sequence === "number"
     && (nested
       ? typeof nested.type === "string" && typeof nested.code === "string" && typeof nested.message === "string"
       : typeof payload.message === "string");
-  if (parsed && !readable) return block;
-  const param = stringField(nested ? nested.param : payload.param);
+  const carried = carriedParam(payload, nested);
+  if (parsed && !readable && !carried) return block;
+  const param = stringField(nested ? nested.param : payload.param) ?? carried;
   const frame = {
     type: "error",
     sequence_number: typeof sequence === "number" && Number.isFinite(sequence) ? sequence : -1,
@@ -309,6 +427,7 @@ function errorEvent(block: Uint8Array, payload: Record<string, unknown>): Uint8A
       code: code ?? "upstream_error",
       message: readable ?? original ?? `omnirush.ai: the model request failed (${code ?? "upstream_error"}).`,
       ...(param ? { param } : {}),
+      ...omnirush,
     },
   };
   return new TextEncoder().encode(`event: error\ndata: ${JSON.stringify(frame)}\n\n`);
@@ -533,7 +652,7 @@ export function guardEventStream(
  * reads its message from. Null leaves the body as it came. `grant` is a
  * spent grant's copy (grantExhaustedCopy), used for `daily_grant_exhausted`.
  */
-function readableErrorBody(text: string, grant: string | null): { body: string; code: string } | null {
+function readableErrorBody(text: string, grant: string | null): { error: Record<string, unknown>; code: string; final: boolean } | null {
   let payload: unknown;
   try {
     payload = JSON.parse(text);
@@ -553,11 +672,20 @@ function readableErrorBody(text: string, grant: string | null): { body: string; 
   if (!message) return null;
   const param = stringField(nested?.param);
   return {
-    body: JSON.stringify({
-      error: { message, type: stringField(nested?.type) ?? "omnirush_error", code, ...(param ? { param } : {}) },
-    }),
+    error: { message, type: stringField(nested?.type) ?? "omnirush_error", code, ...(param ? { param } : {}), ...omnirushField(nested) },
     code,
+    final: retryRefused(nested),
   };
+}
+
+/** Whether a JSON error body carries `error.omnirush.retry === false`. */
+function errorBodyRefusesRetry(text: string): boolean {
+  try {
+    const payload: unknown = JSON.parse(text);
+    return isRecord(payload) && retryRefused(isRecord(payload.error) ? payload.error : null);
+  } catch {
+    return false;
+  }
 }
 
 async function readableErrorResponse(response: Response, consoleUrl: string | null): Promise<Response> {
@@ -566,13 +694,24 @@ async function readableErrorResponse(response: Response, consoleUrl: string | nu
   const headers = responseHeaders(response.headers);
   // A spent grant stays spent until its reset: the engine would otherwise
   // resend the request ten times, each after the 429's Retry-After (60 s).
-  // An outdated app stays refused until it is updated.
-  if (readable?.code === "daily_grant_exhausted" || readable?.code === UPDATE_REQUIRED_CODE || response.status === 426) {
-    headers.set("x-should-retry", "false");
+  // An outdated app stays refused until it is updated. Whatever the
+  // gateway marks final (`x-should-retry: false`, `error.omnirush.retry`
+  // false) is never sent again either.
+  const final = readable?.code === "daily_grant_exhausted" || readable?.code === UPDATE_REQUIRED_CODE || response.status === 426
+    || Boolean(readable?.final) || response.headers.get("x-should-retry") === "false" || (!readable && errorBodyRefusesRetry(text));
+  if (!final) {
+    return new Response(readable ? JSON.stringify({ error: readable.error }) : text, { status: response.status, statusText: response.statusText, headers });
   }
-  return new Response(readable?.body ?? text, {
-    status: response.status,
-    statusText: response.statusText,
+  headers.set("x-should-retry", "false");
+  // The engine never reads that header and retries a 429 (or 408, 409, 5xx)
+  // whatever it says, after its Retry-After: a spent grant then sat as
+  // "retrying in 3 h". Such a final refusal goes on as a 403, like a
+  // streamed one, with the gateway's status in its own header.
+  const retriedStatus = ENGINE_RETRY_STATUSES.has(response.status) || response.status >= 500;
+  if (retriedStatus) headers.set(GATEWAY_STATUS_HEADER, String(response.status));
+  return new Response(readable ? finalErrorBody(readable.error) : text, {
+    status: retriedStatus ? FINAL_REFUSAL_STATUS : response.status,
+    statusText: retriedStatus ? "Forbidden" : response.statusText,
     headers,
   });
 }
@@ -609,7 +748,8 @@ function streamedRefusalResponse(text: string, headers: Headers): Response | nul
   const result = responseHeaders(headers);
   result.set("content-type", "application/json");
   result.set("x-should-retry", "false");
-  return new Response(JSON.stringify({ error: { message, type: stringField(nested?.type) ?? "invalid_request_error", code: detail } }), {
+  const error = { message, type: stringField(nested?.type) ?? "invalid_request_error", code: detail, ...omnirushField(nested) };
+  return new Response(finalErrorBody(error), {
     status: 403,
     headers: result,
   });
@@ -979,25 +1119,27 @@ const FALLBACK_MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 type SubagentRefusal = { move: "now" | "after_retry" | "never"; reason: string };
 
 /** The gateway error code of a refused response, read from a clone so the body stays readable. */
-async function refusalCode(response: Response): Promise<string | null> {
-  if (!(response.headers.get("content-type") ?? "").includes("application/json")) return null;
+async function refusalCode(response: Response): Promise<{ code: string | null; final: boolean }> {
+  const marked = response.headers.get("x-should-retry") === "false";
+  if (!(response.headers.get("content-type") ?? "").includes("application/json")) return { code: null, final: marked };
   const text = await response.clone().text().catch(() => "");
   let payload: unknown;
   try {
     payload = JSON.parse(text);
   } catch {
-    return null;
+    return { code: null, final: marked };
   }
-  if (!isRecord(payload)) return null;
+  if (!isRecord(payload)) return { code: null, final: marked };
   const nested = isRecord(payload.error) ? payload.error : null;
   const code = stringField(payload.detail) ?? stringField(payload.error) ?? stringField(nested?.code) ?? stringField(payload.code);
-  return code ? code.replace(/^upstream_/, "") : null;
+  return { code: code ? code.replace(/^upstream_/, "") : null, final: marked || retryRefused(nested) };
 }
 
 async function subagentRefusal(response: Response): Promise<SubagentRefusal> {
-  const code = await refusalCode(response);
+  const { code, final } = await refusalCode(response);
   const reason = code ?? `http_${response.status}`;
-  if (code && ACCOUNT_REFUSED.has(code)) return { move: "never", reason };
+  // Marked final by the gateway: not sent again, on this model or another.
+  if (final || (code && ACCOUNT_REFUSED.has(code))) return { move: "never", reason };
   if (code && SUBAGENT_MODEL_REFUSED.has(code)) return { move: "now", reason };
   if ((code && SUBAGENT_MODEL_BUSY.has(code)) || SUBAGENT_BUSY_STATUSES.has(response.status)) return { move: "after_retry", reason };
   return { move: "never", reason };

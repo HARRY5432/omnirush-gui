@@ -22,13 +22,16 @@ import { resolvePosthogKey } from "./analytics-key";
 
 const ENV_POSTHOG_HOST = String(import.meta.env.VITE_OMNIRUSH_POSTHOG_HOST ?? "").trim();
 const ENV_APP_VERSION = String(import.meta.env.VITE_OMNIRUSH_APP_VERSION ?? "").trim();
+/** Set by the packaged Electron build (vite.config.ts); empty in `pnpm dev` and other unpackaged builds. */
+const ENV_PACKAGED_BUILD = String(import.meta.env.VITE_OMNIRUSH_PACKAGED_BUILD ?? "").trim() === "1";
 
 const DEFAULT_POSTHOG_HOST = "https://us.i.posthog.com";
 
 // No built-in key: nothing is sent unless the build sets
-// VITE_OMNIRUSH_POSTHOG_KEY. The inspector mirror still records events
-// locally either way.
-let posthogKey = resolvePosthogKey(import.meta.env.VITE_OMNIRUSH_POSTHOG_KEY);
+// VITE_OMNIRUSH_POSTHOG_KEY, and only a packaged release build uses it
+// (never a dev build). The inspector mirror still records events locally
+// either way.
+let posthogKey = resolvePosthogKey(import.meta.env.VITE_OMNIRUSH_POSTHOG_KEY, { appVersion: ENV_APP_VERSION, packaged: ENV_PACKAGED_BUILD });
 let posthogHost = (ENV_POSTHOG_HOST || DEFAULT_POSTHOG_HOST).replace(/\/+$/, "");
 let appVersion = ENV_APP_VERSION;
 
@@ -67,7 +70,8 @@ const hadPreferencesAtStart = (() => {
 
 /** Tests only: set the key, host and version a build would. */
 export function configureAnalyticsForTests(config: { key?: string; host?: string; appVersion?: string }) {
-  if (config.key !== undefined) posthogKey = resolvePosthogKey(config.key);
+  // As a packaged release build would.
+  if (config.key !== undefined) posthogKey = resolvePosthogKey(config.key, { appVersion: "1.0.0", packaged: true });
   if (config.host !== undefined) posthogHost = config.host.replace(/\/+$/, "");
   if (config.appVersion !== undefined) appVersion = config.appVersion;
 }
@@ -126,6 +130,7 @@ export function analyticsOs(platform: string | null | undefined): string {
 function baseProperties(): AnalyticsProperties {
   const platform = typeof navigator === "undefined" ? null : navigator.platform || null;
   return {
+    client: "desktop",
     app_version: appVersion || null,
     platform,
     os: analyticsOs(platform),

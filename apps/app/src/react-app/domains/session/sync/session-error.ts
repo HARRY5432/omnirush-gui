@@ -5,6 +5,21 @@ import { normalizeErrorText } from "../../../../lib/error-text";
 
 export type OpencodeSessionErrorKind = "aborted" | "provider-timeout" | "provider-incomplete" | "free-model-limit" | "disk-full" | "database-error" | "generic";
 
+/**
+ * omnirush.ai's stable error object (`error.omnirush` of the gateway's JSON
+ * error body or stream `error` frame): what the user hit, independent of the
+ * message text. Absent on an older backend and on errors relayed from
+ * upstream.
+ */
+export type OmniRushErrorDetails = {
+  code: string;
+  scope?: string;
+  resets_at?: string;
+  /** false: the same request cannot succeed before the user acts or the allowance resets. */
+  retry?: boolean;
+  retry_after?: number;
+};
+
 export type OpencodeSessionErrorPresentation = {
   kind: OpencodeSessionErrorKind;
   title: string;
@@ -13,7 +28,69 @@ export type OpencodeSessionErrorPresentation = {
   recoveryPrompt: string | null;
   /** A page that fixes the error, opened in the browser (omnirush.ai's console for an account out of tokens). */
   action?: { label: string; link: string } | null;
+  /** The gateway's `error.omnirush`, when the error carried one. */
+  omnirush?: OmniRushErrorDetails | null;
+  /** The answer said `x-should-retry: false`: the same request is refused again. */
+  noRetry?: boolean;
 };
+
+function parsedJson(value: unknown): unknown {
+  if (typeof value !== "string" || !value.trim().startsWith("{")) return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+/** A well-formed `error.omnirush` (only its known fields), or null. */
+export function omnirushErrorDetails(value: unknown): OmniRushErrorDetails | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  const code = typeof source.code === "string" ? source.code.trim() : "";
+  if (!code) return null;
+  const details: OmniRushErrorDetails = { code };
+  if (typeof source.scope === "string" && source.scope.trim()) details.scope = source.scope.trim();
+  if (typeof source.resets_at === "string" && source.resets_at.trim()) details.resets_at = source.resets_at.trim();
+  if (typeof source.retry === "boolean") details.retry = source.retry;
+  if (typeof source.retry_after === "number" && Number.isFinite(source.retry_after)) details.retry_after = source.retry_after;
+  return details;
+}
+
+/** Whether an engine API error's response headers say `x-should-retry: false`. */
+function sessionSaysNoRetry(error: unknown): boolean {
+  for (const record of [error, recordValue(error, "data"), recordValue(recordValue(error, "cause"), "data")]) {
+    const headers = recordValue(record, "responseHeaders");
+    if (!headers || typeof headers !== "object") continue;
+    for (const [name, value] of Object.entries(headers as Record<string, unknown>)) {
+      if (name.toLowerCase() === "x-should-retry" && String(value).trim().toLowerCase() === "false") return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The `error.omnirush` an engine session error carries: in the gateway's
+ * response body (`data.responseBody`, the JSON of an HTTP error or of a
+ * stream's `error` frame), or a raw frame the engine kept as the message.
+ */
+function sessionOmniRushDetails(error: unknown): OmniRushErrorDetails | null {
+  if (!error || typeof error !== "object") return null;
+  const data = recordValue(error, "data");
+  const cause = recordValue(error, "cause");
+  for (const record of [error, data, cause, recordValue(cause, "data")]) {
+    for (const key of ["responseBody", "body", "message"]) {
+      const payload = parsedJson(recordValue(record, key));
+      const nested = recordValue(payload, "error");
+      // A stream frame's object rides in its `param` (the engine keeps only type, code, message and param).
+      const found = omnirushErrorDetails(recordValue(nested, "omnirush"))
+        ?? omnirushErrorDetails(recordValue(payload, "omnirush"))
+        ?? omnirushErrorDetails(recordValue(parsedJson(recordValue(nested, "param")), "omnirush"));
+      if (found) return found;
+    }
+  }
+  return null;
+}
 
 /**
  * An omnirush.ai error that ends with its console page ("… earn tokens every
@@ -211,6 +288,7 @@ export function presentOpencodeSessionError(error: unknown, fallback = "Session 
   const fields = sessionErrorFields(error, fallback);
   const kind = sessionErrorKind(fields.name, fields.message, fields.code, fields.responseBody);
   const consoleLink = consoleLinkAction(fields.message);
+  const omnirush = sessionOmniRushDetails(error);
   const fallbackTitle = normalizeSessionError(consoleLink?.text ?? fields.message ?? defaultErrorMessage(fields.name, fallback));
   return {
     kind,
@@ -219,6 +297,8 @@ export function presentOpencodeSessionError(error: unknown, fallback = "Session 
     technicalDetails: technicalErrorDetails(error, fallback, fields),
     recoveryPrompt: errorRecoveryPrompt(kind),
     ...(consoleLink ? { action: consoleLink.action } : {}),
+    ...(omnirush ? { omnirush } : {}),
+    ...(sessionSaysNoRetry(error) ? { noRetry: true } : {}),
   };
 }
 

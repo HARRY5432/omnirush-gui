@@ -128,6 +128,8 @@ export type GoodSessionChecklistBarProps = {
 
 /** How long a turn's end settles before an auto-retry is judged (late Stop or error events land first). */
 const AUTO_RETRY_SETTLE_MS = 4_000;
+/** How much longer it waits for a last reply still open then (no end time, no error yet) to close. */
+export const AUTO_RETRY_REPLY_WAIT_MS = 3_000;
 /** Sessions whose running turn the user stopped (the Stop button); cleared when a turn starts. */
 const userStops = new Set<string>();
 /** Automatic retries in a row per session; reset when a turn finishes. */
@@ -369,8 +371,18 @@ export function GoodSessionChecklistBar(props: GoodSessionChecklistBarProps) {
       return;
     }
     if (previous.sessionId !== sessionId || !previous.running) return;
-    const timer = window.setTimeout(() => {
+    let replyDeadline = 0;
+    const judge = () => {
       const now = latest.current;
+      // The engine says idle before it writes a failed turn's error onto
+      // the reply: an open reply is waited for (up to 3 s), never judged.
+      if (now.facts.replyOpen && !now.turnRunning) {
+        replyDeadline ||= Date.now() + AUTO_RETRY_REPLY_WAIT_MS;
+        if (Date.now() < replyDeadline) {
+          timer = window.setTimeout(judge, 100);
+          return;
+        }
+      }
       if (now.facts.ended === "pass" || now.facts.ended === "awaiting") {
         autoRetries.delete(sessionId);
         return;
@@ -388,7 +400,8 @@ export function GoodSessionChecklistBar(props: GoodSessionChecklistBarProps) {
       if (!message) return;
       autoRetries.set(sessionId, retriesInARow + 1);
       now.onAutoRetry(message);
-    }, AUTO_RETRY_SETTLE_MS);
+    };
+    let timer = window.setTimeout(judge, AUTO_RETRY_SETTLE_MS);
     return () => window.clearTimeout(timer);
   }, [props.sessionId, props.turnRunning]);
 
