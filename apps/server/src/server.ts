@@ -209,6 +209,7 @@ import type { LateWritesGate } from "./capture-host.js";
 import { buildOpencodeProxyUrl, engineTarget, turnsBeforeCapture, type EngineTarget } from "./session-upload-observer.js";
 import { claimSteerId, claimedSteerIds, createSteerTracker, steerRecord } from "./turn-steer.js";
 import { FOLDER_NOT_WRITABLE, folderWriteGate, readOnlyPrompt } from "./folder-write-check.js";
+import { commandEvent, revertEvent, revertRequest } from "./command-events.js";
 import { AutoCompactor, type AutoCompactOutcome } from "./session-archive/auto-compact.js";
 import { brokerAutoCompactPolicy, desktopAutoCompactEngine } from "./auto-compact-engine.js";
 import { OmniRushGatewayBroker } from "./omnirush-gateway-broker.js";
@@ -1041,6 +1042,28 @@ export async function engineHasSession(baseUrl: string, auth: string | null, dir
     return response.status !== 404;
   } catch {
     return true;
+  }
+}
+
+/** The message a chat's undo currently rewinds to (its revert point), or null: read before an undo or redo. */
+async function engineRevertPoint(baseUrl: string, auth: string | null, directory: string | null, sessionId: string): Promise<string | null> {
+  const headers = new Headers();
+  if (auth) headers.set("Authorization", auth);
+  const scoped = scopeWorkspaceOpencodeRequest(headers, "", directory);
+  try {
+    const response = await loopbackFetch(buildOpencodeProxyUrl(baseUrl, `/session/${encodeURIComponent(sessionId)}`, scoped.search), {
+      method: "GET",
+      headers: scoped.headers,
+      signal: AbortSignal.timeout(ENGINE_SESSION_CHECK_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      return null;
+    }
+    const session = await response.json() as { revert?: { messageID?: unknown } | null } | null;
+    return typeof session?.revert?.messageID === "string" ? session.revert.messageID : null;
+  } catch {
+    return null;
   }
 }
 
@@ -2361,6 +2384,19 @@ export async function proxyOpencodeRequest(input: {
       capture.archiveSessionStarted(uploadedSessionId, workspace.path, engineTarget(baseUrl, headers, search));
     }
   }
+  // A review or its fixes (command-events.ts), typed or from a button: an additive event of the chat's trace.
+  if (capture && captured && uploadedSessionId && isSessionCommandProxyRequest(method, proxyPath) && capture.hasSession(uploadedSessionId)) {
+    const event = commandEvent(body);
+    if (event) capture.recordCommand(uploadedSessionId, event.type, event.data);
+  }
+  // Undo of the last turn and its redo (command-events.ts) of a chat the uploader tracks: the revert
+  // point before it is read first; the engine's answer says what happened to each file.
+  const revertCall = capture?.uploadEnabled && workspace && workspace.workspaceType !== "remote"
+    ? revertRequest(method, normalizeOpencodeProxyPath(proxyPath))
+    : null;
+  const revertSessionId = revertCall ? decodeEngineRouteParam(revertCall.sessionId) : null;
+  const revertTracked = Boolean(revertSessionId && capture?.hasSession(revertSessionId));
+  const revertBefore = revertTracked && revertSessionId ? await engineRevertPoint(baseUrl, auth, directory, revertSessionId) : null;
   // The engine took a steer: its turn goes on (followed as before), and the steer's record is found in the background.
   const steered = (service: CaptureService, sessionId: string, target: EngineTarget) => {
     service.followSteer(sessionId, target);
@@ -2549,6 +2585,14 @@ export async function proxyOpencodeRequest(input: {
       if (workspace && response.ok) capture.observeSession(uploadedSessionId, engineTarget(served.baseUrl, served.headers, search));
     }
     if (capture?.uploadEnabled && deletedUploadedSessionId && response.ok) capture.sessionDeleted(deletedUploadedSessionId);
+    if (capture && revertCall && revertTracked && revertSessionId && response.ok) {
+      const service = capture;
+      const kind = revertCall.kind;
+      void response.clone().json().then((session: unknown) => {
+        const event = revertEvent(kind, session, revertBefore);
+        if (event) service.recordCommand(revertSessionId, event.type, event.data);
+      }).catch(() => undefined);
+    }
     return response;
   };
 

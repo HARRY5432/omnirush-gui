@@ -130,6 +130,8 @@ import { cn } from "@/lib/utils"
 import { DevProfiler } from "@/react-app/shell/dev-profiler"
 import { groupMessages, isMessageGroup, getLastTextPart, getAggregateOnlyParts, getAssistantRenderGroups, getFileTitle, getMediaBadge, getMessageCompleted, getMessageCreated, formatMessageTimestamp, splitTurnAtAnswer, type UIMessageWithIndex, getMessagesText, getSafeFileDownloadUrl, getSafeFileRevealPath } from "./utils"
 import type { AnyToolPart } from "@/lib/tool-aggregate"
+import { commandTemplateLabel, parseReviewReply } from "@/react-app/domains/session/commands/review-message"
+import { ReviewFixBar } from "@/react-app/domains/session/commands/review-fix-bar"
 import { resolveConnectorToolIdentity } from "@/react-app/domains/connections/connector-tool-identity"
 
 const SEARCH_HIGHLIGHT_MARK_CLASS = "rounded px-0.5 bg-amber-4/70 text-current"
@@ -740,6 +742,15 @@ const UserMessage = React.memo(
                   >
                     {inlineParts.map((part, index) => {
                       if (part.type === "text") {
+                        // A review or fix command arrives as its whole prompt: show the command the person ran.
+                        const command = commandTemplateLabel(part.text)
+                        if (command) {
+                          return (
+                            <span key={`text-${index}`} className="font-mono text-[13px]" title={part.text.slice(0, 2000)} data-command-label={command}>
+                              {command}
+                            </span>
+                          )
+                        }
                         return (
                           <span key={`text-${index}`} className="whitespace-pre-wrap">
                             {renderUserTextWithSkillChips(part.text, highlightQuery)}
@@ -1246,7 +1257,7 @@ function MessageGroup({
   isLastGroup,
   isStreaming,
 }: AssistantMessageGroupProps) {
-  const { onRevertToUserMessage, onForkAtMessage, showThinking } = useMessageList()
+  const { onRevertToUserMessage, onForkAtMessage, showThinking, onRunCommand } = useMessageList()
   const lastItem = items[items.length - 1]
   // Branch/revert must target a real server-side message id. Synthetic
   // client-side messages (e.g. session errors) don't exist on the server and
@@ -1261,6 +1272,11 @@ function MessageGroup({
   const renderableItems = getRenderableMessages(items)
   const lastTextMessage = getLastTextPart(lastItem.message)
   const mcpAppParts = collectMcpAppParts(items)
+  // A review reply with issues (the engine's review layout) offers "Fix these" while it is the newest reply.
+  const lastTextPart = lastTextMessage?.parts[0]
+  const review = onRunCommand && isLastGroup && !isStreaming && lastItem.message.role === "assistant" && lastTextPart?.type === "text"
+    ? parseReviewReply(lastTextPart.text)
+    : null
 
   // Leading messages without prose (tool/reasoning steps) render inline and
   // rely on the transcript's one scroll container. Tool activity must never
@@ -1445,6 +1461,9 @@ function MessageGroup({
           {/* <MessageSources messages={items.map((item) => item.message)} /> */}
         </div>
       )}
+      {review?.fixable && onRunCommand ? (
+        <ReviewFixBar review={review} onFix={() => onRunCommand("/fix")} />
+      ) : null}
       </div>
     </DevProfiler>
   )
