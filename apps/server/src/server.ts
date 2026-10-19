@@ -220,6 +220,7 @@ import { prepareDesktopInstallLog } from "./install-log-host.js";
 import pkg from "../package.json" with { type: "json" };
 import constants from "../../../constants.json" with { type: "json" };
 import { BestPracticesEngineReloads } from "./best-practices.js";
+import { AGENT_ASSIST_FEATURES, agentAssistFlags, agentAssistForced } from "./agent-assist-config.js";
 import { BUNDLED_ENGINE_VERSION } from "./engine-identity.js";
 import { createTurnActivity, type TurnActivity } from "./turn-activity.js";
 
@@ -4061,6 +4062,55 @@ function createRoutes(
       return jsonResponse({ ok: true, enabled, changed: result.changed, engine: { status } });
     } catch {
       return jsonResponse({ ok: true, enabled, changed: result.changed, engine: { status: "failed" } });
+    }
+  });
+
+  // Agent assist (agent-assist-config.ts): self-check, project notes, diagnostics, compaction.
+  addRoute(routes, "GET", "/runtime-config/agent-assist", "client", async () => {
+    const runtime = await readGlobalRuntimeOpencodeConfig(config);
+    return jsonResponse({ features: agentAssistFlags(runtime), forced: agentAssistForced() });
+  });
+
+  addRoute(routes, "PUT", "/runtime-config/agent-assist", "client", async (ctx) => {
+    ensureWritable(config);
+    requireClientScope(ctx, "collaborator");
+    const body = await readJsonBody(ctx.request);
+    const keys = Object.keys(body);
+    if (!keys.length || keys.some((key) => !(AGENT_ASSIST_FEATURES as readonly string[]).includes(key) || typeof body[key] !== "boolean")) {
+      throw new ApiError(400, "invalid_payload", `send one or more of ${AGENT_ASSIST_FEATURES.join(", ")} as booleans`);
+    }
+    const before = agentAssistFlags(await readGlobalRuntimeOpencodeConfig(config));
+    const result = await writeGlobalRuntimeOpencodeConfig(config, (current) => {
+      const next: Record<string, boolean> = { ...(current.agentAssist ?? {}) };
+      for (const key of keys) {
+        // On is the default: only "off" is saved.
+        if (body[key] === true) delete next[key];
+        else next[key] = false;
+      }
+      const { agentAssist: _old, ...rest } = current;
+      return Object.keys(next).length ? { ...rest, agentAssist: next } : rest;
+    });
+    const features = agentAssistFlags(await readGlobalRuntimeOpencodeConfig(config));
+    const forced = agentAssistForced();
+    try {
+      // The plugin's switch file and the engine config; only the language servers need the engine to reload.
+      await writeOmniRushRuntimeConfigFile(config);
+      if (before.diagnostics === features.diagnostics) {
+        return jsonResponse({ ok: true, features, forced, changed: result.changed, engine: { status: "applied" } });
+      }
+      const workspaces = config.workspaces.filter((workspace) => resolveWorkspaceOpencodeConnection(config, workspace).baseUrl?.trim());
+      const workspace = findManagedEngineWorkspace(workspaces) ?? workspaces[0];
+      if (!workspace) return jsonResponse({ ok: true, features, forced, changed: result.changed, engine: { status: "unconfigured" } });
+      const pool = enginePoolForConfig(config);
+      if (pool) {
+        const outcome = await pool.requestRollover({ reason: "agent_assist", workspace, manual: true });
+        const status = outcome.action === "coalesced" ? "deferred" : outcome.action === "skipped" ? "failed" : "applied";
+        return jsonResponse({ ok: true, features, forced, changed: result.changed, engine: { status } });
+      }
+      const status = await bestPracticesReloads.apply(workspaces);
+      return jsonResponse({ ok: true, features, forced, changed: result.changed, engine: { status } });
+    } catch {
+      return jsonResponse({ ok: true, features, forced, changed: result.changed, engine: { status: "failed" } });
     }
   });
 

@@ -1,3 +1,4 @@
+import { showAgentAssistToast } from "./agent-assist-toast";
 import type { UIMessage } from "ai";
 import { create } from "zustand";
 import type { FilePart, Part, PermissionRequest, PermissionV2Request, QuestionRequest, Session, SessionStatus, Todo } from "@opencode-ai/sdk/v2/client";
@@ -847,6 +848,8 @@ function upsertPart(messages: UIMessage[], messageId: string, partId: string, ne
 }
 
 function applyEvent(entry: SyncEntry, workspaceId: string, event: OpencodeEvent) {
+  // The engine's toasts: the agent assist plugin's notices (checks, project notes).
+  if (showAgentAssistToast(event as { type: string; properties?: unknown })) return;
   observeModelsTaskEvent(workspaceId, event);
   const queryClient = getReactQueryClient();
   const input = entry.input;

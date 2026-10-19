@@ -33,7 +33,9 @@ import {
   omnirushChromeDevtoolsPluginPath,
   omnirushPdfAttachmentsPluginPath,
   omnirushPluginPath,
+  omnirushAgentAssistPluginPath,
 } from "./omnirush-extensions-plugin-path.js";
+import { agentAssistFlags, agentAssistLspConfig, writeAgentAssistFile } from "./agent-assist-config.js";
 import type { ServerConfig } from "./types.js";
 import { runtimeStorageDir } from "./runtime-db.js";
 import {
@@ -176,6 +178,8 @@ function omnirushLeadingPluginPaths(): string[] {
     omnirushSwarmPluginPath(),
     // Buildathon projects only (the app lists them): the event's reproducibility rules.
     omnirushBuildathonPluginPath(),
+    // Self-check, project notes, diagnostics, compaction (agent-assist-config.ts); inert while all are off.
+    omnirushAgentAssistPluginPath(),
   ];
 }
 
@@ -228,7 +232,9 @@ export function buildOmniRushRuntimeConfigObjectFromSnapshot(
   // OMNIRUSH_APPROVALS in the server environment wins over the persisted setting.
   const permissions = legacyExecutionPermissions(runtimeConfig.managedPolicy?.execution, resolveApprovalMode(runtimeConfig, env).mode);
   const mcpPermission = { "mcp.*": "deny" };
-  const { managedPolicy: _managedPolicy, approvals: _approvals, bestPractices: _bestPractices, ...engineConfig } = runtimeConfig;
+  const { managedPolicy: _managedPolicy, approvals: _approvals, bestPractices: _bestPractices, agentAssist: _agentAssist, ...engineConfig } = runtimeConfig;
+  // Code diagnostics: the main languages' servers on, the rest off; the engine default (none) while off.
+  const lsp = agentAssistFlags(runtimeConfig, env).diagnostics ? agentAssistLspConfig() : undefined;
   const enabled = bestPracticesEnabled(runtimeConfig);
   const skillPaths = [
     ...(skillsDir ? [skillsDir] : []),
@@ -312,6 +318,7 @@ export function buildOmniRushRuntimeConfigObjectFromSnapshot(
       omnirushMcpPolicyPluginPath(),
     ],
     ...(disabledProviders.length ? { disabled_providers: disabledProviders } : {}),
+    ...(lsp ? { lsp } : {}),
     // MCP is a permanently disabled capability. The policy plugin also
     // strips project/global MCP entries that the engine discovers itself.
     mcp: {},
@@ -372,6 +379,8 @@ export async function writeOmniRushRuntimeConfigFile(
     if (bestPracticesEnabled(await readGlobalRuntimeOpencodeConfig(config))) {
       await writeBestPracticesSkills(config);
     }
+    // The agent assist plugin's switches: rewritten before the config, read by the plugin at its next hook.
+    await writeAgentAssistFile(config, agentAssistFlags(await readGlobalRuntimeOpencodeConfig(config))).catch(() => undefined);
     const content = await buildOmniRushRuntimeConfig(config);
     const current = await readFile(path, "utf8").catch(() => undefined);
     if (current === content) return { path, changed: false };

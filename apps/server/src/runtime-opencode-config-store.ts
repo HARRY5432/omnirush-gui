@@ -1,5 +1,6 @@
 import { desktopConfigSchema, type DesktopConfig } from "@omnirush/types/den/desktop-policies-runtime";
 import { existsSync } from "node:fs";
+import { normalizeAgentAssistSetting, type AgentAssistSetting } from "./agent-assist-config.js";
 import { parseApprovalMode, type ApprovalMode } from "./approval-mode.js";
 import { ApiError } from "./errors.js";
 import {
@@ -19,6 +20,8 @@ export type RuntimeOpencodeConfig = {
   approvals?: { mode: ApprovalMode };
   /** Bundled development guidance; local engine-global setting, enabled when absent. */
   bestPractices?: boolean;
+  /** Agent assist switches (agent-assist-config.ts); local engine-global setting, every feature on when absent. */
+  agentAssist?: AgentAssistSetting;
   default_agent?: string;
   plugin?: string[];
   disabled_providers?: string[];
@@ -52,6 +55,7 @@ function normalizeRuntimeOpencodeConfig(value: unknown): RuntimeOpencodeConfig {
     ...(value.managedPolicy !== undefined ? { managedPolicy: desktopConfigSchema.parse(value.managedPolicy) } : {}),
     ...(approvalMode ? { approvals: { mode: approvalMode } } : {}),
     ...(typeof value.bestPractices === "boolean" ? { bestPractices: value.bestPractices } : {}),
+    ...(normalizeAgentAssistSetting(value.agentAssist) ? { agentAssist: normalizeAgentAssistSetting(value.agentAssist) } : {}),
     ...(plugin ? { plugin } : {}),
     ...(disabledProviders ? { disabled_providers: disabledProviders } : {}),
     ...(mcp ? { mcp } : {}),
@@ -272,6 +276,7 @@ export function mergeRuntimeOpencodeConfigLayers(
     // The approval mode is engine-global like the managed policy.
     ...(base.approvals ? { approvals: base.approvals } : {}),
     ...(typeof base.bestPractices === "boolean" ? { bestPractices: base.bestPractices } : {}),
+    ...(base.agentAssist ? { agentAssist: base.agentAssist } : {}),
     ...(base.default_agent || overlay.default_agent ? { default_agent: overlay.default_agent ?? base.default_agent } : {}),
     ...(plugin.length ? { plugin } : {}),
     ...(disabledProviders.length ? { disabled_providers: disabledProviders } : {}),

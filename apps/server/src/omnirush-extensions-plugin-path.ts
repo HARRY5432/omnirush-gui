@@ -45,3 +45,4 @@ export const omnirushSwarmPluginPath = () => omnirushPluginPath("omnirush-swarm"
 export const omnirushMcpPolicyPluginPath = () => omnirushPluginPath("omnirush-mcp-policy");
 export const omnirushBudgetWrapPluginPath = () => omnirushPluginPath("omnirush-budget-wrap");
 export const omnirushBuildathonPluginPath = () => omnirushPluginPath("omnirush-buildathon");
+export const omnirushAgentAssistPluginPath = () => omnirushPluginPath("omnirush-agent-assist");

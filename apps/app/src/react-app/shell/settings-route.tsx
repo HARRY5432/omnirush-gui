@@ -86,6 +86,7 @@ import { isOmniRushExtensionEnabled, OMNIRUSH_EXTENSION_STATE_CHANGED } from "@/
 import { PreferencesView } from "@/react-app/domains/settings/pages/preferences-view";
 import { GeneralSettingsView } from "@/react-app/domains/settings/pages/general-view";
 import type { BestPracticesClient } from "@/react-app/domains/settings/best-practices";
+import type { AgentAssistClient } from "@/react-app/domains/settings/agent-assist";
 import { AuthorizedFoldersPanel } from "@/react-app/domains/settings/panels/authorized-folders-panel";
 import { BrowserLoginsPanel } from "../domains/browser-logins/browser-logins-panel";
 import { EffectivePermissionsPanel } from "@/react-app/domains/settings/panels/effective-permissions-panel";
@@ -514,7 +515,7 @@ function SettingsRouteContent(props: SettingsSurfaceProps = {}) {
   const [baseUrl, setBaseUrl] = useState("");
   const [token, setToken] = useState("");
   const [omnirushClient, setOmniRushClient] = useState<OmniRushServerClient | null>(null);
-  const [bestPracticesClient, setBestPracticesClient] = useState<BestPracticesClient | null>(null);
+  const [bestPracticesClient, setBestPracticesClient] = useState<(BestPracticesClient & AgentAssistClient) | null>(null);
   const [activeClient, setActiveClient] = useState<Client | null>(null);
   const [busy, setBusy] = useState(false);
   const [busyLabel, setBusyLabel] = useState<string | null>(null);
@@ -2285,6 +2286,7 @@ function SettingsRouteContent(props: SettingsSurfaceProps = {}) {
             developerMode={developerMode}
             omnirushClient={omnirushClient}
             bestPracticesClient={bestPracticesClient}
+            agentAssistClient={bestPracticesClient}
             runtimeWorkspaceId={runtimeWorkspaceId}
             linuxSandboxClient={omnirushClient}
             sandboxWorkspaceId={selectedWorkspaceId || runtimeWorkspaceId}
