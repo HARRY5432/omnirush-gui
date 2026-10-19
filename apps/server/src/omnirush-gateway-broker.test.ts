@@ -928,6 +928,51 @@ describe("upstream stream guard with recorded Muse streams", () => {
     }
   });
 
+  test("a final refusal inside the stream ends the turn once, its code and error.omnirush in param", async () => {
+    const created = 'event: response.created\ndata: {"response":{"id":"resp_1"},"sequence_number":0,"type":"response.created"}\n\n';
+    const frames = async (frame: string) => eventPayloads((await replayStream(new TextEncoder().encode(created + frame), 32)).text);
+    type Frame = { type: string; sequence_number: number; error: { type: string; code: string; message: string; param: string; omnirush?: unknown } };
+    // The request policy cutting a relayed stream (parallel enforce).
+    const policy = { code: "request_policy_refused", retry: false };
+    const cut = `event: error\ndata: ${JSON.stringify({ type: "error", sequence_number: 3, detail: "request_policy_refused", error: { type: "invalid_request_error", code: "omnirush.ai", message: "OmniRush can't help with this request.", omnirush: policy } })}\n\n`;
+    const cutFrame = (await frames(cut))[1] as Frame;
+    // invalid_prompt: the one stream error code the engine shows and never retries (provider/error.ts).
+    expect(cutFrame).toMatchObject({ type: "error", sequence_number: 3, error: { type: "invalid_request_error", code: "invalid_prompt", message: "OmniRush can't help with this request.", omnirush: policy } });
+    // The engine's AI SDK keeps only type, code, message and param of a stream error: the rest rides in param.
+    expect(JSON.parse(cutFrame.error.param)).toEqual({ code: "omnirush.ai", detail: "request_policy_refused", omnirush: policy });
+    // An older gateway's cut (no object) and the model's own safety check end the same way.
+    const older = `event: error\ndata: ${JSON.stringify({ type: "error", sequence_number: 3, detail: "request_policy_refused", error: { type: "invalid_request_error", code: "omnirush.ai", message: "No." } })}\n\n`;
+    expect(JSON.parse(((await frames(older))[1] as Frame).error.param)).toEqual({ code: "omnirush.ai", detail: "request_policy_refused" });
+    const cyber = `event: error\ndata: ${JSON.stringify({ type: "error", sequence_number: 4, error: { type: "invalid_request", code: "cyber_policy", message: "This content was flagged for possible cybersecurity risk.", param: null } })}\n\n`;
+    const cyberFrame = (await frames(cyber))[1] as Frame;
+    expect(cyberFrame.error).toMatchObject({ code: "invalid_prompt", message: "This content was flagged for possible cybersecurity risk." });
+    expect(JSON.parse(cyberFrame.error.param)).toEqual({ code: "cyber_policy" });
+
+    // Tokens spent after the early commit: the app's copy; a timing field that spells a retry pattern is left out of param.
+    const tokens = { code: "limit_tokens", scope: "day", resets_at: "2026-10-20T00:00:00Z", retry: false, retry_after: 15000 };
+    const spent = `event: error\ndata: ${JSON.stringify({ type: "error", sequence_number: -1, error: { type: "invalid_request_error", code: "daily_grant_exhausted", message: "OmniRush could not complete this request (daily_grant_exhausted).", omnirush: tokens } })}\n\n`;
+    const spentFrame = (await frames(spent))[1] as Frame;
+    expect(spentFrame.error.code).toBe("invalid_prompt");
+    expect(spentFrame.error.message).toStartWith("omnirush.ai: you have used today's model allowance");
+    expect(JSON.parse(spentFrame.error.param)).toEqual({ code: "daily_grant_exhausted", omnirush: { code: "limit_tokens", scope: "day", resets_at: "2026-10-20T00:00:00Z", retry: false } });
+    for (const frame of [cutFrame, cyberFrame, spentFrame]) {
+      expect(/429|500|502|503|504|524|retry your request|try again/i.test(JSON.stringify(frame))).toBe(false);
+    }
+
+    // Retryable ones: a queue timeout still ends the turn with its own copy; a busy model stays retryable, its object in param.
+    const queued = { code: "queue_timeout", retry: true, retry_after: 15 };
+    const queue = `event: error\ndata: ${JSON.stringify({ type: "error", sequence_number: -1, error: { type: "server_error", code: "omni_queue_timeout", message: "x", omnirush: queued } })}\n\n`;
+    expect((await frames(queue))[1]).toMatchObject({ error: { code: "invalid_prompt", param: "omni_queue_timeout", omnirush: queued } });
+    const busy = { code: "limit_concurrency", scope: "model", retry: true };
+    const flat = `event: error\ndata: ${JSON.stringify({ error: { code: "model_concurrency_limited", message: "busy", omnirush: busy } })}\n\n`;
+    const busyFrame = (await frames(flat))[1] as Frame;
+    expect(busyFrame).toMatchObject({ type: "error", error: { code: "model_concurrency_limited", omnirush: busy } });
+    expect(JSON.parse(busyFrame.error.param)).toEqual({ omnirush: busy });
+    // A frame with its own param and nothing final keeps it.
+    const own = `event: error\ndata: ${JSON.stringify({ type: "error", sequence_number: 3, error: { type: "server_error", code: "x", message: "No.", param: "input", omnirush: busy } })}\n\n`;
+    expect((await frames(own))[1]).toMatchObject({ error: { param: "input", omnirush: busy } });
+  });
+
   test("a relay error frame that was not rewritten becomes one the engine parses", async () => {
     const created = 'event: response.created\ndata: {"response":{"id":"resp_1"},"sequence_number":0,"type":"response.created"}\n\n';
     const relay = 'event: error\ndata: {"error":{"code":"idle_timeout","message":"Upstream stopped sending data","request_id":"req_1","type":"timeout"}}\n\n';
@@ -980,10 +1025,11 @@ describe("readable gateway errors", () => {
   }
 
   test("turn the backend's and the relay's refusal codes into copy the engine shows, keeping status and Retry-After", async () => {
-    const cases: Array<{ status: number; body: unknown; headers?: Record<string, string>; code: string; copy: string }> = [
+    const cases: Array<{ status: number; body: unknown; headers?: Record<string, string>; code: string; copy: string; shown?: number }> = [
       { status: 400, body: { detail: "model_unavailable" }, code: "model_unavailable", copy: "not available on your account" },
       { status: 429, body: { detail: "model_concurrency_limited" }, headers: { "retry-after": "5" }, code: "model_concurrency_limited", copy: "Wait for one to finish" },
-      { status: 429, body: { detail: "daily_grant_exhausted" }, code: "daily_grant_exhausted", copy: "today's model allowance" },
+      // Final: a 403 the engine does not retry (the gateway's 429 in x-omnirush-gateway-status).
+      { status: 429, body: { detail: "daily_grant_exhausted" }, code: "daily_grant_exhausted", copy: "today's model allowance", shown: 403 },
       { status: 502, body: { detail: "model_upstream_auth_failed" }, code: "model_upstream_auth_failed", copy: "temporarily unavailable" },
       {
         status: 503,
@@ -1003,7 +1049,7 @@ describe("readable gateway errors", () => {
     for (const entry of cases) {
       const response = await refusingBroker(entry.status, JSON.stringify(entry.body), { "content-type": "application/json", ...entry.headers })
         .handle(gatewayRequest({ model: "meta-muse-spark", input: "hi", stream: true }), "responses");
-      expect([entry.code, response.status]).toEqual([entry.code, entry.status]);
+      expect([entry.code, response.status]).toEqual([entry.code, entry.shown ?? entry.status]);
       expect(response.headers.get("retry-after")).toBe(entry.headers?.["retry-after"] ?? null);
       const payload = await response.json() as { error: { message: string; code: string } };
       expect(payload.error.code).toBe(entry.code);
@@ -1056,8 +1102,10 @@ describe("readable gateway errors", () => {
 
     const resetsAt = new Date(Date.now() + 3 * 3_600_000).toISOString();
     const day = await spent({ "x-omnirush-grant-scope": "day", "x-omnirush-grant-resets-at": resetsAt });
-    expect(day.status).toBe(429);
-    // The engine would otherwise resend it ten times, a Retry-After apart.
+    // The engine retries any 429 after its Retry-After and never reads
+    // x-should-retry: a final refusal reaches it as a 403.
+    expect(day.status).toBe(403);
+    expect(day.headers.get("x-omnirush-gateway-status")).toBe("429");
     expect(day.headers.get("x-should-retry")).toBe("false");
     expect(day.headers.get("retry-after")).toBe("60");
     expect(day.headers.get("x-omnirush-grant-scope")).toBe("day");
@@ -1080,6 +1128,91 @@ describe("readable gateway errors", () => {
     expect((await older.json() as { error: { message: string } }).error.message).toBe(
       "omnirush.ai: you have used today's model allowance. It refills at 00:00 UTC.",
     );
+  });
+
+  test("error.omnirush passes through unchanged where the broker rewrites the error", async () => {
+    const tokens = { code: "limit_tokens", scope: "day", resets_at: "2026-10-20T00:00:00Z", retry: false, retry_after: 10800 };
+    const spent = await refusingBroker(429, JSON.stringify({ detail: "daily_grant_exhausted", error: { code: "daily_grant_exhausted", omnirush: tokens } }), {
+      "content-type": "application/json", "retry-after": "10800", "x-should-retry": "false", "x-omnirush-grant-scope": "day", "x-omnirush-grant-resets-at": tokens.resets_at,
+    }).handle(gatewayRequest({ model: "gpt-6-astra", input: "hi", stream: true }), "responses");
+    expect([spent.status, spent.headers.get("x-omnirush-gateway-status"), spent.headers.get("retry-after")]).toEqual([403, "429", "10800"]);
+    expect(spent.headers.get("x-should-retry")).toBe("false");
+    const spentError = (await spent.json() as { error: { code: string; message: string; omnirush: unknown } }).error;
+    expect(spentError.code).toBe("daily_grant_exhausted");
+    expect(spentError.message).toStartWith("omnirush.ai: today's tokens are used up.");
+    expect(spentError.omnirush).toEqual(tokens);
+
+    const policy = { code: "request_policy_refused", retry: false };
+    const refused = await refusingBroker(403, JSON.stringify({ error: { type: "invalid_request_error", code: "request_policy_refused", message: "omnirush.ai: OmniRush can't help with this request.", guide_url: "", omnirush: policy } }), {
+      "content-type": "application/json", "x-should-retry": "false",
+    }).handle(gatewayRequest({ model: "gpt-6-astra", input: "hi" }), "responses");
+    expect(refused.status).toBe(403);
+    expect(refused.headers.get("x-should-retry")).toBe("false");
+    expect((await refused.json() as { error: { omnirush: unknown } }).error.omnirush).toEqual(policy);
+
+    // Retryable limits keep their Retry-After and are not marked final.
+    const busy = { code: "limit_concurrency", scope: "account", retry: true, retry_after: 5 };
+    const concurrent = await refusingBroker(429, JSON.stringify({ detail: "too_many_concurrent_requests", error: { code: "too_many_concurrent_requests", omnirush: busy } }), {
+      "content-type": "application/json", "retry-after": "5",
+    }).handle(gatewayRequest({ model: "gpt-6-astra", input: "hi" }), "responses");
+    expect([concurrent.status, concurrent.headers.get("retry-after"), concurrent.headers.get("x-should-retry")]).toEqual([429, "5", null]);
+    expect((await concurrent.json() as { error: { omnirush: unknown } }).error.omnirush).toEqual(busy);
+    const queued = { code: "queue_timeout", retry: true, retry_after: 15 };
+    const queue = await refusingBroker(503, JSON.stringify({ detail: "omni_queue_timeout", error: { code: "omni_queue_timeout", omnirush: queued } }), {
+      "content-type": "application/json", "retry-after": "15",
+    }).handle(gatewayRequest({ model: "gpt-6-astra", input: "hi" }), "responses");
+    expect((await queue.json() as { error: { omnirush: unknown } }).error.omnirush).toEqual(queued);
+  });
+
+  test("a streamed refusal keeps error.omnirush in its 403", async () => {
+    const sse = { "content-type": "text/event-stream", "x-should-retry": "false" };
+    for (const [detail, omnirush] of [
+      ["request_policy_refused", { code: "request_policy_refused", retry: false }],
+      ["session_quality_cap", { code: "limit_session_cap", scope: "session", retry: false }],
+    ] as const) {
+      const message = "OmniRush can't help with this request.";
+      const frame = `event: error\ndata: ${JSON.stringify({ type: "error", sequence_number: -1, detail, error: { type: "invalid_request_error", code: "omnirush.ai", message, omnirush } })}\n\n`;
+      const response = await refusingBroker(200, frame, sse).handle(gatewayRequest({ model: "gpt-6-astra", input: "hi", stream: true }), "responses");
+      expect(response.status).toBe(403);
+      expect(response.headers.get("x-should-retry")).toBe("false");
+      expect(await response.json()).toEqual({ error: { message, type: "invalid_request_error", code: detail, omnirush } });
+    }
+  });
+
+  test("an error the gateway marks final is never marked for a resend", async () => {
+    // A code the broker has no copy for, final by its object or by the header.
+    const body = JSON.stringify({ error: { type: "invalid_request_error", code: "something_new", message: "No.", omnirush: { code: "something_new", retry: false } } });
+    const byObject = await refusingBroker(400, body).handle(gatewayRequest({ model: "gpt-6-astra", input: "hi" }), "responses");
+    expect(byObject.headers.get("x-should-retry")).toBe("false");
+    expect(await byObject.text()).toBe(body);
+    const byHeader = await refusingBroker(400, JSON.stringify({ detail: "model_unavailable" }), { "content-type": "application/json", "x-should-retry": "false" })
+      .handle(gatewayRequest({ model: "gpt-6-astra", input: "hi" }), "responses");
+    expect(byHeader.headers.get("x-should-retry")).toBe("false");
+    // retry: true, or no object at all (an older gateway), changes nothing.
+    const retryable = await refusingBroker(429, JSON.stringify({ detail: "rate_limited", error: { code: "rate_limited", omnirush: { code: "limit_rate", scope: "account", retry: true } } }), { "content-type": "application/json", "retry-after": "12" })
+      .handle(gatewayRequest({ model: "gpt-6-astra", input: "hi" }), "responses");
+    expect(retryable.headers.get("x-should-retry")).toBeNull();
+    const older = await refusingBroker(400, JSON.stringify({ detail: "model_unavailable" })).handle(gatewayRequest({ model: "gpt-6-astra", input: "hi" }), "responses");
+    expect(older.headers.get("x-should-retry")).toBeNull();
+  });
+
+  test("a final refusal never spells what the engine retries on, and keeps code, scope and retry", async () => {
+    // retry_after 15000 holds "500", one of the engine's retry patterns.
+    const tokens = { code: "limit_tokens", scope: "day", resets_at: "2026-10-20T00:00:00.500Z", retry: false, retry_after: 15000 };
+    const spent = await refusingBroker(429, JSON.stringify({ detail: "daily_grant_exhausted", error: { code: "daily_grant_exhausted", omnirush: tokens } }), {
+      "content-type": "application/json", "retry-after": "15000", "x-should-retry": "false", "x-omnirush-grant-scope": "day", "x-omnirush-grant-resets-at": tokens.resets_at,
+    }).handle(gatewayRequest({ model: "gpt-6-astra", input: "hi" }), "responses");
+    const text = await spent.text();
+    expect(/429|500|502|503|504|524/.test(text)).toBe(false);
+    expect((JSON.parse(text) as { error: { omnirush: unknown } }).error.omnirush).toEqual({ code: "limit_tokens", scope: "day", retry: false });
+    // The timing is still in the headers.
+    expect([spent.headers.get("retry-after"), spent.headers.get("x-omnirush-grant-resets-at")]).toEqual(["15000", tokens.resets_at]);
+    // A retryable limit keeps its 429 and every field.
+    const rate = { code: "limit_rate", scope: "account", retry: true, retry_after: 1500 };
+    const limited = await refusingBroker(429, JSON.stringify({ detail: "rate_limited", error: { code: "rate_limited", omnirush: rate } }), { "content-type": "application/json", "retry-after": "1500" })
+      .handle(gatewayRequest({ model: "gpt-6-astra", input: "hi" }), "responses");
+    expect(limited.status).toBe(429);
+    expect((await limited.json() as { error: { omnirush: unknown } }).error.omnirush).toEqual(rate);
   });
 
   test("grant copy on the user's clock: local time, then how long until it", () => {
@@ -1360,7 +1493,7 @@ describe("OmniRush gateway broker: sub-agent model fallback", () => {
   test("account-wide refusals, other errors and requests without the header pass through untouched", async () => {
     const account = fallbackBroker(() => refuse(429, "daily_grant_exhausted"));
     const refused = await account.broker.handle(gatewayRequest({ model: "gpt-6-sol", input: "a" }, subagentHeaders), "responses");
-    expect(refused.status).toBe(429);
+    expect(refused.status).toBe(403);
     expect(account.calls).toHaveLength(1);
     expect(((await refused.json()) as { error: { code: string } }).error.code).toBe("daily_grant_exhausted");
 
@@ -1372,6 +1505,16 @@ describe("OmniRush gateway broker: sub-agent model fallback", () => {
     expect((await same.broker.handle(gatewayRequest({ model: "gpt-6-astra", input: "a" }, subagentHeaders), "responses")).status).toBe(400);
     expect(same.calls).toHaveLength(1);
     expect(same.events).toEqual([]);
+  });
+
+  test("a sub-agent refusal the gateway marks final is not moved to the main model", async () => {
+    const final = fallbackBroker(() => Response.json({ detail: "model_concurrency_limited", error: { code: "model_concurrency_limited", omnirush: { code: "limit_concurrency", scope: "model", retry: false } } }, { status: 429 }));
+    expect((await final.broker.handle(gatewayRequest({ model: "gpt-6-sol", input: "a" }, subagentHeaders), "responses")).status).toBe(403);
+    expect(final.calls).toHaveLength(1);
+    const marked = fallbackBroker(() => Response.json({ detail: "model_unavailable" }, { status: 400, headers: { "x-should-retry": "false" } }));
+    expect((await marked.broker.handle(gatewayRequest({ model: "gpt-6-sol", input: "a" }, subagentHeaders), "responses")).status).toBe(400);
+    expect(marked.calls).toHaveLength(1);
+    expect(marked.events).toEqual([]);
   });
 
   test("when the main model refuses too, its error reaches the engine readably", async () => {
