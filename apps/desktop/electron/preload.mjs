@@ -357,6 +357,18 @@ ipcRenderer.on("omnirush:placements:window", (_event, detail) => {
   window.dispatchEvent(new CustomEvent("omnirush:placements:window", { detail }));
 });
 
+// Help > Send Feedback… (app-menu.mjs): the window opens its feedback dialog.
+ipcRenderer.on("omnirush:native-menu:send-feedback", () => {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new Event("omnirush:native-menu:send-feedback"));
+});
+
+// In-app feedback (feedback-desktop.mjs EVENT_CHANNEL): { name, properties } for the app's analytics (labels only).
+ipcRenderer.on("omnirush:feedback:event", (_event, detail) => {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent("omnirush:feedback:event", { detail }));
+});
+
 ipcRenderer.on(NATIVE_MENU_ZOOM_EVENT, (_event, action) => {
   if (typeof window === "undefined") return;
   window.dispatchEvent(new CustomEvent(NATIVE_MENU_ZOOM_EVENT, { detail: action }));

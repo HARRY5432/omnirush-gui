@@ -101,6 +101,7 @@ import { QuestionPanel } from "@/react-app/domains/session/modals/question-modal
 import { QueuedMessagesPanel } from "@/react-app/domains/session/modals/queued-messages-panel";
 import { GoodSessionChecklistBar, noteUserStop } from "@/react-app/domains/quality/good-session";
 import { PlacementTurnFooter } from "@/react-app/domains/placements/placements";
+import { FeedbackTurnPrompt } from "@/react-app/domains/feedback/feedback";
 import { deriveOpenTargets, sameOpenTargets, selectAutoOpenTarget, type OpenTarget } from "@/react-app/domains/session/artifacts/open-target";
 import { usePanelTabStore } from "@/react-app/domains/session/panel/panel-tab-store";
 import {
@@ -3399,6 +3400,18 @@ export function SessionSurface(props: SessionSurfaceProps) {
                 </OpenTargetProvider>
               </DevProfiler>
             )}
+            {/* In-app feedback: under the last answer, drawn beside the transcript (never one of its messages). */}
+            <FeedbackTurnPrompt
+              sessionId={props.sessionId}
+              messages={renderedMessages}
+              turnRunning={chatStreaming || (effectiveActivityStatus !== "idle" && effectiveActivityStatus !== "error")}
+              draft={draft}
+              modelId={sessionModel.selectedModel?.modelID ?? null}
+              effort={sessionModel.modelVariant ?? null}
+              queuedCount={queuedItems.length}
+              askable={!currentSnapshot?.session.parentID && !(currentSnapshot?.session.title ?? "").startsWith("Automation: ")}
+              onDone={() => composerShellRef.current?.querySelector<HTMLElement>("[contenteditable=true]")?.focus()}
+            />
             {admissionOutcomeUnresolved && queuedDrainState.phase.kind !== "admission_unknown" && renderedMessages.length > 0 ? (
               <AdmissionOutcomeUnknownCard
                 resuming={resuming}

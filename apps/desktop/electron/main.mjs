@@ -76,6 +76,7 @@ import {
 import { resolveConnectLinkPublicKeys } from "./connect-link-keys.mjs";
 import { openExternalUrl } from "./open-external.mjs";
 import { createDesktopPlacements, watchWindowForPlacements } from "./placements-desktop.mjs";
+import { createDesktopFeedback, EVENT_CHANNEL as FEEDBACK_EVENT_CHANNEL } from "./feedback-desktop.mjs";
 import { classifyLocalOpen, isNetworkPath, localPathFromFileUrl } from "./open-local-path.mjs";
 import { resolveAppIdentifier, resolveUserDataPath } from "./dev-profile.mjs";
 import { fetchAgentContextDiagnosticsResponse } from "./agent-context-diagnostics-fetch.mjs";
@@ -1417,6 +1418,26 @@ const desktopPlacements = createDesktopPlacements({
   openUrl: (url) => openExternalUrl(url),
 });
 
+// In-app feedback (feedback-desktop.mjs): "Send feedback" anytime, and a
+// quiet, sampled "How was this?" after a finished turn when the server's
+// policy turns it on. Its two analytics events go to the window's analytics.
+const desktopFeedback = createDesktopFeedback({
+  request: (pathAndQuery, init) => omnirushAccountStore.feedbackRequest(pathAndQuery, init),
+  accountId: () => omnirushAccountStore.accountId(),
+  userDataPath: app.getPath("userData"),
+  version: app.getVersion(),
+  packaged: app.isPackaged,
+  devMode: isDevMode,
+  // Only the app window (never a browser panel or a preview window).
+  emit: (name, properties) => {
+    try {
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send(FEEDBACK_EVENT_CHANNEL, { name, properties });
+    } catch {
+      /* closing */
+    }
+  },
+});
+
 function omnirushUiMcpLaunch() {
   return resolveOmniRushUiMcpLaunch({
     devMode: process.env.OMNIRUSH_DEV_MODE === "1",
@@ -2426,6 +2447,25 @@ const desktopCommandHandlers = {
   "omnirushPlacementAction": async (event, ...args) => {
       return desktopPlacements.action(args[0] && typeof args[0] === "object" ? args[0] : {}).catch(() => ({ ok: false }));
   },
+  // In-app feedback: never an error to the window (null / { ok: false } instead).
+  "omnirushFeedbackPolicy": async (event) => {
+      return desktopFeedback.policy();
+  },
+  "omnirushFeedbackStatus": async (event) => {
+      return desktopFeedback.status();
+  },
+  "omnirushFeedbackSessionStarted": async (event, ...args) => {
+      return desktopFeedback.sessionStarted(args[0] && typeof args[0] === "object" ? args[0] : {});
+  },
+  "omnirushFeedbackOffer": async (event, ...args) => {
+      return desktopFeedback.offer(args[0] && typeof args[0] === "object" ? args[0] : {});
+  },
+  "omnirushFeedbackShown": async (event, ...args) => {
+      return desktopFeedback.shown(args[0] && typeof args[0] === "object" ? args[0] : {});
+  },
+  "omnirushFeedbackSubmit": async (event, ...args) => {
+      return desktopFeedback.submit(args[0] && typeof args[0] === "object" ? args[0] : {});
+  },
   // Buildathon: shown only to enrolled accounts; every failure is a null
   // (or a "retry"), never a thrown error, so the app quietly shows nothing.
   "omnirushBuildathon": async (event) => {
@@ -3327,6 +3367,7 @@ or use: pnpm dev:worktree`);
     browserLoginSync.shutdown();
     // The queued placement events: best effort, never waited for (the rest go next start).
     void desktopPlacements.stop().catch(() => undefined);
+    void desktopFeedback.stop().catch(() => undefined);
     // The uploads finish as the services stop: the computer stays awake for them.
     const releaseKeepAwake = keepAwake.hold();
     runDetachedTask("stop services before quit", async () => {
@@ -3459,6 +3500,7 @@ or use: pnpm dev:worktree`);
     const win = await createMainWindow();
     // In the background: the window never waits for it.
     desktopPlacements.start();
+    void desktopFeedback.start();
     if (startReset.ran && startReset.moved.length > 0) {
       runDetachedTask("show app data reset notice", async () => {
         const { response } = await dialog.showMessageBox(win, {

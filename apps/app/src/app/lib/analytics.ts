@@ -252,8 +252,20 @@ export function attributionSurveyProperties(source: string, aiPrompt?: string | 
 // sync) emit nothing.
 const taskRunStarts = new Map<string, number>();
 
+// The last prompt this window sent per session (kept after the run ends):
+// in-app feedback only asks about turns a person started here, never about
+// Workflows, automations or sub-agents.
+const promptsSentHere = new Map<string, number>();
+
 export function markTaskRunStart(sessionId: string) {
-  if (sessionId.trim()) taskRunStarts.set(sessionId, Date.now());
+  if (!sessionId.trim()) return;
+  taskRunStarts.set(sessionId, Date.now());
+  promptsSentHere.set(sessionId, Date.now());
+}
+
+/** When this window last sent a prompt to `sessionId` (ms), or null. */
+export function promptSentHereAt(sessionId: string): number | null {
+  return promptsSentHere.get(sessionId) ?? null;
 }
 
 export function takeTaskRunStart(sessionId: string): number | null {

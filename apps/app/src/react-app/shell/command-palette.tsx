@@ -28,6 +28,8 @@ import {
 } from "@/components/ui/command";
 import { Button } from "@/components/ui/button";
 import { DEFAULT_FEEDBACK_URL } from "@/app/lib/feedback";
+import { openFeedbackDialog } from "@/app/lib/in-app-feedback";
+import { isDesktopRuntime } from "@/app/utils";
 import { ChevronLeftIcon } from "lucide-react";
 import type { ModelOption, ModelRef } from "@/app/types";
 import { useCheckDesktopRestriction } from "../domains/cloud/desktop-config-provider";
@@ -354,11 +356,13 @@ export function CommandPalette(props: CommandPaletteProps) {
       id: "open-feedback",
       title: t("session.support_feedback"),
       meta: t("session.cmd_settings_meta"),
-      keywords: ["feedback", "issue", "bug", "support"],
+      keywords: ["feedback", "issue", "bug", "idea", "support", "report"],
       group: ACTIONS_GROUP,
       action: () => {
         props.onClose();
-        openUrl(DEFAULT_FEEDBACK_URL);
+        // The desktop sends it to the OmniRush team (in-app); elsewhere the public issue form.
+        if (isDesktopRuntime()) openFeedbackDialog({ trigger: "command", sessionId: props.currentSession?.sessionId ?? null });
+        else openUrl(DEFAULT_FEEDBACK_URL);
       },
     },
   ], [accessibleTargetCount, canMoveCurrentSessionToGroup, hasNestedModelPicker, props, sessionGroupCount, sessionNumberHelp]);

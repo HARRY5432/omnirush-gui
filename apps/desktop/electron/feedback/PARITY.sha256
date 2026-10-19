@@ -1,0 +1,3 @@
+# In-app feedback: the same file in omnirush-cli (assets/extensions/omnirush/feedback/)
+# and omnirush-gui (apps/desktop/electron/feedback/). A change to one must be ported to the other and this list updated in both.
+d01100f7db4243ea4b26b1c17664d2154809649416cabc064bda0fdc4876fa33  feedback.mjs

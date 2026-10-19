@@ -672,6 +672,8 @@ export function createDesktopOmniRushAccountStore({
    * server-driven sign-out lands afterwards.
    */
   async function save(credentials) {
+    // A new or renewed sign-in: the account is read again (accountId).
+    knownAccountId = null;
     const normalized = validCredentials(credentials);
     if (!normalized) throw new Error("Invalid OmniRush account credential bundle");
     if (clearInFlight) {
@@ -988,6 +990,30 @@ export function createDesktopOmniRushAccountStore({
    * expired while the app was idle, so a second one is allowed before the
    * session counts as gone.
    */
+  /** The signed-in account's id (from /device/me), remembered until the sign-in changes. */
+  let knownAccountId = null;
+
+  /**
+   * The signed-in account's opaque id, or null when signed out or unknown
+   * (feedback-desktop.mjs: queued feedback goes only under its account).
+   * @returns {Promise<string | null>}
+   */
+  async function accountId() {
+    const credentials = await load().catch(() => null);
+    if (!credentials) {
+      knownAccountId = null;
+      return null;
+    }
+    if (knownAccountId) return knownAccountId;
+    try {
+      const profile = await fetchProfile(credentials, 1);
+      knownAccountId = profile?.accountId ?? null;
+    } catch {
+      return null;
+    }
+    return knownAccountId;
+  }
+
   async function fetchProfile(credentials, refreshesLeft = 2, sessionId = null) {
     const profileUrl = controlPlaneBase(credentials.gatewayUrl);
     profileUrl.pathname += "/device/me";
@@ -1343,6 +1369,30 @@ export function createDesktopOmniRushAccountStore({
   }
 
   /**
+   * One in-app feedback call (feedback-desktop.mjs): like placementsRequest,
+   * but `data` is the JSON of any answer (a 422 names its wrong fields) and
+   * `retryAfter` the Retry-After seconds (a 429 lasts until 00:00 UTC), or
+   * null. Resolves null while signed out; throws on network errors and
+   * timeouts.
+   * @param {string} pathAndQuery
+   * @param {{ method?: string, body?: unknown, timeoutMs?: number }} [init]
+   * @returns {Promise<{ status: number, data: any, retryAfter: number | null } | null>}
+   */
+  async function feedbackRequest(pathAndQuery, { method = "GET", body = undefined, timeoutMs = 2_000 } = {}) {
+    const [pathname, query = ""] = String(pathAndQuery).split("?");
+    const response = await sendAuthorized(`${pathname}`, {
+      method,
+      ...(body !== undefined ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {}),
+      signal: AbortSignal.timeout(timeoutMs),
+    }, 1, undefined, query);
+    if (!response) return null;
+    const data = await response.json().catch(() => null);
+    const header = response.headers.get("retry-after");
+    const seconds = header !== null && header.trim() !== "" ? Number(header) : NaN;
+    return { status: response.status, data, retryAfter: Number.isFinite(seconds) && seconds >= 0 ? seconds : null };
+  }
+
+  /**
    * Join the event from the app (POST /me/buildathon/join; only offered when
    * the promo says `join: true`). The answer is the enrolled status.
    * @returns {Promise<import("@omnirush/types/desktop-ipc").OmniRushBuildathonLinkResult>}
@@ -1403,6 +1453,7 @@ export function createDesktopOmniRushAccountStore({
    * @returns {Promise<SignOutOutcome>}
    */
   async function clear({ revokeRemote = true } = {}) {
+    knownAccountId = null;
     // Claim the gate first (synchronously, so no persist slips in), then wait
     // for a rotation still in flight: signing out under it would revoke a
     // retired token (the live session survives) or let its persist land
@@ -1451,5 +1502,7 @@ export function createDesktopOmniRushAccountStore({
     buildathonJoin,
     buildathonTagSession,
     placementsRequest,
+    feedbackRequest,
+    accountId,
   };
 }

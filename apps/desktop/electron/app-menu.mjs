@@ -10,6 +10,7 @@ const NATIVE_MENU_OPEN_SETTINGS_EVENT = "omnirush:native-menu:open-settings";
 const NATIVE_MENU_TOGGLE_SIDEBAR_EVENT = "omnirush:native-menu:toggle-sidebar";
 const NATIVE_MENU_CHECK_UPDATES_EVENT = "omnirush:native-menu:check-updates";
 const NATIVE_MENU_ZOOM_EVENT = "omnirush:native-menu:zoom";
+const NATIVE_MENU_SEND_FEEDBACK_EVENT = "omnirush:native-menu:send-feedback";
 
 export function createApplicationMenu({ appName, docsUrl, getWindow }) {
   let applicationMenuVisible = process.platform === "darwin";
@@ -29,6 +30,15 @@ export function createApplicationMenu({ appName, docsUrl, getWindow }) {
     win.show();
     win.focus();
     win.webContents.send(NATIVE_MENU_CHECK_UPDATES_EVENT);
+  }
+
+  // Help > Send Feedback…: the window opens its feedback dialog (in-app, not a web page).
+  async function sendFeedbackFromNativeMenu() {
+    const win = await getWindow();
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+    win.webContents.send(NATIVE_MENU_SEND_FEEDBACK_EVENT);
   }
 
   async function toggleSidebarFromNativeMenu() {
@@ -206,6 +216,12 @@ export function createApplicationMenu({ appName, docsUrl, getWindow }) {
                 },
                 { type: "separator" },
               ]),
+          {
+            label: "Send Feedback…",
+            click: () => {
+              runDetachedTask("send feedback from menu", sendFeedbackFromNativeMenu);
+            },
+          },
           {
             label: "Docs",
             click: () => {

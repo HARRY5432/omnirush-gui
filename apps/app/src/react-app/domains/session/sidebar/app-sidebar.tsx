@@ -34,6 +34,7 @@ import {
   UserRound,
   X,
   Workflow,
+  MessageCircleMore,
 } from "lucide-react";
 import { LazyMotion, Reorder, domMax, m, useDragControls } from "motion/react";
 
@@ -64,6 +65,7 @@ import { resolveExtensionIconSrc } from "../../../design-system/extension-icon-s
 import { useBrandAppName, useBrandLogoUrl } from "../../cloud/brand-theme";
 import { canCreateWorkspaces } from "../../../../app/lib/workspace-creation-policy";
 import { useShellConfig } from "../../../shell/shell-config";
+import { openFeedbackDialog } from "../../../../app/lib/in-app-feedback";
 
 import {
   Sidebar,
@@ -1029,6 +1031,7 @@ function QualitySpinRow({ quality }: { quality: AccountQuality }) {
 function NativeAccountFooter({ onOpenAccountSettings }: { onOpenAccountSettings: () => void }) {
   // Shared with the quality popup (QualityRewards): one /device/me read for both.
   const status: NativeAccountStatus | null = useAccountStatusStore((store) => store.status);
+  const { config: shellConfig } = useShellConfig();
 
   React.useEffect(() => {
     const refresh = () => void refreshAccountStatus(omnirushAccountStatus);
@@ -1100,6 +1103,20 @@ function NativeAccountFooter({ onOpenAccountSettings }: { onOpenAccountSettings:
           </SidebarMenuButton>
         </SidebarMenuItem>
         {quality ? <QualitySpinRow quality={quality} /> : null}
+        {shellConfig.feedbackButton ? (
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              type="button"
+              onClick={() => openFeedbackDialog({ trigger: "menu" })}
+              tooltip="Send feedback"
+              aria-label="Send feedback"
+              data-testid="sidebar-send-feedback"
+            >
+              <MessageCircleMore className="size-4" />
+              <span>Send feedback</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        ) : null}
         <SidebarMenuItem>
           <SidebarMenuButton
             type="button"

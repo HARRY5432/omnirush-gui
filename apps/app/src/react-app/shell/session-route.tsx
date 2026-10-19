@@ -65,6 +65,7 @@ import type {
   WorkspaceSessionGroup,
 } from "@/app/types";
 import { buildFeedbackUrl } from "@/app/lib/feedback";
+import { openFeedbackDialog, setFeedbackCurrentSession } from "@/app/lib/in-app-feedback";
 import {
   getWorkspaceTaskLoadErrorDisplay,
   isDesktopRuntime,
@@ -521,6 +522,11 @@ export function SessionRoute() {
     onServerSettingsChanged: () => setOmniRushServerSettingsVersion((value) => value + 1),
     onHostInfo: setOmniRushServerHostInfoState,
   });
+  // "Send feedback" from a menu that does not know the open session (Help menu, sidebar).
+  useEffect(() => {
+    setFeedbackCurrentSession(selectedSessionId ?? null);
+    return () => setFeedbackCurrentSession(null);
+  }, [selectedSessionId]);
   const routeNavigationRef = useRef({ locationKey: location.key, generation: 0 });
   if (routeNavigationRef.current.locationKey !== location.key) {
     routeNavigationRef.current = {
@@ -3422,6 +3428,11 @@ export function SessionRoute() {
       providers={providers}
       mcpConnectedCount={mcpConnectedCount}
       onSendFeedback={() => {
+        // The desktop sends it to the OmniRush team (in-app); elsewhere the public issue form.
+        if (isDesktopRuntime()) {
+          openFeedbackDialog({ trigger: "menu", sessionId: selectedSessionId ?? null });
+          return;
+        }
         platform.openLink(
           buildFeedbackUrl({
             entrypoint: "status-bar",

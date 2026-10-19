@@ -23,6 +23,7 @@ import { useEnterpriseActivationRequired } from "@/react-app/domains/cloud/enter
 import { startDebugLogger, stopDebugLogger } from "./debug-logger";
 import { resolveOmniRushConnection } from "./omnirush-connection";
 import { ReloadCoordinatorProvider } from "./reload-coordinator";
+import { FeedbackDialog } from "../domains/feedback/feedback";
 
 function resolveDefaultServerUrl(): string {
   if (isDesktopRuntime()) return "http://127.0.0.1:4096";
@@ -68,6 +69,7 @@ function EnterpriseAwareAppProviders({ children }: AppProvidersProps) {
                 <GlobalQueueDrainerBridge />
                 <ReloadCoordinatorProvider>{children}</ReloadCoordinatorProvider>
                 <Toaster />
+                <FeedbackDialog />
               </LocalProvider>
             </RestrictionNoticeProvider>
           </BrandThemeProvider>
