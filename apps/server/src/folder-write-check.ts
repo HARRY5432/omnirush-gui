@@ -271,8 +271,10 @@ export type CheckOptions = {
 };
 
 /** Run the write check on a folder. Fails open (ok) only when no probe could run at all. */
-export async function checkFolderWritable(dir: string, options: CheckOptions = {}): Promise<FolderWriteResult> {
+export async function checkFolderWritable(folder: string, options: CheckOptions = {}): Promise<FolderWriteResult> {
+  // The engine probe runs elsewhere (cwd: the temp folder): the folder goes to it absolute.
   const platform = options.platform ?? process.platform;
+  const dir = (platform === "win32" ? path.win32 : path.posix).resolve(folder);
   const env = options.env ?? process.env;
   const engineBin = options.engineBin?.trim() || null;
   let outcome: FolderProbeOutcome | null = null;
