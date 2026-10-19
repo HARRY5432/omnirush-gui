@@ -374,7 +374,9 @@ describe("runtime OpenCode config store", () => {
         expect(await readApprovals()).toEqual({ mode: "guarded", source: "environment", setting: "full" });
         expect(await evaluate()).toEqual({ allowed: true, approvalMode: "guarded" });
         const guarded = JSON.parse(await buildOmniRushRuntimeConfig(config)) as { permission?: { bash?: Record<string, string> } };
-        expect(guarded.permission?.bash?.["*"]).toBeUndefined();
+        // Normal: the shared rules' bash catch-all allow, then the git workflow asks.
+        expect(guarded.permission?.bash?.["*"]).toBe("allow");
+        expect(guarded.permission?.bash?.["git *"]).toBe("ask");
 
         expect(resolveApprovalMode({ approvals: { mode: "guarded" } }, { OMNIRUSH_APPROVALS: " FULL " })).toEqual({ mode: "full", source: "environment", setting: "guarded" });
         expect(resolveApprovalMode({}, { OMNIRUSH_APPROVALS: "yes" })).toEqual({ mode: "guarded", source: "default", setting: null });

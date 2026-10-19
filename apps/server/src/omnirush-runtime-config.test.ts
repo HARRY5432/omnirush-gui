@@ -34,7 +34,10 @@ import {
   writeOmniRushModelCatalog,
   type OmniRushModelCatalog,
 } from "./omnirush-model-catalog.js";
-import { gitWorkflowPermissionRules } from "./git-command-policy.js";
+import { legacyExecutionPermissions } from "./managed-policy-rules.js";
+
+/** The default (Normal) injected permission block: shared Normal bash/read rules, then the git workflow rules. */
+const GUARDED = { ...legacyExecutionPermissions(undefined, "guarded"), "mcp.*": "deny" };
 import { OMNIRUSH_AGENT_PROMPT } from "./omnirush-agent-prompt.js";
 import { BestPracticesEngineReloads, OMNIRUSH_BEST_PRACTICES, omnirushBestPracticesSkillsDir, waitForBestPracticesReady } from "./best-practices.js";
 import type { ServerConfig } from "./types.js";
@@ -115,14 +118,15 @@ describe("omnirush runtime config file", () => {
         },
       },
     });
-    // The built-in git workflow rules come first; the organization's execution
-    // rules are appended last so the engine's last-match-wins evaluation keeps them.
-    const permission = { bash: { ...gitWorkflowPermissionRules(), "*": "deny", "curl *": "deny" }, webfetch: "deny", websearch: "deny" };
+    // Normal's shared rules and the built-in git workflow rules come first; the organization's
+    // execution rules are appended last so the engine's last-match-wins evaluation keeps them.
+    const { "*": _allow, ...guardedBash } = legacyExecutionPermissions(undefined).bash;
+    const permission = { bash: { ...guardedBash, "*": "deny", "curl *": "deny" }, read: GUARDED.read, webfetch: "deny", websearch: "deny" };
     expect(parsed.permission).toEqual(permission);
     expect(Object.keys((parsed.permission as { bash: Record<string, string> }).bash).slice(-2)).toEqual(["*", "curl *"]);
     expect(parsed.agent).toMatchObject({ omnirush: { permission } });
     expect(parsed.managedPolicy).toBeUndefined();
-    expect(buildOmniRushRuntimeConfigObjectFromSnapshot({}).permission).toEqual({ bash: gitWorkflowPermissionRules() });
+    expect(buildOmniRushRuntimeConfigObjectFromSnapshot({}).permission).toEqual(GUARDED);
   });
 
   test("full approval mode allows every permission category; the environment overrides the setting", () => {
@@ -138,7 +142,7 @@ describe("omnirush runtime config file", () => {
     expect(full.approvals).toBeUndefined();
 
     // The engine asks before reading .env files by default and appends the injected block after its
-    // own rules; the full-mode catch-all read allow wins, the guarded block leaves the default alone.
+    // own rules; the full-mode catch-all read allow wins, the guarded block keeps asking.
     const engineEnvDefaults = [{ permission: "read", pattern: "*.env", action: "ask" as const }, { permission: "read", pattern: "*.env.*", action: "ask" as const }];
     const guarded = buildOmniRushRuntimeConfigObjectFromSnapshot({}, undefined, {});
     for (const file of ["/workspace/.env", "/workspace/.env.local"]) {
@@ -155,9 +159,9 @@ describe("omnirush runtime config file", () => {
 
     // OMNIRUSH_APPROVALS on the server process wins in both directions; the default stays guarded.
     expect(buildOmniRushRuntimeConfigObjectFromSnapshot({ approvals: { mode: "full" } }, undefined, { OMNIRUSH_APPROVALS: "guarded" }).permission)
-      .toEqual({ bash: gitWorkflowPermissionRules() });
+      .toEqual(GUARDED);
     expect(buildOmniRushRuntimeConfigObjectFromSnapshot({}, undefined, { OMNIRUSH_APPROVALS: "full" }).permission).toEqual(permission);
-    expect(buildOmniRushRuntimeConfigObjectFromSnapshot({}, undefined, {}).permission).toEqual({ bash: gitWorkflowPermissionRules() });
+    expect(buildOmniRushRuntimeConfigObjectFromSnapshot({}, undefined, {}).permission).toEqual(GUARDED);
   });
 
   test("omits global-row MCPs while writing omnirush defaults into the file", async () => {
@@ -210,7 +214,8 @@ describe("omnirush runtime config file", () => {
       env: ["OMNIRUSH_ACCESS_TOKEN"],
       options: { baseURL: "http://127.0.0.1:8090/omnirush/v1" },
     });
-    expect(JSON.stringify(parsed)).not.toContain("access-token");
+    // The permission rules name commands that print access tokens; no token value is anywhere else.
+    expect(JSON.stringify({ ...parsed, permission: undefined, agent: undefined })).not.toContain("access-token");
   });
 
   test("exposes every omnirush.ai model with the shared effort levels, default first", () => {

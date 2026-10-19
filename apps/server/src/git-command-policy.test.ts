@@ -214,6 +214,16 @@ describe("git workflow command classification", () => {
   });
 });
 
+/** Session approvals the engine appends after the configured rules (a key both use moves to the end). */
+function appended(bash: Record<string, string>, rules: Record<string, string>): Record<string, string> {
+  const out = { ...bash };
+  for (const [pattern, action] of Object.entries(rules)) {
+    delete out[pattern];
+    out[pattern] = action;
+  }
+  return out;
+}
+
 describe("git workflow permission rules", () => {
   const bash = legacyExecutionPermissions(undefined).bash;
 
@@ -231,7 +241,7 @@ describe("git workflow permission rules", () => {
       expect({ command, action: engineAction(bash, command) }).toEqual({ command, action: "ask" });
     }
     // "Allow for session" on `git push origin f` makes the engine append an allow rule for the family.
-    const approved = { ...bash, "git push *": "allow" };
+    const approved = appended(bash, { "git push *": "allow" });
     expect(engineAction(approved, "git push origin f")).toBe("allow");
     expect(engineAction(approved, "git push --force origin f")).toBe("ask");
     // The engine walks the commands inside compound statements; the marked ones still ask.
@@ -252,7 +262,7 @@ describe("git workflow permission rules", () => {
       "cat list | xargs rm -rf", "sudo bash -c 'rm -rf /x'"]) {
       expect({ command, asks: /(^|,)ask$/.test(engineAction(bash, command)) }).toEqual({ command, asks: true });
     }
-    const approved = { ...bash, "bash *": "allow", "eval *": "allow", "xargs *": "allow" };
+    const approved = appended(bash, { "bash *": "allow", "eval *": "allow", "xargs *": "allow" });
     expect(engineAction(approved, "bash -c 'git commit -m x'")).toBe("allow");
     expect(engineAction(approved, "bash -c 'git push --force origin f'")).toBe("ask");
     expect(engineAction(approved, "eval 'git push --force'")).toBe("ask");
@@ -265,7 +275,8 @@ describe("git workflow permission rules", () => {
     const user = { "*": "ask" as const };
     expect(engineAction({ ...user, ...bash }, "git status")).toBe("allow");
     expect(engineAction({ ...user, ...bash }, "git commit -m x")).toBe("ask");
-    expect(engineAction({ ...user, ...bash }, "echo hi")).toBe("ask");
+    // Normal's shared bash rules start with their own catch-all allow.
+    expect(engineAction({ ...user, ...bash }, "echo hi")).toBe("allow");
   });
 
   test("organization rules come last and win over workflow allows", () => {

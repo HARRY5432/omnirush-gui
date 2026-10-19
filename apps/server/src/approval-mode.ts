@@ -1,12 +1,18 @@
 /**
  * Approval mode of the desktop engine.
  *
- *   guarded  (default) the git workflow rules ask for write and destructive
- *            commands; everything else follows the engine defaults.
- *   full     every engine permission is allowed without a prompt; the
- *            organization's deny rules from Den still apply.
+ *   careful  ("Careful" in the app) asks before every file change, every
+ *            command and every MCP tool; reading and searching run freely.
+ *   guarded  ("Normal", the default) asks only before risky actions: the
+ *            shared rules (permissions/permission-modes.json, the same file
+ *            as the CLI's) plus the git workflow rules.
+ *   full     ("Auto") every engine permission is allowed without a prompt;
+ *            the organization's deny rules from Den still apply.
  *
- * Precedence, highest first: OMNIRUSH_APPROVALS=full|guarded in the server
+ * The stored values stay "guarded" and "full" so settings saved by earlier
+ * versions keep their meaning; "normal" and "auto" are accepted as aliases.
+ *
+ * Precedence, highest first: OMNIRUSH_APPROVALS=careful|guarded|full in the server
  * (desktop) process environment, then the user setting persisted in the
  * global runtime config row, then guarded. The server resolves the mode; the
  * managed-policy engine plugin learns it from every /managed-policy/evaluate
@@ -16,7 +22,7 @@
  * Shared by the server and the engine plugins (imported with "../"), so it
  * must stay free of server-only dependencies.
  */
-export type ApprovalMode = "guarded" | "full";
+export type ApprovalMode = "careful" | "guarded" | "full";
 export type ApprovalModeSource = "environment" | "settings" | "default";
 
 export const APPROVAL_MODE_ENV = "OMNIRUSH_APPROVALS";
@@ -32,7 +38,10 @@ export interface ResolvedApprovalMode {
 export function parseApprovalMode(value: unknown): ApprovalMode | null {
   if (typeof value !== "string") return null;
   const mode = value.trim().toLowerCase();
-  return mode === "full" || mode === "guarded" ? mode : null;
+  if (mode === "careful" || mode === "guarded" || mode === "full") return mode;
+  if (mode === "normal") return "guarded";
+  if (mode === "auto") return "full";
+  return null;
 }
 
 export function approvalModeFromEnv(env: NodeJS.ProcessEnv = process.env): ApprovalMode | null {

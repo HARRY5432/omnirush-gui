@@ -4105,7 +4105,7 @@ function createRoutes(
     requireClientScope(ctx, "collaborator");
     const body = await readJsonBody(ctx.request);
     const mode = parseApprovalMode(body.mode);
-    if (!mode) throw new ApiError(400, "invalid_payload", 'mode must be "guarded" or "full"');
+    if (!mode) throw new ApiError(400, "invalid_payload", 'mode must be "careful", "guarded" (normal) or "full" (auto)');
     const result = await writeGlobalRuntimeOpencodeConfig(config, (current) => ({ ...current, approvals: { mode } }));
     // The injected engine config file must carry the new rules before the
     // client's engine reload re-reads it.

@@ -2,6 +2,7 @@ import type { DesktopConfig, DesktopExecutionPolicy, DesktopPolicyKey } from "@o
 import { z } from "zod";
 import type { ApprovalMode } from "./approval-mode.js";
 import { gitWorkflowPermissionRules } from "./git-command-policy.js";
+import permissionModes from "./permissions/permission-modes.json" with { type: "json" };
 
 export const managedPolicyActionSchema = z.enum([
   "sync", "shell", "terminal", "saved_command", "file_write", "engine_config", "browser_external",
@@ -40,32 +41,84 @@ export function executionRules(policy: DesktopExecutionPolicy | undefined): Engi
   }
   return rules;
 }
-type LegacyExecutionPermissions = {
-  bash: Record<string, "allow" | "ask" | "deny">;
-  /** Full mode only: a catch-all allow appended after the engine's default `read *.env: ask` / `read *.env.*: ask` rules. */
-  read?: Record<string, "allow">;
-  webfetch?: "allow" | "deny";
-  websearch?: "allow" | "deny";
-  edit?: "allow";
-  doom_loop?: "allow";
+type PermissionAction = "allow" | "ask" | "deny";
+export type LegacyExecutionPermissions = {
+  bash: Record<string, PermissionAction>;
+  /** Full mode: a catch-all allow after the engine's default `read *.env` asks; careful and guarded: the shared secret-file asks. */
+  read?: Record<string, PermissionAction>;
+  webfetch?: PermissionAction;
+  websearch?: PermissionAction;
+  edit?: PermissionAction;
+  doom_loop?: PermissionAction;
   external_directory?: "allow";
+  /** Careful's catch-all, plain tool names and per-MCP-server rules (`<server>_*`). */
+  [permission: string]: PermissionAction | Record<string, PermissionAction> | undefined;
 };
+
+type SharedModeRules = Record<string, PermissionAction | Record<string, PermissionAction>>;
+const SHARED_MODES = permissionModes.rules as unknown as { careful: SharedModeRules; normal: SharedModeRules };
+
+function cloneRules(rules: SharedModeRules): SharedModeRules {
+  return JSON.parse(JSON.stringify(rules)) as SharedModeRules;
+}
+
+/** The engine's MCP tool-name sanitizer: a server's tools are `<sanitized server>_<tool>`. */
+export function mcpToolPermissionKey(server: string): string {
+  return `${server.replace(/[^a-zA-Z0-9_-]/g, "_")}_*`;
+}
+
 /**
- * Engine permission block for every managed desktop: in guarded mode the
- * built-in git and PR workflow rules (read-only commands run, write commands
- * ask once per session per command family, destructive commands always ask);
- * in full mode a single catch-all allow for bash, a catch-all allow for read
- * (the engine's own defaults ask before reading `*.env` and `*.env.*`; the
- * later `read *` allow wins) and allow for every other permission category
- * the pinned engine exposes, so nothing asks. Both are
- * followed by the organization's execution policy. The engine picks the last
- * matching rule, so an organization deny always wins over a workflow or
- * full-mode allow.
+ * Engine permission block for every managed desktop, by approval mode:
+ *
+ *   full     a single catch-all allow for bash, a catch-all allow for read
+ *            (the engine's own defaults ask before reading `*.env` and
+ *            `*.env.*`; the later `read *` allow wins) and allow for every
+ *            other permission category the pinned engine exposes, so nothing
+ *            asks.
+ *   guarded  (Normal) the shared Normal rules for bash and read
+ *            (permissions/permission-modes.json, the CLI's file), then the
+ *            built-in git and PR workflow rules (read-only commands run,
+ *            write commands ask once per session per command family,
+ *            destructive commands always ask), plus an ask rule for every
+ *            configured MCP server not on the shared allowlist. The shared
+ *            top-level catch-all and external_directory rules are left out:
+ *            the engine's own external_directory handling and the
+ *            authorized-folder grants stay in charge of other folders.
+ *   careful  the shared Careful rules without external_directory: a "*" ask
+ *            catch-all (the runtime config moves it ahead of the user's
+ *            rules) with reads and searches allowed, every edit and command
+ *            asking.
+ *
+ * All are followed by the organization's execution policy. The engine picks
+ * the last matching rule, so an organization deny always wins over a
+ * workflow or mode allow.
  */
-export function legacyExecutionPermissions(policy: DesktopExecutionPolicy | undefined, mode: ApprovalMode = "guarded"): LegacyExecutionPermissions {
-  const permissions: LegacyExecutionPermissions = mode === "full"
-    ? { bash: { "*": "allow" }, read: { "*": "allow" }, edit: "allow", webfetch: "allow", websearch: "allow", doom_loop: "allow", external_directory: "allow" }
-    : { bash: gitWorkflowPermissionRules() };
+export function legacyExecutionPermissions(
+  policy: DesktopExecutionPolicy | undefined,
+  mode: ApprovalMode = "guarded",
+  mcpServers: readonly string[] = [],
+): LegacyExecutionPermissions {
+  let permissions: LegacyExecutionPermissions;
+  if (mode === "full") {
+    permissions = { bash: { "*": "allow" }, read: { "*": "allow" }, edit: "allow", webfetch: "allow", websearch: "allow", doom_loop: "allow", external_directory: "allow" };
+  } else if (mode === "careful") {
+    const { external_directory: _external, ...careful } = cloneRules(SHARED_MODES.careful);
+    permissions = { ...careful, bash: { ...(careful.bash as Record<string, PermissionAction>) } } as LegacyExecutionPermissions;
+  } else {
+    const normal = cloneRules(SHARED_MODES.normal);
+    const bash = { ...(normal.bash as Record<string, PermissionAction>) };
+    // Re-insert every git workflow rule after the shared ones, so a pattern
+    // both lists use keeps the git rules' own order (the last match wins).
+    for (const [pattern, action] of Object.entries(gitWorkflowPermissionRules())) {
+      delete bash[pattern];
+      bash[pattern] = action;
+    }
+    permissions = { bash, read: normal.read as Record<string, PermissionAction> };
+    const allowlist = new Set<string>(permissionModes.mcpAllowlist as string[]);
+    for (const server of mcpServers) {
+      if (!allowlist.has(server)) permissions[mcpToolPermissionKey(server)] = "ask";
+    }
+  }
   for (const rule of executionRules(policy)) {
     if (rule.action === "shell") {
       // Re-insert so a pattern the workflow rules already use moves after them.
