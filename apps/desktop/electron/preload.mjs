@@ -369,6 +369,12 @@ ipcRenderer.on("omnirush:feedback:event", (_event, detail) => {
   window.dispatchEvent(new CustomEvent("omnirush:feedback:event", { detail }));
 });
 
+// A clicked notification about a chat (main.mjs showDesktopNotification): open that chat.
+ipcRenderer.on("omnirush:notification:open-session", (_event, detail) => {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent("omnirush:notification:open-session", { detail }));
+});
+
 ipcRenderer.on(NATIVE_MENU_ZOOM_EVENT, (_event, action) => {
   if (typeof window === "undefined") return;
   window.dispatchEvent(new CustomEvent(NATIVE_MENU_ZOOM_EVENT, { detail: action }));

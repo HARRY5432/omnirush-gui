@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 
 import { LOCAL_PREFERENCES_KEY } from "../src/react-app/kernel/local-preferences-storage";
-import { notifyDesktopEvent } from "../src/react-app/shell/desktop-notifications";
+import { DEFAULT_DESKTOP_NOTIFICATION_PREFERENCE } from "../src/react-app/kernel/desktop-notification-preferences";
+import { notificationSessionRoute, notifyDesktopEvent } from "../src/react-app/shell/desktop-notifications";
 
 type DesktopCall = { command: string; args: unknown[] };
 
@@ -90,6 +91,27 @@ describe("desktop notifications", () => {
       command: "desktopNotificationShow",
       args: [{ title: "Task completed", body: "The session finished running." }],
     });
+  });
+
+  test("by default finished tasks and approvals notify, naming the chat to open on click", async () => {
+    expect(DEFAULT_DESKTOP_NOTIFICATION_PREFERENCE).toBe("all");
+
+    notifyDesktopEvent({ type: "task.completed", sessionId: "session-a", workspaceId: "ws_1" });
+    notifyDesktopEvent({ type: "permission.asked", sessionId: "session-b", workspaceId: "ws_1", detail: "git push" });
+    notifyDesktopEvent({ type: "question.asked", sessionId: "session-c" });
+    await Promise.resolve();
+
+    expect(calls.map((call) => call.args[0])).toEqual([
+      { title: "Task completed", body: "The session finished running.", sessionId: "session-a", workspaceId: "ws_1" },
+      { title: "Permission needed", body: "git push", sessionId: "session-b", workspaceId: "ws_1" },
+      { title: "Question needs your answer", body: "A session is waiting for your answer.", sessionId: "session-c" },
+    ]);
+  });
+
+  test("a clicked notification opens its chat's route", () => {
+    expect(notificationSessionRoute({ sessionId: "ses 1", workspaceId: "ws_1" })).toBe("/workspace/ws_1/session/ses%201");
+    expect(notificationSessionRoute({ sessionId: "ses_2" })).toBe("/session/ses_2");
+    expect(notificationSessionRoute({ sessionId: "ses_3", workspaceId: " " })).toBe("/session/ses_3");
   });
 
   test("focused app suppresses native popups", () => {

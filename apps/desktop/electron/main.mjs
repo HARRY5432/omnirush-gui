@@ -710,12 +710,30 @@ async function applyDefaultAppIconImage(expectedSequence = null) {
   });
 }
 
-async function focusMainWindowFromNotification() {
+/** Sent to the renderer when a notification about a chat is clicked (desktop-notifications.ts). */
+const NOTIFICATION_OPEN_SESSION_EVENT = "omnirush:notification:open-session";
+
+/**
+ * The chat a notification is about, from its input; null when it names none.
+ * @param {Record<string, unknown>} record
+ * @returns {import("@omnirush/types/desktop-ipc").DesktopNotificationOpenSession | null}
+ */
+function notificationSessionTarget(record) {
+  const sessionId = typeof record.sessionId === "string" ? record.sessionId.trim() : "";
+  if (!sessionId) return null;
+  const workspaceId = typeof record.workspaceId === "string" ? record.workspaceId.trim() : "";
+  return workspaceId ? { sessionId, workspaceId } : { sessionId };
+}
+
+/** @param {import("@omnirush/types/desktop-ipc").DesktopNotificationOpenSession | null} [target] */
+async function focusMainWindowFromNotification(target = null) {
   const win = await createMainWindow();
   if (win.isDestroyed()) return;
   if (win.isMinimized()) win.restore();
   win.show();
   win.focus();
+  // The renderer opens the chat the notification was about.
+  if (target && !win.webContents.isDestroyed()) win.webContents.send(NOTIFICATION_OPEN_SESSION_EVENT, target);
 }
 
 /**
@@ -734,6 +752,7 @@ function showDesktopNotification(input) {
   }
 
   const body = String(Reflect.get(record, "body") ?? "").trim();
+  const target = notificationSessionTarget(record);
   const icon = resolveBrandIconImage() ?? APP_ICON_IMAGE;
   const options = {
     title,
@@ -745,7 +764,7 @@ function showDesktopNotification(input) {
   try {
     const notification = new ElectronNotification(options);
     notification.on("click", () => {
-      runDetachedTask("focus window from notification", focusMainWindowFromNotification);
+      runDetachedTask("focus window from notification", () => focusMainWindowFromNotification(target));
     });
     notification.show();
     return { ok: true };

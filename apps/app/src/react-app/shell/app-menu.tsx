@@ -3,6 +3,7 @@ import { useEffect, type ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router";
 
 import { useUpdateCheckRequestStore } from "../domains/settings/state/update-check-request";
+import { NOTIFICATION_OPEN_SESSION_EVENT, notificationSessionRoute } from "./desktop-notifications";
 import { useUiStateStore } from "./ui-state-store";
 import { settingsNavigationFromPathname } from "./workspace-routes";
 
@@ -26,13 +27,26 @@ export function AppMenuProvider({ children }: { children: ReactNode }) {
       openSettingsTab("updates");
     };
 
+    // A clicked desktop notification: the shell focused the window, open the chat it was about.
+    const openNotifiedSession = (event: Event) => {
+      const detail = event instanceof CustomEvent ? (event.detail as unknown) : null;
+      if (!detail || typeof detail !== "object") return;
+      const sessionId = Reflect.get(detail, "sessionId");
+      const workspaceId = Reflect.get(detail, "workspaceId");
+      if (typeof sessionId !== "string" || !sessionId.trim()) return;
+      const route = notificationSessionRoute({ sessionId, workspaceId: typeof workspaceId === "string" ? workspaceId : undefined });
+      if (route !== pathname) navigate(route);
+    };
+
     window.addEventListener(NATIVE_MENU_OPEN_SETTINGS_EVENT, openSettings);
     window.addEventListener(NATIVE_MENU_TOGGLE_SIDEBAR_EVENT, toggleSidebar);
     window.addEventListener(NATIVE_MENU_CHECK_UPDATES_EVENT, checkUpdates);
+    window.addEventListener(NOTIFICATION_OPEN_SESSION_EVENT, openNotifiedSession);
     return () => {
       window.removeEventListener(NATIVE_MENU_OPEN_SETTINGS_EVENT, openSettings);
       window.removeEventListener(NATIVE_MENU_TOGGLE_SIDEBAR_EVENT, toggleSidebar);
       window.removeEventListener(NATIVE_MENU_CHECK_UPDATES_EVENT, checkUpdates);
+      window.removeEventListener(NOTIFICATION_OPEN_SESSION_EVENT, openNotifiedSession);
     };
   }, [navigate, pathname, toggleSidebar]);
 

@@ -133,8 +133,11 @@ export function PreferencesView(props: PreferencesViewProps) {
                   <SelectContent>
                     <SelectGroup>
                       {DESKTOP_NOTIFICATION_PREFERENCE_VALUES.map((value) => (
-                        <SelectItem key={value} value={value}>
-                          {desktopNotificationPreferenceLabel(value)}
+                        <SelectItem key={value} value={value} data-testid={`desktop-notifications-${value}`}>
+                          <span className="flex flex-col">
+                            <span>{desktopNotificationPreferenceLabel(value)}</span>
+                            <span className="text-xs text-muted-foreground">{t(`settings.desktop_notifications.${value}_desc`)}</span>
+                          </span>
                         </SelectItem>
                       ))}
                     </SelectGroup>
