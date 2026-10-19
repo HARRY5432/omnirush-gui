@@ -412,6 +412,39 @@ export type OmniRushPlacement = {
 /** rendered / viewable / open (the click) / dismiss: about one display; conversation / activity: for the display rotation. */
 export type OmniRushPlacementAction = "rendered" | "viewable" | "open" | "dismiss" | "conversation" | "activity";
 
+/** In-app feedback (apps/desktop/electron/feedback-desktop.mjs and the shared feedback/feedback.mjs). */
+export type OmniRushFeedbackKind = "turn" | "general" | "pulse";
+export type OmniRushFeedbackTrigger = "sampled" | "command" | "menu" | "pulse";
+/** How a finished turn ended: only "ok" turns may get the after-turn prompt. */
+export type OmniRushFeedbackTurnOutcome = "ok" | "refused" | "limit" | "error" | "stopped";
+export type OmniRushFeedbackPolicy = {
+  enabled: boolean;
+  turnSampleRate: number;
+  maxPerDay: number;
+  pulseEnabled: boolean;
+  pulseAfterSessions: number;
+  pulseEveryDays: number;
+};
+export type OmniRushFeedbackOffer = { kind: "turn" | "pulse" } | null;
+export type OmniRushFeedbackInput = {
+  kind: OmniRushFeedbackKind;
+  /** "up" | "down" for a turn, 0-10 for the pulse, null for anytime feedback. */
+  rating: "up" | "down" | number | null;
+  categories: string[];
+  comment: string | null;
+  sessionId: string | null;
+  /** 1-based user-turn index of the rated answer. */
+  turn: number | null;
+  trigger: OmniRushFeedbackTrigger;
+  modelId: string | null;
+  effort: string | null;
+};
+/** queued: kept in feedback.json and sent later (offline, signed out, the server has none yet, rate limited). */
+export type OmniRushFeedbackResult =
+  | { ok: true; sent: boolean; queued: boolean; reason?: "offline" | "signed_out" | "unavailable" | "rate_limited" }
+  | { ok: false; error: string };
+export type OmniRushFeedbackStatus = { policy: OmniRushFeedbackPolicy; queued: number; unavailable: boolean; allowed: boolean };
+
 export type OmniRushSessionStatus = {
   sessionId: string;
   status: "on_track" | "at_risk" | "failing" | "unknown";
@@ -971,6 +1004,15 @@ export type DesktopCommandMap = {
   omnirushBuildathonJoin: { args: []; result: OmniRushBuildathonLinkResult };
   omnirushPlacement: { args: [input: { slot: OmniRushPlacementSlot; sessionId?: string }]; result: OmniRushPlacement | null };
   omnirushPlacementAction: { args: [input: { action: OmniRushPlacementAction; id?: string; displayId?: string; sessionId?: string }]; result: { ok: boolean; opened?: boolean; rotate?: boolean } };
+  omnirushFeedbackPolicy: { args: []; result: OmniRushFeedbackPolicy };
+  omnirushFeedbackStatus: { args: []; result: OmniRushFeedbackStatus };
+  omnirushFeedbackSessionStarted: { args: [input: { sessionId: string }]; result: boolean };
+  omnirushFeedbackOffer: {
+    args: [input: { sessionId: string; outcome: OmniRushFeedbackTurnOutcome; toolCalls: number; durationMs: number; text?: string }];
+    result: OmniRushFeedbackOffer;
+  };
+  omnirushFeedbackShown: { args: [input: { kind: "turn" | "pulse" }]; result: { ok: boolean } };
+  omnirushFeedbackSubmit: { args: [input: OmniRushFeedbackInput]; result: OmniRushFeedbackResult };
   omnirushBuildathonSessions: { args: []; result: OmniRushBuildathonSession[] | null };
   omnirushBuildathonLink: { args: [input: { code: string }]; result: OmniRushBuildathonLinkResult };
   omnirushBuildathonChecklist: {

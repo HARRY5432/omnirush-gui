@@ -1322,7 +1322,8 @@ export function createDesktopOmniRushAccountStore({
   }
 
   /**
-   * One sponsored-placements call (placements-desktop.mjs): `pathAndQuery`
+   * One sponsored-placements or feedback call (placements-desktop.mjs,
+   * feedback-desktop.mjs as `clientRequest`): `pathAndQuery`
    * under the account server, the device credential, `timeoutMs` at most.
    * Resolves { status, data } (data: the JSON of a 200, else null), or null
    * while signed out. Throws on network errors and timeouts.
@@ -1451,5 +1452,7 @@ export function createDesktopOmniRushAccountStore({
     buildathonJoin,
     buildathonTagSession,
     placementsRequest,
+    /** The same call for the other small client endpoints (feedback-desktop.mjs). */
+    clientRequest: placementsRequest,
   };
 }
