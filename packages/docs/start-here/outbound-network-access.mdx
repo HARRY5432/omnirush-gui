@@ -38,7 +38,7 @@ Common misses:
 | Your model catalog mirror, if configured | Optional | Model catalog passed to the engine as `OPENCODE_MODELS_URL`. There is no default catalog. | The engine keeps the model list bundled with it. |
 | `cdn.simpleicons.org` | Optional | Provider icons when no local icon exists. | Some icons are missing. |
 | `www.google.com` | Optional | Favicon image service and embedded browser new-tab page. | Favicons or the browser panel new tab may not load. |
-| `us.i.posthog.com` | Optional | Product analytics when analytics are enabled. | Analytics are dropped silently. |
+| `us.i.posthog.com` | Optional | Product analytics, only when a build sets `VITE_OMNIRUSH_POSTHOG_KEY` (release builds set none). | Analytics are dropped silently. |
 | `discord.gg`, `ollama.com`, `opencode.ai`, `linear.app`, `mail.google.com` | Optional or link-only | Docs, feedback, community, provider help, local model links, sample links, and generated Gmail links. | Links do not open; core app behavior is unaffected. |
 
 `code.claude.com` and `schemas.agentskills.io` appear in source or schema metadata. They are findable in the manifest, but OmniRush.ai does not fetch them for normal runtime behavior.

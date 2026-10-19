@@ -59,8 +59,8 @@ export type LocalPreferences = {
    */
   hasCompletedOnboarding: boolean;
   /**
-   * Anonymous product analytics (PostHog). On by default with a visible
-   * opt-out in Settings -> Preferences. Never includes message content.
+   * Anonymous product analytics (PostHog). Only sent when the build sets a
+   * PostHog key; opt-out in Settings -> Preferences. Never includes message content.
    */
   analyticsEnabled: boolean;
   /**

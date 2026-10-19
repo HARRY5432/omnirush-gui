@@ -1,29 +1,27 @@
 import { describe, expect, test } from "bun:test";
 
-import { DEFAULT_POSTHOG_KEY, resolvePosthogKey } from "../src/app/lib/analytics-key";
+import * as analyticsKey from "../src/app/lib/analytics-key";
+import { resolvePosthogKey } from "../src/app/lib/analytics-key";
 
 describe("analytics-key", () => {
-  test("uses the default key for packaged release builds without an env override", () => {
-    expect(resolvePosthogKey(undefined, false)).toBe(DEFAULT_POSTHOG_KEY);
+  test("ships without a built-in key", () => {
+    expect(Object.keys(analyticsKey)).toEqual(["resolvePosthogKey"]);
   });
 
-  test("stays silent for dev builds without an env override", () => {
-    expect(resolvePosthogKey(undefined, true)).toBe("");
+  test("stays silent without an env key", () => {
+    expect(resolvePosthogKey(undefined)).toBe("");
+    expect(resolvePosthogKey(null)).toBe("");
   });
 
-  test("treats an explicit blank as disabled in prod builds", () => {
-    expect(resolvePosthogKey("", false)).toBe("");
+  test("treats an explicit blank as disabled", () => {
+    expect(resolvePosthogKey("")).toBe("");
   });
 
   test("trims whitespace to disabled", () => {
-    expect(resolvePosthogKey("  ", true)).toBe("");
+    expect(resolvePosthogKey("  ")).toBe("");
   });
 
-  test("uses an explicit key in dev builds", () => {
-    expect(resolvePosthogKey("phc_custom", true)).toBe("phc_custom");
-  });
-
-  test("uses an explicit key in prod builds", () => {
-    expect(resolvePosthogKey("phc_custom", false)).toBe("phc_custom");
+  test("uses an explicit key after trim", () => {
+    expect(resolvePosthogKey(" phc_custom ")).toBe("phc_custom");
   });
 });
