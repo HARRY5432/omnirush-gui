@@ -643,7 +643,8 @@ export function createFeedback({
         else if (status === 429) reason = "rate_limited";
         if (final) {
           log("warn", "feedback: the server refused one", { status });
-          const errors = answer?.data && typeof answer.data === "object" && answer.data.errors && typeof answer.data.errors === "object" ? answer.data.errors : null;
+          const data = /** @type {{ errors?: unknown } | null} */ (answer?.data && typeof answer.data === "object" ? answer.data : null);
+          const errors = data?.errors && typeof data.errors === "object" ? data.errors : null;
           result.refused[entry.id] = { status, errors };
         }
         const retryAfterMs = Number.isFinite(answer?.retryAfter) && answer.retryAfter > 0 ? Math.min(MAX_RETRY_AFTER_MS, answer.retryAfter * 1_000) : null;
