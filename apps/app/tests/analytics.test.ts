@@ -22,6 +22,7 @@ const recordedNames = () => inspector().events(500).map((entry) => entry.name);
 const analytics = await import("../src/app/lib/analytics");
 const { ensureInspectorInstalled } = await import("../src/app/lib/app-inspector");
 const { gatewayRefusalEvent } = await import("../src/app/lib/gateway-refusal");
+const { presentOpencodeSessionError } = await import("../src/react-app/domains/session/sync/session-error");
 const { reportSandboxFallback, sandboxFallbackProperties } = await import("../src/react-app/domains/settings/linux-sandbox");
 
 const ACCOUNT = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
@@ -149,22 +150,76 @@ describe("onboarding survey", () => {
 });
 
 describe("refusals shown", () => {
-  test("request policy", () => {
-    expect(gatewayRefusalEvent({ title: "OmniRush can't help with this request. Free model access isn't for attacking systems.", technicalDetails: "" }))
-      .toEqual({ event: "policy_refusal_shown", properties: { reason: "request_policy" } });
-    expect(gatewayRefusalEvent({ title: "x", technicalDetails: "Code: request_policy_refused" })?.event).toBe("policy_refusal_shown");
+  const apiError = (status: number, body: unknown, message = "x") => ({
+    name: "APIError",
+    data: { message, statusCode: status, isRetryable: false, responseBody: JSON.stringify(body) },
   });
 
-  test("limits", () => {
+  test("keyed on error.omnirush.code, whatever the words", () => {
+    const policy = presentOpencodeSessionError(apiError(403, { error: { type: "invalid_request_error", code: "request_policy_refused", message: "Reworded.", omnirush: { code: "request_policy_refused", retry: false } } }, "Reworded."));
+    expect(policy.omnirush).toEqual({ code: "request_policy_refused", retry: false });
+    expect(gatewayRefusalEvent(policy)).toEqual({
+      event: "policy_refusal_shown",
+      properties: { reason: "request_policy", code: "request_policy_refused", source: "code", retry: false },
+    });
+
+    const tokens = presentOpencodeSessionError(apiError(429, { error: { code: "daily_grant_exhausted", message: "Anything.", omnirush: { code: "limit_tokens", scope: "week", resets_at: "2026-10-26T00:00:00Z", retry: false, retry_after: 600000 } } }));
+    expect(gatewayRefusalEvent(tokens)).toEqual({
+      event: "limit_shown",
+      properties: { limit_type: "tokens", scope: "week", code: "limit_tokens", source: "code", retry: false },
+    });
+
+    const cases: Array<[Record<string, unknown>, Record<string, unknown>]> = [
+      [{ code: "limit_session_cap", scope: "session", retry: false }, { limit_type: "session_cap", scope: "session" }],
+      [{ code: "limit_concurrency", scope: "model", retry: true, retry_after: 5 }, { limit_type: "concurrency", scope: "model", retry: true }],
+      [{ code: "limit_rate", scope: "account", retry: true }, { limit_type: "rate", scope: "account" }],
+      [{ code: "queue_timeout", retry: true, retry_after: 15 }, { limit_type: "queue_timeout" }],
+      [{ code: "limit_tokens", retry: false }, { limit_type: "tokens", scope: "unknown" }],
+    ];
+    for (const [omnirush, expected] of cases) {
+      const shown = gatewayRefusalEvent({ title: "x", technicalDetails: "", omnirush: omnirush as { code: string } });
+      expect(shown?.event).toBe("limit_shown");
+      expect(shown?.properties).toMatchObject({ ...expected, code: omnirush.code, source: "code" });
+    }
+    expect(gatewayRefusalEvent({ title: "x", technicalDetails: "", omnirush: { code: "queue_timeout" } })?.properties).not.toHaveProperty("scope");
+  });
+
+  test("read from a stream error frame the engine kept, and from the broker's 403", () => {
+    const frame = { type: "error", sequence_number: 3, error: { type: "invalid_request_error", code: "invalid_prompt", message: "OmniRush can't help.", param: "request_policy_refused", omnirush: { code: "request_policy_refused", retry: false } } };
+    expect(presentOpencodeSessionError(apiError(0, frame)).omnirush?.code).toBe("request_policy_refused");
+    expect(presentOpencodeSessionError({ name: "UnknownError", data: { message: JSON.stringify(frame) } }).omnirush?.code).toBe("request_policy_refused");
+    // What the engine keeps of a stream frame: type, code, message and param (the broker's carrier).
+    const kept = { type: "error", sequence_number: 3, error: { type: "invalid_request_error", code: "omnirush.ai", message: "OmniRush can't help.", param: JSON.stringify({ detail: "request_policy_refused", omnirush: { code: "request_policy_refused", retry: false } }) } };
+    const cut = presentOpencodeSessionError(apiError(400, kept, "OmniRush can't help."));
+    expect(cut.omnirush).toEqual({ code: "request_policy_refused", retry: false });
+    expect(gatewayRefusalEvent(cut)?.properties).toMatchObject({ code: "request_policy_refused", source: "code" });
+    // x-should-retry: false in the engine's copy of the response headers.
+    expect(presentOpencodeSessionError({ name: "APIError", data: { message: "x", statusCode: 403, responseHeaders: { "X-Should-Retry": "false" } } }).noRetry).toBe(true);
+    expect(presentOpencodeSessionError({ name: "APIError", data: { message: "x", statusCode: 429, responseHeaders: { "retry-after": "5" } } }).noRetry).toBeUndefined();
+    // Malformed objects are ignored.
+    expect(presentOpencodeSessionError(apiError(403, { error: { omnirush: { code: 7 } } })).omnirush).toBeUndefined();
+    expect(presentOpencodeSessionError(apiError(403, { error: { omnirush: "limit_tokens" } })).omnirush).toBeUndefined();
+  });
+
+  test("an older backend: the words, as before", () => {
+    expect(gatewayRefusalEvent({ title: "OmniRush can't help with this request. Free model access isn't for attacking systems.", technicalDetails: "" }))
+      .toEqual({ event: "policy_refusal_shown", properties: { reason: "request_policy", source: "text" } });
+    expect(gatewayRefusalEvent({ title: "x", technicalDetails: "Code: request_policy_refused" })?.event).toBe("policy_refusal_shown");
     expect(gatewayRefusalEvent({ title: "omnirush.ai: today's tokens are used up. They refill at 5:30 AM (in 3 h).", technicalDetails: "" })?.properties)
-      .toEqual({ limit_type: "tokens", scope: "day" });
+      .toEqual({ limit_type: "tokens", scope: "day", source: "text" });
     expect(gatewayRefusalEvent({ title: "omnirush.ai: this week's cap is reached. It resets Monday.", technicalDetails: "" })?.properties.scope).toBe("week");
     expect(gatewayRefusalEvent({ title: "omnirush.ai: you have no tokens left.", technicalDetails: "" })?.properties.scope).toBe("empty");
     expect(gatewayRefusalEvent({ title: "x", technicalDetails: "Code: daily_grant_exhausted" })?.properties.scope).toBe("unknown");
     expect(gatewayRefusalEvent({ title: "x", technicalDetails: "session_quality_cap" })?.properties.limit_type).toBe("session_cap");
+    // The same old-shape errors through the real presentation.
+    const old = presentOpencodeSessionError(apiError(429, { error: { message: "omnirush.ai: you have used today's model allowance. It refills at 00:00 UTC.", type: "omnirush_error", code: "daily_grant_exhausted" } }, "omnirush.ai: you have used today's model allowance. It refills at 00:00 UTC."));
+    expect(old.omnirush).toBeUndefined();
+    expect(gatewayRefusalEvent(old)).toEqual({ event: "limit_shown", properties: { limit_type: "tokens", scope: "day", source: "text" } });
   });
 
-  test("other errors are not refusals", () => {
+  test("an unknown code falls back to the words; other errors are not refusals", () => {
+    expect(gatewayRefusalEvent({ title: "Provider did not respond in time", technicalDetails: "Status: 504", omnirush: { code: "something_new" } })).toBeNull();
+    expect(gatewayRefusalEvent({ title: "x", technicalDetails: "session_quality_cap", omnirush: { code: "something_new" } })?.properties.source).toBe("text");
     expect(gatewayRefusalEvent({ title: "Provider did not respond in time", technicalDetails: "Status: 504" })).toBeNull();
     expect(gatewayRefusalEvent(null)).toBeNull();
   });

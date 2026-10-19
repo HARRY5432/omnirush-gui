@@ -798,11 +798,13 @@ function sessionErrorOf(message: UIMessage): Record<string, unknown> | null {
 }
 
 /**
- * The gateway refusing on purpose: out of tokens for the day, the Windows
- * cut-off, the session cap, an app update required. Its messages start with
+ * The gateway refusing on purpose: out of tokens for the day, the request
+ * policy (or the model's own safety check, `cyber_policy`), the Windows
+ * cut-off, the session cap, an app update required, or anything it marks
+ * final (`"retry": false`). Its messages start with
  * "omnirush.ai: " (and usually end on a console link); retrying cannot help.
  */
-const REFUSAL = /(^|Message: )omnirush\.ai:|daily_grant_exhausted|windows_cutoff|session_quality_cap|update_required|client update required/im;
+const REFUSAL = /(^|Message: )omnirush\.ai:|daily_grant_exhausted|request_policy_refused|cyber_policy|limit_tokens|limit_session_cap|"retry":\s*false|windows_cutoff|session_quality_cap|update_required|client update required/im;
 
 /**
  * How a turn that ended on an error ended. The engine's MessageAbortedError
@@ -812,7 +814,9 @@ const REFUSAL = /(^|Message: )omnirush\.ai:|daily_grant_exhausted|windows_cutoff
  */
 function errorEnding(error: Record<string, unknown>): { ended: LastTurnEnd; retryable: boolean } {
   if (error.kind === "aborted") return { ended: "stopped", retryable: false };
-  const refusal = REFUSAL.test(`${str(error.title)}\n${str(error.technicalDetails)}`) || Boolean(str(record(error.action).link));
+  // The gateway marking it final (`error.omnirush.retry === false`, `x-should-retry: false`) is a refusal whatever its words.
+  const refusal = record(error.omnirush).retry === false || error.noRetry === true
+    || REFUSAL.test(`${str(error.title)}\n${str(error.technicalDetails)}`) || Boolean(str(record(error.action).link));
   if (/^Error type: APIError$/m.test(str(error.technicalDetails))) return { ended: "gateway", retryable: !refusal };
   return { ended: "cut", retryable: !refusal && (error.kind === "provider-timeout" || error.kind === "provider-incomplete") };
 }
@@ -894,14 +898,26 @@ function turnEndOf(turn: readonly UIMessage[], last: UIMessage): TurnEnding {
  * (`endedAt`, ms; null when unknown) and whether one automatic "continue"
  * could help (`retryable`), for the finish guard and the auto-retry.
  */
-export function messageFacts(messages: readonly UIMessage[]): { calls: ToolCall[]; lastTurn: LastTurn } & TurnEnding {
+export function messageFacts(messages: readonly UIMessage[]): { calls: ToolCall[]; lastTurn: LastTurn; replyOpen: boolean } & TurnEnding {
   const calls: ToolCall[] = [];
   for (const message of messages) {
     if (message.role !== "assistant") continue;
     calls.push(...messageCalls(message));
   }
   const ending = lastTurnEnd(messages);
-  return { calls, lastTurn: lastTurnOf(ending.ended), ...ending };
+  return { calls, lastTurn: lastTurnOf(ending.ended), replyOpen: replyOpen(messages), ...ending };
+}
+
+/**
+ * Whether the last reply is still open: an assistant message after the
+ * last prompt with no end time and no error yet. The engine says idle
+ * before it writes a failed turn's error onto the reply, so a turn read
+ * at that moment looks cut off and a refusal would be retried.
+ */
+function replyOpen(messages: readonly UIMessage[]): boolean {
+  const last = messages.at(-1);
+  if (!last || last.role !== "assistant") return false;
+  return typeof messageOpencode(last).completed !== "number" && !sessionErrorOf(last);
 }
 
 // --- The server's checklist (GET /me/sessions/{id}/status) ---------------------------

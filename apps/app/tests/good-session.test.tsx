@@ -608,6 +608,40 @@ describe("how the last turn ended (session_qc._completion)", () => {
     }
     expect(retryable([prompt(), assistant("a", [{ type: "text", text: "Half done" }], { finish: "length" })])).toBe(false);
   });
+
+  test("retryable: never what the gateway marks final in error.omnirush, whatever its words", () => {
+    const retryable = (omnirush: Record<string, unknown>) => messageFacts([prompt(), errorMessage({
+      kind: "generic", title: "Something new", technicalDetails: "Error type: APIError\nStatus: 429", omnirush,
+    })]).retryable;
+    expect(retryable({ code: "limit_tokens", scope: "day", retry: false })).toBe(false);
+    expect(retryable({ code: "something_new", retry: false })).toBe(false);
+    expect(retryable({ code: "limit_concurrency", scope: "account", retry: true })).toBe(true);
+  });
+
+  test("retryable: never the policy, the model's safety check, the stable limit codes or x-should-retry: false", () => {
+    const retryable = (sessionError: Record<string, unknown>) => messageFacts([prompt(), errorMessage({ kind: "generic", title: "Refused", ...sessionError })]).retryable;
+    for (const details of [
+      "Error type: APIError\nMessage: OmniRush can't help with this request.\nResponse: {\"error\":{\"code\":\"request_policy_refused\"}}",
+      "Error type: APIError\nMessage: This content was flagged.\nResponse: {\"type\":\"error\",\"error\":{\"code\":\"cyber_policy\"}}",
+      "Error type: APIError\nResponse: {\"error\":{\"omnirush\":{\"code\":\"limit_tokens\",\"retry\": false}}}",
+      "Error type: APIError\nResponse: {\"error\":{\"omnirush\":{\"code\":\"limit_session_cap\"}}}",
+    ]) {
+      expect(retryable({ technicalDetails: details })).toBe(false);
+    }
+    expect(retryable({ technicalDetails: "Error type: APIError\nStatus: 400", noRetry: true })).toBe(false);
+    expect(retryable({ technicalDetails: "Error type: APIError\nStatus: 400" })).toBe(true);
+  });
+
+  test("replyOpen: the last reply has no end time and no error yet (the engine's idle comes first)", () => {
+    const open = assistant("a", [tool("bash", { command: "npm test" }, "input-streaming")]);
+    expect(messageFacts([prompt(), open]).replyOpen).toBe(true);
+    // Looks cut off and retryable while open: the auto-retry waits for it to close.
+    expect(messageFacts([prompt(), open]).retryable).toBe(true);
+    const refused = errorMessage({ kind: "generic", title: "OmniRush can't help with this request.", technicalDetails: "Error type: APIError", omnirush: { code: "request_policy_refused", retry: false } });
+    expect(messageFacts([prompt(), open, refused])).toMatchObject({ replyOpen: false, ended: "gateway", retryable: false });
+    expect(messageFacts([prompt(), assistant("a", [{ type: "text", text: "Done." }], { completed: 5 })]).replyOpen).toBe(false);
+    expect(messageFacts([prompt()]).replyOpen).toBe(false);
+  });
 });
 
 describe("the finish guard", () => {
@@ -676,6 +710,13 @@ describe("the server's auto-retry and one-more-turn nudge", () => {
     expect(autoRetryMessage({ ...base, ended: "cut" })).toBe("Continue.");
     expect(autoRetryMessage({ ...base, retriesInARow: 1 })).toBeNull();
     expect(autoRetryMessage({ ...base, turnRunning: true })).toBeNull();
+  });
+
+  test("never after an error the gateway marks final (error.omnirush.retry false)", () => {
+    const facts = messageFacts([prompt(), errorMessage({ kind: "generic", title: "x", technicalDetails: "Error type: APIError", omnirush: { code: "request_policy_refused", retry: false } })]);
+    expect(autoRetryMessage({ ...base, ended: facts.ended, retryable: facts.retryable })).toBeNull();
+    const busy = messageFacts([prompt(), errorMessage({ kind: "generic", title: "x", technicalDetails: "Error type: APIError", omnirush: { code: "limit_rate", retry: true } })]);
+    expect(autoRetryMessage({ ...base, ended: busy.ended, retryable: busy.retryable })).toBe("Continue.");
   });
 
   test("never after the Stop button or on a refusal", () => {
