@@ -52,7 +52,7 @@ export async function buildOmniRushEnvSystemContext(
     const keyList = keys.map((key) => `- ${key}`).join("\n");
 
     const context = [
-      "omnirush.ai environment variables configured:",
+      "Environment variables configured:",
       keyList,
       "Only names are shown; values are secret. Use these names when relevant.",
     ].join("\n");
