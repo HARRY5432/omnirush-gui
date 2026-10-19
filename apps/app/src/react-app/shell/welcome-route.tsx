@@ -26,7 +26,7 @@ import { useDenAuth } from "../domains/cloud/den-auth-provider";
 import { useDenControlPlaneConfigured } from "../domains/cloud/use-den-control-plane-configured";
 import { JoinOrganizationDialog } from "../domains/cloud/join-organization-dialog";
 import { resolveOmniRushConnection } from "./omnirush-connection";
-import { captureAnalyticsEvent } from "../../app/lib/analytics";
+import { attributionSurveyProperties, captureAnalyticsEvent } from "../../app/lib/analytics";
 import { noteNewBuildathonProject } from "../../app/lib/buildathon";
 import { buildOmniRushWorkspaceBaseUrl, createOmniRushServerClient } from "../../app/lib/omnirush-server";
 import { buildDenAuthUrl, DEFAULT_DEN_BASE_URL, readDenSettings } from "../../app/lib/den";
@@ -373,13 +373,8 @@ export function WelcomeRoute() {
 
   const handleAttributionSubmit = useCallback(
     (source: AttributionSource, aiPrompt?: string) => {
-      const prompt = aiPrompt?.trim().slice(0, 500) ?? "";
-      captureAnalyticsEvent("attribution_survey_submitted", {
-        source,
-        // User-volunteered survey answer (not session content); see survey UI.
-        ai_prompt: prompt || null,
-        ai_prompt_length: prompt.length,
-      });
+      // The fixed choice and how long the optional answer was; never its text.
+      captureAnalyticsEvent("attribution_survey_submitted", attributionSurveyProperties(source, aiPrompt));
       finishOnboarding();
     },
     [finishOnboarding],

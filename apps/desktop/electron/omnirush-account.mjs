@@ -233,12 +233,19 @@ function accountUsage(usage) {
   };
 }
 
+/** The account's opaque id (a UUID) from /device/me, or null. */
+function accountUuid(value) {
+  const id = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id) ? id : null;
+}
+
 function accountProfile(value) {
   if (!value || typeof value !== "object") return null;
   const email = normalizeCredential(value.email);
   if (!email) return null;
   const usage = accountUsage(value.usage);
   return {
+    accountId: accountUuid(value.id),
     email,
     displayName: normalizeCredential(value.display_name) ?? displayNameFromEmail(email),
     status: normalizeCredential(value.status),
@@ -1105,6 +1112,7 @@ export function createDesktopOmniRushAccountStore({
         gatewayConfigured,
         ...server,
         ...storage,
+        accountId: profile?.accountId ?? null,
         email: profile?.email ?? null,
         displayName: profile?.displayName ?? null,
         accountStatus: profile?.status ?? null,

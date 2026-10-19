@@ -26,6 +26,12 @@ on:
 permissions:
   contents: read
 
+# Product analytics of packaged builds (PostHog project "OmniRush Desktop").
+# A public client key, compiled into the app; a repository variable overrides it.
+env:
+  VITE_OMNIRUSH_POSTHOG_KEY: ${{ vars.OMNIRUSH_POSTHOG_KEY || 'phc_uKRzMW7rNe68NKBxCjAwBvqzpxiRj77dGDY7WN3uGoMX' }}
+  VITE_OMNIRUSH_POSTHOG_HOST: ${{ vars.OMNIRUSH_POSTHOG_HOST || 'https://us.i.posthog.com' }}
+
 jobs:
   build-electron:
     if: ${{ !inputs.updater_e2e_only }}

@@ -28,6 +28,7 @@ import {
   omnirushAccountStatus,
 } from "../../../../app/lib/desktop";
 import type { OmniRushRuntimeApprovals } from "../../../../app/lib/omnirush-server";
+import { captureAnalyticsEvent, resetAnalyticsAccount, syncAnalyticsAccount } from "../../../../app/lib/analytics";
 import { omnirushUsageSummary } from "../../../../app/lib/omnirush-usage";
 import { isElectronRuntime } from "../../../../app/utils";
 import {
@@ -296,7 +297,10 @@ export function GeneralSettingsView(props: GeneralSettingsViewProps) {
 
   useEffect(() => {
     if (!isElectronRuntime()) return;
-    void omnirushAccountStatus().then(setAccount).catch(() => setAccount({ connected: false, gatewayConfigured: false }));
+    void omnirushAccountStatus().then((next) => {
+      setAccount(next);
+      syncAnalyticsAccount(next);
+    }).catch(() => setAccount({ connected: false, gatewayConfigured: false }));
   }, []);
 
   async function connectAccount() {
@@ -304,7 +308,14 @@ export function GeneralSettingsView(props: GeneralSettingsViewProps) {
     setAccountMessage("Approve the device link in your browser…");
     try {
       await omnirushAccountConnect();
-      setAccount(await omnirushAccountStatus());
+      captureAnalyticsEvent("device_approved", { method: "device_link" });
+      const next = await omnirushAccountStatus();
+      setAccount(next);
+      if (next.connected) {
+        // Identify first so the sign-in itself is linked to the account.
+        syncAnalyticsAccount(next);
+        captureAnalyticsEvent("sign_in_completed", { method: "device_link" });
+      }
       setAccountMessage("Account connected. omnirush.ai models are ready.");
     } catch (error) {
       setAccountMessage(error instanceof Error ? error.message : "The account could not be connected.");
@@ -320,6 +331,7 @@ export function GeneralSettingsView(props: GeneralSettingsViewProps) {
     const server = account?.gatewayHost ?? null;
     try {
       const result = await omnirushAccountSignOut();
+      resetAnalyticsAccount();
       const next = await omnirushAccountStatus().catch(() => null);
       setAccount(next ?? { connected: false, gatewayConfigured: account?.gatewayConfigured ?? false });
       setAccountMessage(accountSignOutMessage(result, server));

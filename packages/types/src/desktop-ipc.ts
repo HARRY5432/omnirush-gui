@@ -511,6 +511,8 @@ export type OmniRushAccountStatus = {
   connected: boolean;
   gatewayConfigured: boolean;
   reauthorizationRequired?: boolean;
+  /** The account's opaque id (UUID) from /device/me; product analytics are linked to it. */
+  accountId?: string | null;
   email?: string | null;
   displayName?: string | null;
   accountStatus?: string | null;
@@ -899,7 +901,7 @@ export type DesktopCommandMap = {
     result: { enabled: boolean };
   };
   desktopSentryClearSession: { args: []; result: { enabled: boolean } };
-  /** The "Share anonymous usage" setting; desktop error reports follow it. */
+  /** Consent for desktop error reports; the app no longer grants it. */
   desktopSentrySetConsent: { args: [enabled: boolean]; result: { enabled: boolean } };
   desktopIntegrationStatus: { args: []; result: DesktopIntegrationStatus };
   desktopIntegrationInstall: {

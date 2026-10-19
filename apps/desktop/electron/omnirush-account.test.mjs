@@ -93,6 +93,27 @@ test("device authorization polls, encrypts, and restores the account", async () 
   ]);
 });
 
+test("status carries the account's opaque id (for analytics), never derived from the e-mail", async () => {
+  const id = "3F2504E0-4F89-11D3-9A0C-0305E82C3301";
+  let body = { id, email: "person@example.com", status: "active" };
+  const options = await storeOptions({
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/device/me")) return Response.json(body);
+      if (String(url).endsWith("/device/authorize")) {
+        return Response.json({ device_code: "d", user_code: "U", verification_uri_complete: "http://localhost:5175/console?code=U", interval: 0, expires_in: 60 });
+      }
+      return Response.json({ gateway_url: "http://localhost:8090/omnirush/v1", access_token: "access-token", refresh_token: "refresh-token" });
+    },
+  });
+  const store = createDesktopOmniRushAccountStore(options);
+  await store.authorize({ gatewayUrl: undefined, deviceName: "Test", openVerification: async () => undefined });
+  assert.equal((await store.status()).accountId, id.toLowerCase());
+  body = { id: "person@example.com", email: "person@example.com", status: "active" };
+  assert.equal((await store.status()).accountId, null);
+  body = { email: "person@example.com", status: "active" };
+  assert.equal((await store.status()).accountId, null);
+});
+
 async function authorizeOrigin(env) {
   const requested = [];
   const options = await storeOptions({
