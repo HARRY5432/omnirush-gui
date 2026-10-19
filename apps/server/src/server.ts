@@ -180,6 +180,7 @@ import { boxHome } from "./box/common.js";
 import { buildathonProjectsFile, reproStateFromBody, writeReproState } from "./buildathon-repro.js";
 import { prepareBoxInstallLog } from "./box/install-log.js";
 import { rememberServerDefault, watchServerDefault } from "./box/launch.js";
+import { rememberWebSearchSwitch, watchWebSearchSwitch } from "./web-search.js";
 import { normalizeBackend } from "./box/backends/index.js";
 import { buildOmniRushRuntimeConfigObject, omnirushGatewayConfigured, omnirushRuntimeConfigFilePath, writeOmniRushRuntimeConfigFile } from "./omnirush-runtime-config.js";
 import { assertMcpAllowed, mcpAllowed, mcpPolicyForConfig, MCP_DISABLED_MESSAGE } from "./mcp-policy.js";
@@ -1228,12 +1229,23 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
   // image starts downloading), and the server's default (local_box) is read for the engine config.
   const boxes = boxServiceFor(config, (level, message, attributes) => logger.log(level, message, attributes));
   let stopBoxDefaultWatch: () => void = () => {};
+  let stopWebSearchWatch: () => void = () => {};
   if (gatewayBroker.enabled) {
     // Read before the first plan and the engine's first config (at most 1.5 s, else the last answer is
     // used until it comes): a switch flipped or rolled back on the server applies at this start.
     const read = gatewayBroker.sessionUploadCapabilities().then((capabilities) => rememberServerDefault(runtimeStorageDir(config), capabilities)).catch(() => false);
-    const inTime = await Promise.race([read.then(() => true), new Promise<false>((resolvePromise) => setTimeout(() => resolvePromise(false), 1_500).unref?.())]);
+    // The model's own web search (web-search.ts), from the same answer. Strict: a failed read keeps
+    // the last answer, while an answer without the block (an older server) turns it off.
+    const readWebSearch = gatewayBroker.sessionUploadCapabilities({ strict: true }).then((capabilities) => rememberWebSearchSwitch(runtimeStorageDir(config), capabilities)).catch(() => false);
+    const inTime = await Promise.race([Promise.all([read, readWebSearch]).then(() => true), new Promise<false>((resolvePromise) => setTimeout(() => resolvePromise(false), 1_500).unref?.())]);
     if (!inTime) void read.then((changed) => (changed ? applyServerBoxDefault(config, boxes) : undefined)).catch(() => undefined);
+    if (!inTime) void readWebSearch.then((changed) => (changed ? applyBoxEngineConfig(config, "web_search") : undefined)).catch(() => undefined);
+    stopWebSearchWatch = watchWebSearchSwitch({
+      stateDir: runtimeStorageDir(config),
+      read: () => gatewayBroker.sessionUploadCapabilities({ strict: true }),
+      apply: () => applyBoxEngineConfig(config, "web_search"),
+      everyMs: BOX_DEFAULT_REFRESH_MS,
+    });
     // Read again while the app stays open (from the capabilities cache: at most one request per its
     // TTL), so a switch flipped on the server reaches an app started before it without a restart.
     stopBoxDefaultWatch = watchServerDefault({
@@ -1606,6 +1618,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
     });
   } catch (error) {
     stopBoxDefaultWatch();
+    stopWebSearchWatch();
     bestPracticesReloads.stop();
     // First, and synchronously: archive part uploads in flight are aborted now, not after the other shutdown steps.
     const captureStopped = capture.stop();
@@ -1696,6 +1709,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
       // Before them, each chat in a box gets its last checkpoint (bounded; only when chats ran in a
       // box this run, and the account answers it is still stored within a second).
       stopBoxDefaultWatch();
+    stopWebSearchWatch();
       const archiveFinals = accountStillStored();
       if (boxes.hasChats() && await Promise.race([archiveFinals.catch(() => false), new Promise<false>((resolvePromise) => setTimeout(() => resolvePromise(false), 1_000).unref?.())])) {
         await boxes.finals({ budgetMs: 10_000 }).catch(() => []);

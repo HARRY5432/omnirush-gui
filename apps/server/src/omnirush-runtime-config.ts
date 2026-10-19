@@ -55,6 +55,7 @@ import {
   type OmniRushModelCatalog,
 } from "./omnirush-model-catalog.js";
 import { writeFileAtomic } from "./atomic-write.js";
+import { webSearchSetting, type WebSearchSwitch } from "./web-search.js";
 import { boxServiceFor } from "./box/desktop.js";
 import { engineConfig as withBoxEngineConfig } from "./box/launch.js";
 import {
@@ -111,7 +112,7 @@ export function omnirushGatewayConfigured(config: ServerConfig | undefined): boo
   return resolveConfiguredInternalGatewayRuntime(config) !== undefined;
 }
 
-function internalGatewayProvider(runtime: InternalGatewayRuntime, catalog: OmniRushModelCatalog): Record<string, unknown> {
+function internalGatewayProvider(runtime: InternalGatewayRuntime, catalog: OmniRushModelCatalog, webSearch: WebSearchSwitch | null): Record<string, unknown> {
   return {
     // The native OpenAI provider uses the Responses API, which preserves
     // reasoning summaries, tool calls, and delegated task events. The generic
@@ -123,7 +124,7 @@ function internalGatewayProvider(runtime: InternalGatewayRuntime, catalog: OmniR
     options: { baseURL: runtime.baseUrl },
     // Only models come from the account's catalog; the provider fields above
     // never do, so a catalog cannot route the engine past the local broker.
-    models: engineModelsFromCatalog(catalog),
+    models: engineModelsFromCatalog(catalog, webSearch),
   };
 }
 
@@ -144,6 +145,8 @@ export async function buildOmniRushRuntimeConfigObject(
     internalGateway && config ? await readOmniRushModelCatalog(config) : undefined,
     config ? omnirushRuntimeSkillsDir(config) : undefined,
     config ? omnirushBestPracticesSkillsDir(config) : undefined,
+    // The model's own web search: the server's switch as last seen (web-search.ts).
+    config ? webSearchSetting({ env: process.env, stateDir: runtimeStorageDir(config) }) : null,
   );
   // The Linux sandbox (box/): the engine's shell is the box shell and the box plugin is
   // loaded once any workspace may use a box; every other project's commands run natively
@@ -219,6 +222,7 @@ export function buildOmniRushRuntimeConfigObjectFromSnapshot(
   catalog: OmniRushModelCatalog = builtinOmniRushModelCatalog(),
   skillsDir?: string,
   bestPracticesDir?: string,
+  webSearch: WebSearchSwitch | null = null,
 ): Record<string, unknown> {
   const disabledProviders = runtimeDisabledProviderList(runtimeConfig);
   // OMNIRUSH_APPROVALS in the server environment wins over the persisted setting.
@@ -233,7 +237,7 @@ export function buildOmniRushRuntimeConfigObjectFromSnapshot(
   const provider = {
     ...runtimeProviderMap(runtimeConfig),
     ...(internalGateway
-      ? { [INTERNAL_PROVIDER_ID]: internalGatewayProvider(internalGateway, catalog) }
+      ? { [INTERNAL_PROVIDER_ID]: internalGatewayProvider(internalGateway, catalog, webSearch) }
       : {}),
   };
   const ownProviders = Object.keys(provider).filter((id) => /^(?:lpr_|omnirush$)/i.test(id));

@@ -868,6 +868,8 @@ export type TraceCapabilities = {
   local_box?: { default: string; max_turn_bytes?: number | null; backends?: string[] | null };
   /** Automatic compaction (session-archive/auto-compact.ts): absent is off. */
   auto_compact?: { enabled: boolean; after_turns: number; min_context_tokens?: number };
+  /** The model's own web search (web-search.ts): the block as the server sent it; absent is off. */
+  web_search?: Record<string, unknown>;
 };
 
 
