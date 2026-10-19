@@ -83,7 +83,7 @@ describe("permission approval modal helpers", () => {
       }),
     );
 
-    expect(buttonText(html)).toEqual(["Deny", "Allow once", "Allow for session"]);
+    expect(buttonText(html)).toEqual(["DenyN", "Allow onceY", "Allow for sessionA"]);
   });
 
   test("uses readable labels for generic permission titles", () => {
@@ -115,7 +115,7 @@ describe("permission approval modal helpers", () => {
     expect(html).toContain("Requested by OmniRush browser task");
     expect(html.toLowerCase()).not.toContain("opencode");
     expect(permission).toEqual(original);
-    expect(buttonText(html)).toEqual(["Deny", "Allow once", "Allow for session"]);
+    expect(buttonText(html)).toEqual(["DenyN", "Allow onceY", "Allow for sessionA"]);
   });
 
   test("identifies a permission requested by a child session", () => {
