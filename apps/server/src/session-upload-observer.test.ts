@@ -154,6 +154,8 @@ function fakeClock() {
       await new Promise((resolvePromise) => setImmediate(resolvePromise));
       if (signal.aborted) throw signal.reason;
     },
+    // These cases follow a turn to its end only; a running turn's progress has its own (session-upload-observer-progress.test.ts).
+    progressMs: 0,
   };
   return {
     timing,
