@@ -3,7 +3,7 @@ import type { UIMessage } from "ai";
 import { safeStringify } from "../../../../app/utils";
 import { normalizeErrorText } from "../../../../lib/error-text";
 
-export type OpencodeSessionErrorKind = "aborted" | "provider-timeout" | "provider-incomplete" | "free-model-limit" | "disk-full" | "database-error" | "generic";
+export type OpencodeSessionErrorKind = "aborted" | "provider-timeout" | "provider-incomplete" | "free-model-limit" | "disk-full" | "database-error" | "folder-not-writable" | "generic";
 
 /**
  * omnirush.ai's stable error object (`error.omnirush` of the gateway's JSON
@@ -284,7 +284,40 @@ function technicalErrorDetails(error: unknown, fallback: string, fields: ReturnT
   return normalizeErrorText(serialized && serialized !== "{}" ? serialized : fallback, { cap: 1_500 }).display;
 }
 
+/** The server's refusal of a prompt in a folder the engine cannot write to (apps/server/src/folder-write-check.ts). */
+export type FolderWriteError = { reason: string; message: string; hint: string | null };
+
+export function folderWriteError(error: unknown): FolderWriteError | null {
+  let value: unknown = error instanceof Error ? error.message : error;
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (!text.startsWith("{") || !text.includes("workspace_not_writable")) return null;
+    try {
+      value = JSON.parse(text);
+    } catch {
+      return null;
+    }
+  }
+  const records = [value, recordValue(value, "data")];
+  const source = records.find((record) => recordValue(record, "error") === "workspace_not_writable");
+  const message = recordValue(source, "message");
+  if (!source || typeof message !== "string" || !message.trim()) return null;
+  const reason = recordValue(source, "reason");
+  const hint = recordValue(source, "hint");
+  return { reason: typeof reason === "string" ? reason : "unknown", message: message.trim(), hint: typeof hint === "string" && hint.trim() ? hint.trim() : null };
+}
+
 export function presentOpencodeSessionError(error: unknown, fallback = "Session failed"): OpencodeSessionErrorPresentation {
+  const folder = folderWriteError(error);
+  if (folder) {
+    return {
+      kind: "folder-not-writable",
+      title: folder.message,
+      description: folder.hint,
+      technicalDetails: `Reason: ${folder.reason}`,
+      recoveryPrompt: null,
+    };
+  }
   const fields = sessionErrorFields(error, fallback);
   const kind = sessionErrorKind(fields.name, fields.message, fields.code, fields.responseBody);
   const consoleLink = consoleLinkAction(fields.message);
