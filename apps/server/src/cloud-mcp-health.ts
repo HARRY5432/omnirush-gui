@@ -29,8 +29,8 @@ const OMNIRUSH_CLOUD_DIRECT_TOOL_NAMES = [
   "execute_capability",
 ] satisfies string[];
 export const OMNIRUSH_CLOUD_PLUGIN_CANARIES = [
-  "omnirush_docs_search",
-  "omnirush_query",
+  "app_docs_search",
+  "app_query",
 ] satisfies string[];
 
 const POLL_DELAYS_MS = [0, 250, 750, 1500, 3000];

@@ -391,7 +391,7 @@ function basePartIds(part: Record<string, unknown>): Record<string, unknown> {
 
 function normalizedText(part: OfficeFilePart, materialized: MaterializedAttachment | null, extractedText: string, error?: string): string {
   return [
-    "OmniRush.ai normalized an Office attachment before sending this request to the model.",
+    "The app normalized an Office attachment before sending this request to the model.",
     `filename: ${safeFilename(part.filename, part.kind)}`,
     `canonical_mime: ${part.mime}`,
     `sha256: ${materialized?.sha256 ?? "unavailable"}`,

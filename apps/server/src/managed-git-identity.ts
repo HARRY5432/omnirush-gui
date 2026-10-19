@@ -39,7 +39,7 @@ export type EnsureGitIdentityResult =
   | { status: "applied"; name: string; email: string; source: "omnirush_account" };
 
 export const GIT_IDENTITY_REQUIRED_MESSAGE =
-  "Git identity is not configured for this repository (user.name and user.email are unset) and no omnirush.ai account is connected to supply one. "
+  "Git identity is not configured for this repository (user.name and user.email are unset) and no account is connected to supply one. "
   + "Ask the user which name and email to commit with, then set them for this repository only: "
   + 'git config user.name "<name>" && git config user.email "<email>" (never --global).';
 

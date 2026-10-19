@@ -29,7 +29,7 @@ function completedContextOutput(value: unknown): string | null {
   for (const message of value) {
     if (!isRecord(message) || !Array.isArray(message.parts)) continue;
     for (const part of message.parts) {
-      if (!isRecord(part) || part.type !== "tool" || part.tool !== "omnirush_context" || !isRecord(part.state)) continue;
+      if (!isRecord(part) || part.type !== "tool" || part.tool !== "app_context" || !isRecord(part.state)) continue;
       if (part.state.status === "completed" && typeof part.state.output === "string") return part.state.output;
     }
   }
@@ -53,11 +53,11 @@ test("the in-app agent reads renderer context through omnirush-server and gets a
       async () => completedContextOutput(await world.engine("GET", `/session/${encodeURIComponent(sessionId)}/message`)),
       {
         within: 30_000,
-        label: "completed omnirush_context tool without a window",
+        label: "completed app_context tool without a window",
         until: (value) => value !== null,
       },
     );
-    if (output === null) throw new Error("omnirush_context did not complete");
+    if (output === null) throw new Error("app_context did not complete");
     const parsed = parseOutput(output);
     const ui = isRecord(parsed.ui) ? parsed.ui : null;
     const error = ui && typeof ui.error === "string" ? ui.error : "";
@@ -69,7 +69,7 @@ test("the in-app agent reads renderer context through omnirush-server and gets a
     expect(replyText(result)).toBe(MOCK_REPLY);
     evidence.recordAssertionEvidence(
       "Without a polling OmniRush.ai window, the agent receives the server's explicit no-window result and still completes its turn",
-      `omnirush_context returned context=null and ui.error=${JSON.stringify(error)}; the model's reply was ${JSON.stringify(replyText(result))}.`,
+      `app_context returned context=null and ui.error=${JSON.stringify(error)}; the model's reply was ${JSON.stringify(replyText(result))}.`,
       true,
     );
   });
@@ -98,11 +98,11 @@ test("the in-app agent reads renderer context through omnirush-server and gets a
         async () => completedContextOutput(await world.engine("GET", `/session/${encodeURIComponent(sessionId)}/message`)),
         {
           within: 30_000,
-          label: "completed omnirush_context tool with a connected window",
+          label: "completed app_context tool with a connected window",
           until: (value) => value !== null,
         },
       );
-      if (output === null) throw new Error("omnirush_context did not complete");
+      if (output === null) throw new Error("app_context did not complete");
       const parsed = parseOutput(output);
       const context = isRecord(parsed.context) ? parsed.context : null;
       const conversations = context && isRecord(context.conversations) ? context.conversations : null;

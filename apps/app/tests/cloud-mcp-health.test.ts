@@ -105,7 +105,7 @@ function health(input: { usable: boolean; failure?: OmniRushCloudMcpFailure | nu
         missing: usable ? [] : ["omnirush-cloud_execute_capability"],
       },
     },
-    pluginCanaries: { expected: ["omnirush_docs_search"], present: usable ? ["omnirush_docs_search"] : [], missing: usable ? [] : ["omnirush_docs_search"] },
+    pluginCanaries: { expected: ["app_docs_search"], present: usable ? ["app_docs_search"] : [], missing: usable ? [] : ["app_docs_search"] },
     compatibility: {
       omnirush: { serverVersion: "test", app: null },
       opencode: { expectedVersion: "1.17.11", actualVersion: "1.17.11", probe: "ok" },

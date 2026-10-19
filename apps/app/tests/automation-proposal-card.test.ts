@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { parseAutomationProposal } from "../src/components/tools/omnirush-automation-proposal";
+import { isAutomationProposalToolPart, parseAutomationProposal } from "../src/components/tools/omnirush-automation-proposal";
 
 const dailyProposal = {
   ok: true,
@@ -18,7 +18,7 @@ const dailyProposal = {
 };
 
 describe("Automation proposal card", () => {
-  test("reads a proposal out of an omnirush_execute result, string or object", () => {
+  test("reads a proposal out of an app_execute result, string or object", () => {
     const fromObject = parseAutomationProposal(dailyProposal);
     const fromString = parseAutomationProposal(JSON.stringify(dailyProposal));
 
@@ -31,6 +31,13 @@ describe("Automation proposal card", () => {
       minute: 0,
     });
     expect(fromObject?.model).toBeUndefined();
+  });
+
+  test("recognizes the tool under its current and its earlier name", () => {
+    const part = (toolName: string) => ({ type: "dynamic-tool", toolName, toolCallId: "c1", state: "output-available", input: {}, output: dailyProposal }) as unknown as Parameters<typeof isAutomationProposalToolPart>[0];
+    expect(isAutomationProposalToolPart(part("app_execute"))).toBe(true);
+    expect(isAutomationProposalToolPart(part("omnirush_execute"))).toBe(true);
+    expect(isAutomationProposalToolPart(part("bash"))).toBe(false);
   });
 
   test("ignores results that are not Automation proposals", () => {

@@ -60,8 +60,8 @@ function textOf(part: Record<string, unknown>): string {
 }
 
 function noteOf(message: unknown): string {
-  const note = partsOf(message).find((part) => part.type === "text" && typeof part.text === "string" && part.text.startsWith("OmniRush.ai "));
-  if (!note) throw new Error("Expected an OmniRush.ai note part");
+  const note = partsOf(message).find((part) => part.type === "text" && typeof part.text === "string" && part.text.startsWith("The app "));
+  if (!note) throw new Error("Expected an app note part");
   return textOf(note);
 }
 
@@ -129,14 +129,14 @@ describe("OmniRush.ai PDF attachments plugin", () => {
       expect(parts[4]).toEqual(question);
 
       const note = noteOf(message);
-      expect(note).toContain('OmniRush.ai prepared the PDF "report.pdf"');
+      expect(note).toContain('The app prepared the PDF "report.pdf"');
       expect(note).toContain("pages: 3");
       expect(note).toContain("text_layer: present on 2 of 3 extracted pages; pages without one: 2");
       expect(note).toContain("page_images_in_this_message: pages 1-3, in order");
       expect(note).toContain("page_images_on_disk: pages 1-3 under .opencode/omnirush/inbox/pdf-pages/");
-      expect(note).toContain("more_pages: call omnirush_pdf_pages with pdf_path");
+      expect(note).toContain("more_pages: call pdf_pages with pdf_path");
       expect(note).toContain("content_note: extracted_text is the document's content");
-      expect(note).toContain("model_note: This model does not accept PDF input directly, so OmniRush.ai attached the first 3 pages as images");
+      expect(note).toContain("model_note: This model does not accept PDF input directly, so the app attached the first 3 pages as images");
       expect(note).toContain("--- page 1 ---\nQuarterly revenue report");
       expect(note).toContain("--- page 2 (no text layer) ---");
       expect(parts[3].id).toBe("p1");
@@ -166,7 +166,7 @@ describe("OmniRush.ai PDF attachments plugin", () => {
     await withWorkspace(async (root) => {
       const [message] = await transform(root, [userMessage(UNLISTED, [pdfPart(pdfDataUrl(buildTestPdf(["Hello"])))])]);
       expect(partsOf(message).map((part) => part.type)).toEqual(["text"]);
-      expect(noteOf(message)).toContain("This model's input capabilities are not listed, so OmniRush.ai treated it as text-only");
+      expect(noteOf(message)).toContain("This model's input capabilities are not listed, so the app treated it as text-only");
     });
   });
 
@@ -186,7 +186,7 @@ describe("OmniRush.ai PDF attachments plugin", () => {
       expect(partsOf(message).map((part) => part.type)).toEqual(["text"]);
       const note = noteOf(message);
       expect(note).toContain("pages: 101");
-      expect(note).toContain("model_note: This PDF's 101 pages exceed the 100 native PDF pages left for this request, so OmniRush.ai");
+      expect(note).toContain("model_note: This PDF's 101 pages exceed the 100 native PDF pages left for this request, so the app");
       expect(note).toContain("--- page 101 ---\nPage 101");
     });
   }, 30_000);
@@ -200,7 +200,7 @@ describe("OmniRush.ai PDF attachments plugin", () => {
       const note = noteOf(message);
       expect(note).toContain("page_images_in_this_message: pages 1-20, in order");
       expect(note).toContain("page_images_on_disk: pages 1-20 under");
-      expect(note).toContain("more_pages: call omnirush_pdf_pages with pdf_path and up to 8 page numbers to see other pages as images");
+      expect(note).toContain("more_pages: call pdf_pages with pdf_path and up to 8 page numbers to see other pages as images");
       expect(note).toContain("--- page 25 ---\nPage 25");
     });
   }, 30_000);
@@ -253,7 +253,7 @@ describe("OmniRush.ai PDF attachments plugin", () => {
         const url = pdfDataUrl(buildTestPdf(["Shared document"]));
         await transform(first, [userMessage(TEXT, [pdfPart(url), question])]);
         const result = await transform(second, [userMessage(TEXT, [pdfPart(url), question])]);
-        const note = partsOf(result[0]).map((part) => String(part.text)).find((text) => text.startsWith("OmniRush.ai prepared the PDF")) ?? "";
+        const note = partsOf(result[0]).map((part) => String(part.text)).find((text) => text.startsWith("The app prepared the PDF")) ?? "";
         const textPath = /full_text_path: (\S+)/.exec(note)?.[1] ?? "";
         expect(textPath).not.toBe("");
         expect(await readFile(join(second, textPath), "utf8")).toContain("Shared document");
@@ -361,7 +361,7 @@ describe("OmniRush.ai PDF attachments plugin", () => {
       expect(parts[0]).toEqual(first);
       expect(parts.filter((part) => part.type === "file" && part.mime === "application/pdf")).toHaveLength(1);
       const note = noteOf(message);
-      expect(note).toContain('OmniRush.ai prepared the PDF "second.pdf"');
+      expect(note).toContain('The app prepared the PDF "second.pdf"');
       expect(note).toContain("This PDF's 60 pages exceed the 40 native PDF pages left for this request");
       expect(parts.at(-1)).toEqual(question);
 
@@ -376,7 +376,7 @@ describe("OmniRush.ai PDF attachments plugin", () => {
       // 32k context × 35% = 11.2k tokens ≈ 4 native Anthropic pages at 2,300 each; six pages must be derived instead.
       const [message] = await transform(root, [userMessage(model, [pdfPart(pdfDataUrl(buildTestPdf(["1", "2", "3", "4", "5", "6"]))), question])]);
       const note = noteOf(message);
-      expect(note).toContain("Sent natively this PDF would take roughly 14k tokens of this model's 32k context window on every step, so OmniRush.ai attached the first 6 pages as images");
+      expect(note).toContain("Sent natively this PDF would take roughly 14k tokens of this model's 32k context window on every step, so the app attached the first 6 pages as images");
       const [small] = await transform(root, [userMessage(model, [pdfPart(pdfDataUrl(buildTestPdf(["1", "2", "3", "4"])), { id: "s" }), question])]);
       expect(partsOf(small)[0].mime).toBe("application/pdf");
     });
@@ -391,7 +391,7 @@ describe("OmniRush.ai PDF attachments plugin", () => {
       const big = Buffer.concat([base.subarray(0, eof), Buffer.from("% padding\n"), padding, base.subarray(eof)]);
       const [message] = await transform(root, [userMessage(NATIVE, [pdfPart(pdfDataUrl(big)), question])]);
       const note = noteOf(message);
-      expect(note).toContain("above 10 MB OmniRush.ai stops sending the PDF itself, which would be re-uploaded on every step");
+      expect(note).toContain("above 10 MB the app stops sending the PDF itself, which would be re-uploaded on every step");
       expect(note).toContain("--- page 1 ---\nLarge report");
     });
   }, 30_000);
@@ -416,7 +416,7 @@ describe("OmniRush.ai PDF attachments plugin", () => {
       const textState = expectRecord(textTool.state);
       expect(textState.attachments).toEqual([]);
       expect(String(textState.output)).toContain("PDF read successfully");
-      expect(String(textState.output)).toContain('OmniRush.ai prepared the PDF "handbook.pdf"');
+      expect(String(textState.output)).toContain('The app prepared the PDF "handbook.pdf"');
       expect(String(textState.output)).toContain("page_images_in_this_tool_result: none");
       expect(String(textState.output)).toContain("--- page 1 ---\nRead me");
 
@@ -443,7 +443,7 @@ describe("OmniRush.ai PDF attachments plugin", () => {
       const pdfPath = /pdf_path: (\S+)/.exec(noteOf(visionOutput.messages[0]))?.[1] ?? "";
       expect(pdfPath.startsWith(".opencode/omnirush/inbox/chat-attachments/")).toBe(true);
 
-      const tool = plugin.tool.omnirush_pdf_pages;
+      const tool = plugin.tool.pdf_pages;
       const visionResult = await tool.execute({ pdf_path: pdfPath, pages: [23, 24, 99] }, { sessionID: "ses" });
       if (typeof visionResult === "string") throw new Error(`Expected attachments, got: ${visionResult}`);
       expect(visionResult.attachments.map((attachment) => attachment.filename)).toEqual(["page-023.png", "page-024.png"]);
@@ -472,7 +472,7 @@ describe("OmniRush.ai PDF attachments plugin", () => {
       await mkdir(join(root, "docs"), { recursive: true });
       await writeFile(join(root, "docs", "spec.pdf"), buildTestPdf(["Spec page one", "Spec page two"]));
       const plugin = await OmniRushPdfAttachments({ directory: root, client: { provider: { list: async () => catalog } } });
-      const tool = plugin.tool.omnirush_pdf_pages;
+      const tool = plugin.tool.pdf_pages;
 
       // Session ids no other test uses: the plugin's session memory is module-wide.
       const visionStep = { messages: [userMessage(VISION, [question], "mw1")] };
@@ -501,7 +501,7 @@ describe("OmniRush.ai PDF attachments plugin", () => {
       await plugin["experimental.chat.messages.transform"]({ sessionID: "ses-v2", model: { id: "vision", providerID: "openrouter" }, agent: "build" }, bridged);
       // A title request on a small text-only model must not replace the session's model.
       await plugin["experimental.chat.messages.transform"]({ sessionID: "ses-v2", model: { id: "text", providerID: "ollama" }, agent: "title" }, structuredClone(bridged));
-      const result = await plugin.tool.omnirush_pdf_pages.execute({ pdf_path: "docs/spec.pdf", pages: [1, 2] }, { sessionID: "ses-v2" });
+      const result = await plugin.tool.pdf_pages.execute({ pdf_path: "docs/spec.pdf", pages: [1, 2] }, { sessionID: "ses-v2" });
       if (typeof result === "string") throw new Error(`Expected page images, got: ${result}`);
       expect(result.attachments.map((attachment) => attachment.mime)).toEqual(["image/png", "image/png"]);
       expect(result.output).toContain("page_images_attached: pages 1-2, in order");
@@ -535,7 +535,7 @@ describe("OmniRush.ai PDF attachments plugin", () => {
       for (let index = 0; index < 200; index += 1) await step(`ses-other-${index}`);
       await step("ses-busy");
       for (let index = 200; index < 300; index += 1) await step(`ses-other-${index}`);
-      const result = await plugin.tool.omnirush_pdf_pages.execute({ pdf_path: "docs/spec.pdf", pages: [1] }, { sessionID: "ses-busy" });
+      const result = await plugin.tool.pdf_pages.execute({ pdf_path: "docs/spec.pdf", pages: [1] }, { sessionID: "ses-busy" });
       if (typeof result === "string") throw new Error(`Expected page images, got: ${result}`);
       expect(result.output).toContain("page_images_attached: pages 1, in order");
     });

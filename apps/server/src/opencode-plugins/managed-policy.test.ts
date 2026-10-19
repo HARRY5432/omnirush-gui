@@ -115,7 +115,7 @@ describe("managed-policy engine plugin: git workflows", () => {
     expect(gitGet(repo, "--global", "--get", "user.name")).toBe("");
     const output = { title: "git commit", output: "[main abc] feat: hello", metadata: {} };
     await hooks["tool.execute.after"]({ tool: "bash", callID: "call_2", sessionID: "ses_1", args }, output);
-    expect(output.output).toContain("[omnirush.ai] omnirush.ai set the commit identity for");
+    expect(output.output).toContain("[app note] The app set the commit identity for");
     expect(output.output).toContain("Sam Example <sam@example.com>");
     expect(output.output).toContain("never global");
     // The note is delivered once.

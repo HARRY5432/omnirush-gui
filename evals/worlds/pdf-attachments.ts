@@ -33,7 +33,7 @@ function summarizeToolResults(body: unknown): string[] {
   for (const message of body.messages) {
     if (!isRecord(message) || message.role !== "tool") continue;
     const content = typeof message.content === "string" ? message.content : JSON.stringify(message.content);
-    results.push(content.includes("OmniRush.ai prepared the PDF") ? "tool:note" : `tool:${content.slice(0, 30)}`);
+    results.push(content.includes("The app prepared the PDF") ? "tool:note" : `tool:${content.slice(0, 30)}`);
   }
   return results;
 }
@@ -65,7 +65,7 @@ function summarizeUserContent(body: unknown): string[] {
       } else if (item.type === "file") {
         parts.push(`file:${isRecord(item.file) && typeof item.file.filename === "string" ? item.file.filename : "?"}`);
       } else if (item.type === "text" && typeof item.text === "string") {
-        parts.push(item.text.startsWith("OmniRush.ai prepared the PDF") ? "text:note" : `text:${item.text.slice(0, 20)}`);
+        parts.push(item.text.startsWith("The app prepared the PDF") ? "text:note" : `text:${item.text.slice(0, 20)}`);
       } else {
         parts.push(`other:${String(item.type)}`);
       }

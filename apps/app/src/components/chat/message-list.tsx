@@ -241,7 +241,7 @@ const ToolMessageInner = ({ part }: ToolMessageProps) => {
     )
   }
 
-  if (part.type === "dynamic-tool" && part.toolName === "omnirush_visualization") {
+  if (part.type === "dynamic-tool" && (part.toolName === "app_visualization" || part.toolName === "omnirush_visualization")) {
     return <VisualizationTool part={part} />
   }
 

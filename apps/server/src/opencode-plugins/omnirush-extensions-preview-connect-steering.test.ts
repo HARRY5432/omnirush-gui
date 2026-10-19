@@ -23,7 +23,7 @@ const originalServerUrl = process.env.OMNIRUSH_SERVER_URL;
 const originalServerToken = process.env.OMNIRUSH_SERVER_TOKEN;
 
 const UNCHANGED_EXTENSION_DISCOVERY_INSTRUCTION =
-  "If the user asks for something you cannot do with obvious built-in tools, check OmniRush.ai extensions before saying the capability is unavailable. Use omnirush_query with id extension.actions to inspect available extension actions, then omnirush_execute with id extension.call for the matching action.";
+  "If the user asks for something you cannot do with obvious built-in tools, check the app's extensions before saying the capability is unavailable. Use app_query with id extension.actions to inspect available extension actions, then app_execute with id extension.call for the matching action.";
 
 beforeEach(() => {
   resetOmniRushExtensionDiscoveryInstructionCacheForTests();
@@ -142,9 +142,9 @@ describe("composeOmniRushExtensionDiscoveryInstruction", () => {
     });
     expect(OMNIRUSH_CLOUD_SKILL_AUTHORING_INSTRUCTION).toContain("Skill creation: Cloud");
     expect(OMNIRUSH_CLOUD_SKILL_AUTHORING_INSTRUCTION).toContain("retrieve and follow the listed create-skill remote skill");
-    expect(OMNIRUSH_CLOUD_SKILL_AUTHORING_INSTRUCTION).toContain("omnirush-cloud_execute_capability");
+    expect(OMNIRUSH_CLOUD_SKILL_AUTHORING_INSTRUCTION).toContain("the Connect server's execute_capability tool");
     expect(OMNIRUSH_CLOUD_SKILL_AUTHORING_INSTRUCTION).toContain("exact <capability>");
-    expect(OMNIRUSH_CLOUD_SKILL_AUTHORING_INSTRUCTION).toContain("OmniRush.ai Cloud as a private plugin");
+    expect(OMNIRUSH_CLOUD_SKILL_AUTHORING_INSTRUCTION).toContain("in Cloud as a private plugin");
     expect(OMNIRUSH_CLOUD_SKILL_AUTHORING_INSTRUCTION).toContain("use share-plugin when the user wants a specific person or team to use a skill");
     expect(OMNIRUSH_CLOUD_SKILL_AUTHORING_INSTRUCTION).toContain("add-to-marketplace");
     expect(OMNIRUSH_CLOUD_SKILL_AUTHORING_INSTRUCTION).toContain("add-user-to-marketplace");

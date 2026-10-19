@@ -136,10 +136,10 @@ const connectCatalogResponseSchema = z.object({
 }).passthrough();
 
 export const OMNIRUSH_EXTENSION_DISCOVERY_INSTRUCTION =
-  "If the user asks for something you cannot do with obvious built-in tools, check OmniRush.ai extensions before saying the capability is unavailable. Use omnirush_query with id extension.actions to inspect available extension actions, then omnirush_execute with id extension.call for the matching action.";
+  "If the user asks for something you cannot do with obvious built-in tools, check the app's extensions before saying the capability is unavailable. Use app_query with id extension.actions to inspect available extension actions, then app_execute with id extension.call for the matching action.";
 
 export const OMNIRUSH_CLOUD_SKILL_AUTHORING_INSTRUCTION =
-  "Skill creation: Cloud. When the user asks to create a skill, retrieve and follow the listed create-skill remote skill by calling omnirush-cloud_execute_capability with its exact <capability>. Create the skill in OmniRush.ai Cloud as a private plugin, not in the workspace. For later steps, use share-plugin when the user wants a specific person or team to use a skill, and use add-to-marketplace or add-user-to-marketplace only when the user asks. Use a workspace-local skill only when the user explicitly requests one. Do not create both copies.";
+  "Skill creation: Cloud. When the user asks to create a skill, retrieve and follow the listed create-skill remote skill by calling the Connect server's execute_capability tool with its exact <capability>. Create the skill in Cloud as a private plugin, not in the workspace. For later steps, use share-plugin when the user wants a specific person or team to use a skill, and use add-to-marketplace or add-user-to-marketplace only when the user asks. Use a workspace-local skill only when the user explicitly requests one. Do not create both copies.";
 
 export const OMNIRUSH_LOCAL_SKILL_AUTHORING_INSTRUCTION =
   "Skill creation: Local. Create or update a workspace-local skill only when the user requests one. Keep one skill in .opencode/skills/<skill-name>/SKILL.md, validate it, and re-read it after writing. Do not create a Cloud copy.";
@@ -153,13 +153,13 @@ export const OMNIRUSH_LOCAL_SKILL_AUTHORING_INSTRUCTION =
 // steering is selected. Restating either here costs characters on every
 // request and drifts.
 export const OMNIRUSH_CLOUD_CONNECTION_INSTRUCTION =
-  "The OmniRush.ai Cloud connection is verified ready for this exact workspace/model. The omnirush-cloud server instructions in this prompt are authoritative for search-first discovery, MCP Apps, connection_status results, schema guidance, and retry rules; follow them instead of improvising. Local OmniRush.ai extensions remain available through omnirush_query/omnirush_execute with extension.actions and extension.call.";
+  "The Cloud connection is verified ready for this exact workspace/model. The Connect server instructions in this prompt are authoritative for search-first discovery, MCP Apps, connection_status results, schema guidance, and retry rules; follow them instead of improvising. Local app extensions remain available through app_query/app_execute with extension.actions and extension.call.";
 
 export const OMNIRUSH_CONNECT_SIGN_IN_INSTRUCTION =
-  `${OMNIRUSH_EXTENSION_DISCOVERY_INSTRUCTION} OmniRush.ai Cloud is not signed in or no desired agent access configuration exists for this workspace. Direct the user to sign in to OmniRush.ai and connect the service in Settings → Connect.`;
+  `${OMNIRUSH_EXTENSION_DISCOVERY_INSTRUCTION} Cloud is not signed in or no desired agent access configuration exists for this workspace. Direct the user to sign in to their account and connect the service in Settings → Connect.`;
 
 export const OMNIRUSH_CONNECT_DISABLED_INSTRUCTION =
-  `${OMNIRUSH_EXTENSION_DISCOVERY_INSTRUCTION} OmniRush.ai Cloud agent access is explicitly disabled for this workspace. Explain that the user can enable agent access in Settings → Connect.`;
+  `${OMNIRUSH_EXTENSION_DISCOVERY_INSTRUCTION} Cloud agent access is explicitly disabled for this workspace. Explain that the user can enable agent access in Settings → Connect.`;
 
 const OMNIRUSH_CLOUD_MCP_NAME = "omnirush-cloud";
 
@@ -220,7 +220,7 @@ function requireOmniRushServer(): { url: string; token: string } {
   const url = serverUrl();
   const token = serverToken();
   if (!url || !token) {
-    throw new Error("OmniRush.ai extension tools are only available when OmniRush is launched by OmniRush.ai.");
+    throw new Error("App extension tools are only available when the engine is launched by the app.");
   }
   return { url, token };
 }

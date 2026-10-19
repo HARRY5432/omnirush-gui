@@ -30,7 +30,7 @@ import { looksLikePdf, withPdfDocument } from "../pdf-attachments/pdfium.js";
  * - Models that accept PDF input receive the PDF as-is, within the provider's
  *   per-request page and byte limits counted across every PDF in the step.
  * - Models that accept images receive rendered page images plus page-marked
- *   text; further pages come from the `omnirush_pdf_pages` tool on demand.
+ *   text; further pages come from the `pdf_pages` tool on demand.
  * - Text-only models receive the page-marked text, with an honest note about
  *   pages that have no text layer.
  * - Oversized, encrypted, or corrupt PDFs become a clear note instead of a
@@ -60,7 +60,7 @@ const MAX_REMEMBERED_SESSIONS = 256;
 const SIDE_AGENTS = new Set(["title", "compaction", "summary"]);
 /** Extracted text inlined in the note; the full text stays on disk. */
 const MAX_INLINE_TEXT_CHARS = 60_000;
-const PAGE_TOOL_NAME = "omnirush_pdf_pages";
+const PAGE_TOOL_NAME = "pdf_pages";
 
 type RuntimeContext = {
   directory?: string;
@@ -314,10 +314,10 @@ function textLayerLine(derived: DerivedPdf): string {
 
 function modelNote(support: ModelInputSupport, inlinePages: number, derived: DerivedPdf, reason: Reason): string {
   const why = reason.kind === "limits"
-    ? `${reason.detail}, so OmniRush.ai`
+    ? `${reason.detail}, so the app`
     : support.known
-      ? "This model does not accept PDF input directly, so OmniRush.ai"
-      : "This model's input capabilities are not listed, so OmniRush.ai treated it as text-only and";
+      ? "This model does not accept PDF input directly, so the app"
+      : "This model's input capabilities are not listed, so the app treated it as text-only and";
   if (support.image && inlinePages > 0) return `model_note: ${why} attached the first ${inlinePages} page${inlinePages === 1 ? "" : "s"} as images (in order) and included the extracted text below.`;
   if (support.image) return `model_note: ${why} included the extracted text below.`;
   const scanned = derived.textPages > 0 && derived.pagesWithoutText.length === derived.textPages;
@@ -339,7 +339,7 @@ function derivedNote(source: PdfSource, derived: DerivedPdf, support: ModelInput
   const truncated = derived.text.length > MAX_INLINE_TEXT_CHARS;
   const renderedPages = derived.renderedPages.map((page) => page.page);
   const lines = [
-    `OmniRush.ai prepared the PDF "${safePdfFilename(source.filename)}" before sending this request to the model.`,
+    `The app prepared the PDF "${safePdfFilename(source.filename)}" before sending this request to the model.`,
     `pages: ${derived.pageCount}`,
     `bytes: ${derived.bytes}`,
     `sha256: ${derived.sha256}`,
@@ -363,7 +363,7 @@ function derivedNote(source: PdfSource, derived: DerivedPdf, support: ModelInput
 
 function failureNote(source: PdfSource, message: string, derived: DerivedPdf | null): string {
   return [
-    `OmniRush.ai could not prepare the PDF "${safePdfFilename(source.filename)}" for this model.`,
+    `The app could not prepare the PDF "${safePdfFilename(source.filename)}" for this model.`,
     `pdf_path: ${derived?.pdfPath ?? "unavailable"}`,
     `error: ${message}`,
     "The original PDF bytes were not forwarded to the provider. Tell the user what went wrong and, if the file is on disk, offer to work with it through tools.",
@@ -431,7 +431,7 @@ function megabytes(bytes: number): string {
 function claimNative(inspection: Inspection, budget: NativeBudget): { ok: true } | { ok: false; detail: string } {
   const { policy } = budget;
   if (inspection.bytes > policy.maxRawBytes) {
-    return { ok: false, detail: `This PDF is ${megabytes(inspection.bytes)}; above ${megabytes(policy.maxRawBytes)} OmniRush.ai stops sending the PDF itself, which would be re-uploaded on every step` };
+    return { ok: false, detail: `This PDF is ${megabytes(inspection.bytes)}; above ${megabytes(policy.maxRawBytes)} the app stops sending the PDF itself, which would be re-uploaded on every step` };
   }
   const encoded = encodedSize(inspection.bytes);
   if (encoded > budget.encodedBytes) {
@@ -697,7 +697,7 @@ export const OmniRushPdfAttachments = async (factoryInput?: unknown) => {
       [PAGE_TOOL_NAME]: {
         description: `Render specific pages of a PDF in this workspace and return them as images (when this model can view images) together with those pages' text. Use it after a PDF's extracted text was not enough — tables, figures, charts, scanned pages — or to reach pages beyond the ones already attached. Pages are 1-based; at most ${MAX_PAGES_PER_REQUEST} per call.`,
         args: {
-          pdf_path: z.string().min(1).describe("Workspace-relative path of the PDF, for example the pdf_path line of an OmniRush.ai PDF note."),
+          pdf_path: z.string().min(1).describe("Workspace-relative path of the PDF, for example the pdf_path line of a PDF note."),
           pages: z.array(z.number().int().min(1)).min(1).max(MAX_PAGES_PER_REQUEST).describe("1-based page numbers to render."),
         },
         async execute(args: { pdf_path: string; pages: number[] }, context: unknown) {

@@ -1872,14 +1872,14 @@ export async function visualization(seed: Seed) {
     ] }],
   };
   const mock = seed.mock({ agentWorkloads: [
-    { latestUserTurn: true, promptMarker: "Sketch a project overview", finalReply: "Your first sketch is ready.", steps: [{ tool: "omnirush_visualization", arguments: design }] },
-    { latestUserTurn: true, promptMarker: "Create version 2", finalReply: "Your revised sketch is ready.", steps: [{ tool: "omnirush_visualization", arguments: { ...design, revision: 2, description: "A calmer overview" } }] },
+    { latestUserTurn: true, promptMarker: "Sketch a project overview", finalReply: "Your first sketch is ready.", steps: [{ tool: "app_visualization", arguments: design }] },
+    { latestUserTurn: true, promptMarker: "Create version 2", finalReply: "Your revised sketch is ready.", steps: [{ tool: "app_visualization", arguments: { ...design, revision: 2, description: "A calmer overview" } }] },
   ] });
   const den = await seed.den({ mocks: { agent: mock } });
   const app = await seed.desktop({ name: "visualization", model: `${providerId}/${modelId}` });
   const workspace = await seed.workspace(app, seed.tmpPath("visualization"));
   await configureProvider(seed, app, workspace.workspaceId, providerId, modelId, {
-    permission: { omnirush_visualization: "allow" },
+    permission: { app_visualization: "allow" },
     provider: { [providerId]: {
       npm: "@ai-sdk/openai-compatible", name: "Visualization mock",
       options: { baseURL: `${den.mocks.agent.url}/v1`, apiKey: "sk-visualization" },

@@ -207,8 +207,8 @@ function fallbackNote(fallback: { requestedName: string; usedName: string; reaso
   const why = fallback.reason === "not_in_catalog"
     ? "is not available to this account"
     : fallback.reason === "signed_out"
-      ? "needs an omnirush.ai account"
-      : "was refused by omnirush.ai";
+      ? "needs a signed-in account"
+      : "was refused by the model service";
   return `ran on ${fallback.usedName}: ${fallback.requestedName} ${why}`;
 }
 
@@ -765,7 +765,7 @@ export const OmniRushSwarm = async (input?: { client?: SwarmClient; directory?: 
       if (!fallback) return;
       metadata.omnirushModelFallback = { requested: fallback.requested, used: fallback.used, reason: fallback.reason };
       if (typeof output?.output === "string") {
-        output.output = `${output.output}\n\n(omnirush.ai: this sub-agent ${fallbackNote(fallback)}.)`;
+        output.output = `${output.output}\n\n(Note: this sub-agent ${fallbackNote(fallback)}.)`;
       }
     },
 
@@ -795,7 +795,7 @@ export const OmniRushSwarm = async (input?: { client?: SwarmClient; directory?: 
 
     tool: {
       [OMNIRUSH_SWARM_TOOL_NAME]: {
-        description: "Swarm board (.omnirush/swarm.md) for a sub-agent: shows your task rows and the Decisions; with status/result/findings/subtasks it updates them. Use instead of reading or editing the board file.",
+        description: "The running swarm's board, for a sub-agent: shows your task rows and the Decisions; with status/result/findings/subtasks it updates them. Use instead of reading or editing the board file.",
         args: swarmBoardArgs.shape,
         execute: boardTool,
       },

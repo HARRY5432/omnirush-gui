@@ -27,7 +27,7 @@ test("v2 app guidance fits the native entry limit and uses the current native to
     expect(value.operatingInstructions).toContain("## Editing files");
     expect(value.operatingInstructions).not.toContain("omnirush-cloud_search_capabilities");
     expect(value.operatingInstructions).not.toContain("omnirush-cloud_execute_capability");
-    expect(value.operatingInstructions).toStartWith("You are omnirush.ai.");
+    expect(value.operatingInstructions).toStartWith("You are the user's coding assistant.");
     expect(value.connect.includes("not connected")).toBe(!connected);
   }
 });

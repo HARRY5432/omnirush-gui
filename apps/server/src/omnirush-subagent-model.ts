@@ -310,7 +310,7 @@ export function subagentFallbackNote(fallback: NonNullable<SubagentModelResoluti
   const why = fallback.reason === "not_in_catalog"
     ? "is not available to this account"
     : fallback.reason === "signed_out"
-      ? "needs an omnirush.ai account"
-      : "was refused by omnirush.ai";
+      ? "needs a signed-in account"
+      : "was refused by the model service";
   return `ran on ${fallback.usedName}: ${fallback.requestedName} ${why}`;
 }

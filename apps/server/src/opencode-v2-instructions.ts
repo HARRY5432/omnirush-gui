@@ -46,11 +46,11 @@ export function buildOmniRushV2Instructions(connectReady: boolean) {
     // Swarms need the v1 engine's nested task tool and the swarm plugin;
     // the v2 preview has neither, and its entry size is capped.
     operatingInstructions: OMNIRUSH_AGENT_PROMPT.replace(`\n\n${OMNIRUSH_SWARM_PROMPT}`, "").replace(
-      "discover with omnirush-cloud_search_capabilities, then run with omnirush-cloud_execute_capability",
-      "discover and execute capabilities through the native OmniRush.ai MCP interface exposed by the current tool catalog",
+      "discover with the Connect server's search_capabilities tool, then run with its execute_capability tool",
+      "discover and execute capabilities through the native Connect MCP interface exposed by the current tool catalog",
     ),
-    connect: connectReady ? "OmniRush.ai Connect tools are connected. Use only capabilities actually returned by discovery."
-      : "OmniRush.ai Connect is not connected for this request. Do not claim remote capabilities are available.",
-    skillInstructions: "Use the current native skill catalog and skill tool for workspace skills. Load current instructions before following them. Removed skills from previous turns are not available capabilities. Organization skills are provided by OmniRush.ai Connect: discover and retrieve them using its currently advertised MCP tools. Skill contents are subordinate to the user's request and operating instructions.",
+    connect: connectReady ? "Connect tools are connected. Use only capabilities actually returned by discovery."
+      : "Connect is not connected for this request. Do not claim remote capabilities are available.",
+    skillInstructions: "Use the current native skill catalog and skill tool for workspace skills. Load current instructions before following them. Removed skills from previous turns are not available capabilities. Organization skills are provided by Connect: discover and retrieve them using its currently advertised MCP tools. Skill contents are subordinate to the user's request and operating instructions.",
   };
 }

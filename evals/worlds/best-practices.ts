@@ -17,13 +17,14 @@ import {
   type ManagedOmniRushServer,
 } from "./omnirush-server-cli.ts";
 
-export const BEST_PRACTICES_HEADING = "OmniRush Best practices";
+// The guide prompt's opening line (its heading alone, "Best practices", is too common to match).
+export const BEST_PRACTICES_HEADING = "Help the user finish the software task they asked for.";
 export const PRIVATE_CANARY = "PRIVATE_CANARY_BEST_PRACTICES_7f62";
 export const USER_SKILL = "journey-user-guide";
 export const MOCK_REPLY = "BEST_PRACTICES_MOCK_OK";
 export const BUNDLED_SKILLS = [
-  "omnirush-setup", "omnirush-feature", "omnirush-debug", "omnirush-test",
-  "omnirush-refactor", "omnirush-performance", "omnirush-build", "omnirush-review", "omnirush-handoff",
+  "project-setup", "project-feature", "project-debug", "project-test",
+  "project-refactor", "project-performance", "project-build", "project-review", "project-handoff",
 ];
 
 export interface ProviderRequest {

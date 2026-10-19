@@ -83,7 +83,7 @@ export default async function omnirushMcpPolicy() {
     },
     "tool.execute.before": async (input: ToolBeforeInput) => {
       if (typeof input.tool !== "string" || !isDeniedMcpTool(input.tool, serverNames)) return;
-      throw new Error("MCP tools are disabled in OmniRush.ai.");
+      throw new Error("MCP tools are disabled in this app.");
     },
   };
 }

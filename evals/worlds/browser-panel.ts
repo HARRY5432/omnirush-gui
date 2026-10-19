@@ -310,7 +310,7 @@ export async function createBuiltinBrowserWorld(seed: Seed, env?: Record<string,
     /**
      * Open a page the way an agent in a given conversation does: the request
      * reaches the UI command bus stamped with that conversation as its origin,
-     * exactly as the OmniRush.ai bridge stamps `omnirush_execute` calls.
+     * exactly as the OmniRush.ai bridge stamps `app_execute` calls.
      */
     async openTabAs(name: string, ownerSessionId: string, url = `${origin}/?viewport-probe=${encodeURIComponent(name)}`): Promise<OpenedTab> {
       const result = await seed.evalIn(

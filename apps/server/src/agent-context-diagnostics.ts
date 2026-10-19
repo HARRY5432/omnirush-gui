@@ -338,7 +338,8 @@ function promptEvidence(configuredAgent: Record<string, unknown> | null) {
     markers: {
       searchCapabilities: prompt.includes("search_capabilities"),
       executeCapability: prompt.includes("execute_capability"),
-      artifacts: prompt.includes("## OmniRush.ai Artifacts"),
+      // "## OmniRush.ai Artifacts" before 3.6.
+      artifacts: prompt.includes("## Artifacts") || prompt.includes("## OmniRush.ai Artifacts"),
     },
   };
 }

@@ -778,12 +778,12 @@ describe("omnirush-cloud MCP strict reconcile", () => {
 
   test("reports extension canary missing when docs canary is present but extension canary is absent", async () => {
     const root = await createRoot();
-    const mock = startMockOpencode({ toolIds: [...OMNIRUSH_CLOUD_EXPECTED_TOOLS, "omnirush_docs_search"] });
+    const mock = startMockOpencode({ toolIds: [...OMNIRUSH_CLOUD_EXPECTED_TOOLS, "app_docs_search"] });
     const omnirush = await startOmniRush([workspace("ws_1", root, `http://127.0.0.1:${mock.server.port}`)]);
 
     const body = await responseRecord(await reconcile(omnirush.base));
     expect(firstFailure(body).code).toBe("extensions_plugin_missing");
-    expect(requireArray(requireRecord(body.pluginCanaries, "pluginCanaries").missing, "missing")).toContain("omnirush_query");
+    expect(requireArray(requireRecord(body.pluginCanaries, "pluginCanaries").missing, "missing")).toContain("app_query");
   });
 
   test("old engines without tool.ids return Update OmniRush.ai guidance", async () => {

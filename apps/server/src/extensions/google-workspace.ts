@@ -85,7 +85,7 @@ export const GOOGLE_WORKSPACE_EXTENSION_ACTIONS = [
     extensionId: GOOGLE_WORKSPACE_EXTENSION_ID,
     action: "status",
     title: "Google Workspace status",
-    description: "Check whether Google Workspace is connected and ready for OmniRush.ai extension actions.",
+    description: "Check whether Google Workspace is connected and ready for the app's extension actions.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
@@ -127,12 +127,12 @@ export const GOOGLE_WORKSPACE_EXTENSION_ACTIONS = [
     extensionId: GOOGLE_WORKSPACE_EXTENSION_ID,
     action: "gmail_create_reply_draft",
     title: "Create Gmail reply draft",
-    description: "Create a Gmail draft reply in an existing thread. This does not send email. Requires Gmail read access (gmail.readonly scope). body must contain only the new reply text — OmniRush.ai automatically appends the quoted conversation below it in plain text and in Gmail's collapsible quote format; never include quoted history yourself. Returns draftUrl and threadUrl plus the resolved reply target; always share draftUrl with the user so they can review and send in Gmail.",
+    description: "Create a Gmail draft reply in an existing thread. This does not send email. Requires Gmail read access (gmail.readonly scope). body must contain only the new reply text — the app automatically appends the quoted conversation below it in plain text and in Gmail's collapsible quote format; never include quoted history yourself. Returns draftUrl and threadUrl plus the resolved reply target; always share draftUrl with the user so they can review and send in Gmail.",
     inputSchema: {
       type: "object",
       properties: {
         messageId: { type: "string", description: "Gmail message id to reply to." },
-        body: { type: "string", description: "Plain text reply body. Write plain prose with no markdown syntax; do not include quoted history because OmniRush.ai appends it automatically." },
+        body: { type: "string", description: "Plain text reply body. Write plain prose with no markdown syntax; do not include quoted history because the app appends it automatically." },
         replyAll: { type: "boolean", description: "Reply to everyone on the original message. Defaults to true." },
         attachments: GMAIL_DRAFT_ATTACHMENTS_SCHEMA,
       },
@@ -187,7 +187,7 @@ export const GOOGLE_WORKSPACE_EXTENSION_ACTIONS = [
     extensionId: GOOGLE_WORKSPACE_EXTENSION_ID,
     action: "drive_search_files",
     title: "Search Drive files",
-    description: "Search files available to OmniRush.ai through the connected Google Drive scope. With full Drive access enabled, this searches the entire Drive.",
+    description: "Search files available to the app through the connected Google Drive scope. With full Drive access enabled, this searches the entire Drive.",
     inputSchema: {
       type: "object",
       properties: {
@@ -202,7 +202,7 @@ export const GOOGLE_WORKSPACE_EXTENSION_ACTIONS = [
     extensionId: GOOGLE_WORKSPACE_EXTENSION_ID,
     action: "drive_read_file",
     title: "Read Drive file",
-    description: "Read a Drive file available to OmniRush.ai by file id.",
+    description: "Read a Drive file available to the app by file id.",
     inputSchema: {
       type: "object",
       properties: {
@@ -216,7 +216,7 @@ export const GOOGLE_WORKSPACE_EXTENSION_ACTIONS = [
     extensionId: GOOGLE_WORKSPACE_EXTENSION_ID,
     action: "drive_update_file",
     title: "Update Drive file",
-    description: "Replace the plain text content of a Drive file available to OmniRush.ai by file id.",
+    description: "Replace the plain text content of a Drive file available to the app by file id.",
     inputSchema: {
       type: "object",
       properties: {

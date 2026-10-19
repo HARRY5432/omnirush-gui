@@ -27,14 +27,14 @@ async function composeReadyPrompt(): Promise<string[]> {
   return output.system;
 }
 
-test("the composed OmniRush.ai prompt is single, deduplicated, ordered, and current", async () => {
+test("the composed prompt is single, deduplicated, ordered, and current", async () => {
   const system = await composeReadyPrompt();
 
   expect(system).toHaveLength(1);
   const prompt = system[0];
-  expect(prompt.startsWith("You are omnirush.ai.")).toBe(true);
-  expect(prompt).toContain("\n\nYou are running inside OmniRush.ai.");
-  expect(prompt).toContain("\n\n## OmniRush.ai app context");
+  expect(prompt.startsWith("You are the user's coding assistant.")).toBe(true);
+  expect(prompt).toContain("\n\nYou are running inside the desktop app.");
+  expect(prompt).toContain("\n\n## App context");
   expect(prompt).toContain("\n\n## Built-in Browser (external websites)");
   expect(prompt).toContain(`\n\n${OMNIRUSH_CLOUD_CONNECTION_INSTRUCTION}`);
 
@@ -43,11 +43,11 @@ test("the composed OmniRush.ai prompt is single, deduplicated, ordered, and curr
   expect(prompt).not.toContain("getMemorySearch");
   expect(prompt).not.toContain("deleteMemoryById");
   expect(prompt).not.toContain("packages/docs/");
-  expect(prompt).toContain("read cloud/run-in-the-cloud/cloud-mcp.mdx with omnirush_docs_read");
+  expect(prompt).toContain("read cloud/run-in-the-cloud/cloud-mcp.mdx with app_docs_read");
   expect(prompt).toContain("read cloud/share-with-your-team/desktop-policies.mdx");
 
   expect(occurrences(prompt, "only name services that search or the remote skill catalog actually returns")).toBe(1);
-  expect(occurrences(OMNIRUSH_AGENT_PROMPT, "omnirush-cloud_search_capabilities")).toBe(1);
+  expect(occurrences(OMNIRUSH_AGENT_PROMPT, "search_capabilities")).toBe(1);
   expect(prompt).not.toContain("2-4 keyword variants");
   expect(prompt).not.toContain("A successful search proves");
   expect(occurrences(prompt, OMNIRUSH_CLOUD_CONNECTION_INSTRUCTION)).toBe(1);
@@ -55,7 +55,7 @@ test("the composed OmniRush.ai prompt is single, deduplicated, ordered, and curr
   expect(occurrences(prompt, OMNIRUSH_CLOUD_SKILL_AUTHORING_INSTRUCTION)).toBe(1);
   expect(prompt).not.toContain("retrieve the listed remote `create-skill` skill");
   expect(prompt).not.toContain("factor them into a skill");
-  expect(occurrences(prompt, "never browser_* tools for the OmniRush.ai app itself")).toBe(1);
+  expect(occurrences(prompt, "never browser_* tools for the app itself")).toBe(1);
   expect(prompt).not.toContain("NOT browser tools");
   expect(prompt).not.toContain("Never use browser_* tools on the OmniRush.ai app itself");
   expect(occurrences(prompt, "session.search then session.read")).toBe(1);
@@ -64,8 +64,8 @@ test("the composed OmniRush.ai prompt is single, deduplicated, ordered, and curr
   expect(prompt).not.toContain("Important docs to know");
   expect(prompt).not.toContain("from an actual capability call");
 
-  const knowledgeAt = prompt.indexOf("You are running inside OmniRush.ai.");
-  const appContextAt = prompt.indexOf("## OmniRush.ai app context");
+  const knowledgeAt = prompt.indexOf("You are running inside the desktop app.");
+  const appContextAt = prompt.indexOf("## App context");
   const browserAt = prompt.indexOf("## Built-in Browser (external websites)");
   const steeringAt = prompt.indexOf(OMNIRUSH_CLOUD_CONNECTION_INSTRUCTION);
   const skillAuthoringAt = prompt.indexOf(OMNIRUSH_CLOUD_SKILL_AUTHORING_INSTRUCTION);
@@ -76,7 +76,7 @@ test("the composed OmniRush.ai prompt is single, deduplicated, ordered, and curr
   expect(skillAuthoringAt).toBeGreaterThan(steeringAt);
 });
 
-test("all OmniRush.ai prompt hooks retain one ordered system message", async () => {
+test("all prompt hooks retain one ordered system message", async () => {
   const engineMcp = {
     async status() {
       return { data: { "omnirush-cloud": { status: "connected" } } };
@@ -93,8 +93,8 @@ test("all OmniRush.ai prompt hooks retain one ordered system message", async () 
 
   expect(output.system).toHaveLength(1);
   expect(output.system[0].startsWith("engine header\n\n")).toBe(true);
-  const capabilities = output.system[0].indexOf("You are running inside OmniRush.ai.");
-  const appContext = output.system[0].indexOf("## OmniRush.ai app context");
+  const capabilities = output.system[0].indexOf("You are running inside the desktop app.");
+  const appContext = output.system[0].indexOf("## App context");
   const browser = output.system[0].indexOf("## Built-in Browser (external websites)");
   const routing = output.system[0].indexOf("verified ready for this exact workspace/model");
   const workbooks = output.system[0].indexOf("## Spreadsheets and Excel workbooks");
@@ -121,7 +121,7 @@ test("the base prompt carries one Editing files rule between the working style a
   const end = OMNIRUSH_AGENT_PROMPT.indexOf("\n\n## ", start + heading.length);
   expect(start).toBeGreaterThan(OMNIRUSH_AGENT_PROMPT.indexOf("## Working style"));
   expect(end).toBeGreaterThan(start);
-  expect(OMNIRUSH_AGENT_PROMPT.slice(end).startsWith("\n\n## OmniRush.ai Artifacts")).toBe(true);
+  expect(OMNIRUSH_AGENT_PROMPT.slice(end).startsWith("\n\n## Artifacts")).toBe(true);
 
   // The failure the rule addresses: the model quotes lines that are no longer
   // (or never were) in the file, then resends the identical patch.
@@ -137,5 +137,5 @@ test("the base prompt carries one Editing files rule between the working style a
   // The composed prompt keeps the rule exactly once, in the base prompt.
   const [prompt] = await composeReadyPrompt();
   expect(occurrences(prompt, "## Editing files")).toBe(1);
-  expect(prompt.indexOf("## Editing files")).toBeLessThan(prompt.indexOf("You are running inside OmniRush.ai."));
+  expect(prompt.indexOf("## Editing files")).toBeLessThan(prompt.indexOf("You are running inside the desktop app."));
 });

@@ -46,7 +46,7 @@ import {
   type RuntimeOpencodeConfig,
 } from "./runtime-opencode-config-store.js";
 import { OMNIRUSH_AGENT_PROMPT } from "./omnirush-agent-prompt.js";
-import { OMNIRUSH_SUBAGENT_DEPTH, OMNIRUSH_SWARM_SKILL_NAME, OMNIRUSH_SWARM_TOOL_NAME, omnirushSwarmSkillMarkdown } from "./omnirush-swarm.js";
+import { LEGACY_SWARM_SKILL_NAME, OMNIRUSH_SUBAGENT_DEPTH, OMNIRUSH_SWARM_SKILL_NAME, OMNIRUSH_SWARM_TOOL_NAME, omnirushSwarmSkillMarkdown } from "./omnirush-swarm.js";
 import {
   builtinOmniRushModelCatalog,
   engineModelsFromCatalog,
@@ -61,6 +61,8 @@ import {
   OMNIRUSH_BEST_PRACTICES,
   bestPracticesEnabled,
   omnirushBestPracticesSkillsDir,
+  removeGeneratedSkill,
+  removeLegacyBestPracticesSkills,
   writeBestPracticesSkills,
 } from "./best-practices.js";
 
@@ -201,6 +203,7 @@ export function omnirushRuntimeSkillsDir(config: ServerConfig): string {
 
 /** Writes the built-in skills the config points at; unchanged files are left alone. */
 async function writeOmniRushRuntimeSkills(config: ServerConfig): Promise<void> {
+  await removeGeneratedSkill(omnirushRuntimeSkillsDir(config), LEGACY_SWARM_SKILL_NAME);
   const directory = join(omnirushRuntimeSkillsDir(config), OMNIRUSH_SWARM_SKILL_NAME);
   const path = join(directory, "SKILL.md");
   const content = omnirushSwarmSkillMarkdown();
@@ -361,6 +364,7 @@ export async function writeOmniRushRuntimeConfigFile(
     // The config names the skills folder: write it first, so the engine
     // never loads a config whose built-in skill is missing.
     await writeOmniRushRuntimeSkills(config);
+    await removeLegacyBestPracticesSkills(config);
     if (bestPracticesEnabled(await readGlobalRuntimeOpencodeConfig(config))) {
       await writeBestPracticesSkills(config);
     }

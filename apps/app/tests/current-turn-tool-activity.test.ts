@@ -15,7 +15,7 @@ const staleHistory: MessageHistory = [
     role: "assistant",
     parts: [{
       type: "dynamic-tool",
-      toolName: "omnirush_execute",
+      toolName: "app_execute",
       toolCallId: "old-call",
       state: "input-streaming",
       input: {},

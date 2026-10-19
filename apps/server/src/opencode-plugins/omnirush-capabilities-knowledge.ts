@@ -26,38 +26,38 @@ export function automationRuntimeKnowledge(runtimeProvider = process.env.DEN_RUN
   // The Automation catalog section owns "read live before reporting"; these
   // lines own capability roles, mutation gating, and schedule shape.
   const shared = [
-    "OmniRush.ai has first-class Automations. Den owns schedules and durable run history; each Automation has immutable execution placement set by its creation surface.",
+    "The app has first-class Automations. Den owns schedules and durable run history; each Automation has immutable execution placement set by its creation surface.",
     "Use listAutomations/getAutomation and listAutomationRuns/getAutomationRun for live state and receipts. Use updateAutomation, activateAutomation/deactivateAutomation, runAutomationNow, cancelAutomationRun, and archiveAutomation only when the person asks for those actions. Deactivation stops future runs but does not cancel a run already in progress.",
     "Schedules are once, daily, or weekly with an IANA timezone; there is no interval schedule or sub-daily cadence. When the person names no zone, use the user's time zone stated in this prompt.",
   ];
   if (runtimeProvider === "daytona") {
     return [
       ...shared,
-      "This chat is running in OmniRush.ai Cloud. When the person explicitly asks to create or schedule recurring work, use createCloudAutomation. It always creates Cloud placement, becomes active immediately, can wake a stopped Cloud container, and runs headlessly without a desktop.",
+      "This chat is running in Cloud. When the person explicitly asks to create or schedule recurring work, use createCloudAutomation. It always creates Cloud placement, becomes active immediately, can wake a stopped Cloud container, and runs headlessly without a desktop.",
       "Do not use createAutomation or automation.propose from Cloud Chat. If the person has not explicitly authorized creation, describe the proposed name, instructions, schedule, and model and ask for confirmation.",
-      "Cloud agent Automations use the person's current OmniRush.ai Connect integrations. If Cloud or Connect/model access is unavailable, report the capability error instead of inventing success.",
+      "Cloud agent Automations use the person's current Connect integrations. If Cloud or Connect/model access is unavailable, report the capability error instead of inventing success.",
     ].map((line) => `- ${line}`).join("\n");
   }
   return [
     ...shared,
-    "This chat is running in OmniRush.ai Desktop. For new recurring work, use omnirush_execute id automation.propose so the person can review and create it in the app. Desktop creation fixes placement to Desktop and each occurrence requires the signed-in desktop runner.",
+    "This chat is running in the desktop app. For new recurring work, use app_execute id automation.propose so the person can review and create it in the app. Desktop creation fixes placement to Desktop and each occurrence requires the signed-in desktop runner.",
     "Do not use createCloudAutomation from Desktop chat and never claim a Desktop Automation will run while the app is offline.",
   ].map((line) => `- ${line}`).join("\n");
 }
 
-const OMNIRUSH_CAPABILITIES_KNOWLEDGE = `You are running inside OmniRush.ai.
+const OMNIRUSH_CAPABILITIES_KNOWLEDGE = `You are running inside the desktop app.
 
-For OmniRush.ai product questions, use omnirush_docs_search and omnirush_docs_read as the first source of truth. OmniRush.ai documentation tools answer product questions. Never use them as a substitute for performing an action against a connected service, marketplace capability, or remote skill. Read and summarize relevant docs before answering, and cite the docs-relative path (for example cloud/run-in-the-cloud/cloud-mcp.mdx) when it helps the user verify or continue. If the docs are missing, ambiguous, or appear stale, inspect the implementation code as a last resort and say that you are inferring from code.
+For questions about the app itself, use app_docs_search and app_docs_read as the first source of truth. The app documentation tools answer product questions. Never use them as a substitute for performing an action against a connected service, marketplace capability, or remote skill. Read and summarize relevant docs before answering, and cite the docs-relative path (for example cloud/run-in-the-cloud/cloud-mcp.mdx) when it helps the user verify or continue. If the docs are missing, ambiguous, or appear stale, inspect the implementation code as a last resort and say that you are inferring from code.
 
 Here is what you can help users with:
 
 ## Adding AI Providers
 - **Cloud providers**: Go to Settings > AI Providers to add Anthropic, OpenAI, Google, OpenRouter, or other providers with an API key.
-- **OmniRush.ai Cloud models**: Users can sign up for OmniRush.ai Cloud at the Den sign-in page for managed AI models without needing their own API keys.
+- **Cloud models**: Users can sign up for Cloud at the Den sign-in page for managed AI models without needing their own API keys.
 - **Custom provider scripts**: Users can add custom OpenAI-compatible endpoints in Settings > AI Providers by adding a provider with a custom base URL.
 
 ## Fixing Authorized Folders
-- Go to Settings > Permissions to manage which folders OmniRush.ai can access.
+- Go to Settings > Permissions to manage which folders the app can access.
 - When the agent gets a "permission denied" or "not authorized" error for a file path, the user needs to add that folder (or a parent folder) to the authorized folders list.
 - The agent can navigate there: use the UI control action \`settings.panel.open\` with \`{panel: "permissions"}\`.
 
@@ -67,16 +67,16 @@ Here is what you can help users with:
 - Once enabled, the agent can take screenshots and control the mouse/keyboard on the user's desktop.
 
 ## Connect and MCP servers
-- If the runtime steering says OmniRush.ai Cloud is not ready, do not substitute documentation, browser, or UI tools for the connected-service action; direct the user to \`Settings > Library\` for inventory and \`Settings > Debug\` (developer mode) to repair and test agent access.
-- Prefer organization apps and connections listed in \`Settings > Library\` over adding the same managed service as a custom MCP. \`Settings > Library\` and custom MCP commands/URLs are also the path for a custom or local MCP server that OmniRush.ai Cloud does not provide.
-- OmniRush.ai Connect is served by a self-hosted Den (omnirush.ai runs no hosted Den): external MCP clients use the \`/mcp/agent\` URL on that Den's API origin, for example \`https://api.omnirush.example.com/mcp/agent\`; it exposes \`search_capabilities\` and \`execute_capability\`, governed by org membership, roles, policies, and exposure allowlists. The Den web origin's \`/api/den\` path is an internal same-origin desktop proxy, not an external-client URL. Client setup (Codex, Cursor, ChatGPT Desktop, Claude Code, VS Code, and other MCP clients), OAuth flows, token lifetimes, and troubleshooting are documented — read cloud/run-in-the-cloud/cloud-mcp.mdx with omnirush_docs_read before answering from memory.
+- If the runtime steering says Cloud is not ready, do not substitute documentation, browser, or UI tools for the connected-service action; direct the user to \`Settings > Library\` for inventory and \`Settings > Debug\` (developer mode) to repair and test agent access.
+- Prefer organization apps and connections listed in \`Settings > Library\` over adding the same managed service as a custom MCP. \`Settings > Library\` and custom MCP commands/URLs are also the path for a custom or local MCP server that Cloud does not provide.
+- Connect is served by a self-hosted Den (there is no hosted Den): external MCP clients use the \`/mcp/agent\` URL on that Den's API origin, for example \`https://api.example.com/mcp/agent\`; it exposes \`search_capabilities\` and \`execute_capability\`, governed by org membership, roles, policies, and exposure allowlists. The Den web origin's \`/api/den\` path is an internal same-origin desktop proxy, not an external-client URL. Client setup (Codex, Cursor, ChatGPT Desktop, Claude Code, VS Code, and other MCP clients), OAuth flows, token lifetimes, and troubleshooting are documented — read cloud/run-in-the-cloud/cloud-mcp.mdx with app_docs_read before answering from memory.
 
 ## Other sessions
-- For questions about another chat (what was said, decided, or done), use the session affordances described under OmniRush.ai app context; match by ID, title, workspace, or topic words, ask a short clarifying question if several sessions match, and answer only from the returned transcript — say so when it is limited or missing older context.
+- For questions about another chat (what was said, decided, or done), use the session affordances described under App context; match by ID, title, workspace, or topic words, ask a short clarifying question if several sessions match, and answer only from the returned transcript — say so when it is limited or missing older context.
 
-## OmniRush.ai Cloud
+## Cloud
 - Users sign up at the Den portal (accessible from the status bar "Sign in" button).
-- Cloud features: managed AI models, team workspaces, shared skills, Collections, org provisioning, and the hosted OmniRush.ai Cloud MCP server.
+- Cloud features: managed AI models, team workspaces, shared skills, Collections, org provisioning, and the hosted Cloud MCP server.
 - Organization owners and admins can use desktop policies to control desktop app capabilities for the whole org, specific members, or teams. For setup details, read cloud/share-with-your-team/desktop-policies.mdx.
 - After signing in, cloud-provisioned providers and extensions appear automatically.
 
@@ -85,23 +85,23 @@ Here is what you can help users with:
 
 ## Automations
 ${automationRuntimeKnowledge()}
-- Never write a cron entry, launchd/systemd unit, Task Scheduler job, or workspace script as a substitute for an OmniRush.ai Automation.
+- Never write a cron entry, launchd/systemd unit, Task Scheduler job, or workspace script as a substitute for an Automation.
 
 ## Creating Plugins
-- Plugins extend OmniRush.ai/OpenCode with custom tools.
+- Plugins extend the app and its OpenCode engine with custom tools.
 - Create a file in \`.opencode/plugins/my-plugin.ts\` and add it to the \`plugin\` array in \`opencode.json\`.
 - Plugins are async factory functions returning a hooks object with \`tool\` definitions.
 - See the \`create-plugin\` skill for the full API reference.
 
-When users ask "what can I do?" or "what can OmniRush.ai do?", summarize these capabilities; for a specific how-to, read the relevant docs first, then give direct steps.`;
+When users ask "what can I do?" or "what can this app do?", summarize these capabilities; for a specific how-to, read the relevant docs first, then give direct steps.`;
 
 const docsSearchArgsSchema = z.object({
-  query: z.string().min(1).describe("OmniRush.ai docs search query, for example 'connect slack mcp'."),
+  query: z.string().min(1).describe("App docs search query, for example 'connect slack mcp'."),
   limit: z.number().int().min(1).max(10).optional().describe("Maximum number of matching docs to return."),
 });
 
 const docsReadArgsSchema = z.object({
-  path: z.string().min(1).describe("Docs-relative path returned by omnirush_docs_search, for example start-here/connect-your-stack/connect-services.mdx."),
+  path: z.string().min(1).describe("Docs-relative path returned by app_docs_search, for example start-here/connect-your-stack/connect-services.mdx."),
 });
 
 type DocsEntry = {
@@ -215,8 +215,8 @@ export const OmniRushCapabilitiesKnowledge = async () => ({
     appendAgentInstructions(output.system, createInstructionSection("capabilities-knowledge", OMNIRUSH_CAPABILITIES_KNOWLEDGE));
   },
   tool: {
-    omnirush_docs_search: {
-      description: "Search the bundled OmniRush.ai documentation. Use this first for OmniRush.ai product questions before inspecting implementation code.",
+    app_docs_search: {
+      description: "Search the bundled app documentation. Use this first for questions about the app before inspecting implementation code.",
       args: docsSearchArgsSchema.shape,
       async execute(rawArgs: unknown) {
         const args = docsSearchArgsSchema.parse(rawArgs);
@@ -235,8 +235,8 @@ export const OmniRushCapabilitiesKnowledge = async () => ({
         return JSON.stringify({ ok: true, matches }, null, 2);
       },
     },
-    omnirush_docs_read: {
-      description: "Read a bundled OmniRush.ai documentation page by docs-relative path returned from omnirush_docs_search.",
+    app_docs_read: {
+      description: "Read a bundled app documentation page by docs-relative path returned from app_docs_search.",
       args: docsReadArgsSchema.shape,
       async execute(rawArgs: unknown) {
         const args = docsReadArgsSchema.parse(rawArgs);
@@ -244,7 +244,7 @@ export const OmniRushCapabilitiesKnowledge = async () => ({
         if (normalized.split("/").includes("..")) throw new Error("Invalid docs path");
         const docs = await loadDocs();
         const entry = docs.find((doc) => doc.path === normalized);
-        if (!entry) throw new Error(`OmniRush.ai docs page not found: ${normalized}`);
+        if (!entry) throw new Error(`Docs page not found: ${normalized}`);
         return JSON.stringify(entry, null, 2);
       },
     },

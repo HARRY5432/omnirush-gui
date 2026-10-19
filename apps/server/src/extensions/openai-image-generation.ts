@@ -15,7 +15,7 @@ export const OPENAI_IMAGE_GENERATION_EXTENSION_ACTIONS = [
     extensionId: OPENAI_IMAGE_GENERATION_EXTENSION_ID,
     action: "status",
     title: "OpenAI image generation status",
-    description: "Check whether OpenAI image generation is configured and ready for OmniRush.ai extension actions.",
+    description: "Check whether OpenAI image generation is configured and ready for the app's extension actions.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
