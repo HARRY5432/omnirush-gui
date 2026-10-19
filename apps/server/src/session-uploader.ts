@@ -151,8 +151,13 @@ const MAX_SPOOL_ENTRIES = 200;
 /** Trace uploads have a budget of their own: a large snapshot never pushes one out. */
 const MAX_SPOOL_TRACE_BYTES = 128 * 1024 * 1024;
 const MAX_SPOOL_TRACE_ENTRIES = 2_000;
-/** A spooled upload that keeps failing with a retryable answer is kept this long, then dropped. */
-export const MAX_SPOOL_AGE_MS = 7 * 24 * 60 * 60_000;
+/**
+ * A spooled upload that keeps failing with a retryable answer, or that waits
+ * for its account to sign in again, is kept this long, then dropped.
+ */
+export const MAX_SPOOL_AGE_MS = 14 * 24 * 60 * 60_000;
+/** Stamped at a sign-out on spooled uploads whose account was never learned: no account has it, so none sends them. */
+export const SIGNED_OUT_UNKNOWN_ACCOUNT = "signed-out:unknown";
 /** Trace events reach the chat's journal on disk within this long. */
 const JOURNAL_FLUSH_MS = 250;
 /** A journal stops taking events past this size (its chat's meta lines still go in). */
@@ -7996,6 +8001,33 @@ export class SessionUploader {
    * retired (a refused refresh) keeps its queue for when the account is
    * back, each upload stamped with its account.
    */
+  /**
+   * The user signed out: uploads in flight stop, and what is spooled stays on
+   * disk for that account. An entry without an account is stamped with
+   * `account` (none known: SIGNED_OUT_UNKNOWN_ACCOUNT), so a later account's
+   * drain never adopts it; that account's drain sends them after its next
+   * sign-in, and MAX_SPOOL_AGE_MS drops the rest.
+   */
+  keepSpoolFor(account: string | null): Promise<void> {
+    this.ownSpoolEntries.clear();
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+    this.draining?.controller.abort();
+    this.account.abort();
+    this.account = new AbortController();
+    this.accountKnown = null;
+    this.accountLookup = null;
+    this.retryFailures = 0;
+    return this.spoolLocked(async () => {
+      for (const entry of await this.listSpool()) {
+        if (entry.account_id) continue;
+        await this.writeSpoolMeta({ ...entry, account_id: account ?? SIGNED_OUT_UNKNOWN_ACCOUNT });
+      }
+    });
+  }
+
   clearSpool(): Promise<void> {
     this.ownSpoolEntries.clear();
     if (this.retryTimer) {

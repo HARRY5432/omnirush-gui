@@ -1909,8 +1909,8 @@ describe("session upload deadline and spool drain", () => {
     await sessionUploader.stop();
   });
 
-  test("the default age limit is seven days", () => {
-    expect(MAX_SPOOL_AGE_MS).toBe(7 * 24 * 60 * 60_000);
+  test("the default age limit is fourteen days (an account that signed out gets them after its next sign-in)", () => {
+    expect(MAX_SPOOL_AGE_MS).toBe(14 * 24 * 60 * 60_000);
   });
 
   test("a non-retryable answer still drops the entry", async () => {
@@ -1971,6 +1971,46 @@ describe("session upload deadline and spool drain", () => {
     expect(sent.sort()).toEqual(["session-drain-1", "session-drain-3"]);
     expect(await sessionUploader.spoolStatus()).toEqual({ entries: 1, bytes: 512 });
     await sessionUploader.stop();
+  });
+
+  test("a sign-out keeps the spool: unstamped entries take the signed-out account, another account never sends them, the same account does", async () => {
+    const stateDir = await drainState();
+    await spoolEntry(stateDir, 1, 512);
+    await spoolEntry(stateDir, 2, 512, { account_id: "acct-b" });
+    const leaving = new SessionUploader({ stateDir, retryBaseMs: 60_000, accountId: async () => "acct-a" });
+    await leaving.keepSpoolFor("acct-a");
+    expect(await leaving.spoolStatus()).toEqual({ entries: 2, bytes: 1_024 });
+    await leaving.stop();
+    const sentBy = (account: string) => {
+      const sent: string[] = [];
+      const uploader = new SessionUploader({
+        stateDir,
+        upload: async (sessionId) => {
+          sent.push(sessionId);
+          return Response.json({}, { status: 201 });
+        },
+        accountId: async () => account,
+        retryBaseMs: 60_000,
+      });
+      return { uploader, sent };
+    };
+    const other = sentBy("acct-c");
+    expect(await other.uploader.drainSpool()).toEqual({ delivered: 0, pending: 0 });
+    expect(other.sent).toEqual([]);
+    await other.uploader.stop();
+    const same = sentBy("acct-a");
+    expect(await same.uploader.drainSpool()).toEqual({ delivered: 1, pending: 0 });
+    expect(same.sent).toEqual(["session-drain-1"]);
+    await same.uploader.stop();
+    // Never learned whose they were: stamped with an account nobody has.
+    const unknown = await drainState();
+    await spoolEntry(unknown, 3, 512);
+    const signedOut = new SessionUploader({ stateDir: unknown, retryBaseMs: 60_000 });
+    await signedOut.keepSpoolFor(null);
+    await signedOut.stop();
+    const anyone = new SessionUploader({ stateDir: unknown, upload: async () => Response.json({}, { status: 201 }), accountId: async () => "acct-a", retryBaseMs: 60_000 });
+    expect(await anyone.drainSpool()).toEqual({ delivered: 0, pending: 0 });
+    await anyone.stop();
   });
 
   test("while the account cannot be learned only this process's own entries go out", async () => {

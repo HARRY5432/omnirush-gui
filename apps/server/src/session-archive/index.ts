@@ -32,6 +32,7 @@ import {
   type ProjectMarkerDetector,
 } from "./detect.js";
 import { hintGarbageCollection, readJsonFile, stateKey, writeChunksAtomic, writeJsonAtomic } from "./files.js";
+import { claimArchiveState } from "./account-park.js";
 import {
   ArchiveHashCache,
   archiveLabel,
@@ -147,6 +148,7 @@ import {
   type ArchiveLog,
   type KeyResult,
   type RetryPolicy,
+  type ServerChain,
 } from "./upload.js";
 
 export { gitMarkerDetector, gitParentDetector, isArchivableProject, type ArchivableProject, type ProjectMarkerDetector } from "./detect.js";
@@ -337,6 +339,12 @@ const sessionStateSchema = z.object({
    * server's flag was on then; the flag, as last answered, can still stop it at any capture (kill switch).
    */
   files_used: z.boolean().optional(),
+  /**
+   * The chain goes on from the server's (continueServerChain): this machine
+   * lost its own record of it (a sign-out, a reinstall). Until its first
+   * archive here, there is no baseline: that delta carries every file.
+   */
+  server_chain: z.boolean().optional(),
 }).transform((state) => ({ ...state, last_activity_at: state.last_activity_at ?? state.updated_at }));
 type SessionState = z.infer<typeof sessionStateSchema>;
 
@@ -564,6 +572,8 @@ export class SessionArchiver {
   private readonly prescans = new Map<string, Prescan>();
   /** Capture v2: the sessions whose chain is v2 (as last loaded or saved). */
   private readonly v2Sessions = new Set<string>();
+  /** Sessions whose server chain was asked in this app run and found empty (or not told): their base goes as a base. */
+  private readonly chainChecked = new Set<string>();
   /** Files used (files-used.ts): staged copies and the items waiting for the next state. */
   readonly filesUsed: FilesUsedStore;
   /** Files used: turns the agent's tool calls into items (the end of each call, the end of each turn). */
@@ -659,16 +669,14 @@ export class SessionArchiver {
       }),
     ]).finally(() => clearTimeout(timer));
     if (!id) return;
-    const path = join(this.dir, "account.json");
-    const saved = await readJsonFile(path);
-    const owner = saved && typeof saved === "object" && typeof Reflect.get(saved, "account_id") === "string" ? String(Reflect.get(saved, "account_id")) : null;
-    if (owner === id) return;
-    if (owner) {
-      this.log("warn", "OmniRush project archives queued for another account were removed", {});
-      await this.signOut();
+    // Another account's queue and chain records are set aside for it, never sent under this one (account-park.ts).
+    const claimed = await claimArchiveState(this.dir, id, this.now().getTime());
+    if (claimed.parked) this.log("info", "OmniRush project archives of another account were set aside for it", {});
+    if (claimed.restored) this.log("info", "OmniRush project archives this account left at its sign-out are back", {});
+    if (claimed.parked || claimed.restored) {
+      await this.draining?.catch(() => undefined);
+      this.resetMemory();
     }
-    await mkdir(this.dir, { recursive: true, mode: 0o700 });
-    await writeJsonAtomic(path, { v: 1, account_id: id });
   }
 
   /** The device bearer changed (session uploader token rotation). */
@@ -692,7 +700,18 @@ export class SessionArchiver {
   captureBase(sessionId: string, root: string, turn = 0): Promise<CaptureResult> {
     return this.guard("base", sessionId, turn, async () => this.withSession(sessionId, async () => {
       const generation = this.generation;
-      const state = await this.loadSession(sessionId);
+      let state = await this.loadSession(sessionId);
+      // Stopped by a sequence conflict (a release that could not go on from the server's chain): once per app run,
+      // the server's chain is read again; the session goes on from it, its next turn or final archive sends the folder.
+      if (state?.stopped === "archive_sequence_conflict" && !this.stoppedSessions.has(sessionId) && !this.chainChecked.has(sessionId)) {
+        const found = await this.continueServerChain({ ...state, stopped: null }, generation);
+        this.chainChecked.add(sessionId);
+        if (found.status === "continue" && generation === this.generation) {
+          if (state.baseline) await rm(join(this.dirs.baselines, state.baseline), { force: true });
+          state = { ...found.state, stopped: null, ended: null };
+          await this.saveSession(state);
+        }
+      }
       if (state?.stopped || this.stoppedSessions.has(sessionId)) return { status: "skipped", reason: "stopped" };
       if (state && state.next_sequence > 0) {
         // A prompt on a session archived in an earlier app run: it is active again.
@@ -1110,11 +1129,46 @@ export class SessionArchiver {
   }
 
   /**
-   * The account signed out: abort in-flight uploads (best effort), drop every
-   * queued archive, baseline, hash cache and session record. Archives are the
-   * user's; nothing may be uploaded later under another account.
+   * The account signed out: nothing more is captured or sent in this app
+   * run. Uploads in flight stop here (their multipart uploads stay, resumed
+   * later); the queue and the chain records stay on disk for that account
+   * (account-park.ts): a sign-in to it sends them, a start under another
+   * account sets them aside, and they go after PARKED_MAX_AGE_MS.
    */
   async signOut(): Promise<void> {
+    this.generation += 1;
+    this.touched.clear();
+    this.clearRetryTimer();
+    this.drainController?.abort();
+    await this.draining?.catch(() => undefined);
+    this.resetMemory();
+    this.uploader.setAccessToken(null);
+  }
+
+  /** Forgets what this app run knows of the state on disk (it was set aside or brought back): the next call recovers it again. */
+  private resetMemory(): void {
+    this.key = null;
+    this.disabled = null;
+    this.policy = null;
+    this.policyProbe = null;
+    this.stoppedSessions.clear();
+    this.resettingSessions.clear();
+    this.v2Sessions.clear();
+    this.chainChecked.clear();
+    this.filesUsedSessions.clear();
+    this.filesUsedServer = null;
+    for (const sessionId of [...this.prescans.keys()]) this.dropPrescan(sessionId);
+    this.finalsAccepted = false;
+    this.finalsRefused = false;
+    this.started = null;
+  }
+
+  /**
+   * Archiving turned off on this device: abort in-flight uploads (best
+   * effort), drop every queued archive, baseline, hash cache and session
+   * record, and what other accounts left aside.
+   */
+  async discardAll(): Promise<void> {
     this.generation += 1;
     this.touched.clear();
     this.clearRetryTimer();
@@ -1132,20 +1186,8 @@ export class SessionArchiver {
     } catch (error) {
       this.log("warn", "OmniRush archive sign-out cleanup failed", { error: errorSummary(error) });
     }
-    this.key = null;
-    this.disabled = null;
-    this.policy = null;
-    this.policyProbe = null;
-    this.stoppedSessions.clear();
-    this.resettingSessions.clear();
-    this.v2Sessions.clear();
-    this.filesUsedSessions.clear();
-    this.filesUsedServer = null;
-    for (const sessionId of [...this.prescans.keys()]) this.dropPrescan(sessionId);
-    this.finalsAccepted = false;
-    this.finalsRefused = false;
+    this.resetMemory();
     this.uploader.setAccessToken(null);
-    this.started = null;
   }
 
   /**
@@ -1412,12 +1454,75 @@ export class SessionArchiver {
    * a capture's per-entry garbage from stacking on top of the previous one's.
    */
   private async captureArchive(state: SessionState, kind: ArchiveKind, turn: number, key: ArchiveKey, generation: number, options: CaptureOptions = {}): Promise<CaptureResult> {
+    // A base after completed turns: the session ran before this machine's record of it began (`--continue` after
+    // a sign-out, a reinstall). The server may hold its chain already: a base would end in 409
+    // archive_sequence_conflict, so the chain goes on from the server's last archive instead.
+    if (kind === "base" && state.next_sequence === 0 && turn > 0 && !this.chainChecked.has(state.session_id)) {
+      const found = await this.continueServerChain(state, generation, options.signal);
+      if (found.status === "continue" && generation === this.generation) await this.saveSession(found.state);
+      if (found.status === "stop") {
+        await this.markStopped(state.session_id, found.code);
+        this.stoppedSessions.set(state.session_id, found.code);
+        return { status: "skipped", reason: "stopped", detail: found.code };
+      }
+      if (found.status === "continue") {
+        this.dropPrescan(state.session_id);
+        return this.captureArchive(found.state, "delta", Math.max(turn, found.state.last_turn ?? 0), key, generation, options.trigger ? options : { ...options, trigger: "turn" });
+      }
+    }
     hintGarbageCollection();
     try {
       return await this.captureArchiveOnce(state, kind, turn, key, generation, options);
     } finally {
       hintGarbageCollection();
     }
+  }
+
+  /**
+   * Whether the server already holds a chain for the session and where it
+   * goes on (ArchiveUploader.serverChain). `continue`: the record to save,
+   * pointing at the server's last archive, with no baseline, so the next
+   * archive is a delta that carries every file. `fresh`: nothing there (or
+   * the server does not say), a base is right. `wait`: not now (offline, the
+   * server's last archive still uploading). `stop`: a chain that cannot be
+   * continued (its last archive failed or was deleted, another marker).
+   */
+  private async continueServerChain(state: SessionState, generation: number, signal?: AbortSignal): Promise<
+    | { status: "continue"; state: SessionState }
+    | { status: "fresh" }
+    | { status: "wait"; reason: string }
+    | { status: "stop"; code: string }
+  > {
+    const sessionId = state.session_id;
+    const answer: ServerChain = await this.uploader.serverChain(sessionId, signal);
+    if (answer.status === "unavailable") return { status: "wait", reason: answer.reason };
+    if (answer.status === "unsupported" || answer.nextSequence === 0 || !answer.tip) {
+      this.chainChecked.add(sessionId);
+      return { status: "fresh" };
+    }
+    const tip = answer.tip;
+    if (tip.status === "uploading" && !tip.deleted) return { status: "wait", reason: "server_archive_uploading" };
+    if (tip.status !== "uploaded" || tip.deleted || tip.sequence + 1 !== answer.nextSequence) {
+      this.log("warn", "OmniRush archive chain on the server cannot be continued", { sessionId, sequence: tip.sequence, status: tip.status, deleted: tip.deleted });
+      return { status: "stop", code: "archive_chain_ended" };
+    }
+    if (tip.marker !== null && tip.marker !== state.marker) {
+      this.log("warn", "OmniRush archive chain on the server is of another kind of folder; not continued", { sessionId, sequence: tip.sequence });
+      return { status: "stop", code: "archive_marker_changed" };
+    }
+    if (generation !== this.generation) return { status: "wait", reason: "signed_out" };
+    this.log("info", "OmniRush archive chain continues from the server", { sessionId, sequence: answer.nextSequence, parentTurn: tip.turn });
+    return { status: "continue", state: {
+      ...state,
+      next_sequence: answer.nextSequence,
+      last_archive_id: tip.archiveId,
+      last_turn: tip.turn,
+      baseline: null,
+      rewind: null,
+      final_due: true,
+      server_chain: true,
+      updated_at: this.now().toISOString(),
+    } };
   }
 
   private budgetLocked<T>(task: () => Promise<T>): Promise<T> {
@@ -1989,6 +2094,8 @@ export class SessionArchiver {
 
   /** The entry list after the chain's last archive; null when it cannot be read (the chain cannot go on). */
   private async readBaseline(state: SessionState): Promise<ArchiveEntry[] | null> {
+    // A chain continued from the server's (continueServerChain) has no baseline here: its next delta carries every file.
+    if (!state.baseline && state.server_chain) return [];
     return state.baseline ? parseBaselineText(await readText(join(this.dirs.baselines, state.baseline))) : null;
   }
 
@@ -2103,6 +2210,16 @@ export class SessionArchiver {
           if (record.trigger === "final" && outcome.code === "archive_parent_mismatch" && !this.finalsAccepted) {
             // A server without final archives refuses the repeated turn number: not a broken chain.
             result.dropped += await this.rewindRefusedFinal(record);
+          } else if (outcome.code === "archive_sequence_conflict") {
+            // The server already holds this number: the chain goes on from the server's (or waits for it).
+            const recovered = await this.recoverSequenceConflict(record, signal);
+            if (recovered === "later") {
+              record.attempts += 1;
+              record.next_attempt_at = new Date(nowMs + Math.min(JOB_RETRY_MAX_MS, JOB_RETRY_BASE_MS * 2 ** (record.attempts - 1))).toISOString();
+              await persist();
+            } else {
+              result.dropped += recovered;
+            }
           } else {
             // The server does not take this marker: its policy is off here too until the next answer, so no other chain starts meanwhile.
             if (outcome.code === ARCHIVE_MARKER_NOT_ALLOWED) this.markerRefused(record.request.marker, generation);
@@ -2277,6 +2394,61 @@ export class SessionArchiver {
       }
     })
       .catch((error) => this.log("warn", "OmniRush archive session rewind failed", { sessionId, error: errorSummary(error) }))
+      .finally(() => {
+        this.resettingSessions.delete(sessionId);
+        if (recaptured && generation === this.generation) void this.drain();
+      });
+    return dropped.length;
+  }
+
+  /**
+   * 409 archive_sequence_conflict: the server holds the number already
+   * (this machine lost its record of the chain: a sign-out, a reinstall, a
+   * session continued from another machine). The session's jobs go, the
+   * record points at the server's last archive, and the folder is captured
+   * again at once as a delta on it (every file: there is no baseline), so
+   * archiving goes on. "later": the server's chain could not be read now,
+   * the job waits. A chain that cannot be continued stops, as before.
+   * Returns the jobs dropped.
+   */
+  private async recoverSequenceConflict(record: QueueRecord, signal: AbortSignal): Promise<number | "later"> {
+    const sessionId = record.request.session_id;
+    const state = await this.loadSession(sessionId);
+    if (!state || state.stopped) return this.stopSession(sessionId, "archive_sequence_conflict");
+    const found = await this.continueServerChain(state, this.generation, signal);
+    if (found.status === "wait") {
+      this.log("info", "OmniRush archive chain on the server not read yet; the upload waits", { sessionId, reason: found.reason });
+      return "later";
+    }
+    if (found.status === "stop") return this.stopSession(sessionId, found.code);
+    if (found.status === "fresh") return this.stopSession(sessionId, "archive_sequence_conflict");
+    const dropped = (await this.listQueue()).filter((job) => job.request.session_id === sessionId);
+    for (const job of dropped) await this.deleteJob(job);
+    this.resettingSessions.add(sessionId);
+    const generation = this.generation;
+    const turn = Math.max(found.state.last_turn ?? 0, ...dropped.map((job) => job.request.turn));
+    let recaptured = false;
+    void this.withSession(sessionId, async () => {
+      if (generation !== this.generation) return;
+      // Jobs a capture committed meanwhile were numbered on the lost chain too.
+      for (const job of await this.listQueue()) {
+        if (job.request.session_id === sessionId) await this.deleteJob(job);
+      }
+      const current = await this.loadSession(sessionId);
+      if (!current || current.stopped) return;
+      // A capture that held the lock may have saved its own (lost) chain point: the server's stands.
+      const continued: SessionState = current.server_chain && current.last_archive_id === found.state.last_archive_id
+        ? current
+        : { ...current, next_sequence: found.state.next_sequence, last_archive_id: found.state.last_archive_id, last_turn: found.state.last_turn, baseline: null, rewind: null, final_due: true, server_chain: true };
+      if (continued !== current) await this.saveSession(continued);
+      if (current.baseline && continued.baseline === null) await rm(join(this.dirs.baselines, current.baseline), { force: true });
+      if (current.rewind?.baseline && continued.rewind === null) await rm(join(this.dirs.baselines, current.rewind.baseline), { force: true });
+      // Without a key now, the next turn (or final) archive carries the folder.
+      if (!this.key) return;
+      const again = await this.captureArchive(continued, "delta", turn, this.key, generation, { trigger: "turn" });
+      recaptured = again.status === "queued";
+    })
+      .catch((error) => this.log("warn", "OmniRush archive chain recovery failed", { sessionId, error: errorSummary(error) }))
       .finally(() => {
         this.resettingSessions.delete(sessionId);
         if (recaptured && generation === this.generation) void this.drain();

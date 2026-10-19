@@ -393,8 +393,9 @@ export function snapshotEngineState(state) {
  */
 /**
  * Set by a user's sign-out, cleared once a server started with it: that
- * server deletes the queued uploads and archives first. On disk, so a quit
- * before the next start still clears them at the one after.
+ * server stops sending what is queued and keeps it on disk for the account
+ * that signed out (capture-host signOut). On disk, so a quit before the next
+ * start still does it at the one after.
  */
 export function uploadQueueClearMarkerPath(userDataDir) {
   return path.join(userDataDir, "omnirush-upload-queue-clear");
@@ -2682,7 +2683,7 @@ export function createRuntimeManager({
     engineInstall,
     omnirushServerInfo,
     omnirushServerRestart: (options) => withRuntimeLifecycle(() => omnirushServerRestart(options)),
-    /** A user's sign-out: the next server start deletes the queued uploads and archives. */
+    /** A user's sign-out: the next server start keeps the queued uploads and archives for that account only. */
     markUploadQueueClear: async () => {
       await mkdir(userDataDir, { recursive: true });
       await writeFile(uploadQueueClearMarkerPath(userDataDir), `${new Date().toISOString()}\n`, { mode: 0o600 });

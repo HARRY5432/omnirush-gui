@@ -46,6 +46,8 @@ export class FakeArchiveServer {
   strictTurns = false;
   /** The key route's `policy` (backend spec 4.4), left out while undefined. */
   policy: unknown = undefined;
+  /** The session check's `archive.chain` (GET me/sessions/{id}/integrity?summary=1); a backend before it answers 404. */
+  chainView = false;
   readonly archives = new Map<string, FakeArchive>();
   readonly calls: FakeCall[] = [];
   readonly puts: Array<{ archiveId: string; partNumber: number; status: number }> = [];
@@ -126,6 +128,20 @@ export class FakeArchiveServer {
     if (this.gate && !abort) return json(this.gate.status, { detail: this.gate.detail });
     if (method === "GET" && path === "archives/key") return json(200, { kid: testKeys.kid, public_key: testKeys.publicB64, alg: "X25519-HKDF-SHA256-A256GCM", policy: this.policy });
     if (method === "POST" && path === "archives") return this.create(body);
+    const view = /^me\/sessions\/([^/?]+)\/integrity\?summary=1$/.exec(path);
+    if (method === "GET" && view && this.chainView) {
+      const sessionId = decodeURIComponent(view[1]!);
+      const rows = [...this.archives.values()].filter((archive) => archive.request.session_id === sessionId);
+      const top = rows.reduce<FakeArchive | null>((best, row) => (!best || row.request.sequence > best.request.sequence ? row : best), null);
+      return json(200, {
+        archive: {
+          chain: {
+            next_sequence: top ? top.request.sequence + 1 : 0,
+            tip: top ? { archive_id: top.request.archive_id, sequence: top.request.sequence, turn: top.request.turn, kind: top.request.kind, marker: (top.request.marker as string | undefined) ?? null, status: top.status, deleted: false } : null,
+          },
+        },
+      });
+    }
     const parts = /^archives\/([^/]+)\/parts$/.exec(path);
     if (method === "POST" && parts) return this.listParts(parts[1]!, body);
     const complete = /^archives\/([^/]+)\/complete$/.exec(path);

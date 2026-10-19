@@ -25,10 +25,11 @@ import {
   type SessionObservers,
 } from "./session-upload-observer.js";
 import type { CaptureStopOptions } from "./capture-protocol.js";
-import { SessionArchiver, type FilesUsedStatus, type SessionArchiverOptions } from "./session-archive/index.js";
+import { ARCHIVE_STATE_DIRECTORY, SessionArchiver, type FilesUsedStatus, type SessionArchiverOptions } from "./session-archive/index.js";
+import { archiveOwner } from "./session-archive/account-park.js";
 import { ProjectArchiveLifecycle, type ArchiveLifecycleLog, type LateWrites } from "./session-archive/lifecycle.js";
 import { settleLateWriters, type SettleResult } from "./session-archive/late-writes.js";
-import { isAbsolute, relative, sep } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
 import { boxSnapshotsDir } from "./box/box.js";
 import type { BoxCaptureInfo } from "./box/service.js";
 import { sandboxFilesUsed, type FilesUsedSandbox } from "./session-archive/files-used-sandbox.js";
@@ -143,6 +144,7 @@ export class CaptureHost {
   private readonly sessionRoots = new Map<string, string>();
   /** The state dir and the app's data/config/cache dirs: never reported or recorded as a touched file. */
   private readonly appDirs: string[];
+  private readonly stateDir: string;
   private readonly engineTarget?: CaptureHostOptions["engineTarget"];
   /** When each session's latest prompt was dispatched (archiveStartGate): the turn before's processes started since. */
   private readonly promptAt = new Map<string, number>();
@@ -186,6 +188,7 @@ export class CaptureHost {
     });
     const { enabled, excludedDirs, folderGate, baseIdleMs, baseMaxDeferMs, ...auth } = options.archive;
     this.appDirs = [options.stateDir, ...excludedDirs];
+    this.stateDir = options.stateDir;
     this.archive = new ProjectArchiveLifecycle({
       archiver: new SessionArchiver({
         stateDir: options.stateDir,
@@ -408,10 +411,47 @@ export class CaptureHost {
     this.forgetSession(sessionId);
   }
 
-  /** The account is gone: queued archives and spooled uploads are deleted, nothing more is archived. */
+  /**
+   * The user signed out: nothing more is captured or sent in this app run.
+   * What is queued stays on disk for that account (stamped with it): its
+   * next sign-in sends it, another account never does (account-park.ts).
+   */
   async signOut(): Promise<void> {
+    const owner = await archiveOwner(join(this.stateDir, ARCHIVE_STATE_DIRECTORY)).catch(() => null);
     await this.archive.signOut();
-    await this.sessionUploader.clearSpool().catch(() => undefined);
+    await this.sessionUploader.keepSpoolFor(owner).catch(() => undefined);
+  }
+
+  /** Uploads and project archives queued now (for "Sending N pending uploads…" before a sign-out). */
+  async pendingUploads(): Promise<{ uploads: number; archives: number }> {
+    const [spool, archives] = await Promise.all([
+      this.sessionUploader.spoolStatus().catch(() => ({ entries: 0 })),
+      this.archive.pendingStatus().catch(() => ({ jobs: 0 })),
+    ]);
+    return { uploads: spool.entries, archives: archives.jobs };
+  }
+
+  /**
+   * Before a sign-out: sends what is queued, for at most `budgetMs`. What is
+   * not sent by then stays queued (signOut() keeps it for the account).
+   */
+  async flushPending(budgetMs: number): Promise<{ before: number; after: number }> {
+    const count = async () => {
+      const pending = await this.pendingUploads();
+      return pending.uploads + pending.archives;
+    };
+    const before = await count();
+    if (before > 0) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        Promise.all([this.sessionUploader.drainSpool().catch(() => undefined), this.archive.drainNow().catch(() => undefined)]),
+        new Promise((resolvePromise) => {
+          timer = setTimeout(resolvePromise, Math.max(0, Math.min(budgetMs, 30_000)));
+          timer.unref?.();
+        }),
+      ]).finally(() => clearTimeout(timer));
+    }
+    return { before, after: before > 0 ? await count() : 0 };
   }
 
   /**
