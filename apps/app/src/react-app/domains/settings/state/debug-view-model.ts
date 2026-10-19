@@ -51,7 +51,6 @@ type DebugViewModelProps = Omit<DebugViewProps, "agentContextDiagnostics">;
 const STARTUP_PREFERENCE_KEY = "omnirush.startupPreference";
 const ENGINE_SOURCE_KEY = "omnirush.engineSource";
 const ENGINE_CUSTOM_BIN_KEY = "omnirush.engineCustomBinPath";
-const OPENCODE_ENABLE_EXA_KEY = "omnirush.opencodeEnableExa";
 const NUKE_CONFIRMATION_WORD = "NUKE";
 const NUKE_SIGN_OUT_TIMEOUT_MS = 5000;
 
@@ -138,10 +137,6 @@ async function revokeDenSessionBeforeNuke(): Promise<void> {
 function readEngineSource(): "path" | "sidecar" | "custom" {
   const raw = readStoredString(ENGINE_SOURCE_KEY, "sidecar");
   return raw === "path" || raw === "sidecar" || raw === "custom" ? raw : "sidecar";
-}
-
-function readOpencodeEnableExa(): boolean {
-  return readStoredString(OPENCODE_ENABLE_EXA_KEY, "1") === "1";
 }
 
 function statusPill(
@@ -740,7 +735,6 @@ export function useDebugViewModel(options: UseDebugViewModelOptions) {
       userInitiated: true,
       runtime: "direct",
       workspacePaths,
-      opencodeEnableExa: readOpencodeEnableExa(),
       omnirushRemoteAccess:
         optionsRef.current.omnirushServerSnapshot.omnirushServerSettings
           .remoteAccessEnabled === true,

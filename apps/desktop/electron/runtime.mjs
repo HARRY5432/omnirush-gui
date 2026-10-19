@@ -2527,7 +2527,6 @@ export function createRuntimeManager({
     return engineStart(projectDir, {
       runtime: engineState.runtime,
       workspacePaths: [projectDir],
-      opencodeEnableExa: options.opencodeEnableExa,
       omnirushRemoteAccess,
       forceRestart: true,
     });
