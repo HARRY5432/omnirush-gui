@@ -46,4 +46,10 @@ describe("analytics-key", () => {
     expect(vite).toContain('"import.meta.env.VITE_OMNIRUSH_PACKAGED_BUILD": JSON.stringify(isElectronPackagedBuild ? "1" : "")');
     expect(vite).toContain('const isElectronPackagedBuild = process.env.OMNIRUSH_ELECTRON_BUILD === "1"');
   });
+
+  test("only the release workflow gives a build the key", () => {
+    const workflow = (name: string) => readFileSync(path.join(import.meta.dir, "..", "..", "..", ".github", "workflows", name), "utf8");
+    expect(workflow("release-desktop.yml")).toContain("VITE_OMNIRUSH_POSTHOG_KEY:");
+    expect(workflow("build-electron-desktop.yml")).not.toMatch(/POSTHOG_KEY|phc_/);
+  });
 });
