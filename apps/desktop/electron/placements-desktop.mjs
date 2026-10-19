@@ -6,6 +6,15 @@
 // omnirushPlacementAction). The window only ever gets a placement to draw;
 // the link is opened here, in the system browser, after a click.
 //
+// Displays and events (placements.mjs): the window reports each display it
+// drew (rendered), the one it measured viewable (≥ 50% of the card on screen
+// for one continuous second while the window is focused and visible: the
+// renderer's timer, app/lib/placement-viewability.ts), the click and the ×,
+// each with the display id it was given. It also says when a conversation
+// starts and when the user is active, for the display rotation. The window's
+// focus / minimize / show state is pushed to it (WINDOW_STATE_CHANNEL) so the
+// timer stops when the window is minimized or hidden.
+//
 // OMNIRUSH_PLACEMENTS=0 turns it off (the server is not asked).
 
 import path from "node:path";
@@ -14,7 +23,35 @@ import { createPlacements, osName, refreshDue, SLOTS, STATE_FILE } from "./place
 
 /** After a failed ask, the window's next look waits at least this long before asking again. */
 export const RETRY_AFTER_MS = 5 * 60_000;
-const ACTIONS = new Set(["impression", "open", "dismiss"]);
+const ACTIONS = new Set(["rendered", "impression", "viewable", "open", "dismiss", "conversation", "activity"]);
+/** Main → window: { focused, minimized, visible } of the window. */
+export const WINDOW_STATE_CHANNEL = "omnirush:placements:window";
+
+/**
+ * Pushes the window's focus / minimize / show state to its page (the
+ * viewability timer's "window focused and visible"): on every change and
+ * whenever the page (re)loads. The page cannot tell by itself: the window
+ * keeps it "visible" while hidden or minimized (no background throttling).
+ * Returns the unhook.
+ * @param {{ on: Function, removeListener: Function, isFocused: () => boolean, isMinimized: () => boolean, isVisible: () => boolean, isDestroyed: () => boolean, webContents: { send: Function, on: Function, removeListener: Function, isDestroyed?: () => boolean } }} win
+ */
+export function watchWindowForPlacements(win) {
+  const events = ["focus", "blur", "minimize", "restore", "show", "hide"];
+  const send = () => {
+    try {
+      if (win.isDestroyed() || win.webContents.isDestroyed?.()) return;
+      win.webContents.send(WINDOW_STATE_CHANNEL, { focused: win.isFocused(), minimized: win.isMinimized(), visible: win.isVisible() });
+    } catch {
+      /* closing */
+    }
+  };
+  for (const name of events) win.on(name, send);
+  win.webContents.on("did-finish-load", send);
+  return () => {
+    for (const name of events) win.removeListener(name, send);
+    win.webContents.removeListener("did-finish-load", send);
+  };
+}
 
 /** @param {Record<string, string | undefined>} [env] */
 export function desktopPlacementsAllowed(env = process.env) {
@@ -76,12 +113,27 @@ export function createDesktopPlacements({ request, userDataPath, version = "", p
         return null;
       }
     },
-    /** IPC omnirushPlacementAction {id, action}: impression, open (the click) or dismiss. */
+    /**
+     * IPC omnirushPlacementAction {action, displayId, id?, sessionId?}:
+     * rendered, viewable, open (the click) or dismiss of a display;
+     * conversation {sessionId} (a turn started in it) and activity (both
+     * resolve `rotate`: the home display is due for a change).
+     */
     async action(input) {
-      const id = typeof input?.id === "string" ? input.id : "";
       const action = typeof input?.action === "string" && ACTIONS.has(input.action) ? input.action : null;
-      if (!id || !action) return { ok: false };
-      if (action === "impression") return { ok: service.impression(id) };
+      if (!action) return { ok: false };
+      if (action === "activity") return { ok: true, rotate: service.activity() };
+      if (action === "conversation") {
+        const sessionId = typeof input?.sessionId === "string" && input.sessionId.length <= 200 ? input.sessionId : "";
+        if (!sessionId) return { ok: false };
+        service.conversation(sessionId);
+        return { ok: true, rotate: service.activity() };
+      }
+      // The display id; a bare placement id (older windows) means its newest display.
+      const id = typeof input?.displayId === "string" && input.displayId ? input.displayId : typeof input?.id === "string" ? input.id : "";
+      if (!id || id.length > 64) return { ok: false };
+      if (action === "rendered" || action === "impression") return { ok: service.rendered(id) };
+      if (action === "viewable") return { ok: service.viewable(id) };
       if (action === "dismiss") return { ok: service.dismiss(id) };
       const url = service.click(id);
       if (!url) return { ok: false };

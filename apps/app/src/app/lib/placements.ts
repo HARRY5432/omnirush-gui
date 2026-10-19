@@ -1,20 +1,27 @@
 // Sponsored placements, renderer side. The Electron main process decides
 // (apps/desktop/electron/placements-desktop.mjs and the shared
 // placements/placements.mjs): it answers a placement to draw or null (none,
-// switched off, offline, any error), counts it, and opens its link after a
-// click. Here: one home placement per app run, the turn line once per
-// session, and the dismissals of this run. Nothing here is awaited on the way
-// to the first screen, and nothing here touches a session's messages.
+// switched off, offline, any error) with its display id, counts it, and
+// opens its link after a click. Here: the home display (the main process
+// keeps it until a new conversation or 30 idle minutes), the turn line once
+// per session, the dismissals of this run, and each display's events:
+// rendered (first painted), viewable (placement-viewability.ts), click and
+// dismiss, once per display. Nothing here is awaited on the way to the first
+// screen, and nothing here touches a session's messages.
 
 import { create } from "zustand";
 
-import type { OmniRushPlacement, OmniRushPlacementAction, OmniRushPlacementSlot } from "@omnirush/types/desktop-ipc";
+import type { OmniRushPlacement, OmniRushPlacementAction, OmniRushPlacementSlot, OmniRushPlacementSurface } from "@omnirush/types/desktop-ipc";
 
 import { omnirushPlacement, omnirushPlacementAction } from "./desktop";
 
 export type Placement = OmniRushPlacement;
 
 const SLOTS: readonly OmniRushPlacementSlot[] = ["home_banner", "turn_footer"];
+const SURFACE: Record<OmniRushPlacementSlot, OmniRushPlacementSurface> = { home_banner: "desktop_home", turn_footer: "desktop_turn" };
+const DISPLAY_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** Activity is reported at most this often (the main process only needs it for the 30-minute idle rule). */
+export const ACTIVITY_EVERY_MS = 60_000;
 
 /** Copy limits (the shared module clamps them already; checked again here). */
 export const PLACEMENT_LIMITS = { sponsor: 40, title: 60, body: 140, ctaLabel: 20 } as const;
@@ -37,6 +44,8 @@ export function asPlacement(value: unknown): Placement | null {
   if (!value || typeof value !== "object") return null;
   const p = value as Record<string, unknown>;
   if (typeof p.id !== "string" || !p.id || !SLOTS.includes(p.slot as OmniRushPlacementSlot)) return null;
+  if (typeof p.displayId !== "string" || !DISPLAY_ID_RE.test(p.displayId)) return null;
+  if (p.surface !== SURFACE[p.slot as OmniRushPlacementSlot]) return null;
   if (!shortText(p.sponsor, PLACEMENT_LIMITS.sponsor) || !p.sponsor) return null;
   if (!shortText(p.title, PLACEMENT_LIMITS.title) || !p.title) return null;
   if (!shortText(p.body, PLACEMENT_LIMITS.body) || !shortText(p.ctaLabel, PLACEMENT_LIMITS.ctaLabel) || !p.ctaLabel) return null;
@@ -44,6 +53,8 @@ export function asPlacement(value: unknown): Placement | null {
   if (p.imageUrl !== null && !httpsUrl(p.imageUrl)) return null;
   return {
     id: p.id,
+    displayId: p.displayId,
+    surface: p.surface as OmniRushPlacementSurface,
     slot: p.slot as OmniRushPlacementSlot,
     label: `Sponsored · ${p.sponsor}`,
     sponsor: p.sponsor,
@@ -72,14 +83,14 @@ export const usePlacementsStore = create<PlacementsState>((set) => ({
   setHome: (home) => set({ home }),
   setFooter: (sessionId, placement) => set((state) => ({ footers: { ...state.footers, [sessionId]: placement } })),
   hide: (id) => set((state) => ({
-    home: state.home?.id === id ? null : state.home,
+    home: state.home && state.home.id === id ? null : state.home,
     footers: Object.fromEntries(Object.entries(state.footers).map(([sid, p]) => [sid, p?.id === id ? null : p])),
   })),
 }));
 
 type Bridge = {
   placement: (input: { slot: OmniRushPlacementSlot; sessionId?: string }) => Promise<unknown>;
-  action: (input: { id: string; action: OmniRushPlacementAction }) => Promise<unknown>;
+  action: (input: { action: OmniRushPlacementAction; id?: string; displayId?: string; sessionId?: string }) => Promise<unknown>;
 };
 
 let bridge: Bridge = {
@@ -91,13 +102,20 @@ let bridge: Bridge = {
 export function setPlacementsBridgeForTests(next: Bridge | null): void {
   if (next) bridge = next;
   homeAsk = null;
-  impressions.clear();
+  sent.clear();
+  homeCards = 0;
+  lastActivity = 0;
+  lastConversation = null;
   usePlacementsStore.setState({ home: undefined, footers: {} });
 }
 
 let homeAsk: Promise<Placement | null> | null = null;
 
-/** The home placement of this run (asked once; the main process keeps the same one for the run). */
+/**
+ * The home display: asked whenever the home card mounts or the window comes
+ * back; the main process answers the same display (same id) until a new
+ * conversation or 30 idle minutes, so asking again never counts it again.
+ */
 export function loadHomePlacement(): Promise<Placement | null> {
   if (homeAsk) return homeAsk;
   homeAsk = Promise.resolve()
@@ -105,8 +123,13 @@ export function loadHomePlacement(): Promise<Placement | null> {
     .then(asPlacement)
     .catch(() => null)
     .then((placement) => {
-      usePlacementsStore.getState().setHome(placement);
+      const current = usePlacementsStore.getState().home;
+      // The same display: the card stays as it is (its timer keeps running).
+      if (!(placement && current && current.displayId === placement.displayId)) usePlacementsStore.getState().setHome(placement);
       return placement;
+    })
+    .finally(() => {
+      homeAsk = null;
     });
   return homeAsk;
 }
@@ -129,25 +152,84 @@ export function endTurnFooter(sessionId: string): void {
   if (footers[sessionId]) usePlacementsStore.getState().setFooter(sessionId, null);
 }
 
-const impressions = new Set<string>();
+/** `${displayId}:${kind}` already sent from this window (the main process refuses repeats too). */
+const sent = new Set<string>();
 
-/** Drawn: one impression per placement and place (home, or a session's turn line). */
-export function placementShown(placement: Placement, where: string): void {
-  const key = `${where}:${placement.id}`;
-  if (impressions.has(key)) return;
-  impressions.add(key);
-  void bridge.action({ id: placement.id, action: "impression" }).catch(() => undefined);
+function once(placement: Placement, action: "rendered" | "viewable" | "dismiss"): void {
+  const key = `${placement.displayId}:${action}`;
+  if (sent.has(key)) return;
+  sent.add(key);
+  void bridge.action({ action, id: placement.id, displayId: placement.displayId }).catch(() => undefined);
 }
 
-/** The click: the main process opens the link in the system browser. */
+/** First painted: once per display. */
+export function placementRendered(placement: Placement): void {
+  once(placement, "rendered");
+}
+
+/** Measured viewable (≥ 50% for one continuous second, focused and visible): once per display. */
+export function placementViewable(placement: Placement): void {
+  once(placement, "viewable");
+}
+
+/** Whether this display was already measured viewable in this window. */
+export function placementViewableSent(placement: Placement): boolean {
+  return sent.has(`${placement.displayId}:viewable`);
+}
+
+/** The click: the main process opens the link in the system browser (one click event per display). */
 export function openPlacement(placement: Placement): void {
-  void bridge.action({ id: placement.id, action: "open" }).catch(() => undefined);
+  void bridge.action({ action: "open", id: placement.id, displayId: placement.displayId }).catch(() => undefined);
 }
 
 /** ×: hidden for its snooze days. */
 export function dismissPlacement(placement: Placement): void {
   usePlacementsStore.getState().hide(placement.id);
-  void bridge.action({ id: placement.id, action: "dismiss" }).catch(() => undefined);
+  once(placement, "dismiss");
+}
+
+let lastActivity = 0;
+let lastConversation: string | null = null;
+
+/** Home cards on screen now: a due rotation is asked for only while one is (a display nobody sees is never made). */
+let homeCards = 0;
+
+/** The home card mounted; resolves the unmount. */
+export function homeCardMounted(): () => void {
+  homeCards += 1;
+  return () => {
+    homeCards = Math.max(0, homeCards - 1);
+  };
+}
+
+function rotateIfDue(answer: unknown): void {
+  if (homeCards > 0 && answer && typeof answer === "object" && (answer as { rotate?: unknown }).rotate === true) void loadHomePlacement();
+}
+
+let activityInstalled = false;
+
+/** Key presses and clicks anywhere in the window count as activity (installed once). */
+export function installPlacementActivity(target: Pick<Window, "addEventListener"> | null = typeof window === "undefined" ? null : window): void {
+  if (activityInstalled || !target) return;
+  activityInstalled = true;
+  const onInput = () => placementActivity();
+  target.addEventListener("keydown", onInput, { capture: true, passive: true });
+  target.addEventListener("pointerdown", onInput, { capture: true, passive: true });
+}
+
+/** The user typed or clicked (at most once a minute): the main process's 30-minute idle rule. */
+export function placementActivity(now = Date.now()): void {
+  if (now - lastActivity < ACTIVITY_EVERY_MS) return;
+  lastActivity = now;
+  void Promise.resolve().then(() => bridge.action({ action: "activity" })).then(rotateIfDue, () => undefined);
+}
+
+/** A turn started in `sessionId`: a different conversation than last time means a new home display next. */
+export function placementConversation(sessionId: string): void {
+  if (!sessionId || sessionId === lastConversation) return;
+  lastConversation = sessionId;
+  lastActivity = Date.now();
+  void Promise.resolve().then(() => bridge.action({ action: "conversation", sessionId })).then(rotateIfDue, () => undefined);
 }
 
 /** Whether a turn just finished: this session was running and is not any more. */

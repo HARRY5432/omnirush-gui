@@ -11,19 +11,33 @@
 // start-up never waits for it.
 //
 // Local rules, on top of the server's: a placement's window (starts_at,
-// ends_at), `max_per_day` per placement per local day, `snooze_days` after a
-// dismissal, the home slot once per app run (the same one stays for the run),
-// the turn slot once per session. Copy is plain text, clamped (sponsor 40,
-// title 60, body 140, CTA 20) and always labelled "Sponsored · <sponsor>";
-// links are https only and opened by the app only after a click.
+// ends_at), `max_per_day` displays per placement per local day, at most
+// `max_per_advertiser_per_day` (default 3) displays per `advertiser_id` (else
+// per sponsor name) per local day, `snooze_days` after a dismissal, the turn
+// slot once per session. Copy is plain text,
+// clamped (sponsor 40, title 60, body 140, CTA 20) and always labelled
+// "Sponsored · <sponsor>"; links are https only and opened by the app only
+// after a click.
 //
-// Events (impression, click, dismiss: id, kind, time, nothing else) are
-// queued in the same file and sent in batches, best effort; a 404 or an
-// answer that says placements are off drops them.
+// Displays: every time a placement is put on screen anew it gets a display
+// id, a random UUID made here (never derived from the user, device or
+// account). The home slot keeps its display (same placement, same id, nothing
+// counted or sent again) until a new conversation starts or after
+// `rotate_after_idle_minutes` (default 30) without activity; only then may a
+// new display (and a new placement) come.
+//
+// Events: { display_id, placement_id, kind, surface } and nothing else, at
+// most one of each kind per display. Kinds: rendered (drawn), viewable (desktop only:
+// the window measured ≥ 50% of the card on screen for one continuous second
+// while focused and visible), click, dismiss. Surfaces: desktop_home,
+// desktop_turn, cli_home, cli_turn. The CLI never sends viewable. Queued in the
+// same file and sent in batches, best effort; a 404 or an answer that says
+// placements are off drops them.
 //
 // Nothing here touches sessions, prompts, files or uploads. Node builtins
 // only; the transport (`request`) is the app's own authorized call.
 
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -42,7 +56,17 @@ export const CACHE_MAX_AGE_MS = 24 * 3_600_000;
 export const DEFAULT_SNOOZE_DAYS = 7;
 export const MAX_SNOOZE_DAYS = 365;
 export const MAX_PER_DAY_LIMIT = 24;
-export const EVENT_KINDS = Object.freeze(["impression", "click", "dismiss"]);
+export const EVENT_KINDS = Object.freeze(["rendered", "viewable", "click", "dismiss"]);
+/** Where a display was: `${client}_${home|turn}`. */
+export const SURFACES = Object.freeze(["desktop_home", "desktop_turn", "cli_home", "cli_turn"]);
+/** The surfaces whose displays may be measured viewable (the CLI's never are). */
+export const VIEWABLE_SURFACES = Object.freeze(["desktop_home", "desktop_turn"]);
+/** The home slot's display changes after this long without activity (or on a new conversation), unless the placement says `rotate_after_idle_minutes`. */
+export const ROTATE_IDLE_MS = 30 * 60_000;
+/** Displays per advertiser per local day (both slots), unless the placement says `max_per_advertiser_per_day`. */
+export const ADVERTISER_DAILY_CAP = 3;
+/** Displays remembered (for once-per-display events), the newest. */
+export const MAX_DISPLAYS = 300;
 export const EVENT_FLUSH_MS = 60_000;
 export const MAX_QUEUED_EVENTS = 200;
 export const MAX_EVENT_BATCH = 50;
@@ -50,6 +74,8 @@ export const MAX_EVENT_BATCH = 50;
 export const MAX_FOOTER_SESSIONS = 500;
 const DAY_MS = 86_400_000;
 const STATE_VERSION = 1;
+const ID_RE = /^[A-Za-z0-9._:-]{1,64}$/;
+const DISPLAY_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 // --- copy -------------------------------------------------------------------
 
@@ -97,7 +123,7 @@ function intIn(value, min, max, fallback) {
  */
 export function parsePlacement(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-  const id = typeof raw.id === "string" && /^[A-Za-z0-9._:-]{1,64}$/.test(raw.id) ? raw.id : null;
+  const id = typeof raw.id === "string" && ID_RE.test(raw.id) ? raw.id : null;
   const slot = SLOTS.includes(raw.slot) ? raw.slot : null;
   const sponsor = clampText(raw.sponsor, LIMITS.sponsor);
   const title = clampText(raw.title, LIMITS.title);
@@ -123,7 +149,21 @@ export function parsePlacement(raw) {
     maxPerDay: intIn(raw.max_per_day, 1, MAX_PER_DAY_LIMIT, 1),
     snoozeDays: intIn(raw.snooze_days, 1, MAX_SNOOZE_DAYS, DEFAULT_SNOOZE_DAYS),
     priority: intIn(raw.priority, -1_000_000, 1_000_000, 0),
+    // The frequency cap's key: the server's advertiser id, else the sponsor's name.
+    advertiser: advertiserId(raw.advertiser_id) ?? `name:${sponsor.toLowerCase()}`,
+    maxPerAdvertiserPerDay: intIn(raw.max_per_advertiser_per_day, 1, MAX_PER_DAY_LIMIT, ADVERTISER_DAILY_CAP),
+    rotateAfterIdleMs: intIn(raw.rotate_after_idle_minutes, 1, 1_440, ROTATE_IDLE_MS / 60_000) * 60_000,
   };
+}
+
+function advertiserId(value) {
+  if (typeof value === "number" && Number.isSafeInteger(value)) return `id:${value}`;
+  return typeof value === "string" && ID_RE.test(value) ? `id:${value}` : null;
+}
+
+/** The surface of `slot` in `client`: desktop_home, desktop_turn, cli_home or cli_turn. */
+export function surfaceOf(client, slot) {
+  return `${client === "desktop" ? "desktop" : "cli"}_${slot === "turn_footer" ? "turn" : "home"}`;
 }
 
 /**
@@ -169,10 +209,12 @@ export function placementLine(placement, { width = 100, suffix = "" } = {}) {
   return clampText(head, room);
 }
 
-/** The placement as the apps show it (the UI never sees more). */
-export function placementView(placement) {
+/** The placement as the apps show it (the UI never sees more), with its display. */
+export function placementView(placement, display = null) {
   return {
     id: placement.id,
+    displayId: display?.display_id ?? null,
+    surface: display?.surface ?? null,
     slot: placement.slot,
     label: sponsoredLabel(placement),
     sponsor: placement.sponsor,
@@ -213,7 +255,22 @@ export function localDay(ms) {
 
 /** An empty state. */
 export function emptyState() {
-  return { v: STATE_VERSION, fetched_at: 0, answer: null, shown: {}, snoozed: {}, hidden_until: 0, footer_sessions: [], events: [] };
+  return {
+    v: STATE_VERSION,
+    fetched_at: 0,
+    answer: null,
+    shown: {},
+    snoozed: {},
+    hidden_until: 0,
+    footer_sessions: [],
+    events: [],
+    displays: {},
+    advertisers: {},
+    home_display: null,
+    last_active_at: 0,
+    rotate_home: false,
+    last_conversation: null,
+  };
 }
 
 function record(value) {
@@ -237,6 +294,17 @@ export function readState(file) {
   }
   const snoozed = {};
   for (const [id, until] of Object.entries(record(data.snoozed))) if (Number.isFinite(until)) snoozed[id] = until;
+  const displays = {};
+  for (const [displayId, entry] of Object.entries(record(data.displays))) {
+    const d = record(entry);
+    if (!DISPLAY_ID_RE.test(displayId) || typeof d.id !== "string" || !SLOTS.includes(d.slot) || !SURFACES.includes(d.surface) || !Number.isFinite(d.at)) continue;
+    displays[displayId] = { display_id: displayId, id: d.id, slot: d.slot, surface: d.surface, at: d.at, sent: Array.isArray(d.sent) ? d.sent.filter((k) => EVENT_KINDS.includes(k)) : [] };
+  }
+  const advertisers = {};
+  for (const [key, entry] of Object.entries(record(data.advertisers))) {
+    const e = record(entry);
+    if (typeof e.day === "string" && Number.isFinite(e.count)) advertisers[key] = { day: e.day, count: Math.max(0, Math.floor(e.count)) };
+  }
   return {
     ...base,
     fetched_at: Number.isFinite(data.fetched_at) ? data.fetched_at : 0,
@@ -245,10 +313,23 @@ export function readState(file) {
     snoozed,
     hidden_until: Number.isFinite(data.hidden_until) ? data.hidden_until : 0,
     footer_sessions: Array.isArray(data.footer_sessions) ? data.footer_sessions.filter((s) => typeof s === "string").slice(-MAX_FOOTER_SESSIONS) : [],
-    events: Array.isArray(data.events)
-      ? data.events.filter((e) => e && typeof e.id === "string" && EVENT_KINDS.includes(e.kind) && typeof e.at === "string").slice(-MAX_QUEUED_EVENTS)
-      : [],
+    events: Array.isArray(data.events) ? data.events.filter(validEvent).slice(-MAX_QUEUED_EVENTS) : [],
+    displays,
+    advertisers,
+    home_display: typeof data.home_display === "string" && displays[data.home_display]?.slot === "home_banner" ? data.home_display : null,
+    last_active_at: Number.isFinite(data.last_active_at) ? data.last_active_at : 0,
+    rotate_home: data.rotate_home === true,
+    last_conversation: typeof data.last_conversation === "string" ? data.last_conversation.slice(0, 200) : null,
   };
+}
+
+/** An event as it is queued and sent: { display_id, placement_id, kind, surface }, nothing else. */
+export function validEvent(e) {
+  return Boolean(e) && typeof e === "object" && !Array.isArray(e) && Object.keys(e).length === 4
+    && typeof e.display_id === "string" && DISPLAY_ID_RE.test(e.display_id)
+    && typeof e.placement_id === "string" && ID_RE.test(e.placement_id)
+    && EVENT_KINDS.includes(e.kind) && SURFACES.includes(e.surface)
+    && (e.kind !== "viewable" || VIEWABLE_SURFACES.includes(e.surface));
 }
 
 export function writeState(file, state) {
@@ -278,7 +359,7 @@ export function refreshDue(state, now) {
   return now - state.fetched_at >= every || state.fetched_at - now > DAY_MS;
 }
 
-/** Whether `placement` may show in `slot` now (window, snooze, the day's count, hidden). */
+/** Whether `placement` may show in `slot` now (window, snooze, the day's counts, hidden). */
 export function eligible(placement, slot, state, now) {
   if (placement.slot !== slot) return false;
   if (placement.startsAt !== null && now < placement.startsAt) return false;
@@ -288,6 +369,8 @@ export function eligible(placement, slot, state, now) {
   if (Number.isFinite(snoozedUntil) && now < snoozedUntil) return false;
   const shown = state.shown[placement.id];
   if (shown && shown.day === localDay(now) && shown.count >= placement.maxPerDay) return false;
+  const advertiser = state.advertisers?.[placement.advertiser];
+  if (advertiser && advertiser.day === localDay(now) && advertiser.count >= placement.maxPerAdvertiserPerDay) return false;
   return true;
 }
 
@@ -319,6 +402,7 @@ const noop = () => undefined;
  *   flushMs?: number,
  *   setTimer?: (fn: () => void, ms: number) => any,
  *   clearTimer?: (timer: any) => void,
+ *   newDisplayId?: () => string,
  * }} PlacementsOptions
  */
 
@@ -343,21 +427,31 @@ export function createPlacements({
   flushMs = EVENT_FLUSH_MS,
   setTimer = (fn, ms) => setTimeout(fn, ms),
   clearTimer = (timer) => clearTimeout(timer),
+  newDisplayId = randomUUID,
 }) {
+  const appClient = client === "desktop" ? "desktop" : "cli";
   let state = allowed ? readState(stateFile) : emptyState();
   let refreshTimer = null;
   let flushTimer = null;
   let inFlight = null;
   let stopped = false;
   let started = false;
-  /** This run's choice per slot: the home slot keeps its placement for the run. */
-  const runClaims = new Map();
+  /** This run's turn-slot display (the last one claimed). */
+  let footerDisplay = null;
   const footerSessions = new Set(state.footer_sessions);
 
   const save = () => (allowed ? writeState(stateFile, state) : false);
   const answer = () => cachedAnswer(state, now());
   /** The placement with `id` (in `slot` when given: one id may have an entry per slot). */
   const known = (id, slot = null) => answer()?.placements.find((p) => p.id === id && (!slot || p.slot === slot)) ?? null;
+  /** A display by its id, or (older callers) the newest display of a placement id. */
+  const displayOf = (ref) => {
+    if (typeof ref !== "string" || !ref) return null;
+    if (Object.hasOwn(state.displays, ref)) return state.displays[ref];
+    let newest = null;
+    for (const d of Object.values(state.displays)) if (d.id === ref && (!newest || d.at >= newest.at)) newest = d;
+    return newest;
+  };
 
   const schedule = () => {
     if (stopped || !started) return;
@@ -371,9 +465,13 @@ export function createPlacements({
     refreshTimer?.unref?.();
   };
 
-  const queue = (id, kind) => {
-    if (!allowed || !EVENT_KINDS.includes(kind) || !known(id) || !answer()?.enabled) return false;
-    state.events.push({ id, kind, at: new Date(now()).toISOString() });
+  /** One event for a display, at most once per kind; false when it may not be sent. */
+  const queue = (display, kind) => {
+    if (!allowed || !display || !EVENT_KINDS.includes(kind) || !answer()?.enabled || !known(display.id, display.slot)) return false;
+    if (kind === "viewable" && !VIEWABLE_SURFACES.includes(display.surface)) return false;
+    if (display.sent.includes(kind)) return false;
+    display.sent.push(kind);
+    state.events.push({ display_id: display.display_id, placement_id: display.id, kind, surface: display.surface });
     if (state.events.length > MAX_QUEUED_EVENTS) state.events = state.events.slice(-MAX_QUEUED_EVENTS);
     save();
     if (!flushTimer && !stopped && started) {
@@ -384,6 +482,41 @@ export function createPlacements({
       flushTimer?.unref?.();
     }
     return true;
+  };
+
+  /** A new display of `placement` in `slot`: counted for the day (placement and advertiser). */
+  const newDisplay = (placement, slot, at) => {
+    let displayId = String(newDisplayId()).toLowerCase();
+    while (Object.hasOwn(state.displays, displayId)) displayId = String(newDisplayId()).toLowerCase();
+    const day = localDay(at);
+    const shown = state.shown[placement.id];
+    state.shown[placement.id] = { day, count: shown && shown.day === day ? shown.count + 1 : 1 };
+    const advertiser = state.advertisers[placement.advertiser];
+    state.advertisers[placement.advertiser] = { day, count: advertiser && advertiser.day === day ? advertiser.count + 1 : 1 };
+    // Old days are forgotten.
+    for (const [id, entry] of Object.entries(state.shown)) if (entry.day !== day) delete state.shown[id];
+    for (const [key, entry] of Object.entries(state.advertisers)) if (entry.day !== day) delete state.advertisers[key];
+    const display = { display_id: displayId, id: placement.id, slot, surface: surfaceOf(appClient, slot), at, sent: [] };
+    state.displays[displayId] = display;
+    const all = Object.values(state.displays);
+    if (all.length > MAX_DISPLAYS) {
+      all.sort((a, b) => a.at - b.at);
+      for (const old of all.slice(0, all.length - MAX_DISPLAYS)) if (old.display_id !== state.home_display) delete state.displays[old.display_id];
+    }
+    return display;
+  };
+
+  /** How long the home display may sit idle before it changes (its placement's `rotate_after_idle_minutes`). */
+  const idleLimit = () => {
+    const kept = state.home_display ? state.displays[state.home_display] : null;
+    return (kept ? known(kept.id, kept.slot)?.rotateAfterIdleMs : null) ?? ROTATE_IDLE_MS;
+  };
+  /** Activity: after the idle limit without any, the home display changes when next asked. */
+  const touch = (at) => {
+    if (state.last_active_at && state.home_display && at - state.last_active_at >= idleLimit()) state.rotate_home = true;
+    const changed = at - state.last_active_at >= 60_000 || at < state.last_active_at;
+    state.last_active_at = at;
+    return changed;
   };
 
   const service = {
@@ -448,59 +581,107 @@ export function createPlacements({
       }
     },
     /**
-     * The placement to show in `slot`, counted as shown for the day, or null.
-     * The home slot: once per run (later asks get the same one, not counted
-     * again). The turn slot: once per `sessionId`, ever.
+     * The placement to show in `slot` with its display, or null.
+     * The home slot: the same display (not counted, nothing sent again) until
+     * a new conversation or the idle limit without activity; then a new one
+     * (or nothing). The turn slot: once per `sessionId`, ever.
      */
     claim(slot, { sessionId = null } = {}) {
       if (!allowed || !SLOTS.includes(slot)) return null;
       const at = now();
-      if (slot === "home_banner" && runClaims.has(slot)) {
-        const kept = known(runClaims.get(slot), slot);
-        return kept && eligibleKept(kept, at) ? placementView(kept) : null;
-      }
       if (slot === "turn_footer") {
         if (typeof sessionId !== "string" || !sessionId || footerSessions.has(sessionId)) return null;
-      }
-      const placement = pickPlacement(answer(), slot, state, at);
-      if (!placement) return null;
-      const day = localDay(at);
-      const shown = state.shown[placement.id];
-      state.shown[placement.id] = { day, count: shown && shown.day === day ? shown.count + 1 : 1 };
-      // Old days are forgotten.
-      for (const [id, entry] of Object.entries(state.shown)) if (entry.day !== day && id !== placement.id) delete state.shown[id];
-      if (slot === "turn_footer") {
+        const placement = pickPlacement(answer(), slot, state, at);
+        if (!placement) return null;
+        touch(at);
         footerSessions.add(sessionId);
         state.footer_sessions = [...state.footer_sessions.filter((s) => s !== sessionId), sessionId].slice(-MAX_FOOTER_SESSIONS);
+        footerDisplay = newDisplay(placement, slot, at).display_id;
+        save();
+        return placementView(placement, state.displays[footerDisplay]);
       }
-      runClaims.set(slot, placement.id);
+      // Idle since the last activity: due for a new display.
+      const wasChanged = touch(at);
+      const kept = state.home_display ? state.displays[state.home_display] : null;
+      if (kept && !state.rotate_home) {
+        const placement = known(kept.id, slot);
+        if (wasChanged) save();
+        return placement && eligibleKept(placement, at) ? placementView(placement, kept) : null;
+      }
+      const placement = pickPlacement(answer(), slot, state, at);
+      if (!placement) {
+        // Due for a change with nothing to show: the old display is over.
+        if (kept) {
+          state.home_display = null;
+          state.rotate_home = false;
+        }
+        if (wasChanged || kept) save();
+        return null;
+      }
+      state.rotate_home = false;
+      state.home_display = newDisplay(placement, slot, at).display_id;
       save();
-      return placementView(placement);
+      return placementView(placement, state.displays[state.home_display]);
     },
-    /** The placement this run claimed for `slot` (not counted again), or null. */
+    /** The display shown in `slot` now (not counted again), or null. */
     current(slot) {
-      const id = runClaims.get(slot);
-      const placement = id ? known(id, slot) : null;
-      return placement && eligibleKept(placement, now()) ? placementView(placement) : null;
+      const displayId = slot === "home_banner" ? state.home_display : slot === "turn_footer" ? footerDisplay : null;
+      const display = displayId ? state.displays[displayId] : null;
+      const placement = display ? known(display.id, slot) : null;
+      return placement && eligibleKept(placement, now()) ? placementView(placement, display) : null;
     },
-    /** It was drawn on screen. */
-    impression(id) {
-      return queue(id, "impression");
+    /**
+     * A conversation started or was picked up (any opaque local id, never
+     * sent): a different one than last time means the home slot's next ask is
+     * a new display.
+     */
+    conversation(conversationId) {
+      if (!allowed || typeof conversationId !== "string" || !conversationId) return false;
+      const at = now();
+      touch(at);
+      const id = conversationId.slice(0, 200);
+      const changed = id !== state.last_conversation;
+      if (changed) {
+        state.last_conversation = id;
+        if (state.home_display) state.rotate_home = true;
+      }
+      save();
+      return changed;
     },
-    /** The click: its https link (the app opens it) or null. */
-    click(id) {
-      const placement = known(id);
+    /** The user did something (typed, clicked); resolves whether the home display is due for a change. */
+    activity() {
+      if (!allowed) return false;
+      if (touch(now())) save();
+      return state.rotate_home;
+    },
+    /** It was drawn on screen (once per display). */
+    rendered(ref) {
+      return queue(displayOf(ref), "rendered");
+    },
+    /** Older name for rendered. */
+    impression(ref) {
+      return service.rendered(ref);
+    },
+    /** The window measured it viewable (desktop surfaces only, once per display). */
+    viewable(ref) {
+      return queue(displayOf(ref), "viewable");
+    },
+    /** The click: its https link (the app opens it) or null; one click event per display. */
+    click(ref) {
+      const display = displayOf(ref);
+      const placement = display ? known(display.id, display.slot) : null;
       if (!placement) return null;
-      queue(id, "click");
+      queue(display, "click");
+      touch(now());
       return placement.url;
     },
-    /** × / hide: snoozed for its `snooze_days`; gone from this run. */
-    dismiss(id) {
-      const placement = known(id);
+    /** × / hide: snoozed for its `snooze_days`; the slot stays empty until its next display. */
+    dismiss(ref) {
+      const display = displayOf(ref);
+      const placement = display ? known(display.id, display.slot) : null;
       if (!allowed || !placement) return false;
-      queue(id, "dismiss");
-      state.snoozed[id] = now() + placement.snoozeDays * DAY_MS;
-      for (const [slot, claimed] of runClaims) if (claimed === id) runClaims.delete(slot);
+      queue(display, "dismiss");
+      state.snoozed[placement.id] = now() + placement.snoozeDays * DAY_MS;
       save();
       return true;
     },
@@ -508,7 +689,6 @@ export function createPlacements({
     hideAll(days = 30) {
       const n = intIn(days, 0, MAX_SNOOZE_DAYS, 30);
       state.hidden_until = n > 0 ? now() + n * DAY_MS : 0;
-      if (n > 0) runClaims.clear();
       return save() || !allowed;
     },
     /** What `omnirush placements` prints. */
@@ -537,7 +717,7 @@ export function createPlacements({
         const batch = state.events.slice(0, MAX_EVENT_BATCH);
         let result = null;
         try {
-          result = await request(`${EVENTS_PATH}?client=${client === "desktop" ? "desktop" : "cli"}`, { method: "POST", body: { events: batch }, timeoutMs });
+          result = await request(`${EVENTS_PATH}?client=${appClient}`, { method: "POST", body: { events: batch }, timeoutMs });
         } catch {
           result = null;
         }
@@ -561,7 +741,7 @@ export function createPlacements({
     state: () => state,
   };
 
-  // A placement kept for the run stays while its window, snooze and hide allow it.
+  // A display kept on screen stays while its window, snooze and hide allow it.
   function eligibleKept(placement, at) {
     if (!answer()?.enabled) return false;
     if (placement.endsAt !== null && at >= placement.endsAt) return false;

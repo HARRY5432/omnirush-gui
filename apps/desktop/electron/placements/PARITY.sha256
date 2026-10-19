@@ -1,3 +1,3 @@
 # Sponsored placements: the same file in omnirush-cli (assets/extensions/omnirush/placements/)
 # and omnirush-gui (apps/desktop/electron/placements/). A change to one must be ported to the other and this list updated in both.
-fc2c3cabdde4c1460481324807abd058575540bad2a2c95e1fe883018687f543  placements.mjs
+47323966e54972473adb398c358af34ed9451d452e9deb977e7fffcbf12ccc74  placements.mjs

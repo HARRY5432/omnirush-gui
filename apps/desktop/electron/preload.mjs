@@ -351,6 +351,12 @@ ipcRenderer.on(FINISH_GUARD_EVENT, (_event, detail) => {
   window.dispatchEvent(new CustomEvent(FINISH_GUARD_EVENT, { detail }));
 });
 
+// Sponsored placements (placements-desktop.mjs WINDOW_STATE_CHANNEL): the window's focus / minimize / show state.
+ipcRenderer.on("omnirush:placements:window", (_event, detail) => {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent("omnirush:placements:window", { detail }));
+});
+
 ipcRenderer.on(NATIVE_MENU_ZOOM_EVENT, (_event, action) => {
   if (typeof window === "undefined") return;
   window.dispatchEvent(new CustomEvent(NATIVE_MENU_ZOOM_EVENT, { detail: action }));
