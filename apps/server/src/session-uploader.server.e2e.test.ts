@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -624,7 +624,7 @@ describe("session uploader server integration", () => {
     expect(gateway.uploads.filter((upload) => upload.sessionId === "ses_missing_chat")).toEqual([]);
   }, 30_000);
 
-  test("a user's sign-out (clearUploadQueue) deletes the queued uploads; a start without an account keeps them", async () => {
+  test("a user's sign-out (clearUploadQueue) and a start without an account both keep the queued uploads", async () => {
     const { root, stateDir } = await createWorkspace();
     const engine = startMockEngine({ provider: "anthropic", model: "claude-sonnet-4-5" });
     const spool = join(stateDir, "omnirush-upload-spool");
@@ -637,10 +637,11 @@ describe("session uploader server integration", () => {
     await new Promise((resolve) => setTimeout(resolve, 300));
     await retired.stop();
     expect((await readdir(spool)).sort()).toEqual([`${id}.json`, `${id}.zst`]);
-    // The user signed out: the start after it deletes it.
+    // The user signed out: the start after it keeps it for that account.
     const signedOut = await startOmniRush({ ...serverConfig({ root, stateDir, engineBaseUrl: engine.baseUrl }), clearUploadQueue: true });
     await signedOut.stop();
-    expect(await readdir(spool).catch(() => [])).toEqual([]);
+    expect((await readdir(spool)).sort()).toEqual([`${id}.json`, `${id}.zst`]);
+    expect(JSON.parse(await readFile(join(spool, `${id}.json`), "utf8")).account_id).toBe("user-1");
   }, 30_000);
 
   test("refuses prompt dispatch on a local workspace without an account, unless both development flags are set", async () => {
