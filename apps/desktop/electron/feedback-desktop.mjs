@@ -85,7 +85,12 @@ function finite(value) {
  *   now?: () => number,
  *   random?: () => number,
  *   log?: (level: string, message: string, data?: object) => void,
+ *   accountId?: (() => Promise<string | null>) | null,
  * }} options
+ *
+ * `accountId()`: the signed-in account's id, null when signed out. Queued
+ * feedback is stamped with it and sent only under that account; the app
+ * never asks on its own while signed out.
  */
 export function createDesktopFeedback({
   request,
@@ -99,10 +104,20 @@ export function createDesktopFeedback({
   now = Date.now,
   random = Math.random,
   log = () => undefined,
+  accountId = null,
 }) {
   const allowed = desktopFeedbackAllowed({ env, packaged, devMode });
-  // (The shared module's options carry no JSDoc type of their own.)
-  const service = createFeedback(/** @type {any} */ ({
+  /** The account last read (the shared module asks synchronously); read again before each offer, send and retry. */
+  let account = null;
+  async function readAccount() {
+    if (typeof accountId !== "function") return account;
+    account = await accountId().catch(() => null);
+    return account;
+  }
+  const retryEveryMs = desktopFeedbackRetryMs({ env, packaged });
+  let accountTimer = null;
+  /** @type {import("./feedback/feedback.mjs").FeedbackOptions} */
+  const options = {
     request,
     stateFile: path.join(userDataPath, STATE_FILE),
     client: "desktop",
@@ -112,7 +127,8 @@ export function createDesktopFeedback({
     now,
     random,
     log,
-    retryEveryMs: desktopFeedbackRetryMs({ env, packaged }),
+    retryEveryMs,
+    ...(typeof accountId === "function" ? { account: () => account } : {}),
     onEvent: (name, properties) => {
       try {
         emit?.(name, properties);
@@ -120,13 +136,26 @@ export function createDesktopFeedback({
         /* analytics never in the way */
       }
     },
-  }));
+  };
+  const service = createFeedback(options);
 
   return {
     service,
     allowed,
-    start: () => service.start(),
-    stop: () => service.stop(),
+    async start() {
+      await readAccount();
+      service.start();
+      // The queue's own retries see a sign-in or sign-out within one interval.
+      if (!accountTimer && typeof accountId === "function") {
+        accountTimer = setInterval(() => void readAccount(), Math.min(retryEveryMs, 60_000));
+        accountTimer.unref?.();
+      }
+    },
+    stop() {
+      if (accountTimer) clearInterval(accountTimer);
+      accountTimer = null;
+      return service.stop();
+    },
     /** IPC omnirushFeedbackPolicy: the policy in force (off when not allowed). */
     policy: () => service.policy(),
     /** IPC omnirushFeedbackStatus. */
@@ -141,9 +170,10 @@ export function createDesktopFeedback({
      * final text, at most 700 characters) is only read here to tell a
      * refusal that came back as an ordinary answer; it is not kept.
      */
-    offer(input) {
+    async offer(input) {
       const sessionId = typeof input?.sessionId === "string" && SESSION_RE.test(input.sessionId) ? input.sessionId : null;
       if (!sessionId) return null;
+      await readAccount();
       let outcome = typeof input?.outcome === "string" && TURN_OUTCOMES.includes(input.outcome) ? input.outcome : "error";
       if (outcome === "ok" && looksLikeRefusal(text(input?.text, 700))) outcome = "refused";
       try {
@@ -165,6 +195,7 @@ export function createDesktopFeedback({
      */
     async submit(input) {
       const value = input && typeof input === "object" ? input : {};
+      await readAccount();
       try {
         return await /** @type {any} */ (service.submit)({
           kind: value.kind,

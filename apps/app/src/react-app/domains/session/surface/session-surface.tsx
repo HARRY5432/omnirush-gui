@@ -3408,6 +3408,9 @@ export function SessionSurface(props: SessionSurfaceProps) {
               draft={draft}
               modelId={sessionModel.selectedModel?.modelID ?? null}
               effort={sessionModel.modelVariant ?? null}
+              queuedCount={queuedItems.length}
+              askable={!currentSnapshot?.session.parentID && !(currentSnapshot?.session.title ?? "").startsWith("Automation: ")}
+              onDone={() => composerShellRef.current?.querySelector<HTMLElement>("[contenteditable=true]")?.focus()}
             />
             {admissionOutcomeUnresolved && queuedDrainState.phase.kind !== "admission_unknown" && renderedMessages.length > 0 ? (
               <AdmissionOutcomeUnknownCard

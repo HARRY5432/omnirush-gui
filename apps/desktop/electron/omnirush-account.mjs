@@ -672,6 +672,8 @@ export function createDesktopOmniRushAccountStore({
    * server-driven sign-out lands afterwards.
    */
   async function save(credentials) {
+    // A new or renewed sign-in: the account is read again (accountId).
+    knownAccountId = null;
     const normalized = validCredentials(credentials);
     if (!normalized) throw new Error("Invalid OmniRush account credential bundle");
     if (clearInFlight) {
@@ -988,6 +990,30 @@ export function createDesktopOmniRushAccountStore({
    * expired while the app was idle, so a second one is allowed before the
    * session counts as gone.
    */
+  /** The signed-in account's id (from /device/me), remembered until the sign-in changes. */
+  let knownAccountId = null;
+
+  /**
+   * The signed-in account's opaque id, or null when signed out or unknown
+   * (feedback-desktop.mjs: queued feedback goes only under its account).
+   * @returns {Promise<string | null>}
+   */
+  async function accountId() {
+    const credentials = await load().catch(() => null);
+    if (!credentials) {
+      knownAccountId = null;
+      return null;
+    }
+    if (knownAccountId) return knownAccountId;
+    try {
+      const profile = await fetchProfile(credentials, 1);
+      knownAccountId = profile?.accountId ?? null;
+    } catch {
+      return null;
+    }
+    return knownAccountId;
+  }
+
   async function fetchProfile(credentials, refreshesLeft = 2, sessionId = null) {
     const profileUrl = controlPlaneBase(credentials.gatewayUrl);
     profileUrl.pathname += "/device/me";
@@ -1427,6 +1453,7 @@ export function createDesktopOmniRushAccountStore({
    * @returns {Promise<SignOutOutcome>}
    */
   async function clear({ revokeRemote = true } = {}) {
+    knownAccountId = null;
     // Claim the gate first (synchronously, so no persist slips in), then wait
     // for a rotation still in flight: signing out under it would revoke a
     // retired token (the live session survives) or let its persist land
@@ -1476,5 +1503,6 @@ export function createDesktopOmniRushAccountStore({
     buildathonTagSession,
     placementsRequest,
     feedbackRequest,
+    accountId,
   };
 }

@@ -1423,17 +1423,17 @@ const desktopPlacements = createDesktopPlacements({
 // policy turns it on. Its two analytics events go to the window's analytics.
 const desktopFeedback = createDesktopFeedback({
   request: (pathAndQuery, init) => omnirushAccountStore.feedbackRequest(pathAndQuery, init),
+  accountId: () => omnirushAccountStore.accountId(),
   userDataPath: app.getPath("userData"),
   version: app.getVersion(),
   packaged: app.isPackaged,
   devMode: isDevMode,
+  // Only the app window (never a browser panel or a preview window).
   emit: (name, properties) => {
-    for (const win of BrowserWindow.getAllWindows()) {
-      try {
-        if (!win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.send(FEEDBACK_EVENT_CHANNEL, { name, properties });
-      } catch {
-        /* closing */
-      }
+    try {
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send(FEEDBACK_EVENT_CHANNEL, { name, properties });
+    } catch {
+      /* closing */
     }
   },
 });
@@ -3500,7 +3500,7 @@ or use: pnpm dev:worktree`);
     const win = await createMainWindow();
     // In the background: the window never waits for it.
     desktopPlacements.start();
-    desktopFeedback.start();
+    void desktopFeedback.start();
     if (startReset.ran && startReset.moved.length > 0) {
       runDetachedTask("show app data reset notice", async () => {
         const { response } = await dialog.showMessageBox(win, {

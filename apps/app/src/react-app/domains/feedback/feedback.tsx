@@ -8,7 +8,7 @@
 //   a one-line comment, thumbs up a one-line "What worked?"; the rating is
 //   sent even when the follow-up is ignored. Or, instead, the 0-10 pulse.
 // - Anytime: "Send feedback" (account menu, command palette) opens a small
-//   dialog: category, text, "Include this session's id".
+//   dialog: category, text, "Include this chat's id".
 // The prompt is drawn next to the transcript, never part of its messages.
 
 import { useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent } from "react";
@@ -31,6 +31,7 @@ import {
   feedbackTurnStarted,
   finishedTurn,
   GENERAL_CATEGORIES,
+  lastAnswerId,
   includeSessionChecked,
   installFeedbackAnalytics,
   offerFeedbackAfterTurn,
@@ -55,6 +56,7 @@ import {
   type TurnPrompt,
   type TurnReasonId,
 } from "../../../app/lib/in-app-feedback";
+import { promptSentHereAt } from "../../../app/lib/analytics";
 
 /** The engine says idle a moment before it writes a failed turn's error: the turn is read after this. */
 const SETTLE_MS = 1_200;
@@ -62,6 +64,17 @@ const SETTLE_MS = 1_200;
 const SETTLE_MAX_MS = 4_500;
 
 // --- after a turn -----------------------------------------------------------------------
+
+/** Typing in the composer this recently: not now. */
+const QUIET_INPUT_MS = 3_000;
+/** A toast or dialog on screen (the Good-session card, the finish guard): wait, at most this long, then let it be. */
+const WAIT_FOR_CLEAR_MS = 20_000;
+
+/** Something else is up on screen: a toast (the Good-session card) or a dialog. The thumbs never stack with it. */
+function screenBusy(): boolean {
+  if (typeof document === "undefined") return false;
+  return Boolean(document.querySelector('[data-sonner-toast]:not([data-removed="true"]), [role="dialog"], [role="alertdialog"]'));
+}
 
 export type FeedbackTurnPromptProps = {
   sessionId: string;
@@ -71,11 +84,19 @@ export type FeedbackTurnPromptProps = {
   draft: string;
   modelId: string | null;
   effort: string | null;
+  /** Follow-ups waiting to be sent: the next turn is coming, not now. */
+  queuedCount: number;
+  /** False for sessions a person does not drive here (sub-agents, automations). */
+  askable: boolean;
+  /** After Send, Skip or ×: focus back to the composer. */
+  onDone?: () => void;
 };
 
 /**
  * Watches this session's turns: on the running → done edge it reads how
- * the turn ended and asks the main process; draws the prompt it gets.
+ * the turn ended and, when the moment is quiet (nothing typed, nothing
+ * queued, no card or dialog up), asks the main process; draws the prompt it
+ * gets under the last answer only.
  */
 export function FeedbackTurnPrompt(props: FeedbackTurnPromptProps) {
   const prompt = useFeedbackStore((state) => state.prompt);
@@ -83,6 +104,12 @@ export function FeedbackTurnPrompt(props: FeedbackTurnPromptProps) {
   latest.current = props;
   const edge = useRef({ sessionId: props.sessionId, running: props.turnRunning });
   const startedAt = useRef<number | null>(null);
+  const lastInputAt = useRef(0);
+  const draftSeen = useRef(props.draft);
+  if (draftSeen.current !== props.draft) {
+    draftSeen.current = props.draft;
+    lastInputAt.current = Date.now();
+  }
 
   useEffect(() => {
     const before = edge.current;
@@ -98,19 +125,40 @@ export function FeedbackTurnPrompt(props: FeedbackTurnPromptProps) {
     if (!turnJustFinished(before, now)) return;
     const sessionId = props.sessionId;
     const began = startedAt.current ?? Date.now();
-    const deadline = Date.now() + SETTLE_MAX_MS;
+    const settleBy = Date.now() + SETTLE_MAX_MS;
+    const clearBy = Date.now() + WAIT_FOR_CLEAR_MS;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
+    // The same session, idle, the same last answer, nothing typed or queued.
+    const quiet = (messageId: string) => {
+      const current = latest.current;
+      return current.sessionId === sessionId && !current.turnRunning && current.askable && !current.draft.trim()
+        && current.queuedCount === 0 && lastAnswerId(current.messages) === messageId && Date.now() - lastInputAt.current >= QUIET_INPUT_MS;
+    };
     const judge = () => {
       if (cancelled) return;
       const current = latest.current;
-      if (current.sessionId !== sessionId || current.turnRunning) return;
+      if (current.sessionId !== sessionId || current.turnRunning || !current.askable) return;
+      // Only turns a person started from this window (never Workflows, automations or sub-agents).
+      const sent = promptSentHereAt(sessionId);
+      if (sent === null || sent < began - 60_000) return;
       const turn = finishedTurn(current.messages);
       if (!turn) {
-        if (Date.now() < deadline) timer = setTimeout(judge, 150);
+        if (Date.now() < settleBy) timer = setTimeout(judge, 150);
         return;
       }
-      void offerFeedbackAfterTurn({ sessionId, turn, fallbackDurationMs: Date.now() - began, modelId: current.modelId, effort: current.effort });
+      if (!quiet(turn.messageId) || screenBusy()) {
+        if (Date.now() < clearBy) timer = setTimeout(judge, 400);
+        return;
+      }
+      void offerFeedbackAfterTurn({
+        sessionId,
+        turn,
+        fallbackDurationMs: Date.now() - began,
+        modelId: current.modelId,
+        effort: current.effort,
+        stillCurrent: () => !cancelled && quiet(turn.messageId),
+      });
     };
     timer = setTimeout(judge, SETTLE_MS);
     return () => {
@@ -119,16 +167,16 @@ export function FeedbackTurnPrompt(props: FeedbackTurnPromptProps) {
     };
   }, [props.sessionId, props.turnRunning]);
 
-  // This pane switches to another session: the prompt of the one it left goes (its rating, if chosen, is sent).
+  // This pane switches to another session, or goes: the prompt it showed goes (its rating, if chosen, is sent).
   const shownSession = useRef(props.sessionId);
   useEffect(() => {
     const left = shownSession.current;
     shownSession.current = props.sessionId;
-    if (left === props.sessionId) return;
-    if (useFeedbackStore.getState().prompt?.sessionId === left) void closePrompt();
+    if (left !== props.sessionId) void closePrompt(left);
   }, [props.sessionId]);
+  useEffect(() => () => void closePrompt(shownSession.current), []);
 
-  const visible = Boolean(prompt) && prompt?.sessionId === props.sessionId && !props.turnRunning;
+  const visible = prompt !== null && prompt.sessionId === props.sessionId && !props.turnRunning && prompt.messageId === lastAnswerId(props.messages);
   // Typing a new prompt (the draft changing after the prompt showed) puts it away.
   const draftAtShow = useRef<string | null>(null);
   useEffect(() => {
@@ -140,10 +188,11 @@ export function FeedbackTurnPrompt(props: FeedbackTurnPromptProps) {
       draftAtShow.current = props.draft;
       return;
     }
-    if (props.draft !== draftAtShow.current && props.draft.trim()) void closePrompt();
-  }, [visible, props.draft]);
+    if (props.draft !== draftAtShow.current && props.draft.trim()) void closePrompt(props.sessionId);
+  }, [visible, props.draft, props.sessionId]);
 
   if (!visible || !prompt) return null;
+  const done = () => latest.current.onDone?.();
   return (
     <FeedbackTurnPromptView
       prompt={prompt}
@@ -151,9 +200,12 @@ export function FeedbackTurnPrompt(props: FeedbackTurnPromptProps) {
       onPulse={ratePulse}
       onToggleReason={toggleTurnReason}
       onComment={setPromptComment}
-      onSend={() => void sendPrompt()}
-      onSkip={() => void sendPrompt({ skip: true })}
-      onDismiss={() => void closePrompt()}
+      onSend={() => void sendPrompt().then((result) => { if (!useFeedbackStore.getState().prompt && result) done(); })}
+      onSkip={() => void sendPrompt({ skip: true }).then((result) => { if (!useFeedbackStore.getState().prompt && result) done(); })}
+      onDismiss={() => {
+        void closePrompt(props.sessionId);
+        done();
+      }}
     />
   );
 }
@@ -170,9 +222,11 @@ export type FeedbackTurnPromptViewProps = {
 };
 
 const thumbClass = "size-7 rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground aria-pressed:bg-muted aria-pressed:text-foreground";
-const chipClass = "inline-flex h-7 items-center rounded-full border border-border px-2.5 text-[12px] leading-none text-muted-foreground transition-colors hover:border-foreground/20 hover:text-foreground aria-pressed:border-foreground/25 aria-pressed:bg-muted aria-pressed:text-foreground";
+const chipClass = "h-7 px-2.5 text-[12px] text-muted-foreground aria-pressed:border-foreground/25 aria-pressed:text-foreground";
 
 function CommentRow(props: { prompt: TurnPrompt; placeholder: string; onComment: (text: string) => void; onSend: () => void; onSkip: () => void; testId: string }) {
+  // The pulse is about OmniRush, not this chat: it carries no chat id.
+  const note = props.prompt.kind === "pulse" ? null : RATING_NOTE;
   return (
     <>
     <div className="flex w-full max-w-xl items-center gap-2">
@@ -198,7 +252,7 @@ function CommentRow(props: { prompt: TurnPrompt; placeholder: string; onComment:
     {props.prompt.error ? (
       <p role="alert" className="text-[12px] leading-4 text-destructive" data-testid="feedback-error">{props.prompt.error}</p>
     ) : null}
-    <p className="text-[11px] leading-4 text-muted-foreground/80" data-testid="feedback-note">{RATING_NOTE}</p>
+    {note ? <p className="text-[11px] leading-4 text-muted-foreground/80" data-testid="feedback-note">{note}</p> : null}
     </>
   );
 }
@@ -217,7 +271,7 @@ export function FeedbackTurnPromptView(props: FeedbackTurnPromptViewProps) {
       variant="ghost"
       size="icon-xs"
       aria-label="Dismiss"
-      title="Dismiss (Esc)"
+      title="Dismiss"
       onClick={props.onDismiss}
       className="text-muted-foreground/70 hover:text-foreground"
       data-testid="feedback-dismiss"
@@ -270,30 +324,37 @@ export function FeedbackTurnPromptView(props: FeedbackTurnPromptViewProps) {
         <>
           <div className="flex items-center gap-1">
             <span className="me-1 text-[12px] text-muted-foreground">How was this?</span>
-            <Button variant="ghost" size="icon-xs" className={thumbClass} aria-label="Good answer" title="Good answer" aria-pressed={prompt.rating === "up"} onClick={() => props.onRate("up")} data-testid="feedback-up">
+            <Button variant="ghost" size="icon-xs" className={thumbClass} aria-label="Good answer" title={`Good answer. ${RATING_NOTE}`} aria-pressed={prompt.rating === "up"} onClick={() => props.onRate("up")} data-testid="feedback-up">
               <ThumbsUp className="size-3.5" aria-hidden="true" />
             </Button>
-            <Button variant="ghost" size="icon-xs" className={thumbClass} aria-label="Bad answer" title="Bad answer" aria-pressed={prompt.rating === "down"} onClick={() => props.onRate("down")} data-testid="feedback-down">
+            <Button variant="ghost" size="icon-xs" className={thumbClass} aria-label="Bad answer" title={`Bad answer. ${RATING_NOTE}`} aria-pressed={prompt.rating === "down"} onClick={() => props.onRate("down")} data-testid="feedback-down">
               <ThumbsDown className="size-3.5" aria-hidden="true" />
             </Button>
             {dismiss}
           </div>
           {prompt.stage === "down" ? (
             <>
-              <div className="flex flex-wrap items-center gap-1.5" aria-label="What went wrong?">
+              <ToggleGroup
+                multiple
+                aria-label="What went wrong?"
+                variant="outline"
+                size="sm"
+                spacing={1.5}
+                value={prompt.reasons}
+                onValueChange={(value) => {
+                  // The one reason pressed or released.
+                  const next = value.filter((id): id is TurnReasonId => TURN_REASONS.some((r) => r.id === id));
+                  const changed = TURN_REASONS.find((r) => next.includes(r.id) !== prompt.reasons.includes(r.id));
+                  if (changed) props.onToggleReason(changed.id);
+                }}
+                className="flex-wrap"
+              >
                 {TURN_REASONS.map((reason) => (
-                  <button
-                    key={reason.id}
-                    type="button"
-                    aria-pressed={prompt.reasons.includes(reason.id)}
-                    onClick={() => props.onToggleReason(reason.id)}
-                    className={chipClass}
-                    data-testid={`feedback-reason-${reason.id}`}
-                  >
+                  <ToggleGroupItem key={reason.id} value={reason.id} className={chipClass} data-testid={`feedback-reason-${reason.id}`}>
                     {reason.label}
-                  </button>
+                  </ToggleGroupItem>
                 ))}
-              </div>
+              </ToggleGroup>
               <CommentRow prompt={prompt} placeholder="Anything to add? (optional)" onComment={props.onComment} onSend={props.onSend} onSkip={props.onSkip} testId="feedback-comment" />
             </>
           ) : prompt.stage === "up" ? (
@@ -365,7 +426,7 @@ export function FeedbackFormView(props: FeedbackFormViewProps) {
         {dialog.sessionId ? (
           <label className="flex cursor-pointer items-center gap-2 text-[13px] text-muted-foreground" data-testid="feedback-include-session">
             <Checkbox checked={includeSessionChecked(dialog)} onCheckedChange={(checked) => props.onIncludeSession(checked === true)} />
-            Include this session's id
+            Include this chat's id
           </label>
         ) : null}
       </div>

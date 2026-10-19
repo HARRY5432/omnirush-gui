@@ -60,6 +60,20 @@ describe("in-app feedback: how the last turn ended", () => {
     expect(lib.finishedTurn(messages)).toEqual({ outcome: "ok", toolCalls: 1, durationMs: 15_000, text: "Two files: a and b.", turn: 2, messageId: "a2" });
   });
 
+  test("the agent asking the person a question is not a finished turn", () => {
+    const asks = [user("u1", "set it up"), assistant("a1", [toolPart, text("Which database should I use, Postgres or SQLite?")])];
+    expect(lib.finishedTurn(asks)).toBeNull();
+  });
+
+  test("after an automatic compaction: back to the real prompt (tools, duration, turn index)", () => {
+    const cont = { id: "c1", role: "user", parts: [{ type: "text", text: "Continue.", synthetic: true }], metadata: { opencode: { created: 30_000 } } } as unknown as UIMessage;
+    const compactReq = { ...user("cr", "compact"), metadata: { opencode: { created: 20_000, compaction: true } } } as UIMessage;
+    const summary = assistant("s1", [text("summary")], { created: 20_100, completed: 25_000, finish: "stop", compaction: true });
+    const messages = [user("u1", "first"), assistant("a1", [text("hi")]), user("u2", "build it", 10_000), assistant("a2", [toolPart], { created: 10_100, completed: 19_000, finish: "tool-calls" }), compactReq, summary, cont, assistant("a3", [toolPart, text("Built.")], { created: 30_100, completed: 50_000, finish: "stop" })];
+    expect(lib.finishedTurn(messages)).toEqual({ outcome: "ok", toolCalls: 2, durationMs: 40_000, text: "Built.", turn: 2, messageId: "a3" });
+    expect(lib.lastAnswerId(messages)).toBe("a3");
+  });
+
   test("no answer yet, an open answer, a compaction: nothing", () => {
     expect(lib.finishedTurn([user("u1", "x")])).toBeNull();
     expect(lib.finishedTurn([user("u1", "x"), assistant("a1", [text("partial")], { created: 1 })])).toBeNull();
@@ -86,6 +100,21 @@ describe("in-app feedback: after a turn", () => {
     expect(main.offers).toEqual([{ sessionId: "ses_1", outcome: "ok", toolCalls: 1, durationMs: 4000, text: "Done." }]);
     expect(main.shown).toEqual([{ kind: "turn" }]);
     expect(lib.useFeedbackStore.getState().prompt).toMatchObject({ sessionId: "ses_1", kind: "turn", stage: "rate", turn: 2, modelId: "gpt-6-astra", effort: "high", rating: null });
+  });
+
+  test("stale by the time the main process answers (typed, another answer, another session): dropped", async () => {
+    const main = fakeMain();
+    expect(await lib.offerFeedbackAfterTurn({ sessionId: "ses_1", turn: TURN, fallbackDurationMs: 0, modelId: null, effort: null, stillCurrent: () => false })).toBeNull();
+    expect(lib.useFeedbackStore.getState().prompt).toBeNull();
+    expect(main.shown).toEqual([]);
+  });
+
+  test("a send that fails outright says so inline; the prompt stays", async () => {
+    fakeMain({ kind: "turn" }, { ok: false, error: "failed" });
+    await lib.offerFeedbackAfterTurn({ sessionId: "ses_1", turn: TURN, fallbackDurationMs: 0, modelId: null, effort: null });
+    lib.rateTurn("up");
+    await lib.sendPrompt();
+    expect(lib.useFeedbackStore.getState().prompt?.error).toBe("Couldn't send. Try again.");
   });
 
   test("the main process says no: nothing shows, nothing reported", async () => {
@@ -121,15 +150,20 @@ describe("in-app feedback: after a turn", () => {
     expect(main.submitted[0]).toMatchObject({ kind: "turn", rating: "up", categories: [], comment: null });
   });
 
-  test("a rating chosen and then left (next turn, typing, ×): the rating alone, sent quietly", async () => {
+  test("a rating chosen and then left (next turn, typing, ×): the rating and the reasons picked, sent quietly, not the unsent comment", async () => {
     const main = fakeMain();
     await lib.offerFeedbackAfterTurn({ sessionId: "ses_1", turn: TURN, fallbackDurationMs: 0, modelId: null, effort: null });
     lib.rateTurn("down");
     lib.toggleTurnReason("ui");
+    lib.setPromptComment("half typed");
+    lib.feedbackTurnStarted("ses_other");
+    await flush();
+    expect(lib.useFeedbackStore.getState().prompt?.sessionId).toBe("ses_1");
+    expect(main.submitted).toEqual([]);
     lib.feedbackTurnStarted("ses_1");
     await flush();
-    expect(main.started).toEqual([{ sessionId: "ses_1" }]);
-    expect(main.submitted[0]).toMatchObject({ rating: "down", categories: [], comment: null });
+    expect(main.started).toEqual([{ sessionId: "ses_other" }, { sessionId: "ses_1" }]);
+    expect(main.submitted[0]).toMatchObject({ rating: "down", categories: ["ui"], comment: null });
     expect(main.toasts).toEqual([]);
     expect(lib.useFeedbackStore.getState().prompt).toBeNull();
   });
@@ -151,7 +185,7 @@ describe("in-app feedback: after a turn", () => {
     lib.ratePulse(9);
     lib.setPromptComment("fast and handy");
     await lib.sendPrompt();
-    expect(main.submitted).toEqual([{ kind: "pulse", rating: 9, categories: [], comment: "fast and handy", sessionId: "ses_9", turn: 2, trigger: "pulse", modelId: "m", effort: null }]);
+    expect(main.submitted).toEqual([{ kind: "pulse", rating: 9, categories: [], comment: "fast and handy", sessionId: null, turn: null, trigger: "pulse", modelId: "m", effort: null }]);
   });
 
   test("queued (offline / the server has none yet): the saved wording, never an error", async () => {
@@ -203,7 +237,7 @@ describe("in-app feedback: refusals (422 / 413)", () => {
     const prompt = { sessionId: "ses_1", kind: "turn" as const, stage: "down" as const, turn: 2, messageId: "a2", modelId: null, effort: null, rating: "down" as const, reasons: [], comment: "x", error: "Couldn't send: comment: too long", sending: false };
     const html = renderToStaticMarkup(<FeedbackTurnPromptView prompt={prompt} onRate={noop} onPulse={noop} onToggleReason={noop} onComment={noop} onSend={noop} onSkip={noop} onDismiss={noop} />);
     expect(html).toContain("Couldn&#x27;t send: comment: too long");
-    const dialog = { open: true, trigger: "menu" as const, sessionId: null, category: "bug" as const, text: "x", includeSession: null, sending: false, error: "That's too long to send" };
+    const dialog = { open: true, trigger: "menu" as const, sessionId: null, category: "bug" as const, text: "x", includeSession: null, sending: false, error: "That's too long to send", openId: 1 };
     const form = renderToStaticMarkup(<FeedbackFormView dialog={dialog} onCategory={noop} onText={noop} onIncludeSession={noop} onSend={noop} onCancel={noop} />);
     expect(form).toContain("That&#x27;s too long to send");
     expect(form).toContain('role="alert"');
@@ -237,6 +271,25 @@ describe("in-app feedback: Send feedback", () => {
     await lib.sendFeedbackDialog();
     expect(main.submitted[0]).toMatchObject({ kind: "general", categories: ["bug"], sessionId: "ses_open", trigger: "command" });
     expect(main.toasts).toEqual([{ kind: "sent", title: "Thanks, sent." }]);
+  });
+
+  test("a late answer to an earlier opening leaves a reopened dialog alone", async () => {
+    let release: (v: unknown) => void = () => undefined;
+    lib.setFeedbackBridgeForTests({
+      offer: async () => null,
+      sessionStarted: async () => true,
+      shown: async () => ({ ok: true }),
+      submit: () => new Promise((resolve) => { release = resolve; }) as never,
+    });
+    lib.openFeedbackDialog({ trigger: "menu", sessionId: null });
+    lib.setDialogText("first");
+    const pending = lib.sendFeedbackDialog();
+    lib.closeFeedbackDialog();
+    lib.openFeedbackDialog({ trigger: "command", sessionId: null });
+    lib.setDialogText("second, being written");
+    release({ ok: true, sent: true, queued: false });
+    await pending;
+    expect(lib.useFeedbackStore.getState().dialog).toMatchObject({ open: true, trigger: "command", text: "second, being written" });
   });
 
   test("a refused input keeps the dialog open", async () => {
@@ -297,8 +350,10 @@ describe("in-app feedback: the views", () => {
   test("thumbs down: the six reasons (chosen ones pressed), a one-line comment, Send / Skip", () => {
     const html = renderToStaticMarkup(<FeedbackTurnPromptView prompt={{ ...base, stage: "down", rating: "down", reasons: ["slow"] }} {...handlers} />);
     for (const label of ["Wrong", "Too slow", "Didn&#x27;t follow instructions", "Broke something", "UI problem", "Other"]) expect(html).toContain(label);
-    expect(html).toMatch(/aria-pressed="true"[^>]*data-testid="feedback-reason-slow"/);
-    expect(html).toMatch(/aria-pressed="false"[^>]*data-testid="feedback-reason-wrong"/);
+    const chip = (id: string) => html.match(new RegExp(`<button[^>]*data-testid="feedback-reason-${id}"[^>]*>`))?.[0] ?? "";
+    expect(chip("slow")).toContain('aria-pressed="true"');
+    expect(chip("wrong")).toContain('aria-pressed="false"');
+    expect(html).toContain('data-slot="toggle-group"');
     expect(html).toContain("Anything to add? (optional)");
     expect(html).toContain("Sent to the OmniRush team with this chat&#x27;s id. Not part of the chat.");
     expect(html).toContain('data-testid="feedback-send"');
@@ -331,14 +386,14 @@ describe("in-app feedback: the views", () => {
   });
 
   test("the dialog form: categories, text, the session box only with a session, Send off while empty", () => {
-    const dialog = { open: true, trigger: "menu" as const, sessionId: "ses_open", category: "bug" as const, text: "", includeSession: null, sending: false, error: null };
+    const dialog = { open: true, trigger: "menu" as const, sessionId: "ses_open", category: "bug" as const, text: "", includeSession: null, sending: false, error: null, openId: 1 };
     const props = { onCategory: noop, onText: noop, onIncludeSession: noop, onSend: noop, onCancel: noop };
     const html = renderToStaticMarkup(<FeedbackFormView dialog={dialog} {...props} />);
     for (const c of ["bug", "idea", "praise", "other"]) expect(html).toContain(`data-testid="feedback-category-${c}"`);
-    expect(html).toContain("Include this session&#x27;s id");
+    expect(html).toContain("Include this chat&#x27;s id");
     expect(html).toMatch(/data-testid="feedback-dialog-send"[^>]*disabled=""|disabled=""[^>]*data-testid="feedback-dialog-send"/);
     const noSession = renderToStaticMarkup(<FeedbackFormView dialog={{ ...dialog, sessionId: null, text: "x" }} {...props} />);
-    expect(noSession).not.toContain("Include this session");
+    expect(noSession).not.toContain("Include this chat");
     expect(noSession).not.toMatch(/data-testid="feedback-dialog-send"[^>]*disabled=""/);
   });
 });

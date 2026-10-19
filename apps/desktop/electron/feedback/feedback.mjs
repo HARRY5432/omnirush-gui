@@ -28,6 +28,12 @@
 // A 2xx or a 4xx that is final (400, 413, 422: the person is told) removes
 // it; a 429 waits for its Retry-After (the server's day ends at 00:00 UTC).
 //
+// Accounts: with `account` (the signed-in account's id, null when signed
+// out), every queued entry is stamped with the account it was written under
+// and sent only while that account is signed in; one written while no
+// account was known is never sent (it goes after 7 days). Signed out, the
+// app does not ask on its own.
+//
 // Nothing here touches sessions, prompts, the model, files or uploads, and
 // the comment never goes to analytics (analyticsProperties). Node builtins
 // only; the transport (`request`) is the app's own authorized call.
@@ -141,6 +147,7 @@ export const TURN_OUTCOMES = Object.freeze(["ok", "refused", "limit", "error", "
 /**
  * Whether a finished turn may get the after-turn prompt: it finished
  * normally (`outcome` "ok") and used at least one tool or ran 30 s.
+ * @param {{ outcome?: string, toolCalls?: number, durationMs?: number }} [turn]
  */
 export function turnEligible({ outcome, toolCalls = 0, durationMs = 0 } = {}) {
   if (outcome !== "ok") return false;
@@ -401,12 +408,31 @@ export function writeState(file, state) {
  */
 
 /**
+ * @typedef {object} FeedbackOptions
+ * @property {FeedbackRequest | null} [request]
+ * @property {string} [stateFile]
+ * @property {"cli" | "desktop" | "web"} [client]
+ * @property {string} [version]
+ * @property {string} [os]
+ * @property {boolean} [allowed]
+ * @property {() => number} [now]
+ * @property {() => number} [random]
+ * @property {((name: string, properties: Record<string, unknown>) => void) | null} [onEvent]
+ * @property {(level: string, message: string, data?: object) => void} [log]
+ * @property {number} [retryEveryMs]
+ * @property {(() => string | null | undefined) | null} [account]
+ */
+
+/**
  * The app's feedback. `request(pathAndQuery, { method, body, timeoutMs })`
  * is the app's authorized call; it resolves { status, data }, or null when
  * signed out. `allowed`: whether the app may ask on its own in this run (an
  * interactive window or terminal, not headless, CI or switched off); anytime
  * feedback works either way. `onEvent(name, properties)`: the app's
  * analytics (feedback_prompt_shown, feedback_submitted), labels only.
+ * `account()`: the signed-in account's id or null (queued entries go only
+ * under the account they were written under).
+ * @param {FeedbackOptions} options
  */
 export function createFeedback({
   request,
@@ -420,8 +446,19 @@ export function createFeedback({
   onEvent = null,
   log = () => undefined,
   retryEveryMs = 5 * 60_000,
+  account = null,
 } = {}) {
   const ctx = { client, appVersion: version, os };
+  /** The signed-in account (a string), null when signed out; undefined without `account`. */
+  const currentAccount = () => {
+    if (typeof account !== "function") return undefined;
+    try {
+      const id = account();
+      return typeof id === "string" && id ? id : null;
+    } catch {
+      return null;
+    }
+  };
   let fetching = null;
   let flushing = null;
   let timer = null;
@@ -511,7 +548,7 @@ export function createFeedback({
    */
   function offerAfterTurn(turn = {}) {
     const sessionId = typeof turn.sessionId === "string" && SESSION_RE.test(turn.sessionId) ? turn.sessionId : null;
-    if (!allowed || !sessionId || !turnEligible(turn)) return null;
+    if (!allowed || !sessionId || !turnEligible(turn) || currentAccount() === null) return null;
     return mutate((s) => {
       const p = policy(s);
       if (!p.enabled || p.maxPerDay < 1) return null;
@@ -550,6 +587,8 @@ export function createFeedback({
     const built = buildPayload(input, ctx);
     if (built.error) return { ok: false, error: built.error };
     const entry = { id: randomUUID(), at: now(), tries: 0, next_at: 0, sending_until: 0, payload: built.payload };
+    const owner = currentAccount();
+    if (owner !== undefined) entry.account = owner;
     mutate((s) => {
       s.spool = [...s.spool, entry].slice(-SPOOL_MAX);
     });
@@ -559,7 +598,9 @@ export function createFeedback({
     const refused = outcome.refused[entry.id];
     if (refused) return { ok: false, error: refused.status === 413 ? "too_large" : "invalid", errors: refused.errors };
     const sent = outcome.sent.includes(entry.id) || (sentHere.has(entry.id) && !read().spool.some((e) => e.id === entry.id));
-    return sent ? { ok: true, sent: true, queued: false } : { ok: true, sent: false, queued: outcome.kept.includes(entry.id), reason: outcome.reasons[entry.id] ?? "offline" };
+    if (sent) return { ok: true, sent: true, queued: false };
+    const queued = outcome.kept.includes(entry.id) || read().spool.some((e) => e.id === entry.id);
+    return { ok: true, sent: false, queued, reason: outcome.reasons[entry.id] ?? (owner === null ? "signed_out" : "offline") };
   }
 
   /** Send what is queued and due (or just `only`; `force`: also what waits for its retry, the person asked). */
@@ -572,10 +613,13 @@ export function createFeedback({
       const result = { sent: [], kept: [], reasons: {}, refused: {} };
       if (typeof request !== "function") return result;
       const at = now();
+      const me = currentAccount();
+      // Another account's entry (or one written signed out) is not this account's to send.
+      const mine = (e) => me === undefined || (typeof me === "string" && e.account === me);
       const due = mutate((s) => {
         s.spool = s.spool.filter((e) => at - e.at <= SPOOL_MAX_AGE_MS);
         if (!s.spool.length) s.absent_at = 0;
-        const picked = s.spool.filter((e) => (only ? e.id === only : true) && (e.sending_until ?? 0) <= at && (force || (e.next_at ?? 0) <= at));
+        const picked = s.spool.filter((e) => (only ? e.id === only : true) && mine(e) && (e.sending_until ?? 0) <= at && (force || (e.next_at ?? 0) <= at));
         // Out now: nobody else sends these meanwhile.
         for (const e of picked) e.sending_until = at + IN_FLIGHT_MS;
         return picked.map((e) => ({ ...e }));

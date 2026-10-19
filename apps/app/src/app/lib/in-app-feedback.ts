@@ -29,7 +29,7 @@ import {
   omnirushFeedbackShown,
   omnirushFeedbackSubmit,
 } from "./desktop";
-import { messageFacts } from "./good-session";
+import { messageFacts, promptsInTranscript } from "./good-session";
 
 /** After a thumbs down (the shared module's TURN_REASONS, same ids and words). */
 export const TURN_REASONS = [
@@ -55,6 +55,7 @@ export const QUEUED_TOAST = "Thanks, saved for later.";
 /** Under the follow-up: what the rating carries. */
 export const RATING_NOTE = "Sent to the OmniRush team with this chat's id. Not part of the chat.";
 export const TOO_LARGE_ERROR = "That's too long to send";
+export const SEND_FAILED = "Couldn't send. Try again.";
 /** The two analytics events the main process forwards (labels only). */
 const EVENT_NAMES = new Set(["feedback_prompt_shown", "feedback_submitted"]);
 const EVENT_CHANNEL = "omnirush:feedback:event";
@@ -85,27 +86,35 @@ function opencodeMeta(message: UIMessage): Record<string, unknown> {
   return record(record(message.metadata).opencode);
 }
 
+/** A prompt a person sent: a user message that is not a compaction request or only synthetic text ("Continue."). */
+function isRealPrompt(message: UIMessage): boolean {
+  return message.role === "user" && opencodeMeta(message).compaction !== true && promptsInTranscript([message]) === 1;
+}
+
 /**
- * How the last turn of a transcript ended, or null when it has no answer
- * yet. Uses the same reading as the Good-session checklist (messageFacts):
- * a normal finish is "ok"; the Stop button "stopped"; a gateway refusal,
- * a spent allowance or any other error "error".
+ * How the last turn of a transcript ended, or null when there is nothing to
+ * rate: no answer yet, an answer still open, an agent waiting for an answer
+ * to its question, or a compaction. The turn starts at the last prompt a
+ * person sent, past the synthetic "continue" and compaction messages an
+ * automatic compaction adds. Uses the same reading as the Good-session
+ * checklist (messageFacts): a normal finish is "ok"; the Stop button
+ * "stopped"; a gateway refusal, a spent allowance or any other error "error".
  */
 export function finishedTurn(messages: readonly UIMessage[]): FinishedTurn | null {
   let start = messages.length;
-  while (start > 0 && messages[start - 1]!.role !== "user") start -= 1;
+  while (start > 0 && !isRealPrompt(messages[start - 1]!)) start -= 1;
   if (start === 0) return null;
   const prompt = messages[start - 1]!;
-  if (opencodeMeta(prompt).compaction === true) return null;
-  const answer = messages.slice(start).filter((message) => message.role === "assistant");
-  const last = answer.at(-1);
-  if (!last) return null;
-  // A compaction (its summary) is no agent turn: never rated.
-  if (answer.some((message) => opencodeMeta(message).compaction === true)) return null;
+  const assistants = messages.slice(start).filter((message) => message.role === "assistant");
+  const last = assistants.at(-1);
+  // The last answer is a compaction's summary: no agent turn to rate.
+  if (!last || opencodeMeta(last).compaction === true) return null;
+  const answer = assistants.filter((message) => opencodeMeta(message).compaction !== true);
   const facts = messageFacts(messages);
-  if (facts.replyOpen || facts.ended === "none") return null;
+  // "awaiting": the agent asked the person something; the turn is not over.
+  if (facts.replyOpen || facts.ended === "none" || facts.ended === "awaiting") return null;
   let outcome: OmniRushFeedbackTurnOutcome;
-  if (facts.ended === "pass" || facts.ended === "awaiting") outcome = "ok";
+  if (facts.ended === "pass") outcome = "ok";
   else if (facts.ended === "stopped") outcome = "stopped";
   else outcome = "error";
   let toolCalls = 0;
@@ -124,8 +133,14 @@ export function finishedTurn(messages: readonly UIMessage[]): FinishedTurn | nul
   const created = opencodeMeta(prompt).created;
   const completed = opencodeMeta(last).completed;
   const durationMs = typeof created === "number" && typeof completed === "number" && completed >= created ? completed - created : null;
-  const turn = messages.slice(0, start).filter((message) => message.role === "user" && opencodeMeta(message).compaction !== true).length;
+  const turn = promptsInTranscript(messages.slice(0, start));
   return { outcome, toolCalls, durationMs, text: text.trim().slice(0, 700), turn, messageId: last.id };
+}
+
+/** The last assistant message's id (the prompt shows only under that answer). */
+export function lastAnswerId(messages: readonly UIMessage[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i -= 1) if (messages[i]!.role === "assistant") return messages[i]!.id;
+  return null;
 }
 
 /** The running → done edge of one session's turn. */
@@ -157,7 +172,7 @@ export type TurnPrompt = {
 export type FeedbackDialogState = {
   open: boolean;
   trigger: "menu" | "command";
-  /** The session open when the dialog opened (offered as "Include this session's id"). */
+  /** The session open when the dialog opened (offered as "Include this chat's id"). */
   sessionId: string | null;
   category: GeneralCategoryId;
   text: string;
@@ -166,6 +181,8 @@ export type FeedbackDialogState = {
   sending: boolean;
   /** The server refused the last Send (shown inline; the text stays). */
   error: string | null;
+  /** Which opening this is: a late answer to an earlier one leaves a reopened dialog alone. */
+  openId: number;
 };
 
 type FeedbackState = {
@@ -173,7 +190,8 @@ type FeedbackState = {
   dialog: FeedbackDialogState;
 };
 
-const closedDialog: FeedbackDialogState = { open: false, trigger: "menu", sessionId: null, category: "bug", text: "", includeSession: null, sending: false, error: null };
+const closedDialog: FeedbackDialogState = { open: false, trigger: "menu", sessionId: null, category: "bug", text: "", includeSession: null, sending: false, error: null, openId: 0 };
+let dialogOpens = 0;
 
 export const useFeedbackStore = create<FeedbackState>(() => ({ prompt: null, dialog: closedDialog }));
 
@@ -247,10 +265,10 @@ async function send(input: OmniRushFeedbackInput, { toast = true } = {}): Promis
 
 // --- after a turn ----------------------------------------------------------------------
 
-/** A turn started in this session: the pulse counts sessions; an open prompt goes (its rating is sent). */
+/** A turn started in this session: the pulse counts sessions; this session's open prompt goes (its rating is sent). */
 export function feedbackTurnStarted(sessionId: string) {
   void bridge.sessionStarted({ sessionId }).catch(() => undefined);
-  if (useFeedbackStore.getState().prompt) void closePrompt();
+  void closePrompt(sessionId);
 }
 
 /**
@@ -263,6 +281,8 @@ export async function offerFeedbackAfterTurn(input: {
   fallbackDurationMs: number;
   modelId: string | null;
   effort: string | null;
+  /** Checked again once the main process answers: same session, idle, the same last answer, nothing typed. */
+  stillCurrent?: () => boolean;
 }): Promise<OmniRushFeedbackOffer> {
   const { turn } = input;
   let offer: OmniRushFeedbackOffer = null;
@@ -278,6 +298,7 @@ export async function offerFeedbackAfterTurn(input: {
     offer = null;
   }
   if (!offer || (offer.kind !== "turn" && offer.kind !== "pulse")) return null;
+  if (input.stillCurrent && !input.stillCurrent()) return null;
   useFeedbackStore.setState({
     prompt: {
       sessionId: input.sessionId,
@@ -304,8 +325,9 @@ function promptInput(prompt: TurnPrompt): OmniRushFeedbackInput {
     rating: prompt.rating,
     categories: prompt.kind === "turn" && prompt.rating === "down" ? [...prompt.reasons] : [],
     comment: prompt.comment.trim() ? prompt.comment.slice(0, COMMENT_MAX) : null,
-    sessionId: prompt.sessionId,
-    turn: prompt.turn,
+    // The pulse is about OmniRush, not this chat: no chat id.
+    sessionId: prompt.kind === "pulse" ? null : prompt.sessionId,
+    turn: prompt.kind === "pulse" ? null : prompt.turn,
     trigger: prompt.kind === "pulse" ? "pulse" : "sampled",
     modelId: prompt.modelId,
     effort: prompt.effort,
@@ -351,7 +373,7 @@ export async function sendPrompt({ skip = false } = {}): Promise<OmniRushFeedbac
   const input = skip ? { ...promptInput(prompt), categories: [], comment: null } : promptInput(prompt);
   setPrompt({ sending: true, error: null });
   const result = await send(input, { toast: false });
-  const refused = refusalText(result);
+  const refused = result.ok ? null : refusalText(result) ?? SEND_FAILED;
   const current = useFeedbackStore.getState().prompt;
   if (refused && current?.sessionId === prompt.sessionId && current.messageId === prompt.messageId) {
     setPrompt({ sending: false, error: refused });
@@ -365,19 +387,21 @@ export async function sendPrompt({ skip = false } = {}): Promise<OmniRushFeedbac
 /**
  * The prompt goes (×, Esc, the next turn, typing a new prompt, another
  * session): a rating already chosen still counts (the click is the
- * signal) and is sent quietly, without the follow-up's extras (as Skip).
+ * signal) and is sent quietly with the reasons picked, without the unsent
+ * comment. `sessionId`: only that session's prompt (split view).
  */
-export function closePrompt(): Promise<OmniRushFeedbackResult | null> {
+export function closePrompt(sessionId?: string): Promise<OmniRushFeedbackResult | null> {
   const prompt = useFeedbackStore.getState().prompt;
+  if (!prompt || (sessionId !== undefined && prompt.sessionId !== sessionId)) return Promise.resolve(null);
   useFeedbackStore.setState({ prompt: null });
   // Not chosen, or already on its way (Send was pressed).
-  if (!prompt || prompt.rating === null || prompt.sending) return Promise.resolve(null);
-  return send({ ...promptInput(prompt), categories: [], comment: null }, { toast: false });
+  if (prompt.rating === null || prompt.sending) return Promise.resolve(null);
+  return send({ ...promptInput(prompt), comment: null }, { toast: false });
 }
 
 // --- "Send feedback" ----------------------------------------------------------------------
 
-/** Whether "Include this session's id" is ticked: the person's own choice, else on for Bug. */
+/** Whether "Include this chat's id" is ticked: the person's own choice, else on for Bug. */
 export function includeSessionChecked(dialog: Pick<FeedbackDialogState, "category" | "includeSession">): boolean {
   return dialog.includeSession ?? dialog.category === "bug";
 }
@@ -393,7 +417,8 @@ export function setFeedbackCurrentSession(sessionId: string | null | undefined) 
 export function openFeedbackDialog(input: { trigger: "menu" | "command"; sessionId?: string | null }) {
   const given = input.sessionId === undefined ? currentSessionId : input.sessionId;
   const sessionId = typeof given === "string" && given.trim() ? given : null;
-  useFeedbackStore.setState({ dialog: { ...closedDialog, open: true, trigger: input.trigger, sessionId } });
+  dialogOpens += 1;
+  useFeedbackStore.setState({ dialog: { ...closedDialog, open: true, trigger: input.trigger, sessionId, openId: dialogOpens } });
 }
 
 export function closeFeedbackDialog() {
@@ -428,8 +453,10 @@ export async function sendFeedbackDialog(): Promise<OmniRushFeedbackResult | nul
     modelId: null,
     effort: null,
   });
-  if (result.ok) useFeedbackStore.setState({ dialog: closedDialog });
-  else setDialog({ sending: false, error: refusalText(result) ?? "Couldn't send. Try again." });
+  // The dialog was closed or opened again meanwhile: this answer is not its business.
+  if (useFeedbackStore.getState().dialog.openId !== dialog.openId) return result;
+  if (result.ok) useFeedbackStore.setState({ dialog: { ...closedDialog, openId: dialog.openId } });
+  else setDialog({ sending: false, error: refusalText(result) ?? SEND_FAILED });
   return result;
 }
 
