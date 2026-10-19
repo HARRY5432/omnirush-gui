@@ -50,7 +50,7 @@ import { QuestionTool } from "@/components/tools/question"
 import { SkillTool } from "@/components/tools/skill"
 import { TodoWriteTool } from "@/components/tools/todowrite"
 import { WebfetchTool } from "@/components/tools/webfetch"
-import { WebsearchTool } from "@/components/tools/websearch"
+import { HostedWebSearchTool, WebsearchTool } from "@/components/tools/websearch"
 import { useMessageList, useSessionErrorMessage } from "@/components/chat/message-list-provider"
 import { TaskSuggestions } from "@/components/chat/task-suggestions"
 import {
@@ -113,6 +113,7 @@ import {
   isTodoWriteToolPart,
   isWebFetchToolPart,
   isWebSearchToolPart,
+  isHostedWebSearchToolPart,
   isWriteToolPart,
 } from "@/lib/build-in-tools"
 import type { ThreadStatus } from "@/lib/messages"
@@ -291,6 +292,10 @@ const ToolMessageInner = ({ part }: ToolMessageProps) => {
 
   if (isWebSearchToolPart(part)) {
     return <WebsearchTool part={part} />
+  }
+
+  if (isHostedWebSearchToolPart(part)) {
+    return <HostedWebSearchTool part={part} />
   }
 
   if (isQuestionToolPart(part)) {

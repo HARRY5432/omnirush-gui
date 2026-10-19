@@ -1,3 +1,4 @@
+import { hostedWebSearchSummary } from "./hosted-web-search"
 import type { DynamicToolUIPart, ToolUIPart } from "ai"
 import {
   isApplyPatchToolPart,
@@ -14,6 +15,7 @@ import {
   isTodoWriteToolPart,
   isWebFetchToolPart,
   isWebSearchToolPart,
+  isHostedWebSearchToolPart,
   isWriteToolPart,
 } from "./build-in-tools"
 import { parseFilename, truncateText } from "../components/tools/path"
@@ -80,6 +82,11 @@ export function getToolActivityLabel(part: AnyToolPart): string {
     const query = part.input?.query?.trim()
     return query
       ? `Searching the web for ${truncateText(query, 44)}`
+      : "Searching the web"
+  }
+  if (isHostedWebSearchToolPart(part)) {
+    return part.state === "output-available"
+      ? truncateText(hostedWebSearchSummary(part.input, part.output).line, 64)
       : "Searching the web"
   }
   if (isQuestionToolPart(part)) {

@@ -1,3 +1,4 @@
+import type { HostedWebSearchAction } from "./hosted-web-search";
 import type { ToolUIPart, DynamicToolUIPart } from "ai";
 
 export interface ToolMetadata {
@@ -370,6 +371,13 @@ export type WebSearchToolPart = BuiltInDynamicToolPart<"websearch", WebSearchInp
 
 export function isWebSearchToolPart(part: ToolUIPart | DynamicToolUIPart): part is WebSearchToolPart {
   return part.type === "dynamic-tool" && part.toolName === "websearch";
+}
+
+/** The model's own web search, run by the provider (lib/hosted-web-search.ts). */
+export type HostedWebSearchToolPart = BuiltInDynamicToolPart<"web_search", HostedWebSearchAction>;
+
+export function isHostedWebSearchToolPart(part: ToolUIPart | DynamicToolUIPart): part is HostedWebSearchToolPart {
+  return part.type === "dynamic-tool" && part.toolName === "web_search";
 }
 
 export type QuestionToolPart = BuiltInDynamicToolPart<"question", QuestionInput>;

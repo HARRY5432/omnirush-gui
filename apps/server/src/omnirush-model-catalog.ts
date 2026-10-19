@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { runtimeStorageDir } from "./runtime-db.js";
 import type { ServerConfig } from "./types.js";
 import { writeFileAtomic } from "./atomic-write.js";
+import { modelHasWebSearch, type WebSearchSwitch } from "./web-search.js";
 
 /** Every effort a catalog model may list, lowest first. */
 export const OMNIRUSH_MODEL_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -218,7 +219,7 @@ export async function clearOmniRushModelCatalog(config: ServerConfig): Promise<v
  * marked disabled. `deprecated` is never passed on: the engine deletes
  * deprecated models, which would strand the sessions pinned to one.
  */
-export function engineModelsFromCatalog(catalog: OmniRushModelCatalog): Record<string, Record<string, unknown>> {
+export function engineModelsFromCatalog(catalog: OmniRushModelCatalog, webSearch: WebSearchSwitch | null = null): Record<string, Record<string, unknown>> {
   return Object.fromEntries(catalog.map((model) => [model.id, {
     name: model.display_name,
     reasoning: model.capabilities.reasoning,
@@ -242,6 +243,9 @@ export function engineModelsFromCatalog(catalog: OmniRushModelCatalog): Record<s
     },
     ...(model.family && model.family !== PROVIDER_FAMILY ? { family: model.family } : {}),
     ...(model.status === "beta" ? { status: "beta" } : {}),
+    // The model's own web search (web-search.ts): the engine declares the
+    // provider's web_search tool for it. Off, no `options` key at all.
+    ...(modelHasWebSearch(model, webSearch) ? { options: { hostedWebSearch: { searchContextSize: webSearch!.searchContextSize } } } : {}),
   }]));
 }
 

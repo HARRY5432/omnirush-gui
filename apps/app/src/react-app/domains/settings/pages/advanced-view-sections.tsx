@@ -1,8 +1,7 @@
 /** @jsxImportSource react */
 import { useEffect, useState, type ComponentProps, type ReactNode } from "react";
-import { CircleAlert, Cpu, Info, RefreshCcw, Server } from "lucide-react";
+import { CircleAlert, Cpu, RefreshCcw, Server } from "lucide-react";
 
-import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Field, FieldLabel } from "@/components/ui/field";
@@ -707,45 +706,6 @@ export function AdvancedRuntimeConfigSourcesSection(props: AdvancedRuntimeConfig
             </div>
           </div>
         ) : null}
-      </LayoutSectionItem>
-    </LayoutSection>
-  );
-}
-
-interface AdvancedOpencodeSectionProps {
-  busy: boolean;
-  enabled: boolean;
-  onToggle: () => void;
-}
-
-export function AdvancedOpencodeSection(props: AdvancedOpencodeSectionProps) {
-  return (
-    <LayoutSection>
-      <LayoutSectionHeader>
-        <LayoutSectionTitle>
-          {t("settings.opencode_section_label")}
-        </LayoutSectionTitle>
-        <LayoutSectionDescription>{t("settings.opencode_engine_desc")}</LayoutSectionDescription>
-      </LayoutSectionHeader>
-
-      <LayoutSectionItem>
-        <LayoutSectionItemHeader>
-          <LayoutSectionItemTitle>{t("settings.enable_exa")}</LayoutSectionItemTitle>
-          <LayoutSectionItemDescription>{t("settings.enable_exa_desc")}</LayoutSectionItemDescription>
-          <LayoutSectionItemHeaderActions>
-            <Switch
-              aria-label={t("settings.enable_exa")}
-              checked={props.enabled}
-              disabled
-              onCheckedChange={props.onToggle}
-            />
-          </LayoutSectionItemHeaderActions>
-        </LayoutSectionItemHeader>
-        <Alert>
-          <Info />
-          <AlertDescription>{t("settings.exa_unavailable")}</AlertDescription>
-        </Alert>
-        <LayoutSectionItemFootnote>{t("settings.exa_restart_hint")}</LayoutSectionItemFootnote>
       </LayoutSectionItem>
     </LayoutSection>
   );

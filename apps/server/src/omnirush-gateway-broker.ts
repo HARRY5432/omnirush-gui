@@ -1680,6 +1680,8 @@ export class OmniRushGatewayBroker {
         ...(isRecord(payload.auto_compact) && typeof payload.auto_compact.enabled === "boolean" && typeof payload.auto_compact.after_turns === "number"
           ? { auto_compact: { enabled: payload.auto_compact.enabled, after_turns: payload.auto_compact.after_turns, ...(typeof payload.auto_compact.min_context_tokens === "number" ? { min_context_tokens: payload.auto_compact.min_context_tokens } : {}) } }
           : {}),
+        // The model's own web search (web-search.ts reads it; absent is off).
+        ...(isRecord(payload.web_search) ? { web_search: payload.web_search } : {}),
       };
     } catch {
       return null;
