@@ -1,18 +1,37 @@
-// Shared approval-mode state. The Settings > General "Approvals" card and the
-// composer's "Full permissions" switch both read it through useApprovalMode,
-// so they show the same mode and a change in either updates the other at once.
+// Shared approval-mode state. The Settings > General "Permissions" card and the
+// composer's permissions menu both read it through useApprovalMode, so they
+// show the same mode and a change in either updates the other at once.
 // State is keyed by server (client.baseUrl): the mode is a server-wide setting,
 // not a workspace one, and a remote workspace talks to a different server.
 import { useCallback, useEffect } from "react";
 import { create } from "zustand";
 
-import type { OmniRushRuntimeApprovals, OmniRushServerClient } from "@/app/lib/omnirush-server";
+import type { OmniRushApprovalMode, OmniRushRuntimeApprovals, OmniRushServerClient } from "@/app/lib/omnirush-server";
+import { t } from "@/i18n";
 import { reloadEngineWithDesktopFallback } from "@/react-app/shell/engine-reload-escalation";
 
 export type ApprovalsClient = Pick<OmniRushServerClient, "getRuntimeApprovals" | "setRuntimeApprovals" | "reloadEngine"> & {
   /** Keys the shared state; clients without one share a single entry. */
   baseUrl?: string;
 };
+
+/** The modes in the order the app lists them. Stored values: careful, guarded (Normal), full (Auto). */
+export const APPROVAL_MODES: readonly OmniRushApprovalMode[] = ["careful", "guarded", "full"];
+
+/**
+ * Title and summary of a mode. The summaries are the `labels` of the rules
+ * file shared with the CLI (apps/server/src/permissions/permission-modes.json).
+ */
+export function approvalModeLabel(mode: OmniRushApprovalMode): { title: string; summary: string } {
+  switch (mode) {
+    case "careful":
+      return { title: t("permissions.mode.careful"), summary: t("permissions.mode.careful_summary") };
+    case "full":
+      return { title: t("permissions.mode.auto"), summary: t("permissions.mode.auto_summary") };
+    default:
+      return { title: t("permissions.mode.normal"), summary: t("permissions.mode.normal_summary") };
+  }
+}
 
 export const FULL_PERMISSIONS_HELP = "Runs every command and edits files without asking. Organisation policies still apply.";
 
@@ -35,22 +54,31 @@ export type FullPermissionsOutcome = {
  * rules apply within seconds. A failed reload keeps the saved setting and says
  * what to do next.
  */
-export async function applyFullPermissions(
+export async function applyApprovalMode(
+  client: ApprovalsClient,
+  workspaceId: string | null,
+  requested: OmniRushApprovalMode,
+): Promise<FullPermissionsOutcome> {
+  const { mode, source, setting } = await client.setRuntimeApprovals(requested);
+  const approvals: OmniRushRuntimeApprovals = { mode, source, setting };
+  const label = t("permissions.status_mode", { mode: approvalModeLabel(mode).title });
+  if (!workspaceId) return { approvals, status: `${label} ${t("permissions.status_reload_needed")}`, tone: "warning" };
+  try {
+    await reloadEngineWithDesktopFallback(client, workspaceId);
+    return { approvals, status: `${label} ${t("permissions.status_reloaded")}`, tone: "success" };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return { approvals, status: `${label} ${t("permissions.status_reload_failed", { reason })}`, tone: "warning" };
+  }
+}
+
+/** Earlier on/off form: on is Auto, off is Normal. */
+export function applyFullPermissions(
   client: ApprovalsClient,
   workspaceId: string | null,
   enabled: boolean,
 ): Promise<FullPermissionsOutcome> {
-  const { mode, source, setting } = await client.setRuntimeApprovals(enabled ? "full" : "guarded");
-  const approvals: OmniRushRuntimeApprovals = { mode, source, setting };
-  const label = mode === "full" ? "Full permissions on." : "Guarded mode.";
-  if (!workspaceId) return { approvals, status: `${label} Reload the engine to apply it.`, tone: "warning" };
-  try {
-    await reloadEngineWithDesktopFallback(client, workspaceId);
-    return { approvals, status: `${label} Engine reloaded.`, tone: "success" };
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    return { approvals, status: `${label} Engine reload failed: ${reason} Use Reload in Settings to apply it.`, tone: "warning" };
-  }
+  return applyApprovalMode(client, workspaceId, enabled ? "full" : "guarded");
 }
 
 export type ApprovalModeEntry = {
@@ -135,13 +163,13 @@ export function useApprovalMode(client: ApprovalsClient | null, workspaceId: str
     void loadApprovalMode(client);
   }, [client]);
 
-  const setFullPermissions = useCallback(async (enabled: boolean): Promise<ApprovalModeChange | null> => {
+  const setApprovalMode = useCallback(async (mode: OmniRushApprovalMode): Promise<ApprovalModeChange | null> => {
     if (!client || !key) return null;
     const { patch } = useApprovalModeStore.getState();
     markApprovalChange(key);
-    patch(key, { busy: true, status: enabled ? "Turning full permissions on…" : "Switching to guarded mode…" });
+    patch(key, { busy: true, status: t("permissions.status_switching", { mode: approvalModeLabel(mode).title }) });
     try {
-      const outcome = await applyFullPermissions(client, workspaceId, enabled);
+      const outcome = await applyApprovalMode(client, workspaceId, mode);
       patch(key, { approvals: outcome.approvals, busy: false, status: outcome.status });
       return outcome;
     } catch (error) {
@@ -151,5 +179,11 @@ export function useApprovalMode(client: ApprovalsClient | null, workspaceId: str
     }
   }, [client, key, workspaceId]);
 
-  return { approvals: entry.approvals, busy: entry.busy, status: entry.status, setFullPermissions };
+  /** Earlier on/off form: on is Auto, off is Normal. */
+  const setFullPermissions = useCallback(
+    (enabled: boolean) => setApprovalMode(enabled ? "full" : "guarded"),
+    [setApprovalMode],
+  );
+
+  return { approvals: entry.approvals, busy: entry.busy, status: entry.status, setApprovalMode, setFullPermissions };
 }

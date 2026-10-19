@@ -1,22 +1,38 @@
 /** @jsxImportSource react */
-import { LoaderCircle, ShieldAlert, ShieldCheck } from "lucide-react";
+import { useState } from "react";
+import { LoaderCircle, ShieldAlert, ShieldCheck, ShieldEllipsis } from "lucide-react";
 
+import type { OmniRushApprovalMode } from "@/app/lib/omnirush-server";
 import { toast } from "@/components/ui/sonner";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { t } from "@/i18n";
 import { useDesktopRestriction } from "@/react-app/domains/cloud/desktop-config-provider";
 import {
+  APPROVAL_MODES,
+  approvalModeLabel,
   approvalsEnvironmentHint,
   useApprovalMode,
   type ApprovalsClient,
 } from "@/react-app/domains/settings/approval-mode";
 
-export const FULL_PERMISSIONS_ON_HINT =
-  "Full permissions on: nothing asks for approval. Switch off to return to guarded mode.";
-export const FULL_PERMISSIONS_OFF_HINT =
-  "Guarded mode: the engine asks before risky commands. Switch on to run every command and edit files without asking. Organisation policies still apply.";
 export const FULL_PERMISSIONS_POLICY_LOCK =
   "Locked by your organisation: its policy does not allow changing app settings.";
-export const FULL_PERMISSIONS_LOADING_HINT = "Loading the approval mode…";
+export const FULL_PERMISSIONS_LOADING_HINT = "Loading the permission mode…";
+
+const MODE_ICONS: Record<OmniRushApprovalMode, typeof ShieldCheck> = {
+  careful: ShieldEllipsis,
+  guarded: ShieldCheck,
+  full: ShieldAlert,
+};
 
 type Props = {
   client: ApprovalsClient | null;
@@ -25,33 +41,38 @@ type Props = {
 };
 
 /**
- * The composer's "Full permissions" switch, beside the model selector. It
- * shares state with Settings > General > Approvals through useApprovalMode,
- * so the two never disagree. Hidden until a server client exists.
+ * The composer's permissions menu (Careful / Normal / Auto), beside the model
+ * selector. It shares state with Settings > General > Permissions through
+ * useApprovalMode, so the two never disagree. Hidden until a server client
+ * exists. The export keeps its earlier name for the composer slots.
  */
 export function FullPermissionsToggle(props: Props) {
   const policyLocked = useDesktopRestriction("allowControlSettings");
   if (!props.client) return null;
-  return <FullPermissionsSwitch client={props.client} workspaceId={props.workspaceId} policyLocked={policyLocked} />;
+  return <PermissionModeMenu client={props.client} workspaceId={props.workspaceId} policyLocked={policyLocked} />;
 }
 
-function FullPermissionsSwitch(props: { client: ApprovalsClient; workspaceId: string | null; policyLocked: boolean }) {
-  const { approvals, busy, status, setFullPermissions } = useApprovalMode(props.client, props.workspaceId);
-  const full = approvals?.mode === "full";
+function PermissionModeMenu(props: { client: ApprovalsClient; workspaceId: string | null; policyLocked: boolean }) {
+  const [open, setOpen] = useState(false);
+  const { approvals, busy, status, setApprovalMode } = useApprovalMode(props.client, props.workspaceId);
+  const mode = approvals?.mode ?? null;
   const lockReason = props.policyLocked
     ? FULL_PERMISSIONS_POLICY_LOCK
     : approvals
       ? approvalsEnvironmentHint(approvals)
       : null;
-  // Disabled while the mode loads, while a change is in flight and while the
-  // environment or the organisation forces the mode.
-  const disabled = busy || !approvals || lockReason !== null;
-  const hint = lockReason
-    ?? (!approvals ? (status || FULL_PERMISSIONS_LOADING_HINT) : full ? FULL_PERMISSIONS_ON_HINT : FULL_PERMISSIONS_OFF_HINT);
+  // Choices are disabled while the mode loads, while a change is in flight and
+  // while the environment or the organisation forces the mode; the menu still
+  // opens so it can say why.
+  const locked = busy || !approvals || lockReason !== null;
+  const label = mode ? approvalModeLabel(mode) : null;
+  const hint = lockReason ?? (label ? label.summary : (status || FULL_PERMISSIONS_LOADING_HINT));
+  const Icon = mode ? MODE_ICONS[mode] : ShieldCheck;
 
-  const toggle = async () => {
-    if (disabled) return;
-    const change = await setFullPermissions(!full);
+  const select = async (next: OmniRushApprovalMode) => {
+    if (locked || next === mode) return;
+    setOpen(false);
+    const change = await setApprovalMode(next);
     if (!change) return;
     if (change.tone === "success") toast.success(change.status);
     else if (change.tone === "warning") toast.warning(change.status);
@@ -59,37 +80,59 @@ function FullPermissionsSwitch(props: { client: ApprovalsClient; workspaceId: st
   };
 
   return (
-    <Tooltip>
-      <TooltipTrigger
-        render={
-          <button
-            type="button"
-            role="switch"
-            aria-checked={full}
-            aria-label="Full permissions"
-            aria-disabled={disabled || undefined}
-            aria-busy={busy || undefined}
-            data-testid="full-permissions-toggle"
-            data-state={full ? "on" : "off"}
-            data-lock-reason={lockReason ?? undefined}
-            onClick={() => void toggle()}
-            // Same height, radius, padding and text size as the model selector
-            // trigger. Kept focusable while disabled (aria-disabled, not
-            // disabled) so the tooltip can explain why. On reads as a warning
-            // (orange, alert shield): nothing asks for approval.
-            className={`flex h-9 max-h-9 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-sm transition-colors aria-disabled:cursor-not-allowed aria-disabled:opacity-60 ${
-              full
-                ? "text-orange-11 hover:bg-orange-3 aria-disabled:hover:bg-transparent"
-                : "text-gray-10 hover:bg-gray-3 hover:text-gray-12 aria-disabled:hover:bg-transparent aria-disabled:hover:text-gray-10"
-            }`}
-          />
-        }
+    <DropdownMenu open={open} onOpenChange={setOpen}>
+      <DropdownMenuTrigger
+        data-testid="full-permissions-toggle"
+        data-state={mode ?? "loading"}
+        data-lock-reason={lockReason ?? undefined}
+        aria-label={t("permissions.trigger_label", { mode: label?.title ?? "…" })}
+        aria-busy={busy || undefined}
+        title={hint}
+        // Same height, radius, padding and text size as the model selector
+        // trigger. Auto reads as a warning (orange, alert shield): nothing asks.
+        className={`flex h-9 max-h-9 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-sm transition-colors ${
+          mode === "full"
+            ? "text-orange-11 hover:bg-orange-3"
+            : "text-gray-10 hover:bg-gray-3 hover:text-gray-12"
+        } ${locked ? "opacity-60" : ""}`}
       >
-        {busy ? <LoaderCircle className="size-4 animate-spin" /> : full ? <ShieldAlert className="size-4" /> : <ShieldCheck className="size-4" />}
-        {/* An icon (its label in the tooltip and aria-label) until the composer is wide enough. */}
-        <span className="hidden whitespace-nowrap @min-[760px]/composer:inline">Full permissions</span>
-      </TooltipTrigger>
-      <TooltipContent>{hint}</TooltipContent>
-    </Tooltip>
+        {busy ? <LoaderCircle className="size-4 animate-spin" /> : <Icon className="size-4" />}
+        {/* An icon (its mode in the aria-label and title) until the composer is wide enough. */}
+        <span className="hidden whitespace-nowrap @min-[760px]/composer:inline" data-testid="full-permissions-label">
+          {label?.title ?? t("permissions.title")}
+        </span>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent side="top" sideOffset={10} className="w-[min(380px,calc(100vw-32px))] p-2">
+        <DropdownMenuGroup>
+          <DropdownMenuLabel className="px-3 text-sm">{t("permissions.menu_label")}</DropdownMenuLabel>
+          <DropdownMenuRadioGroup value={mode ?? ""}>
+            {APPROVAL_MODES.map((item) => {
+              const ItemIcon = MODE_ICONS[item];
+              const itemLabel = approvalModeLabel(item);
+              return (
+                <DropdownMenuRadioItem
+                  key={item}
+                  value={item}
+                  disabled={locked}
+                  data-testid={`permission-mode-${item}`}
+                  aria-label={itemLabel.title}
+                  onClick={() => void select(item)}
+                  className={`gap-3 py-2.5 ${item === "full" ? "text-orange-11" : ""}`}
+                >
+                  <ItemIcon className="size-5 shrink-0" />
+                  <span className="min-w-0">
+                    <span className="block">{itemLabel.title}</span>
+                    <span className="mt-0.5 block text-xs font-normal text-muted-foreground">{itemLabel.summary}</span>
+                  </span>
+                </DropdownMenuRadioItem>
+              );
+            })}
+          </DropdownMenuRadioGroup>
+        </DropdownMenuGroup>
+        <DropdownMenuSeparator />
+        <p className="px-3 py-2 text-xs text-muted-foreground">{t("permissions.menu_footer")}</p>
+        {lockReason ? <p role="status" data-testid="permission-mode-lock" className="px-3 pb-2 text-xs text-muted-foreground">{lockReason}</p> : null}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

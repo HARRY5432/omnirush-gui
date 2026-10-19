@@ -429,7 +429,8 @@ export type OmniRushRuntimeConfigStatus = {
   };
 };
 
-export type OmniRushApprovalMode = "guarded" | "full";
+/** Stored engine approval mode: careful ("Careful"), guarded ("Normal", the default), full ("Auto"). */
+export type OmniRushApprovalMode = "careful" | "guarded" | "full";
 export type OmniRushRuntimeApprovals = {
   /** Effective mode: the environment override, else the setting, else guarded. */
   mode: OmniRushApprovalMode;

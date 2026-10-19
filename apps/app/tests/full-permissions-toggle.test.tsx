@@ -28,7 +28,7 @@ if (typeof globalThis.window === "undefined" || typeof globalThis.document === "
 Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
 
 const [
-  { FullPermissionsToggle, FULL_PERMISSIONS_OFF_HINT, FULL_PERMISSIONS_POLICY_LOCK },
+  { FullPermissionsToggle, FULL_PERMISSIONS_POLICY_LOCK },
   { useApprovalMode, useApprovalModeStore },
   { ApprovalsCard },
   { TooltipProvider },
@@ -104,7 +104,7 @@ async function waitFor(predicate: () => boolean, label: string) {
 
 function toggleIn(container: HTMLElement): HTMLButtonElement {
   const button = container.querySelector<HTMLButtonElement>('[data-testid="full-permissions-toggle"]');
-  if (!button) throw new Error("the Full permissions switch is not rendered");
+  if (!button) throw new Error("the permissions menu is not rendered");
   return button;
 }
 
@@ -114,107 +114,109 @@ async function click(button: HTMLElement) {
   });
 }
 
-const guardedByDefault: OmniRushRuntimeApprovals = { mode: "guarded", source: "default", setting: null };
+function item(mode: OmniRushApprovalMode): HTMLElement | null {
+  return document.querySelector<HTMLElement>(`[data-testid="permission-mode-${mode}"]`);
+}
 
-test("shows the current mode on load and reads as active while full permissions are on", async () => {
+/** Opens the menu and picks a mode. */
+async function choose(container: HTMLElement, mode: OmniRushApprovalMode) {
+  await click(toggleIn(container));
+  await waitFor(() => item(mode) !== null, `the ${mode} item`);
+  await click(item(mode)!);
+}
+
+const guardedByDefault: OmniRushRuntimeApprovals = { mode: "guarded", source: "default", setting: null };
+const loaded = (container: HTMLElement) => toggleIn(container).dataset.state !== "loading";
+
+test("shows the current mode on load; Auto reads as a warning", async () => {
   const guarded = fakeClient("http://guarded.test", guardedByDefault);
   const container = await mount(<FullPermissionsToggle client={guarded.client} workspaceId="ws_1" />);
-  await waitFor(() => toggleIn(container).getAttribute("aria-disabled") === null, "the guarded mode to load");
-  const off = toggleIn(container);
-  expect(off.getAttribute("role")).toBe("switch");
-  expect(off.getAttribute("aria-checked")).toBe("false");
-  expect(off.textContent).toContain("Full permissions");
-  expect(off.dataset.state).toBe("off");
-  expect(off.dataset.lockReason).toBeUndefined();
-  expect(off.className).not.toContain("text-orange-11");
+  await waitFor(() => loaded(container), "the normal mode to load");
+  const normal = toggleIn(container);
+  expect(normal.dataset.state).toBe("guarded");
+  expect(normal.getAttribute("aria-label")).toBe("Permissions: Normal");
+  expect(normal.textContent).toContain("Normal");
+  expect(normal.dataset.lockReason).toBeUndefined();
+  expect(normal.className).not.toContain("text-orange-11");
 
   const full = fakeClient("http://full.test", { mode: "full", source: "settings", setting: "full" });
   const active = await mount(<FullPermissionsToggle client={full.client} workspaceId="ws_1" />);
-  await waitFor(() => toggleIn(active).getAttribute("aria-checked") === "true", "the full mode to load");
-  expect(toggleIn(active).dataset.state).toBe("on");
-  expect(toggleIn(active).getAttribute("aria-disabled")).toBeNull();
-  // On reads as a warning: orange, no accent fill.
+  await waitFor(() => toggleIn(active).dataset.state === "full", "the auto mode to load");
+  expect(toggleIn(active).textContent).toContain("Auto");
   expect(toggleIn(active).className).toContain("text-orange-11");
-  expect(toggleIn(active).className).not.toContain("--dls-accent");
+
+  const careful = fakeClient("http://careful.test", { mode: "careful", source: "settings", setting: "careful" });
+  const asking = await mount(<FullPermissionsToggle client={careful.client} workspaceId="ws_1" />);
+  await waitFor(() => toggleIn(asking).dataset.state === "careful", "the careful mode to load");
+  expect(toggleIn(asking).textContent).toContain("Careful");
+  expect(toggleIn(asking).className).not.toContain("text-orange-11");
 
   // Nothing renders without a server client.
   const none = await mount(<FullPermissionsToggle client={null} workspaceId="ws_1" />);
   expect(none.querySelector('[data-testid="full-permissions-toggle"]')).toBeNull();
 });
 
-test("is disabled with a tooltip while the environment or the organisation forces the mode", async () => {
+test("lists the three modes and disables them while the environment or the organisation forces the mode", async () => {
   const env = fakeClient("http://env.test", { mode: "full", source: "environment", setting: "guarded" });
   const container = await mount(<FullPermissionsToggle client={env.client} workspaceId="ws_1" />);
-  await waitFor(() => toggleIn(container).getAttribute("aria-checked") === "true", "the environment mode to load");
-  const button = toggleIn(container);
-  expect(button.getAttribute("aria-disabled")).toBe("true");
-  expect(button.dataset.lockReason).toBe("Set by environment (OMNIRUSH_APPROVALS=full); change it where the app is launched.");
-  await click(button);
+  await waitFor(() => toggleIn(container).dataset.state === "full", "the environment mode to load");
+  expect(toggleIn(container).dataset.lockReason).toBe("Set by environment (OMNIRUSH_APPROVALS=full); change it where the app is launched.");
+  await choose(container, "careful");
+  expect(item("careful")?.textContent).toContain("Asks before every file change");
+  expect(item("guarded")?.textContent).toContain("Normal");
+  expect(item("full")?.getAttribute("aria-checked")).toBe("true");
+  expect(item("careful")?.getAttribute("aria-disabled")).toBe("true");
+  expect(document.querySelector('[data-testid="permission-mode-lock"]')?.textContent).toContain("Set by environment");
   expect(env.calls).toEqual([]);
   expect(toasts).toEqual([]);
-
-  await act(async () => {
-    button.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, pointerType: "mouse" }));
-    button.dispatchEvent(new MouseEvent("mouseenter"));
-  });
-  await waitFor(
-    () => document.querySelector('[data-slot="tooltip-content"]')?.textContent?.includes("Set by environment (OMNIRUSH_APPROVALS=full)") === true,
-    "the environment tooltip",
-  );
+  await act(async () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
 
   policyLocked = true;
   const guarded = fakeClient("http://policy.test", guardedByDefault);
   const locked = await mount(<FullPermissionsToggle client={guarded.client} workspaceId="ws_1" />);
   await waitFor(() => toggleIn(locked).dataset.lockReason === FULL_PERMISSIONS_POLICY_LOCK, "the policy lock");
-  expect(toggleIn(locked).getAttribute("aria-disabled")).toBe("true");
-  await click(toggleIn(locked));
+  await choose(locked, "full");
   expect(guarded.calls).toEqual([]);
 });
 
-test("clicking persists the mode, reloads the engine and stays disabled while the reload is in flight", async () => {
+test("choosing persists the mode, reloads the engine and stays busy while the reload is in flight", async () => {
   const held = fakeClient("http://toggle.test", guardedByDefault, { holdSet: true });
   const container = await mount(<FullPermissionsToggle client={held.client} workspaceId="ws_1" />);
-  await waitFor(() => toggleIn(container).getAttribute("aria-disabled") === null, "the guarded mode to load");
+  await waitFor(() => loaded(container), "the normal mode to load");
 
-  await click(toggleIn(container));
+  await choose(container, "full");
   await waitFor(() => toggleIn(container).getAttribute("aria-busy") === "true", "the in-flight state");
-  expect(toggleIn(container).getAttribute("aria-disabled")).toBe("true");
-  expect(held.calls).toEqual(["set:full"]);
-  // A second click while in flight is ignored.
-  await click(toggleIn(container));
   expect(held.calls).toEqual(["set:full"]);
 
   await act(async () => held.release());
-  await waitFor(() => toggleIn(container).getAttribute("aria-checked") === "true", "the full mode");
+  await waitFor(() => toggleIn(container).dataset.state === "full", "the auto mode");
   expect(held.calls).toEqual(["set:full", "reload:ws_1"]);
   expect(toggleIn(container).getAttribute("aria-busy")).toBeNull();
-  expect(toggleIn(container).getAttribute("aria-disabled")).toBeNull();
-  expect(toasts).toEqual(["success:Full permissions on. Engine reloaded."]);
+  expect(toasts).toEqual(["success:Auto mode. Engine reloaded."]);
 
-  await click(toggleIn(container));
+  await choose(container, "careful");
   await act(async () => held.release());
-  await waitFor(() => toggleIn(container).getAttribute("aria-checked") === "false", "the guarded mode again");
-  expect(held.calls.slice(2)).toEqual(["set:guarded", "reload:ws_1"]);
-  expect(toasts[1]).toBe("success:Guarded mode. Engine reloaded.");
+  await waitFor(() => toggleIn(container).dataset.state === "careful", "the careful mode");
+  expect(held.calls.slice(2)).toEqual(["set:careful", "reload:ws_1"]);
+  expect(toasts[1]).toBe("success:Careful mode. Engine reloaded.");
 });
 
-test("reports a failed reload or a refused change without losing the switch", async () => {
+test("reports a failed reload or a refused change without losing the mode", async () => {
   const reloadFails = fakeClient("http://reload-fails.test", guardedByDefault, { reloadError: new Error("engine busy") });
   const container = await mount(<FullPermissionsToggle client={reloadFails.client} workspaceId="ws_1" />);
-  await waitFor(() => toggleIn(container).getAttribute("aria-disabled") === null, "the guarded mode to load");
-  await click(toggleIn(container));
-  await waitFor(() => toggleIn(container).getAttribute("aria-checked") === "true", "the saved full mode");
-  expect(toasts).toEqual(["warning:Full permissions on. Engine reload failed: engine busy Use Reload in Settings to apply it."]);
+  await waitFor(() => loaded(container), "the normal mode to load");
+  await choose(container, "full");
+  await waitFor(() => toggleIn(container).dataset.state === "full", "the saved auto mode");
+  expect(toasts).toEqual(["warning:Auto mode. Engine reload failed: engine busy Use Reload in Settings to apply it."]);
 
   const refused = fakeClient("http://refused.test", guardedByDefault, { setError: new Error("settings are locked") });
   const other = await mount(<FullPermissionsToggle client={refused.client} workspaceId="ws_1" />);
-  await waitFor(() => toggleIn(other).getAttribute("aria-disabled") === null, "the second guarded mode to load");
-  await click(toggleIn(other));
+  await waitFor(() => loaded(other), "the second normal mode to load");
+  await choose(other, "careful");
   await waitFor(() => toasts.length === 2, "the error toast");
   expect(toasts[1]).toBe("error:settings are locked");
-  expect(toggleIn(other).getAttribute("aria-checked")).toBe("false");
-  expect(toggleIn(other).getAttribute("aria-disabled")).toBeNull();
-  expect(refused.calls).toEqual(["set:full"]);
+  expect(toggleIn(other).dataset.state).toBe("guarded");
+  expect(refused.calls).toEqual(["set:careful"]);
 });
 
 /** The Settings card exactly as GeneralSettingsView wires it. */
@@ -225,7 +227,7 @@ function SettingsCard(props: { client: ApprovalsClient }) {
       approvals={mode.approvals}
       busy={mode.busy}
       status={mode.status}
-      onToggle={(enabled) => void mode.setFullPermissions(enabled)}
+      onSelect={(next) => void mode.setApprovalMode(next)}
     />
   );
 }
@@ -238,25 +240,24 @@ test("shares its state with the Settings card, so a change in either shows in th
       <SettingsCard client={shared.client} />
     </>,
   );
-  const cardSwitch = () => {
-    const element = container.querySelector<HTMLButtonElement>('[role="switch"][data-slot="switch"]');
-    if (!element) throw new Error("the Settings switch is not rendered");
+  const cardButton = (mode: OmniRushApprovalMode) => {
+    const element = container.querySelector<HTMLButtonElement>(`[data-testid="approval-mode-${mode}"]`);
+    if (!element) throw new Error("the Settings card is not rendered");
     return element;
   };
-  await waitFor(() => toggleIn(container).getAttribute("aria-disabled") === null, "the shared load");
+  await waitFor(() => loaded(container), "the shared load");
   expect(shared.gets()).toBe(1);
-  expect(cardSwitch().getAttribute("aria-checked")).toBe("false");
+  expect(cardButton("guarded").getAttribute("aria-checked")).toBe("true");
 
-  await click(toggleIn(container));
-  await waitFor(() => cardSwitch().getAttribute("aria-checked") === "true", "the card to follow the composer");
-  expect(container.querySelector('[data-testid="approvals-status"]')?.textContent).toBe("Full permissions on. Engine reloaded.");
-  expect(toasts).toEqual(["success:Full permissions on. Engine reloaded."]);
+  await choose(container, "full");
+  await waitFor(() => cardButton("full").getAttribute("aria-checked") === "true", "the card to follow the composer");
+  expect(container.querySelector('[data-testid="approvals-status"]')?.textContent).toBe("Auto mode. Engine reloaded.");
+  expect(toasts).toEqual(["success:Auto mode. Engine reloaded."]);
 
-  await click(cardSwitch());
-  await waitFor(() => toggleIn(container).getAttribute("aria-checked") === "false", "the composer to follow the card");
-  expect(shared.calls).toEqual(["set:full", "reload:ws_1", "set:guarded", "reload:ws_1"]);
+  await click(cardButton("careful"));
+  await waitFor(() => toggleIn(container).dataset.state === "careful", "the composer to follow the card");
+  expect(shared.calls).toEqual(["set:full", "reload:ws_1", "set:careful", "reload:ws_1"]);
   // Settings changes report inline, not through the composer toast.
   expect(toasts).toHaveLength(1);
   expect(toggleIn(container).dataset.lockReason).toBeUndefined();
-  expect(FULL_PERMISSIONS_OFF_HINT).toContain("Guarded mode");
 });
