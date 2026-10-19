@@ -15,7 +15,7 @@ import {
 import type { HostedWebSearchToolPart, WebSearchToolPart } from "@/lib/build-in-tools"
 import { Tool } from "@/components/ui/tool"
 import { parseWebSearchResults } from "@/lib/websearch-results"
-import { hostedWebSearchSummary } from "@/lib/hosted-web-search"
+import { hostedWebSearchSummary, shortPageAddress } from "@/lib/hosted-web-search"
 
 interface WebsearchToolProps {
   part: WebSearchToolPart
@@ -107,7 +107,7 @@ export function HostedWebSearchTool({ part }: HostedWebSearchToolProps) {
             {sources.map((url) => (
               <Source href={url} key={url}>
                 <SourceTrigger />
-                <SourceContent title={url} />
+                <SourceContent title={shortPageAddress(url)} description={url} showFavicon={false} />
               </Source>
             ))}
           </div>

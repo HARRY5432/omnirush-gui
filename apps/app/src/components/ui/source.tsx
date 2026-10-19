@@ -78,12 +78,15 @@ export type SourceContentProps = {
   title: string
   description?: string
   className?: string
+  /** Off: no favicon (it would be fetched from a third-party service). */
+  showFavicon?: boolean
 }
 
 export function SourceContent({
   title,
   description,
   className,
+  showFavicon = true,
 }: SourceContentProps) {
   const { href, domain } = useSourceContext()
 
@@ -96,15 +99,17 @@ export function SourceContent({
         className="flex flex-col gap-2 p-3"
       >
         <div className="flex items-center gap-1.5">
-          <img
-            src={`https://www.google.com/s2/favicons?sz=64&domain_url=${encodeURIComponent(
-              href
-            )}`}
-            alt="favicon"
-            className="size-4 rounded-full"
-            width={16}
-            height={16}
-          />
+          {showFavicon && (
+            <img
+              src={`https://www.google.com/s2/favicons?sz=64&domain_url=${encodeURIComponent(
+                href
+              )}`}
+              alt="favicon"
+              className="size-4 rounded-full"
+              width={16}
+              height={16}
+            />
+          )}
           <div className="text-primary truncate text-sm">
             {domain.replace("www.", "")}
           </div>
