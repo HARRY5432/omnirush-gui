@@ -99,8 +99,8 @@ account is connected.
 
 | Feature | Description | Docs |
 | --- | --- | --- |
-| Models and effort | Choose a model and an effort level (low, high, xhigh, max) per chat. You can also add your own OpenAI, Anthropic or other provider keys. | |
-| Skills and MCP servers | Add skills and MCP servers from the Library in Settings. Every model sees the same skills and tools. | [skills-and-mcp.md](docs/skills-and-mcp.md) |
+| Models and effort | Choose a model and an effort level (low, high, xhigh, max) per chat, from the models in your omnirush.ai account. Your own provider keys are not supported. | |
+| Skills | Add skills from the Library in Settings. Every model sees the same skills. MCP servers are turned off. | |
 | Git workflows | The agent clones, branches, creates worktrees, commits, pushes, and opens and reviews pull requests with `gh`. Write commands ask once per session; destructive ones always ask. | [git-workflows.md](docs/git-workflows.md) |
 | Approvals | The composer's full-permissions toggle switches between asking and allowing every tool call. | [approvals.md](docs/approvals.md) |
 
