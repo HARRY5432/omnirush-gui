@@ -85,7 +85,7 @@ import {
   messageHasVisibleAssistantOutput,
   resolveAdmissionOutcome,
 } from "./session-admission-outcome";
-import { describeOpencodeSessionError, interruptedTaskRecoveryPrompt, presentOpencodeSessionError } from "@/react-app/domains/session/sync/session-error";
+import { describeOpencodeSessionError, folderWriteError, interruptedTaskRecoveryPrompt, presentOpencodeSessionError } from "@/react-app/domains/session/sync/session-error";
 import { createSessionErrorUIMessage } from "@/react-app/domains/session/sync/usechat-adapter";
 import { useLocal } from "@/react-app/kernel/local-provider";
 import { resolveAttachmentFileMetadata } from "@/react-app/domains/session/sync/attachment-file-part";
@@ -1032,6 +1032,21 @@ function SessionErrorCard({ error, developerMode, onDismiss, onChangeModel, onOp
             <div className="text-sm font-medium text-red-11">{developerMode ? error.message : presentation.title}</div>
             {!developerMode && presentation.description ? (
               <p className="mt-1 text-sm text-red-11">{presentation.description}</p>
+            ) : null}
+            {presentation.kind === "folder-not-writable" ? (
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  className="rounded-full border border-dls-border bg-dls-surface px-3 py-1.5 text-xs font-medium text-dls-text transition-colors hover:bg-dls-hover"
+                  data-testid="folder-not-writable-choose"
+                  onClick={() => {
+                    window.dispatchEvent(new CustomEvent("omnirush-open-project-folder"));
+                    onDismiss();
+                  }}
+                >
+                  Choose another folder
+                </button>
+              </div>
             ) : null}
             {error.kind === "model-not-found" ? (
               <div className="mt-2 flex flex-wrap gap-2">
@@ -2220,7 +2235,9 @@ export function SessionSurface(props: SessionSurfaceProps) {
       }
       dispatchQueuedDrain(props.sessionId, { type: "send_error", itemId });
       const parsed = parseSessionError(nextError);
-      captureAnalyticsEvent("task_send_failed", {});
+      const folderNotWritable = folderWriteError(nextError);
+      captureAnalyticsEvent("task_send_failed", folderNotWritable ? { reason: "folder_not_writable" } : {});
+      if (folderNotWritable) captureAnalyticsEvent("folder_not_writable", { reason: folderNotWritable.reason });
       setError(parsed);
       useSessionActivityStore.getState().setError(props.workspaceId, props.sessionId, parsed.message);
       if (activeSessionOwnerRef.current === sessionOwner) {

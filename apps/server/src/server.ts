@@ -205,6 +205,7 @@ import { startCaptureService, type CaptureService } from "./capture-client.js";
 import type { LateWritesGate } from "./capture-host.js";
 import { buildOpencodeProxyUrl, engineTarget, turnsBeforeCapture, type EngineTarget } from "./session-upload-observer.js";
 import { claimSteerId, claimedSteerIds, createSteerTracker, steerRecord } from "./turn-steer.js";
+import { FOLDER_NOT_WRITABLE, folderWriteGate, readOnlyPrompt } from "./folder-write-check.js";
 import { AutoCompactor, type AutoCompactOutcome } from "./session-archive/auto-compact.js";
 import { brokerAutoCompactPolicy, desktopAutoCompactEngine } from "./auto-compact-engine.js";
 import { OmniRushGatewayBroker } from "./omnirush-gateway-broker.js";
@@ -920,6 +921,29 @@ export function assertUploadDispatchAllowed(config: ServerConfig, workspace: Wor
   if (uploadDispatchRefused(config, workspace)) {
     throw new ApiError(403, "omnirush_account_required", OMNIRUSH_ACCOUNT_REQUIRED_MESSAGE);
   }
+}
+
+/**
+ * The project folder's write check (folder-write-check.ts) before a chat's
+ * first turn there: a folder the engine cannot write to stops the prompt with
+ * the reason and the fix instead of letting the agent run turns that change
+ * nothing. Prompts for the read-only plan agent go on.
+ */
+async function folderWriteRefusal(config: ServerConfig, workspace: WorkspaceInfo, sessionId: string, request: Request): Promise<Response | null> {
+  const dir = resolveOpencodeDirectory(workspace) ?? workspace.path;
+  if (!dir) return null;
+  const body: unknown = await request.clone().json().catch(() => null);
+  if (readOnlyPrompt(body)) return null;
+  const failed = await folderWriteGate(sessionId, dir).catch(() => null);
+  if (!failed) return null;
+  createServerLogger(config).log("warn", "Project folder is not writable.", {
+    "folder_write.reason": failed.reason,
+    "folder_write.code": failed.code ?? "",
+    "folder_write.step": failed.step,
+    "folder_write.via": failed.via,
+  });
+  await request.arrayBuffer().catch(() => undefined);
+  return jsonResponse({ error: FOLDER_NOT_WRITABLE, reason: failed.reason, message: failed.message, hint: failed.hint }, 409);
 }
 
 // The v2 daemon's dispatch routes, matched on the decoded path like the v1 classifier.
@@ -1769,6 +1793,8 @@ export async function proxyOpencodeV2Request(input: {
       await input.request.arrayBuffer().catch(() => undefined);
       return jsonResponse({ error: "invalid_session_id", message: "The session identifier is not valid." }, 400);
     }
+    const notWritable = await folderWriteRefusal(input.config, input.workspace, sessionId, input.request);
+    if (notWritable) return notWritable;
     await awaitOmniRushModelCatalogSettled(input.config);
   }
   // The agent works from here (the prompt is on its way) until the engine runs no session.
@@ -2200,6 +2226,8 @@ export async function proxyOpencodeRequest(input: {
       await input.request.arrayBuffer().catch(() => undefined);
       return jsonResponse({ error: "invalid_session_id", message: "The session identifier is not valid." }, 400);
     }
+    const notWritable = await folderWriteRefusal(input.config, workspace, uploadSessionId(proxyPath, method) ?? "", input.request);
+    if (notWritable) return notWritable;
     // A prompt right after launch waits (briefly) for the first model catalog
     // sync: the engine must know the account's models before the turn starts.
     await awaitOmniRushModelCatalogSettled(input.config);

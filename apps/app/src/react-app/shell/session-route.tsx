@@ -3217,6 +3217,13 @@ export function SessionRoute() {
     const folder = singlePickedDirectory(await pickDirectory({ title: t("onboarding.authorize_folder") }));
     await handleCreateWorkspace("starter", folder);
   }, [checkDesktopRestriction, handleCreateWorkspace, restrictionNotice, workspaces.length]);
+  // "Choose another folder" on a chat stopped because its folder is not writable (session-surface.tsx).
+  useEffect(() => {
+    if (!platform.capabilities.nativeFilePicker || !canCreateWorkspaces()) return;
+    const open = () => void openProjectFolder().catch(() => undefined);
+    window.addEventListener("omnirush-open-project-folder", open);
+    return () => window.removeEventListener("omnirush-open-project-folder", open);
+  }, [openProjectFolder, platform.capabilities.nativeFilePicker]);
   const newTaskComposerWithProjects = useMemo<NewTaskComposerContext | null>(() => newTaskComposerContext && {
     ...newTaskComposerContext,
     projectPicker: {
