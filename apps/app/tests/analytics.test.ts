@@ -60,8 +60,8 @@ describe("analytics identity", () => {
     analytics.captureAnalyticsEvent("app_opened", {});
     const [event] = await flushed();
     expect(event.distinct_id).toBe(analytics.getAnalyticsDistinctId());
-    expect(event.properties).toMatchObject({ app_version: "3.5.8" });
-    expect(Object.keys(event.properties)).toEqual(expect.arrayContaining(["app_version", "platform", "os"]));
+    expect(event.properties).toMatchObject({ client: "desktop", app_version: "3.5.8" });
+    expect(Object.keys(event.properties)).toEqual(expect.arrayContaining(["client", "app_version", "platform", "os"]));
     expect(sent[0].url).toBe("http://127.0.0.1:9/batch/");
     expect(sent[0].body.api_key).toBe(NEW_KEY);
   });

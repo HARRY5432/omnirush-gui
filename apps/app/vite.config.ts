@@ -89,6 +89,8 @@ export default defineConfig({
   define: {
     "import.meta.env.VITE_OMNIRUSH_APP_VERSION": JSON.stringify(buildAppVersion),
     "import.meta.env.VITE_OMNIRUSH_BUILD_SHA": JSON.stringify(shortBuildSha),
+    // Analytics send only from a packaged release build (analytics-key.ts).
+    "import.meta.env.VITE_OMNIRUSH_PACKAGED_BUILD": JSON.stringify(isElectronPackagedBuild ? "1" : ""),
   },
   plugins: [
     {
