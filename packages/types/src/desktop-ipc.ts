@@ -439,10 +439,15 @@ export type OmniRushFeedbackInput = {
   modelId: string | null;
   effort: string | null;
 };
-/** queued: kept in feedback.json and sent later (offline, signed out, the server has none yet, rate limited). */
+/**
+ * queued: kept in feedback.json and sent later (offline, signed out, the
+ * server has none yet, rate limited). ok false: not sent and not kept: the
+ * input ("comment", "kind", "rating"), or the server refused it ("invalid":
+ * a 422 with its wrong fields in `errors`; "too_large": a 413).
+ */
 export type OmniRushFeedbackResult =
   | { ok: true; sent: boolean; queued: boolean; reason?: "offline" | "signed_out" | "unavailable" | "rate_limited" }
-  | { ok: false; error: string };
+  | { ok: false; error: string; errors?: Record<string, string> | null };
 export type OmniRushFeedbackStatus = { policy: OmniRushFeedbackPolicy; queued: number; unavailable: boolean; allowed: boolean };
 
 export type OmniRushSessionStatus = {

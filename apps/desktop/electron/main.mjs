@@ -1422,7 +1422,7 @@ const desktopPlacements = createDesktopPlacements({
 // quiet, sampled "How was this?" after a finished turn when the server's
 // policy turns it on. Its two analytics events go to the window's analytics.
 const desktopFeedback = createDesktopFeedback({
-  request: (pathAndQuery, init) => omnirushAccountStore.clientRequest(pathAndQuery, init),
+  request: (pathAndQuery, init) => omnirushAccountStore.feedbackRequest(pathAndQuery, init),
   userDataPath: app.getPath("userData"),
   version: app.getVersion(),
   packaged: app.isPackaged,

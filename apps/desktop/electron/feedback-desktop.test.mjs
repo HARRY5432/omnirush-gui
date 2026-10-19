@@ -1,6 +1,6 @@
 // In-app feedback: the shared module (./feedback/feedback.mjs, the same file
 // in the CLI, PARITY.sha256) and the main process's side (feedback-desktop.mjs,
-// the account store's clientRequest). The CLI covers the same rules with its
+// the account store's feedbackRequest). The CLI covers the same rules with its
 // own launcher.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -41,7 +41,8 @@ function desktop({ policy = ON, submit = 201, env = { OMNIRUSH_FEEDBACK: "1" }, 
       if (p === "/feedback") {
         if (server.submit === "offline") throw new Error("ECONNREFUSED");
         if (server.submit === "signed_out") return null;
-        return { status: server.submit, data: null };
+        if (typeof server.submit === "object") return server.submit;
+        return { status: server.submit, data: server.submit === 201 ? { ok: true } : null, retryAfter: null };
       }
       return { status: 404, data: null };
     },
@@ -188,6 +189,26 @@ test("submit: offline, signed out and 429 are kept for later with their reason",
   }
 });
 
+test("submit: a 422 names the wrong fields and a 413 is too large; neither is queued", async () => {
+  const { d, server } = desktop({ submit: { status: 422, data: { detail: "invalid_feedback", errors: { comment: "too long" } }, retryAfter: null } });
+  const r = await d.submit({ kind: "general", categories: ["bug"], comment: "x", trigger: "menu" });
+  assert.deepEqual(r, { ok: false, error: "invalid", errors: { comment: "too long" } });
+  assert.equal(d.status().queued, 0, "not kept: the person is told");
+  server.submit = { status: 413, data: { detail: "feedback_too_large" }, retryAfter: null };
+  const big = await d.submit({ kind: "general", categories: ["bug"], comment: "y", trigger: "menu" });
+  assert.equal(big.ok, false);
+  assert.equal(/** @type {any} */ (big).error, "too_large");
+  assert.equal(d.status().queued, 0);
+});
+
+test("submit: a 429 waits for its Retry-After", async () => {
+  const { d, userDataPath } = desktop({ submit: { status: 429, data: { detail: "feedback_rate_limited" }, retryAfter: 7_200 } });
+  const r = await d.submit({ kind: "turn", rating: "up", sessionId: "ses_r", turn: 1, trigger: "sampled" });
+  assert.deepEqual(r, { ok: true, sent: false, queued: true, reason: "rate_limited" });
+  const saved = JSON.parse(fs.readFileSync(path.join(userDataPath, "feedback.json"), "utf8"));
+  assert.equal(saved.spool[0].next_at, T0 + 7_200_000);
+});
+
 test("the state lives in the app's data folder (feedback.json), not in any workspace", async () => {
   const { d, userDataPath } = desktop();
   await d.service.refreshPolicy({ force: true });
@@ -201,7 +222,7 @@ test("wiring: main.mjs handlers, the preload's event channel, the bridge and the
   for (const name of ["omnirushFeedbackPolicy", "omnirushFeedbackStatus", "omnirushFeedbackSessionStarted", "omnirushFeedbackOffer", "omnirushFeedbackShown", "omnirushFeedbackSubmit"]) {
     assert.match(main, new RegExp(`^  "${name}": async \\(event`, "m"), name);
   }
-  assert.match(main, /omnirushAccountStore\.clientRequest\(pathAndQuery, init\)/);
+  assert.match(main, /omnirushAccountStore\.feedbackRequest\(pathAndQuery, init\)/);
   assert.match(main, /desktopFeedback\.start\(\)/);
   assert.match(main, /desktopFeedback\.stop\(\)/);
   const preload = fs.readFileSync(path.join(here, "preload.mjs"), "utf8");
@@ -212,7 +233,7 @@ test("wiring: main.mjs handlers, the preload's event channel, the bridge and the
   assert.ok(renderer.includes(`"${EVENT_CHANNEL}"`));
 });
 
-test("account store: clientRequest posts feedback to the account server with the device credential (renewed on a 401)", async () => {
+test("account store: feedbackRequest posts feedback to the account server with the device credential (renewed on a 401)", async () => {
   const seen = [];
   const fetchImpl = async (url, init = {}) => {
     const u = new URL(String(url));
@@ -221,6 +242,12 @@ test("account store: clientRequest posts feedback to the account server with the
     if (u.pathname.endsWith("/feedback") && headers.get("authorization") === "Bearer access-1") return new Response("", { status: 401 });
     if (u.pathname.includes("/device/token") || u.pathname.includes("/refresh")) {
       return new Response(JSON.stringify({ access_token: "access-2", refresh_token: "refresh-2", expires_in: 3600 }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (u.pathname.endsWith("/feedback") && JSON.parse(String(init.body)).comment === "bad") {
+      return new Response(JSON.stringify({ detail: "invalid_feedback", errors: { comment: "too long" } }), { status: 422, headers: { "content-type": "application/json" } });
+    }
+    if (u.pathname.endsWith("/feedback") && JSON.parse(String(init.body)).comment === "limit") {
+      return new Response(JSON.stringify({ detail: "feedback_rate_limited" }), { status: 429, headers: { "content-type": "application/json", "retry-after": "5400" } });
     }
     if (u.pathname.endsWith("/feedback")) return new Response(JSON.stringify({ ok: true }), { status: 201, headers: { "content-type": "application/json" } });
     return new Response(JSON.stringify(ON), { status: 200, headers: { "content-type": "application/json" } });
@@ -243,7 +270,7 @@ test("account store: clientRequest posts feedback to the account server with the
   });
   const userDataPath = tmp();
   let now = T0;
-  const d = createDesktopFeedback({ request: (p, init) => store.clientRequest(p, init), userDataPath, version: "3.6.1", platform: "darwin", env: { OMNIRUSH_FEEDBACK: "1" }, now: () => now });
+  const d = createDesktopFeedback({ request: (p, init) => store.feedbackRequest(p, init), userDataPath, version: "3.6.1", platform: "darwin", env: { OMNIRUSH_FEEDBACK: "1" }, now: () => now });
   const signedOut = await d.submit({ kind: "general", categories: ["idea"], comment: "dark mode for the sidebar", trigger: "command" });
   assert.deepEqual(signedOut, { ok: true, sent: false, queued: true, reason: "signed_out" });
   assert.equal(seen.length, 0, "signed out: nothing asked");
@@ -262,4 +289,9 @@ test("account store: clientRequest posts feedback to the account server with the
   now += 2 * 60_000;
   await d.service.flush();
   assert.equal(d.status().queued, 0, "the signed-out one went too, at its retry");
+  const refused = await store.feedbackRequest("/feedback", { method: "POST", body: { kind: "general", comment: "bad" } });
+  assert.deepEqual(refused, { status: 422, data: { detail: "invalid_feedback", errors: { comment: "too long" } }, retryAfter: null }, "a 422's body is read");
+  const limited = await store.feedbackRequest("/feedback", { method: "POST", body: { kind: "general", comment: "limit" } });
+  assert.deepEqual(limited, { status: 429, data: { detail: "feedback_rate_limited" }, retryAfter: 5400 }, "Retry-After in seconds");
+  assert.deepEqual(await d.submit({ kind: "general", categories: ["bug"], comment: "bad", trigger: "menu" }), { ok: false, error: "invalid", errors: { comment: "too long" } });
 });

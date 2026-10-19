@@ -1322,8 +1322,7 @@ export function createDesktopOmniRushAccountStore({
   }
 
   /**
-   * One sponsored-placements or feedback call (placements-desktop.mjs,
-   * feedback-desktop.mjs as `clientRequest`): `pathAndQuery`
+   * One sponsored-placements call (placements-desktop.mjs): `pathAndQuery`
    * under the account server, the device credential, `timeoutMs` at most.
    * Resolves { status, data } (data: the JSON of a 200, else null), or null
    * while signed out. Throws on network errors and timeouts.
@@ -1341,6 +1340,30 @@ export function createDesktopOmniRushAccountStore({
     if (!response) return null;
     const data = response.status === 200 ? await response.json().catch(() => null) : null;
     return { status: response.status, data };
+  }
+
+  /**
+   * One in-app feedback call (feedback-desktop.mjs): like placementsRequest,
+   * but `data` is the JSON of any answer (a 422 names its wrong fields) and
+   * `retryAfter` the Retry-After seconds (a 429 lasts until 00:00 UTC), or
+   * null. Resolves null while signed out; throws on network errors and
+   * timeouts.
+   * @param {string} pathAndQuery
+   * @param {{ method?: string, body?: unknown, timeoutMs?: number }} [init]
+   * @returns {Promise<{ status: number, data: any, retryAfter: number | null } | null>}
+   */
+  async function feedbackRequest(pathAndQuery, { method = "GET", body = undefined, timeoutMs = 2_000 } = {}) {
+    const [pathname, query = ""] = String(pathAndQuery).split("?");
+    const response = await sendAuthorized(`${pathname}`, {
+      method,
+      ...(body !== undefined ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {}),
+      signal: AbortSignal.timeout(timeoutMs),
+    }, 1, undefined, query);
+    if (!response) return null;
+    const data = await response.json().catch(() => null);
+    const header = response.headers.get("retry-after");
+    const seconds = header !== null && header.trim() !== "" ? Number(header) : NaN;
+    return { status: response.status, data, retryAfter: Number.isFinite(seconds) && seconds >= 0 ? seconds : null };
   }
 
   /**
@@ -1452,7 +1475,6 @@ export function createDesktopOmniRushAccountStore({
     buildathonJoin,
     buildathonTagSession,
     placementsRequest,
-    /** The same call for the other small client endpoints (feedback-desktop.mjs). */
-    clientRequest: placementsRequest,
+    feedbackRequest,
   };
 }

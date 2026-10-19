@@ -192,9 +192,12 @@ function CommentRow(props: { prompt: TurnPrompt; placeholder: string; onComment:
         className="h-8 flex-1 text-[13px]"
         data-testid={props.testId}
       />
-      <Button size="sm" className="h-8" onClick={props.onSend} data-testid="feedback-send">Send</Button>
-      <Button size="sm" variant="ghost" className="h-8 text-muted-foreground" onClick={props.onSkip} data-testid="feedback-skip">Skip</Button>
+      <Button size="sm" className="h-8" onClick={props.onSend} disabled={props.prompt.sending} data-testid="feedback-send">Send</Button>
+      <Button size="sm" variant="ghost" className="h-8 text-muted-foreground" onClick={props.onSkip} disabled={props.prompt.sending} data-testid="feedback-skip">Skip</Button>
     </div>
+    {props.prompt.error ? (
+      <p role="alert" className="text-[12px] leading-4 text-destructive" data-testid="feedback-error">{props.prompt.error}</p>
+    ) : null}
     <p className="text-[11px] leading-4 text-muted-foreground/80" data-testid="feedback-note">{RATING_NOTE}</p>
     </>
   );
@@ -356,6 +359,9 @@ export function FeedbackFormView(props: FeedbackFormViewProps) {
           className="min-h-24"
           data-testid="feedback-text"
         />
+        {dialog.error ? (
+          <p role="alert" className="text-[13px] text-destructive" data-testid="feedback-dialog-error">{dialog.error}</p>
+        ) : null}
         {dialog.sessionId ? (
           <label className="flex cursor-pointer items-center gap-2 text-[13px] text-muted-foreground" data-testid="feedback-include-session">
             <Checkbox checked={includeSessionChecked(dialog)} onCheckedChange={(checked) => props.onIncludeSession(checked === true)} />

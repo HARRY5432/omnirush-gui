@@ -54,6 +54,7 @@ export const SENT_TOAST = "Thanks, sent.";
 export const QUEUED_TOAST = "Thanks, saved for later.";
 /** Under the follow-up: what the rating carries. */
 export const RATING_NOTE = "Sent to the OmniRush team with this chat's id. Not part of the chat.";
+export const TOO_LARGE_ERROR = "That's too long to send";
 /** The two analytics events the main process forwards (labels only). */
 const EVENT_NAMES = new Set(["feedback_prompt_shown", "feedback_submitted"]);
 const EVENT_CHANNEL = "omnirush:feedback:event";
@@ -148,6 +149,9 @@ export type TurnPrompt = {
   rating: "up" | "down" | number | null;
   reasons: TurnReasonId[];
   comment: string;
+  /** The server refused the last Send (shown inline; the prompt stays). */
+  error: string | null;
+  sending: boolean;
 };
 
 export type FeedbackDialogState = {
@@ -160,6 +164,8 @@ export type FeedbackDialogState = {
   /** null: the default for the category (on for Bug); true/false: the person's own choice. */
   includeSession: boolean | null;
   sending: boolean;
+  /** The server refused the last Send (shown inline; the text stays). */
+  error: string | null;
 };
 
 type FeedbackState = {
@@ -167,7 +173,7 @@ type FeedbackState = {
   dialog: FeedbackDialogState;
 };
 
-const closedDialog: FeedbackDialogState = { open: false, trigger: "menu", sessionId: null, category: "bug", text: "", includeSession: null, sending: false };
+const closedDialog: FeedbackDialogState = { open: false, trigger: "menu", sessionId: null, category: "bug", text: "", includeSession: null, sending: false, error: null };
 
 export const useFeedbackStore = create<FeedbackState>(() => ({ prompt: null, dialog: closedDialog }));
 
@@ -207,6 +213,19 @@ export function setFeedbackNotifier(next: Notify) {
 export function setFeedbackBridgeForTests(next: Bridge | null): void {
   if (next) bridge = next;
   useFeedbackStore.setState({ prompt: null, dialog: closedDialog });
+}
+
+/**
+ * Why the server refused a send, for the person to fix: a 422 names its
+ * fields ("Couldn't send: comment: too long"), a 413 is too long. Null when
+ * it was sent or kept for later.
+ */
+export function refusalText(result: OmniRushFeedbackResult): string | null {
+  if (result.ok) return null;
+  if (result.error === "too_large") return TOO_LARGE_ERROR;
+  if (result.error !== "invalid") return null;
+  const fields = Object.entries(result.errors ?? {}).filter(([, why]) => typeof why === "string").map(([field, why]) => `${field}: ${why}`);
+  return fields.length ? `Couldn't send: ${fields.join("; ")}` : "Couldn't send: the server did not accept it";
 }
 
 /** The words of the toast after a send: sent, or kept for later (never an error look). */
@@ -271,6 +290,8 @@ export async function offerFeedbackAfterTurn(input: {
       rating: null,
       reasons: [],
       comment: "",
+      error: null,
+      sending: false,
     },
   });
   void bridge.shown({ kind: offer.kind }).catch(() => undefined);
@@ -312,16 +333,33 @@ export function toggleTurnReason(id: TurnReasonId) {
 }
 
 export function setPromptComment(comment: string) {
-  setPrompt({ comment: comment.slice(0, COMMENT_MAX) });
+  setPrompt({ comment: comment.slice(0, COMMENT_MAX), error: null });
 }
 
-/** Send, or Skip (the rating alone, without reasons or comment). Without a rating the prompt just goes. */
+/**
+ * Send, or Skip (the rating alone, without reasons or comment). Without a
+ * rating the prompt just goes. A refusal (422 / 413) keeps the prompt open
+ * with its reason, so the comment can be fixed.
+ */
 export async function sendPrompt({ skip = false } = {}): Promise<OmniRushFeedbackResult | null> {
   const prompt = useFeedbackStore.getState().prompt;
-  useFeedbackStore.setState({ prompt: null });
-  if (!prompt || prompt.rating === null) return null;
+  if (!prompt || prompt.rating === null) {
+    useFeedbackStore.setState({ prompt: null });
+    return null;
+  }
+  if (prompt.sending) return null;
   const input = skip ? { ...promptInput(prompt), categories: [], comment: null } : promptInput(prompt);
-  return send(input);
+  setPrompt({ sending: true, error: null });
+  const result = await send(input, { toast: false });
+  const refused = refusalText(result);
+  const current = useFeedbackStore.getState().prompt;
+  if (refused && current?.sessionId === prompt.sessionId && current.messageId === prompt.messageId) {
+    setPrompt({ sending: false, error: refused });
+    return result;
+  }
+  if (current?.sessionId === prompt.sessionId && current.messageId === prompt.messageId) useFeedbackStore.setState({ prompt: null });
+  notify(result);
+  return result;
 }
 
 /**
@@ -332,7 +370,8 @@ export async function sendPrompt({ skip = false } = {}): Promise<OmniRushFeedbac
 export function closePrompt(): Promise<OmniRushFeedbackResult | null> {
   const prompt = useFeedbackStore.getState().prompt;
   useFeedbackStore.setState({ prompt: null });
-  if (!prompt || prompt.rating === null) return Promise.resolve(null);
+  // Not chosen, or already on its way (Send was pressed).
+  if (!prompt || prompt.rating === null || prompt.sending) return Promise.resolve(null);
   return send({ ...promptInput(prompt), categories: [], comment: null }, { toast: false });
 }
 
@@ -366,7 +405,7 @@ export function setDialogCategory(category: GeneralCategoryId) {
 }
 
 export function setDialogText(text: string) {
-  setDialog({ text });
+  setDialog({ text, error: null });
 }
 
 export function setDialogIncludeSession(include: boolean) {
@@ -390,7 +429,7 @@ export async function sendFeedbackDialog(): Promise<OmniRushFeedbackResult | nul
     effort: null,
   });
   if (result.ok) useFeedbackStore.setState({ dialog: closedDialog });
-  else setDialog({ sending: false });
+  else setDialog({ sending: false, error: refusalText(result) ?? "Couldn't send. Try again." });
   return result;
 }
 

@@ -163,6 +163,53 @@ describe("in-app feedback: after a turn", () => {
   });
 });
 
+describe("in-app feedback: refusals (422 / 413)", () => {
+  test("the words: the fields a 422 names, a 413 too long, nothing for sent or queued", () => {
+    expect(lib.refusalText({ ok: false, error: "invalid", errors: { comment: "too long", turn: "must be an integer" } })).toBe("Couldn't send: comment: too long; turn: must be an integer");
+    expect(lib.refusalText({ ok: false, error: "invalid", errors: null })).toBe("Couldn't send: the server did not accept it");
+    expect(lib.refusalText({ ok: false, error: "too_large" })).toBe("That's too long to send");
+    expect(lib.refusalText({ ok: true, sent: true, queued: false })).toBeNull();
+    expect(lib.refusalText({ ok: true, sent: false, queued: true, reason: "offline" })).toBeNull();
+  });
+
+  test("the follow-up: a 422 keeps the prompt open with its reason and the comment; no toast", async () => {
+    const main = fakeMain({ kind: "turn" }, { ok: false, error: "invalid", errors: { comment: "too long" } });
+    await lib.offerFeedbackAfterTurn({ sessionId: "ses_1", turn: TURN, fallbackDurationMs: 0, modelId: null, effort: null });
+    lib.rateTurn("down");
+    lib.setPromptComment("way too much");
+    await lib.sendPrompt();
+    expect(main.submitted).toHaveLength(1);
+    expect(lib.useFeedbackStore.getState().prompt).toMatchObject({ rating: "down", comment: "way too much", error: "Couldn't send: comment: too long", sending: false });
+    expect(main.toasts).toEqual([]);
+    lib.setPromptComment("shorter");
+    expect(lib.useFeedbackStore.getState().prompt?.error).toBeNull();
+  });
+
+  test("the dialog: a 422 or 413 keeps it open with the text and the reason", async () => {
+    fakeMain(null, { ok: false, error: "invalid", errors: { comment: "too long" } });
+    lib.openFeedbackDialog({ trigger: "menu", sessionId: null });
+    lib.setDialogText("a long note");
+    await lib.sendFeedbackDialog();
+    expect(lib.useFeedbackStore.getState().dialog).toMatchObject({ open: true, text: "a long note", error: "Couldn't send: comment: too long", sending: false });
+    fakeMain(null, { ok: false, error: "too_large" });
+    lib.openFeedbackDialog({ trigger: "menu", sessionId: null });
+    lib.setDialogText("huge");
+    await lib.sendFeedbackDialog();
+    expect(lib.useFeedbackStore.getState().dialog.error).toBe("That's too long to send");
+  });
+
+  test("the views show the reason", () => {
+    const noop = () => undefined;
+    const prompt = { sessionId: "ses_1", kind: "turn" as const, stage: "down" as const, turn: 2, messageId: "a2", modelId: null, effort: null, rating: "down" as const, reasons: [], comment: "x", error: "Couldn't send: comment: too long", sending: false };
+    const html = renderToStaticMarkup(<FeedbackTurnPromptView prompt={prompt} onRate={noop} onPulse={noop} onToggleReason={noop} onComment={noop} onSend={noop} onSkip={noop} onDismiss={noop} />);
+    expect(html).toContain("Couldn&#x27;t send: comment: too long");
+    const dialog = { open: true, trigger: "menu" as const, sessionId: null, category: "bug" as const, text: "x", includeSession: null, sending: false, error: "That's too long to send" };
+    const form = renderToStaticMarkup(<FeedbackFormView dialog={dialog} onCategory={noop} onText={noop} onIncludeSession={noop} onSend={noop} onCancel={noop} />);
+    expect(form).toContain("That&#x27;s too long to send");
+    expect(form).toContain('role="alert"');
+  });
+});
+
 describe("in-app feedback: Send feedback", () => {
   test("Bug includes the open session by default; other categories do not; the person's choice wins", async () => {
     const main = fakeMain();
@@ -229,7 +276,7 @@ describe("in-app feedback: analytics", () => {
 });
 
 describe("in-app feedback: the views", () => {
-  const base = { sessionId: "ses_1", kind: "turn" as const, stage: "rate" as const, turn: 2, messageId: "a2", modelId: null, effort: null, rating: null, reasons: [], comment: "" };
+  const base = { sessionId: "ses_1", kind: "turn" as const, stage: "rate" as const, turn: 2, messageId: "a2", modelId: null, effort: null, rating: null, reasons: [], comment: "", error: null, sending: false };
   const noop = () => undefined;
   const handlers = { onRate: noop, onPulse: noop, onToggleReason: noop, onComment: noop, onSend: noop, onSkip: noop, onDismiss: noop };
 
@@ -284,7 +331,7 @@ describe("in-app feedback: the views", () => {
   });
 
   test("the dialog form: categories, text, the session box only with a session, Send off while empty", () => {
-    const dialog = { open: true, trigger: "menu" as const, sessionId: "ses_open", category: "bug" as const, text: "", includeSession: null, sending: false };
+    const dialog = { open: true, trigger: "menu" as const, sessionId: "ses_open", category: "bug" as const, text: "", includeSession: null, sending: false, error: null };
     const props = { onCategory: noop, onText: noop, onIncludeSession: noop, onSend: noop, onCancel: noop };
     const html = renderToStaticMarkup(<FeedbackFormView dialog={dialog} {...props} />);
     for (const c of ["bug", "idea", "praise", "other"]) expect(html).toContain(`data-testid="feedback-category-${c}"`);

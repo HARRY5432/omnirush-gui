@@ -25,7 +25,8 @@
 // spool: 50 entries, each dropped after 7 days), so offline, signed out, a 429
 // or a 5xx keep it for later. A 404 (the server has no feedback yet) keeps it
 // too and the app stops asking on its own until a queued send goes through.
-// A 2xx or a 4xx that is final (400, 413, 422) removes it.
+// A 2xx or a 4xx that is final (400, 413, 422: the person is told) removes
+// it; a 429 waits for its Retry-After (the server's day ends at 00:00 UTC).
 //
 // Nothing here touches sessions, prompts, the model, files or uploads, and
 // the comment never goes to analytics (analyticsProperties). Node builtins
@@ -92,7 +93,13 @@ export const MAX_SESSIONS = 500;
 const DAY_MS = 86_400_000;
 const STATE_VERSION = 1;
 const SESSION_RE = /^[A-Za-z0-9._:-]{1,128}$/;
-const LABEL_RE = /^[A-Za-z0-9._:/@+-]{1,80}$/;
+/** The server's rule for `session_id`: ses_… or the CLI's session UUID. */
+const PAYLOAD_SESSION_RE = /^(?:ses_[A-Za-z0-9_]{1,124}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+const LABEL_RE = /^[A-Za-z0-9._:/@+-]+$/;
+/** The server's longest app_version, os, model_id, effort. */
+export const FIELD_MAX = Object.freeze({ app_version: 64, os: 64, model_id: 128, effort: 32 });
+/** After a 429: its Retry-After, at most this long. */
+const MAX_RETRY_AFTER_MS = 26 * 3_600_000;
 
 // --- policy -----------------------------------------------------------------
 
@@ -156,19 +163,24 @@ export function looksLikeRefusal(text) {
 // eslint-disable-next-line no-control-regex
 const UNSAFE_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f​-‏‪-‮⁠-⁩﻿]/g;
 
-/** The comment as sent: trimmed, at most COMMENT_MAX characters; one line unless `multiline`; null when empty. */
+/** The comment as sent: trimmed, at most COMMENT_MAX UTF-16 units (the server counts JavaScript's .length, a pair is never cut); one line unless `multiline`; null when empty. */
 export function cleanComment(value, { multiline = false } = {}) {
   if (typeof value !== "string") return null;
   let text = value.replace(/\r\n?/g, "\n").replace(UNSAFE_CHARS, " ");
   text = multiline ? text.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n") : text.replace(/\s+/g, " ");
   text = text.trim();
   if (!text) return null;
-  const chars = Array.from(text);
-  return chars.length <= COMMENT_MAX ? text : chars.slice(0, COMMENT_MAX).join("").trimEnd();
+  if (text.length <= COMMENT_MAX) return text;
+  let cut = text.slice(0, COMMENT_MAX);
+  // Never half a surrogate pair at the end.
+  if (/[\ud800-\udbff]$/.test(cut)) cut = cut.slice(0, -1);
+  return cut.trimEnd();
 }
 
-function label(value) {
-  return typeof value === "string" && LABEL_RE.test(value.trim()) ? value.trim() : null;
+function label(value, max = 64) {
+  if (typeof value !== "string") return null;
+  const v = value.trim();
+  return v && v.length <= max && LABEL_RE.test(v) ? v : null;
 }
 
 /** "0-10 pulse" bucket: promoter (9-10), passive (7-8), detractor (0-6). */
@@ -201,7 +213,7 @@ export function buildPayload(input = {}, ctx = {}) {
   const comment = cleanComment(input.comment, { multiline: kind === "general" });
   if (kind === "general" && !comment) return { error: "comment" };
   const trigger = TRIGGERS.includes(input.trigger) ? input.trigger : kind === "turn" ? "sampled" : kind === "pulse" ? "pulse" : "command";
-  const sessionId = typeof input.sessionId === "string" && SESSION_RE.test(input.sessionId) ? input.sessionId : null;
+  const sessionId = typeof input.sessionId === "string" && PAYLOAD_SESSION_RE.test(input.sessionId) ? input.sessionId : null;
   const turn = Number.isInteger(input.turn) && input.turn >= 1 && input.turn <= 100_000 ? input.turn : null;
   const client = CLIENTS.includes(ctx.client) ? ctx.client : "cli";
   return {
@@ -214,10 +226,10 @@ export function buildPayload(input = {}, ctx = {}) {
       turn: sessionId ? turn : null,
       trigger,
       client,
-      app_version: label(ctx.appVersion) ?? "0",
+      app_version: label(ctx.appVersion, FIELD_MAX.app_version) ?? "0",
       os: ["win", "mac", "linux"].includes(ctx.os) ? ctx.os : osName(),
-      model_id: label(input.modelId),
-      effort: label(input.effort),
+      model_id: label(input.modelId, FIELD_MAX.model_id),
+      effort: label(input.effort, FIELD_MAX.effort),
     },
   };
 }
@@ -385,7 +397,7 @@ export function writeState(file, state) {
 // --- the app's feedback -----------------------------------------------------
 
 /**
- * @typedef {(pathAndQuery: string, init: { method?: string, body?: unknown, timeoutMs: number }) => Promise<{ status: number, data: unknown } | null>} FeedbackRequest
+ * @typedef {(pathAndQuery: string, init: { method?: string, body?: unknown, timeoutMs: number }) => Promise<{ status: number, data: unknown, retryAfter?: number | null } | null>} FeedbackRequest
  */
 
 /**
@@ -529,7 +541,9 @@ export function createFeedback({
 
   /**
    * Send one feedback (queued first). Resolves { ok: true, sent, queued,
-   * reason? } or { ok: false, error } when the input cannot be sent.
+   * reason? } or { ok: false, error, errors? } when it cannot be sent (the
+   * input, or the server refused it: error "invalid" with its 422 `errors`
+   * by field, or "too_large" for a 413; not queued).
    * `reason` when queued: offline | signed_out | unavailable | rate_limited.
    */
   async function submit(input = {}) {
@@ -542,6 +556,8 @@ export function createFeedback({
     emit("feedback_submitted", analyticsProperties(built.payload));
     const outcome = await flush({ only: entry.id });
     // Sent here, or by a send that was already running when this one came.
+    const refused = outcome.refused[entry.id];
+    if (refused) return { ok: false, error: refused.status === 413 ? "too_large" : "invalid", errors: refused.errors };
     const sent = outcome.sent.includes(entry.id) || (sentHere.has(entry.id) && !read().spool.some((e) => e.id === entry.id));
     return sent ? { ok: true, sent: true, queued: false } : { ok: true, sent: false, queued: outcome.kept.includes(entry.id), reason: outcome.reasons[entry.id] ?? "offline" };
   }
@@ -550,10 +566,10 @@ export function createFeedback({
   async function flush({ only = null, force = false } = {}) {
     if (flushing) {
       await flushing.catch(() => undefined);
-      if (!only) return { sent: [], kept: [], reasons: {} };
+      if (!only) return { sent: [], kept: [], reasons: {}, refused: {} };
     }
     const run = (async () => {
-      const result = { sent: [], kept: [], reasons: {} };
+      const result = { sent: [], kept: [], reasons: {}, refused: {} };
       if (typeof request !== "function") return result;
       const at = now();
       const due = mutate((s) => {
@@ -581,7 +597,12 @@ export function createFeedback({
         else if (status === 401 || status === 403) reason = "signed_out";
         else if (status === 404) reason = "unavailable";
         else if (status === 429) reason = "rate_limited";
-        if (final) log("warn", "feedback: the server refused one", { status });
+        if (final) {
+          log("warn", "feedback: the server refused one", { status });
+          const errors = answer?.data && typeof answer.data === "object" && answer.data.errors && typeof answer.data.errors === "object" ? answer.data.errors : null;
+          result.refused[entry.id] = { status, errors };
+        }
+        const retryAfterMs = Number.isFinite(answer?.retryAfter) && answer.retryAfter > 0 ? Math.min(MAX_RETRY_AFTER_MS, answer.retryAfter * 1_000) : null;
         mutate((s) => {
           if (done || final) {
             s.spool = s.spool.filter((e) => e.id !== entry.id);
@@ -594,7 +615,7 @@ export function createFeedback({
           kept.sending_until = 0;
           kept.tries = (kept.tries ?? 0) + 1;
           const backoff = Math.min(RETRY_MAX_MS, retryMinMs * 2 ** Math.min(12, kept.tries - 1));
-          kept.next_at = now() + (status === 429 ? RATE_LIMIT_RETRY_MS : status === 404 ? Math.min(RATE_LIMIT_RETRY_MS, backoff) : backoff);
+          kept.next_at = now() + (status === 429 ? retryAfterMs ?? RATE_LIMIT_RETRY_MS : status === 404 ? Math.min(RATE_LIMIT_RETRY_MS, backoff) : backoff);
         });
         if (done) {
           result.sent.push(entry.id);
