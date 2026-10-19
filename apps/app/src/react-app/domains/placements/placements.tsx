@@ -5,21 +5,49 @@
 // colours, no motion, no sound, no toast. The link opens in the system
 // browser only on a click; × hides it for the placement's snooze days.
 // Nothing renders while the main process has no placement to show.
+//
+// Each display reports rendered when first painted and viewable once it has
+// been ≥ 50% on screen for one continuous second with the window focused and
+// visible (placement-viewability.ts); both once per display id.
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type RefObject } from "react";
 import { ArrowUpRight, X } from "lucide-react";
 
 import {
   dismissPlacement,
   endTurnFooter,
+  homeCardMounted,
+  installPlacementActivity,
   loadHomePlacement,
   loadTurnFooter,
   openPlacement,
-  placementShown,
+  placementConversation,
+  placementRendered,
+  placementViewable,
+  placementViewableSent,
   turnJustFinished,
   usePlacementsStore,
   type Placement,
 } from "../../../app/lib/placements";
+import { observeViewability } from "../../../app/lib/placement-viewability";
+
+/** rendered on the first paint, viewable when measured: once per display. */
+function useDisplayMeasurement(ref: RefObject<HTMLElement | null>, placement: Placement) {
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    let frame: number | null = null;
+    if (typeof requestAnimationFrame === "function") frame = requestAnimationFrame(() => placementRendered(placement));
+    else placementRendered(placement);
+    const stop = placementViewableSent(placement) ? () => undefined : observeViewability(element, () => placementViewable(placement));
+    return () => {
+      if (frame !== null && typeof cancelAnimationFrame === "function") cancelAnimationFrame(frame);
+      stop();
+    };
+    // One measurement per display: a new display id starts a new one.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [placement.displayId]);
+}
 
 function DismissButton(props: { placement: Placement; testId: string }) {
   return (
@@ -40,22 +68,36 @@ function DismissButton(props: { placement: Placement; testId: string }) {
 export function PlacementHomeCard() {
   const placement = usePlacementsStore((state) => state.home);
   useEffect(() => {
+    installPlacementActivity();
+    const unmount = homeCardMounted();
     void loadHomePlacement();
+    // Back to the window: the same display, or a new one after 30 idle minutes.
+    const back = () => {
+      if (typeof document === "undefined" || document.visibilityState === "visible") void loadHomePlacement();
+    };
+    window.addEventListener("focus", back);
+    document.addEventListener("visibilitychange", back);
+    return () => {
+      unmount();
+      window.removeEventListener("focus", back);
+      document.removeEventListener("visibilitychange", back);
+    };
   }, []);
-  useEffect(() => {
-    if (placement) placementShown(placement, "home");
-  }, [placement]);
   if (!placement) return null;
-  return <PlacementHomeCardView placement={placement} />;
+  return <PlacementHomeCardView key={placement.displayId} placement={placement} />;
 }
 
 /** The card itself (tests render it directly). */
 export function PlacementHomeCardView({ placement }: { placement: Placement }) {
+  const ref = useRef<HTMLElement | null>(null);
+  useDisplayMeasurement(ref, placement);
   return (
     <aside
+      ref={ref}
       aria-label={placement.label}
       data-testid="placement-home"
       data-placement-id={placement.id}
+      data-display-id={placement.displayId}
       className="flex items-center gap-3 rounded-lg border border-border/70 bg-background px-3 py-2"
     >
       {placement.imageUrl ? (
@@ -103,28 +145,32 @@ export function PlacementTurnFooter(props: { sessionId: string; turnRunning: boo
     const now = { sessionId: props.sessionId, running: props.turnRunning };
     previous.current = now;
     if (props.turnRunning) {
+      installPlacementActivity();
+      // A turn in this conversation: the home card's next display may be a new one.
+      placementConversation(props.sessionId);
       endTurnFooter(props.sessionId);
       return;
     }
     if (turnJustFinished(before, now)) void loadTurnFooter(props.sessionId);
   }, [props.sessionId, props.turnRunning]);
   const visible = Boolean(placement) && !props.turnRunning;
-  useEffect(() => {
-    if (visible && placement) placementShown(placement, `turn:${props.sessionId}`);
-  }, [placement, props.sessionId, visible]);
   if (!visible || !placement) return null;
-  return <PlacementTurnFooterView placement={placement} />;
+  return <PlacementTurnFooterView key={placement.displayId} placement={placement} />;
 }
 
 /** The line itself (tests render it directly). */
 export function PlacementTurnFooterView({ placement }: { placement: Placement }) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  useDisplayMeasurement(ref, placement);
   return (
     <div className="px-4 max-lg:px-3 lg:px-8">
       <div
+        ref={ref}
         role="note"
         aria-label={placement.label}
         data-testid="placement-turn-footer"
         data-placement-id={placement.id}
+        data-display-id={placement.displayId}
         className="mx-auto flex max-w-[800px] items-center gap-2 pb-1 text-[11px] leading-4 text-muted-foreground/80"
       >
         <span className="min-w-0 flex-1 truncate">

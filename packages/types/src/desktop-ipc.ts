@@ -387,8 +387,12 @@ export type OmniRushBuildathonTagResult = "tagged" | "refused" | "retry";
 
 /** A sponsored placement as the window draws it (apps/desktop/electron/placements/placements.mjs placementView). */
 export type OmniRushPlacementSlot = "home_banner" | "turn_footer";
+export type OmniRushPlacementSurface = "desktop_home" | "desktop_turn";
 export type OmniRushPlacement = {
   id: string;
+  /** This display's id (a random UUID made by the main process); every event about it carries it. */
+  displayId: string;
+  surface: OmniRushPlacementSurface;
   slot: OmniRushPlacementSlot;
   /** "Sponsored · <sponsor>" */
   label: string;
@@ -405,7 +409,8 @@ export type OmniRushPlacement = {
   imageUrl: string | null;
   snoozeDays: number;
 };
-export type OmniRushPlacementAction = "impression" | "open" | "dismiss";
+/** rendered / viewable / open (the click) / dismiss: about one display; conversation / activity: for the display rotation. */
+export type OmniRushPlacementAction = "rendered" | "viewable" | "open" | "dismiss" | "conversation" | "activity";
 
 export type OmniRushSessionStatus = {
   sessionId: string;
@@ -965,7 +970,7 @@ export type DesktopCommandMap = {
   omnirushBuildathon: { args: []; result: OmniRushBuildathonAnswer };
   omnirushBuildathonJoin: { args: []; result: OmniRushBuildathonLinkResult };
   omnirushPlacement: { args: [input: { slot: OmniRushPlacementSlot; sessionId?: string }]; result: OmniRushPlacement | null };
-  omnirushPlacementAction: { args: [input: { id: string; action: OmniRushPlacementAction }]; result: { ok: boolean; opened?: boolean } };
+  omnirushPlacementAction: { args: [input: { action: OmniRushPlacementAction; id?: string; displayId?: string; sessionId?: string }]; result: { ok: boolean; opened?: boolean; rotate?: boolean } };
   omnirushBuildathonSessions: { args: []; result: OmniRushBuildathonSession[] | null };
   omnirushBuildathonLink: { args: [input: { code: string }]; result: OmniRushBuildathonLinkResult };
   omnirushBuildathonChecklist: {

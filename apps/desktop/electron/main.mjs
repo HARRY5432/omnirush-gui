@@ -75,7 +75,7 @@ import {
 } from "./connect-link-branding.mjs";
 import { resolveConnectLinkPublicKeys } from "./connect-link-keys.mjs";
 import { openExternalUrl } from "./open-external.mjs";
-import { createDesktopPlacements } from "./placements-desktop.mjs";
+import { createDesktopPlacements, watchWindowForPlacements } from "./placements-desktop.mjs";
 import { classifyLocalOpen, isNetworkPath, localPathFromFileUrl } from "./open-local-path.mjs";
 import { resolveAppIdentifier, resolveUserDataPath } from "./dev-profile.mjs";
 import { fetchAgentContextDiagnosticsResponse } from "./agent-context-diagnostics-fetch.mjs";
@@ -3042,6 +3042,8 @@ async function createMainWindow() {
     await applyCachedBrandIcon(cachedBrandImage, bootSourceUrl);
   }
   applicationMenu.applyVisibility(mainWindow);
+  // Sponsored placements: the page's viewability timer stops while the window is blurred, minimized or hidden.
+  watchWindowForPlacements(mainWindow);
 
   mainWindow.on("page-title-updated", (event) => {
     event.preventDefault();

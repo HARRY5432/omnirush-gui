@@ -21,7 +21,7 @@ import {
   parsePlacement,
   placementsQuery,
 } from "./placements/placements.mjs";
-import { createDesktopPlacements, desktopPlacementsAllowed } from "./placements-desktop.mjs";
+import { createDesktopPlacements, desktopPlacementsAllowed, WINDOW_STATE_CHANNEL, watchWindowForPlacements } from "./placements-desktop.mjs";
 import { createDesktopOmniRushAccountStore } from "./omnirush-account.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -111,7 +111,10 @@ test("shared: caps, snooze and expiry", async () => {
   const a = make();
   await a.refresh();
   assert.ok(a.claim("home_banner"));
-  assert.equal(make().claim("home_banner"), null, "max_per_day 1: not again today");
+  const same = make();
+  assert.ok(same.claim("home_banner"), "a restart within 30 minutes: the same display");
+  same.conversation("ses_new");
+  assert.equal(same.claim("home_banner"), null, "a new display is due; max_per_day 1: not again today");
   now = T0 + DAY;
   const b = make();
   await b.refresh();
@@ -149,7 +152,7 @@ test("shared: events go to /client/placements/events?client=desktop", async () =
   const paths = [];
   const { d } = desktop({ routes: (p) => { paths.push(p); return p.startsWith("/client/placements/events") ? { status: 204 } : { status: 200, data: answer() }; } });
   const p = await d.placement({ slot: "home_banner" });
-  await d.action({ id: p.id, action: "impression" });
+  await d.action({ id: p.id, displayId: p.displayId, action: "rendered" });
   assert.equal(await d.service.flush(), 1);
   assert.equal(paths.at(-1), "/client/placements/events?client=desktop");
 });
@@ -171,9 +174,11 @@ test("desktop: asks with client=desktop and the OS, 2 s timeout, and hands the w
   const p = await d.placement({ slot: "home_banner" });
   assert.equal(calls[0].path, "/client/placements?client=desktop&version=3.5.5&os=mac");
   assert.equal(calls[0].timeoutMs, FETCH_TIMEOUT_MS);
-  assert.deepEqual(Object.keys(p).sort(), ["body", "ctaLabel", "id", "imageUrl", "label", "slot", "snoozeDays", "sponsor", "title", "url"]);
+  assert.deepEqual(Object.keys(p).sort(), ["body", "ctaLabel", "displayId", "id", "imageUrl", "label", "slot", "snoozeDays", "sponsor", "surface", "title", "url"]);
   assert.equal(p.label, "Sponsored · Acme");
-  // The same one for the rest of the run.
+  assert.equal(p.surface, "desktop_home");
+  assert.match(p.displayId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  // The same display while nothing changed.
   assert.deepEqual(await d.placement({ slot: "home_banner" }), p);
   assert.equal(calls.length, 1, "asked once");
 });
@@ -217,14 +222,87 @@ test("desktop: OMNIRUSH_PLACEMENTS=0: never asks", async () => {
 test("desktop: open (the click) opens the placement's own https link; dismiss snoozes; bad input is refused", async () => {
   const { d, opened } = desktop();
   const p = await d.placement({ slot: "home_banner" });
-  assert.deepEqual(await d.action({ id: p.id, action: "impression" }), { ok: true });
-  assert.deepEqual(await d.action({ id: p.id, action: "open" }), { ok: true, opened: true });
+  const displayId = p.displayId;
+  assert.deepEqual(await d.action({ displayId, action: "rendered" }), { ok: true });
+  assert.deepEqual(await d.action({ displayId, action: "open" }), { ok: true, opened: true });
   assert.deepEqual(opened, ["https://acme.example/ci"]);
-  assert.deepEqual(await d.action({ id: "other", action: "open" }), { ok: false });
-  assert.deepEqual(await d.action({ id: p.id, action: "navigate" }), { ok: false });
-  assert.deepEqual(await d.action({ id: p.id, action: "dismiss" }), { ok: true });
+  assert.deepEqual(await d.action({ displayId: "other", action: "open" }), { ok: false });
+  assert.deepEqual(await d.action({ displayId, action: "navigate" }), { ok: false });
+  assert.deepEqual(await d.action({ displayId, action: "dismiss" }), { ok: true });
   assert.equal(await d.placement({ slot: "home_banner" }), null);
-  assert.deepEqual(d.service.state().events.map((e) => e.kind), ["impression", "click", "dismiss"]);
+  assert.deepEqual(d.service.state().events.map((e) => e.kind), ["rendered", "click", "dismiss"]);
+});
+
+test("desktop: viewable once per display, with the exact event shape", async () => {
+  const { d } = desktop();
+  const p = await d.placement({ slot: "home_banner" });
+  assert.deepEqual(await d.action({ displayId: p.displayId, action: "rendered" }), { ok: true });
+  assert.deepEqual(await d.action({ displayId: p.displayId, action: "rendered" }), { ok: false }, "once");
+  assert.deepEqual(await d.action({ displayId: p.displayId, action: "viewable" }), { ok: true });
+  assert.deepEqual(await d.action({ displayId: p.displayId, action: "viewable" }), { ok: false }, "never recounted");
+  // The window asks again (re-mount, focus): the same display, nothing new.
+  const again = await d.placement({ slot: "home_banner" });
+  assert.equal(again.displayId, p.displayId);
+  assert.deepEqual(await d.action({ displayId: again.displayId, action: "viewable" }), { ok: false });
+  assert.deepEqual(d.service.state().events, [
+    { display_id: p.displayId, placement_id: "plc_abc", kind: "rendered", surface: "desktop_home" },
+    { display_id: p.displayId, placement_id: "plc_abc", kind: "viewable", surface: "desktop_home" },
+  ]);
+});
+
+test("desktop: the turn line is its own display (desktop_turn), viewable too", async () => {
+  const { d } = desktop({ routes: () => ({ status: 200, data: answer([placement({ id: "plc_t", slot: "turn_footer", max_per_day: 5 })]) }) });
+  const t = await d.placement({ slot: "turn_footer", sessionId: "ses_1" });
+  assert.equal(t.surface, "desktop_turn");
+  assert.deepEqual(await d.action({ displayId: t.displayId, action: "viewable" }), { ok: true });
+  assert.deepEqual(d.service.state().events.map((e) => `${e.kind}:${e.surface}`), ["viewable:desktop_turn"]);
+});
+
+test("desktop: rotation: a new conversation or 30 idle minutes gives a new display; activity keeps it", async () => {
+  let now = T0;
+  const { d } = desktop({ now: () => now, routes: () => ({ status: 200, data: answer([placement({ max_per_day: 10 })]) }) });
+  const a = await d.placement({ slot: "home_banner" });
+  assert.deepEqual(await d.action({ action: "conversation", sessionId: "ses_1" }), { ok: true, rotate: true });
+  const b = await d.placement({ slot: "home_banner" });
+  assert.notEqual(b.displayId, a.displayId, "new conversation");
+  assert.deepEqual(await d.action({ action: "conversation", sessionId: "ses_1" }), { ok: true, rotate: false }, "the same one again: no change");
+  for (let i = 0; i < 4; i++) {
+    now += 20 * 60_000;
+    assert.deepEqual(await d.action({ action: "activity" }), { ok: true, rotate: false });
+  }
+  assert.equal((await d.placement({ slot: "home_banner" })).displayId, b.displayId, "active all along: same display");
+  now += 31 * 60_000;
+  assert.deepEqual(await d.action({ action: "activity" }), { ok: true, rotate: true }, "back after 31 idle minutes");
+  const c = await d.placement({ slot: "home_banner" });
+  assert.notEqual(c.displayId, b.displayId);
+  assert.deepEqual(await d.action({ action: "conversation" }), { ok: false }, "needs a session");
+});
+
+test("desktop: the window state goes to the page on focus, blur, minimize, restore, show and hide", () => {
+  const handlers = new Map();
+  const sent = [];
+  const state = { focused: true, minimized: false, visible: true };
+  const win = {
+    on: (name, fn) => handlers.set(name, fn),
+    removeListener: (name) => handlers.delete(name),
+    isFocused: () => state.focused,
+    isMinimized: () => state.minimized,
+    isVisible: () => state.visible,
+    isDestroyed: () => false,
+    webContents: { send: (channel, detail) => sent.push({ channel, detail }), isDestroyed: () => false },
+  };
+  const off = watchWindowForPlacements(win);
+  assert.deepEqual([...handlers.keys()].sort(), ["blur", "focus", "hide", "minimize", "restore", "show"]);
+  state.focused = false;
+  state.minimized = true;
+  handlers.get("minimize")();
+  assert.deepEqual(sent, [{ channel: WINDOW_STATE_CHANNEL, detail: { focused: false, minimized: true, visible: true } }]);
+  off();
+  assert.equal(handlers.size, 0);
+  const preload = fs.readFileSync(path.join(here, "preload.mjs"), "utf8");
+  assert.ok(preload.includes(`ipcRenderer.on("${WINDOW_STATE_CHANNEL}"`), "the preload passes it on");
+  const main = fs.readFileSync(path.join(here, "main.mjs"), "utf8");
+  assert.match(main, /watchWindowForPlacements\(mainWindow\)/);
 });
 
 test("desktop: the cache lives in the app's data folder, not in any workspace", async () => {
