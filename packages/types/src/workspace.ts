@@ -16,6 +16,12 @@ export type WorkspaceKind = "local" | "remote";
 
 export type WorkspaceRemoteKind = "opencode" | "omnirush";
 
+/** A workspace that is one parallel task's own checkout (a git worktree) of another workspace. */
+export type WorkspaceTaskLink = {
+  parentWorkspaceId: string;
+  taskId: string;
+};
+
 export type WorkspaceWire = {
   id: string;
   name: string;
@@ -50,4 +56,6 @@ export type WorkspaceWire = {
     username?: string;
     password?: string;
   } | null;
+  /** Set on a parallel task's workspace (omnirush-server only). */
+  task?: WorkspaceTaskLink | null;
 };

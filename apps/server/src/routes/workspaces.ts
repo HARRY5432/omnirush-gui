@@ -10,7 +10,7 @@ import { ensureDir, exists, shortId } from "../utils.js";
 import { defaultWorkspaceOmniRushConfig, ensureWorkspaceFiles } from "../workspace-init.js";
 import { seedOmniRushWorkspaceConfigIfEmpty } from "../omnirush-workspace-config-store.js";
 import { workspaceIdForPath, workspaceIdForRemote } from "../workspaces.js";
-import { addRoute, type Route } from "./registry.js";
+import { addRoute, type RequestContext, type Route } from "./registry.js";
 
 type JsonResponse = (data: unknown, status?: number) => Response;
 type ReadJsonBody = (request: Request) => Promise<Record<string, unknown>>;
@@ -217,6 +217,7 @@ function serializeWorkspaceConfigEntry(workspace: WorkspaceInfo): Record<string,
     ...(workspace.sandboxContainerName ? { sandboxContainerName: workspace.sandboxContainerName } : {}),
     ...(!isLocalWorkspace && workspace.opencodeUsername ? { opencodeUsername: workspace.opencodeUsername } : {}),
     ...(!isLocalWorkspace && workspace.opencodePassword ? { opencodePassword: workspace.opencodePassword } : {}),
+    ...(workspace.task ? { task: workspace.task } : {}),
   };
 }
 
@@ -235,6 +236,67 @@ async function persistServerWorkspaceState(config: ServerConfig): Promise<boolea
   // Retried while Windows (antivirus, indexer, a concurrent reader) holds
   // the file for a moment: a registry change must not be lost to that.
   await writeFileAtomic(configPath, `${JSON.stringify(next, null, 2)}\n`);
+  return true;
+}
+
+/**
+ * Registers a local folder as a workspace (the POST /workspaces/local flow):
+ * its runtime config row, its authorized root, the saved registry and the
+ * audit line. The caller announces the change (onWorkspacesChanged).
+ */
+export async function addLocalWorkspace(
+  config: ServerConfig,
+  input: { folderPath: string; name: string; preset: string; actor?: RequestContext["actor"]; task?: WorkspaceInfo["task"] },
+): Promise<{ workspace: WorkspaceInfo; persisted: boolean }> {
+  const { name, preset } = input;
+  const workspacePath = resolve(input.folderPath);
+  await ensureDir(workspacePath);
+  await ensureWorkspaceFiles(workspacePath, preset);
+
+  const workspaceId = workspaceIdForPath(workspacePath);
+  // Seed the per-workspace omnirush config in the runtime DB (replaces the
+  // legacy `.opencode/omnirush.json` file). No-op if a row already exists.
+  await seedOmniRushWorkspaceConfigIfEmpty(
+    config,
+    workspaceId,
+    defaultWorkspaceOmniRushConfig(workspacePath, preset),
+  );
+
+  const workspace: WorkspaceInfo = {
+    id: workspaceId,
+    name,
+    path: workspacePath,
+    preset,
+    workspaceType: "local",
+    ...inheritWorkspaceOpencodeConnection(config),
+    ...(input.task ? { task: input.task } : {}),
+  };
+
+  config.workspaces = [workspace, ...config.workspaces.filter((entry) => entry.id !== workspace.id)];
+  if (!config.authorizedRoots.some((root) => resolve(root) === workspacePath)) {
+    config.authorizedRoots = [...config.authorizedRoots, workspacePath];
+  }
+  const persisted = await persistServerWorkspaceState(config);
+
+  await recordAudit(workspace.path, {
+    id: shortId(),
+    workspaceId: workspace.id,
+    actor: input.actor ?? { type: "host" },
+    action: "workspace.create",
+    target: workspace.path,
+    summary: `Created workspace ${name}`,
+    timestamp: Date.now(),
+  });
+  return { workspace, persisted };
+}
+
+/** Removes a local workspace from the registry (not its folder); the caller announces the change. */
+export async function forgetLocalWorkspace(config: ServerConfig, workspaceId: string): Promise<boolean> {
+  const workspace = config.workspaces.find((entry) => entry.id === workspaceId);
+  if (!workspace) return false;
+  config.workspaces = config.workspaces.filter((entry) => entry.id !== workspaceId);
+  config.authorizedRoots = config.authorizedRoots.filter((root) => resolve(root) !== resolve(workspace.path));
+  await persistServerWorkspaceState(config);
   return true;
 }
 
@@ -279,44 +341,8 @@ export function registerWorkspaceRoutes(options: RegisterWorkspaceRoutesOptions)
       throw new ApiError(400, "invalid_payload", "folderPath is required");
     }
 
-    const workspacePath = resolve(folderPath);
-    await ensureDir(workspacePath);
-    await ensureWorkspaceFiles(workspacePath, preset);
-
-    const workspaceId = workspaceIdForPath(workspacePath);
-    // Seed the per-workspace omnirush config in the runtime DB (replaces the
-    // legacy `.opencode/omnirush.json` file). No-op if a row already exists.
-    await seedOmniRushWorkspaceConfigIfEmpty(
-      config,
-      workspaceId,
-      defaultWorkspaceOmniRushConfig(workspacePath, preset),
-    );
-
-    const workspace: WorkspaceInfo = {
-      id: workspaceId,
-      name,
-      path: workspacePath,
-      preset,
-      workspaceType: "local",
-      ...inheritWorkspaceOpencodeConnection(config),
-    };
-
-    config.workspaces = [workspace, ...config.workspaces.filter((entry) => entry.id !== workspace.id)];
-    if (!config.authorizedRoots.some((root) => resolve(root) === workspacePath)) {
-      config.authorizedRoots = [...config.authorizedRoots, workspacePath];
-    }
-    const persisted = await persistServerWorkspaceState(config);
+    const { workspace, persisted } = await addLocalWorkspace(config, { folderPath, name, preset, actor: ctx.actor });
     onWorkspacesChanged();
-
-    await recordAudit(workspace.path, {
-      id: shortId(),
-      workspaceId: workspace.id,
-      actor: ctx.actor ?? { type: "host" },
-      action: "workspace.create",
-      target: workspace.path,
-      summary: `Created workspace ${name}`,
-      timestamp: Date.now(),
-    });
 
     return jsonResponse({
       activeId: workspace.id,
