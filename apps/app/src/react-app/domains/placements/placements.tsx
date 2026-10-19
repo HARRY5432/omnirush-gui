@@ -29,7 +29,10 @@ import {
   usePlacementsStore,
   type Placement,
 } from "../../../app/lib/placements";
-import { observeViewability } from "../../../app/lib/placement-viewability";
+import { observeViewability, trackPlacementWindow } from "../../../app/lib/placement-viewability";
+
+// The window's focus / minimize / show state from the start, before any card mounts.
+trackPlacementWindow();
 
 /** rendered on the first paint, viewable when measured: once per display. */
 function useDisplayMeasurement(ref: RefObject<HTMLElement | null>, placement: Placement) {

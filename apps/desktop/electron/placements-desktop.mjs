@@ -29,8 +29,11 @@ export const WINDOW_STATE_CHANNEL = "omnirush:placements:window";
 
 /**
  * Pushes the window's focus / minimize / show state to its page (the
- * viewability timer's "window focused and visible"). Returns the unhook.
- * @param {{ on: Function, removeListener: Function, isFocused: () => boolean, isMinimized: () => boolean, isVisible: () => boolean, isDestroyed: () => boolean, webContents: { send: Function, isDestroyed?: () => boolean } }} win
+ * viewability timer's "window focused and visible"): on every change and
+ * whenever the page (re)loads. The page cannot tell by itself: the window
+ * keeps it "visible" while hidden or minimized (no background throttling).
+ * Returns the unhook.
+ * @param {{ on: Function, removeListener: Function, isFocused: () => boolean, isMinimized: () => boolean, isVisible: () => boolean, isDestroyed: () => boolean, webContents: { send: Function, on: Function, removeListener: Function, isDestroyed?: () => boolean } }} win
  */
 export function watchWindowForPlacements(win) {
   const events = ["focus", "blur", "minimize", "restore", "show", "hide"];
@@ -43,8 +46,10 @@ export function watchWindowForPlacements(win) {
     }
   };
   for (const name of events) win.on(name, send);
+  win.webContents.on("did-finish-load", send);
   return () => {
     for (const name of events) win.removeListener(name, send);
+    win.webContents.removeListener("did-finish-load", send);
   };
 }
 

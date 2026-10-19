@@ -4,6 +4,7 @@ import {
   createViewabilityTimer,
   observeViewability,
   qualifies,
+  trackPlacementWindow,
   VIEWABLE_MS,
   VIEWABLE_RATIO,
   WINDOW_STATE_EVENT,
@@ -203,6 +204,7 @@ function page({ focused = true, visible = true } = {}) {
   };
   return {
     env: env as never,
+    win: env.win as never,
     clock: c,
     intersect: (ratio: number) => observerCallback?.([{ isIntersecting: ratio > 0, intersectionRatio: ratio }]),
     focus: () => {
@@ -222,7 +224,7 @@ function page({ focused = true, visible = true } = {}) {
       for (const fn of docListeners.get("visibilitychange") ?? []) fn();
     },
     windowState: (detail: { focused: boolean; minimized: boolean; visible: boolean }) => emit(WINDOW_STATE_EVENT, detail),
-    listenerCount: () => [...listeners.values()].reduce((n, s) => n + s.size, 0) + [...docListeners.values()].reduce((n, s) => n + s.size, 0),
+    docListenerCount: () => [...docListeners.values()].reduce((n, s) => n + s.size, 0),
     disconnected: () => disconnected,
   };
 }
@@ -321,12 +323,49 @@ describe("viewability: on the page", () => {
     stop();
   });
 
-  test("cleanup removes every listener and the observer", () => {
+  test("cleanup removes the card's listeners and the observer; nothing fires after", () => {
     const p = page();
-    const stop = observeViewability(el, () => undefined, p.env);
-    expect(p.listenerCount()).toBeGreaterThan(0);
+    let fired = 0;
+    const stop = observeViewability(el, () => fired++, p.env);
+    expect(p.docListenerCount()).toBeGreaterThan(0);
+    p.intersect(1);
+    p.clock.advance(500);
     stop();
-    expect(p.listenerCount()).toBe(0);
+    expect(p.docListenerCount()).toBe(0);
     expect(p.disconnected()).toBe(true);
+    p.blur();
+    p.focus();
+    p.clock.advance(5_000);
+    expect(fired).toBe(0);
+  });
+
+  test("a window hidden or minimized before the card mounted: none until it is shown (the page itself still says visible)", () => {
+    const p = page();
+    trackPlacementWindow(p.win);
+    p.windowState({ focused: false, minimized: false, visible: false });
+    let fired = 0;
+    observeViewability(el, () => fired++, p.env);
+    p.intersect(1);
+    p.clock.advance(5_000);
+    expect(fired).toBe(0);
+    p.windowState({ focused: true, minimized: false, visible: true });
+    p.clock.advance(999);
+    expect(fired).toBe(0);
+    p.clock.advance(1);
+    expect(fired).toBe(1);
+  });
+
+  test("a blur before the card mounted is remembered too", () => {
+    const p = page();
+    trackPlacementWindow(p.win);
+    p.blur();
+    let fired = 0;
+    observeViewability(el, () => fired++, p.env);
+    p.intersect(1);
+    p.clock.advance(5_000);
+    expect(fired).toBe(0);
+    p.focus();
+    p.clock.advance(1_000);
+    expect(fired).toBe(1);
   });
 });

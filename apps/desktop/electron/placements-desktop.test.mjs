@@ -289,14 +289,16 @@ test("desktop: the window state goes to the page on focus, blur, minimize, resto
     isMinimized: () => state.minimized,
     isVisible: () => state.visible,
     isDestroyed: () => false,
-    webContents: { send: (channel, detail) => sent.push({ channel, detail }), isDestroyed: () => false },
+    webContents: { send: (channel, detail) => sent.push({ channel, detail }), isDestroyed: () => false, on: (name, fn) => handlers.set(`page:${name}`, fn), removeListener: (name) => handlers.delete(`page:${name}`) },
   };
   const off = watchWindowForPlacements(win);
-  assert.deepEqual([...handlers.keys()].sort(), ["blur", "focus", "hide", "minimize", "restore", "show"]);
+  assert.deepEqual([...handlers.keys()].sort(), ["blur", "focus", "hide", "minimize", "page:did-finish-load", "restore", "show"]);
   state.focused = false;
   state.minimized = true;
   handlers.get("minimize")();
   assert.deepEqual(sent, [{ channel: WINDOW_STATE_CHANNEL, detail: { focused: false, minimized: true, visible: true } }]);
+  handlers.get("page:did-finish-load")();
+  assert.equal(sent.length, 2, "a (re)loaded page gets the state too");
   off();
   assert.equal(handlers.size, 0);
   const preload = fs.readFileSync(path.join(here, "preload.mjs"), "utf8");

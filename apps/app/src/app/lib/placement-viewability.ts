@@ -107,19 +107,79 @@ function defaultEnv(): ViewabilityEnv | null {
   return { win: window, doc: document, IntersectionObserver: (globalThis as { IntersectionObserver?: ObserverCtor }).IntersectionObserver ?? null };
 }
 
+type WindowState = {
+  /** The last focus / blur the window reported (null: none yet; document.hasFocus() decides). */
+  focused: boolean | null;
+  minimized: boolean;
+  visible: boolean;
+};
+type WindowTracker = { state: WindowState; listen: (fn: () => void) => () => void };
+
+const trackers = new WeakMap<object, WindowTracker>();
+
+/**
+ * The app window's state, followed from the page's start (not from a card's
+ * mount): the main process keeps the page "visible" while the window is
+ * hidden or minimized (no background throttling), so its own report
+ * (WINDOW_STATE_EVENT) and the focus / blur events are remembered here for
+ * every card that mounts later.
+ */
+export function trackPlacementWindow(win: ViewabilityEnv["win"] | null = typeof window === "undefined" ? null : window): WindowTracker | null {
+  if (!win) return null;
+  const known = trackers.get(win);
+  if (known) return known;
+  const state: WindowState = { focused: null, minimized: false, visible: true };
+  const listeners = new Set<() => void>();
+  const changed = () => {
+    for (const fn of listeners) fn();
+  };
+  win.addEventListener("focus", () => {
+    state.focused = true;
+    changed();
+  });
+  win.addEventListener("blur", () => {
+    state.focused = false;
+    changed();
+  });
+  win.addEventListener(WINDOW_STATE_EVENT, (event: Event) => {
+    const detail: unknown = "detail" in event ? event.detail : null;
+    if (!detail || typeof detail !== "object") return;
+    const next = detail as { focused?: unknown; minimized?: unknown; visible?: unknown };
+    if (typeof next.focused === "boolean") state.focused = next.focused;
+    if (typeof next.minimized === "boolean") state.minimized = next.minimized;
+    if (typeof next.visible === "boolean") state.visible = next.visible;
+    changed();
+  });
+  const tracker: WindowTracker = {
+    state,
+    listen(fn) {
+      listeners.add(fn);
+      return () => {
+        listeners.delete(fn);
+      };
+    },
+  };
+  trackers.set(win, tracker);
+  return tracker;
+}
+
 /**
  * Measures `element` (the card) and calls `onViewable` once when it
  * qualifies. Resolves the cleanup.
  */
 export function observeViewability(element: Element, onViewable: () => void, env: ViewabilityEnv | null = defaultEnv()): () => void {
   if (!env || typeof env.IntersectionObserver !== "function") return () => undefined;
-  const { win, doc } = env;
+  const { doc } = env;
+  const tracker = trackPlacementWindow(env.win);
+  if (!tracker) return () => undefined;
   const timer = createViewabilityTimer(onViewable, env);
-  let minimized = false;
-  let hidden = false;
-  const focus = () => !minimized && !hidden && doc.hasFocus();
-  const pageVisible = () => doc.visibilityState === "visible";
-  timer.update({ pageVisible: pageVisible(), windowFocused: focus() });
+  const shown = () => tracker.state.visible && !tracker.state.minimized;
+  // Any signal of "not focused" wins: the window's last report and the document's own focus.
+  const conditions = () => ({
+    pageVisible: doc.visibilityState === "visible" && shown(),
+    windowFocused: shown() && tracker.state.focused !== false && doc.hasFocus(),
+  });
+  timer.update(conditions());
 
   const observer = new env.IntersectionObserver(
     (entries) => {
@@ -131,26 +191,14 @@ export function observeViewability(element: Element, onViewable: () => void, env
   );
   observer.observe(element);
 
-  const onVisibility = () => timer.update({ pageVisible: pageVisible(), windowFocused: focus() });
-  const onFocus = () => timer.update({ windowFocused: focus() });
-  const onBlur = () => timer.update({ windowFocused: false });
-  const onWindowState = (event: Event) => {
-    const detail = (event as CustomEvent<{ focused?: boolean; minimized?: boolean; visible?: boolean }>).detail ?? {};
-    minimized = detail.minimized === true;
-    hidden = detail.visible === false;
-    timer.update({ windowFocused: detail.focused === false ? false : focus(), pageVisible: pageVisible() });
-  };
-  doc.addEventListener("visibilitychange", onVisibility);
-  win.addEventListener("focus", onFocus);
-  win.addEventListener("blur", onBlur);
-  win.addEventListener(WINDOW_STATE_EVENT, onWindowState);
+  const update = () => timer.update(conditions());
+  const unlisten = tracker.listen(update);
+  doc.addEventListener("visibilitychange", update);
 
   return () => {
     timer.stop();
     observer.disconnect();
-    doc.removeEventListener("visibilitychange", onVisibility);
-    win.removeEventListener("focus", onFocus);
-    win.removeEventListener("blur", onBlur);
-    win.removeEventListener(WINDOW_STATE_EVENT, onWindowState);
+    unlisten();
+    doc.removeEventListener("visibilitychange", update);
   };
 }
