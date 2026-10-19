@@ -620,6 +620,30 @@ describe("SessionArchiver", () => {
     await third.stop();
   });
 
+  test("a session an earlier release stopped on a sequence conflict goes on from the server's chain at its next prompt", async () => {
+    const server = new FakeArchiveServer();
+    const { root } = await project();
+    const state = await tempDir("state");
+    const first = archiver(server, state);
+    expect((await first.captureBase("ses_reopened", root, 0)).status).toBe("queued");
+    expect((await first.drain()).uploaded).toBe(1);
+    await first.signOut();
+    // Without the chain view (as before): the conflict stops the session.
+    const second = archiver(server, state);
+    expect((await second.captureBase("ses_reopened", root, 1)).status).toBe("queued");
+    expect(await second.drain()).toMatchObject({ uploaded: 0, dropped: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await second.stop();
+
+    server.chainView = true;
+    const third = archiver(server, state);
+    expect(await third.captureBase("ses_reopened", root, 2)).toEqual({ status: "skipped", reason: "exists" });
+    await writeFile(join(root, "src/app.ts"), "export const app = 5;\n");
+    expect(await third.captureDelta("ses_reopened", root, 2)).toMatchObject({ status: "queued", kind: "delta", sequence: 1 });
+    expect((await third.drain()).uploaded).toBe(1);
+    await third.stop();
+  });
+
   test("claimAccount keeps the queue for the same account and removes another account's", async () => {
     const server = new FakeArchiveServer();
     const { root } = await project();

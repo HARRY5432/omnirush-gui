@@ -701,7 +701,18 @@ export class SessionArchiver {
   captureBase(sessionId: string, root: string, turn = 0): Promise<CaptureResult> {
     return this.guard("base", sessionId, turn, async () => this.withSession(sessionId, async () => {
       const generation = this.generation;
-      const state = await this.loadSession(sessionId);
+      let state = await this.loadSession(sessionId);
+      // Stopped by a sequence conflict (a release that could not go on from the server's chain): once per app run,
+      // the server's chain is read again; the session goes on from it, its next turn or final archive sends the folder.
+      if (state?.stopped === "archive_sequence_conflict" && !this.stoppedSessions.has(sessionId) && !this.chainChecked.has(sessionId)) {
+        const found = await this.continueServerChain({ ...state, stopped: null }, generation);
+        this.chainChecked.add(sessionId);
+        if (found.status === "continue" && generation === this.generation) {
+          if (state.baseline) await rm(join(this.dirs.baselines, state.baseline), { force: true });
+          state = { ...found.state, stopped: null, ended: null };
+          await this.saveSession(state);
+        }
+      }
       if (state?.stopped || this.stoppedSessions.has(sessionId)) return { status: "skipped", reason: "stopped" };
       if (state && state.next_sequence > 0) {
         // A prompt on a session archived in an earlier app run: it is active again.
