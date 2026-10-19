@@ -38,7 +38,10 @@
  * an engine SDK.
  */
 
-export const DESTRUCTIVE_MARKER = "OMNIRUSH_DESTRUCTIVE=1";
+export const DESTRUCTIVE_MARKER = "DESTRUCTIVE_COMMAND=1";
+
+/** The marker earlier versions wrote; a command copied from an older session still loses it. */
+const LEGACY_DESTRUCTIVE_MARKER = "OMNIRUSH_DESTRUCTIVE=1";
 
 export type ShellCommandKind = "read" | "write" | "destructive" | "other";
 
@@ -791,7 +794,7 @@ export function classifyShellCommand(command: string): ClassifiedCommand[] {
 
 /** Remove any marker the model wrote itself so the plugin stays the only author of it. */
 export function stripDestructiveMarkers(command: string): string {
-  return command.replace(new RegExp(`(?:^|(?<=\\s))${DESTRUCTIVE_MARKER}\\s+`, "g"), "");
+  return command.replace(new RegExp(`(?:^|(?<=\\s))(?:${DESTRUCTIVE_MARKER}|${LEGACY_DESTRUCTIVE_MARKER})\\s+`, "g"), "");
 }
 
 /**

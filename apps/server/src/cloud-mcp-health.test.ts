@@ -595,7 +595,7 @@ describe("cloud MCP health foundation", () => {
       toolIds: [...OMNIRUSH_CLOUD_EXPECTED_TOOLS],
       projectConfig: {
         tools: {
-          omnirush_query: false,
+          app_query: false,
         },
       },
       globalConfig: {},

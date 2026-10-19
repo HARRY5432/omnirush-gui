@@ -171,7 +171,7 @@ function countOfficeFileMarkers(value, context = { filename: "", mime: "" }) {
 
 function parseNormalizedAttachment(texts, expected) {
   const block = texts.find((text) => {
-    return text.includes("OmniRush.ai normalized an Office attachment")
+    return text.includes("The app normalized an Office attachment")
       && text.includes(`filename: ${expected.filename}`)
       && text.includes(`canonical_mime: ${expected.mime}`);
   });

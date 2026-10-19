@@ -6,7 +6,7 @@ approval modes:
 | Mode | What asks |
 | --- | --- |
 | `guarded` (default) | The git and pull-request rules from [git-workflows.md](git-workflows.md): write commands ask once per session per command family, destructive commands always ask. Everything else follows the engine's own defaults (for example editing files outside authorized folders). |
-| `full` | Nothing asks. The injected engine config sets `permission.bash` to a single `"*": "allow"` rule (no git ask rules, no `OMNIRUSH_DESTRUCTIVE` marker rule), `permission.read` to a single `"*": "allow"` rule (the engine asks before reading `.env` files by default; the later catch-all wins) and `edit`, `webfetch`, `websearch`, `doom_loop` and `external_directory` to `allow`. |
+| `full` | Nothing asks. The injected engine config sets `permission.bash` to a single `"*": "allow"` rule (no git ask rules, no `DESTRUCTIVE_COMMAND` marker rule), `permission.read` to a single `"*": "allow"` rule (the engine asks before reading `.env` files by default; the later catch-all wins) and `edit`, `webfetch`, `websearch`, `doom_loop` and `external_directory` to `allow`. |
 
 Organization rules from Den (`commands: deny`, `blockedCommands`, approved
 browser origins) are still appended after those rules in both modes. The

@@ -10,17 +10,17 @@ describe("OmniRush.ai capabilities knowledge plugin", () => {
     await plugin["experimental.chat.system.transform"]({}, output);
 
     const knowledge = output.system.join("\n");
-    expect(knowledge).toContain("https://api.omnirush.example.com/mcp/agent");
-    expect(knowledge).toContain("omnirush.ai runs no hosted Den");
+    expect(knowledge).toContain("https://api.example.com/mcp/agent");
+    expect(knowledge).toContain("there is no hosted Den");
     expect(knowledge).toContain("`/api/den` path is an internal same-origin desktop proxy");
     expect(knowledge).not.toContain("omnirushlabs.com");
     expect(knowledge).toContain("search_capabilities");
     expect(knowledge).toContain("execute_capability");
     // Protocol and client-setup detail lives in the docs, reachable through
-    // omnirush_docs_read with a docs-relative path — the always-on prompt only
+    // app_docs_read with a docs-relative path — the always-on prompt only
     // routes to it. Keeping OAuth mechanics out of every request saves ~2.5k
     // characters per turn.
-    expect(knowledge).toContain("read cloud/run-in-the-cloud/cloud-mcp.mdx with omnirush_docs_read");
+    expect(knowledge).toContain("read cloud/run-in-the-cloud/cloud-mcp.mdx with app_docs_read");
     expect(knowledge).toContain("read cloud/share-with-your-team/desktop-policies.mdx");
     expect(knowledge).not.toContain("packages/docs/");
     expect(knowledge).not.toContain("cursor://anysphere.cursor-mcp/oauth/callback");
@@ -28,12 +28,12 @@ describe("OmniRush.ai capabilities knowledge plugin", () => {
     expect(knowledge).not.toContain("JWTs signed and validated with EdDSA");
     expect(knowledge).not.toContain("30-day inactivity window");
     expect(knowledge).not.toContain("codex mcp login omnirush");
-    expect(knowledge).toContain("OmniRush.ai documentation tools answer product questions. Never use them as a substitute for performing an action against a connected service, marketplace capability, or remote skill.");
+    expect(knowledge).toContain("The app documentation tools answer product questions. Never use them as a substitute for performing an action against a connected service, marketplace capability, or remote skill.");
     expect(knowledge).toContain("Settings > Library");
     expect(knowledge).toContain("Settings > Debug");
     expect(knowledge).toContain("custom or local MCP server");
     expect(knowledge).not.toContain("Access tokens are opaque");
-    expect(knowledge).not.toContain("https://api.omnirush.example.com/mcp`");
+    expect(knowledge).not.toContain("https://api.example.com/mcp`");
     expect(knowledge).not.toContain("omnirush-ui-mcp");
     expect(knowledge).not.toContain("omnirush_extensions_export");
   });
@@ -49,7 +49,7 @@ describe("OmniRush.ai capabilities knowledge plugin", () => {
     // read through session.search/session.read without navigating the user.
     expect(knowledge).not.toContain("Memory Bank");
     expect(knowledge).toContain("## Other sessions");
-    expect(knowledge).toContain("use the session affordances described under OmniRush.ai app context");
+    expect(knowledge).toContain("use the session affordances described under App context");
     expect(knowledge).not.toContain("session.search then session.read");
     expect(knowledge).not.toContain("open the matching session");
     // Owned elsewhere: Connect tool mechanics (base prompt), readiness and
@@ -75,18 +75,18 @@ describe("OmniRush.ai capabilities knowledge plugin", () => {
     await plugin["experimental.chat.system.transform"]({}, output);
 
     expect(output.system).toHaveLength(1);
-    expect(output.system[0].startsWith("engine header\n\nYou are running inside OmniRush.ai.")).toBe(true);
+    expect(output.system[0].startsWith("engine header\n\nYou are running inside the desktop app.")).toBe(true);
   });
 
   test("retrieves the Connect-first member flow from bundled docs", async () => {
     process.env.OMNIRUSH_DOCS_DIR = resolve(import.meta.dir, "../../../../packages/docs");
 
     const plugin = await OmniRushCapabilitiesKnowledge();
-    const search = await plugin.tool.omnirush_docs_search.execute({ query: "connect gmail calendar slack", limit: 3 });
+    const search = await plugin.tool.app_docs_search.execute({ query: "connect gmail calendar slack", limit: 3 });
 
     expect(search).toContain("start-here/connect-your-stack/connect-services.mdx");
 
-    const read = await plugin.tool.omnirush_docs_read.execute({
+    const read = await plugin.tool.app_docs_read.execute({
       path: "start-here/connect-your-stack/connect-services.mdx",
     });
 
@@ -100,7 +100,7 @@ describe("OmniRush.ai capabilities knowledge plugin", () => {
     process.env.OMNIRUSH_DOCS_DIR = resolve(import.meta.dir, "../../../../packages/docs");
 
     const plugin = await OmniRushCapabilitiesKnowledge();
-    const search = await plugin.tool.omnirush_docs_search.execute({ query: "import a skill", limit: 10 });
+    const search = await plugin.tool.app_docs_search.execute({ query: "import a skill", limit: 10 });
 
     expect(search).not.toContain("start-here/do-work-with-it/import-a-skill.mdx");
   });
@@ -109,7 +109,7 @@ describe("OmniRush.ai capabilities knowledge plugin", () => {
     process.env.OMNIRUSH_DOCS_DIR = resolve(import.meta.dir, "../../../../packages/docs");
 
     const plugin = await OmniRushCapabilitiesKnowledge();
-    const read = await plugin.tool.omnirush_docs_read.execute({
+    const read = await plugin.tool.app_docs_read.execute({
       path: "cloud/run-in-the-cloud/cloud-mcp.mdx",
     });
 
@@ -137,7 +137,7 @@ describe("OmniRush.ai capabilities knowledge plugin", () => {
 
     const knowledge = output.system.join("\n");
     expect(knowledge).toContain("## Automations");
-    expect(knowledge).toContain("omnirush_execute");
+    expect(knowledge).toContain("app_execute");
     expect(knowledge).toContain("automation.propose");
     // Scheduling OmniRush.ai work through the OS is the exact failure this guidance prevents.
     expect(knowledge).toContain("Never write a cron entry, launchd/systemd unit, Task Scheduler job");

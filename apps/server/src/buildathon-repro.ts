@@ -19,10 +19,10 @@ import path from "node:path";
 import { boxHome, keyOf } from "./box/plugin-lib.js";
 
 /** The server's default rules, word for word (clients embed the same as the fallback). */
-export const DEFAULT_AGENT_RULES = "This project is part of the OmniRush Buildathon and must rebuild from scratch on a clean Linux machine. Keep every file the project needs inside this folder and use git, committing after each working step. Pin the runtime version (.nvmrc / .python-version / go.mod toolchain / rust-toolchain.toml) and always keep a lockfile; install dependencies only into the project (no global installs, no sudo outside the Dockerfile). Maintain a Dockerfile that installs every system package and dependency and can build and run the project, a single test command (e.g. `make test`) that works offline, and a README with exact setup, run, test and deploy steps. Never hard-code absolute paths from this machine or put secrets in files (use .env.example). After each change, run the tests.";
+export const DEFAULT_AGENT_RULES = "This project is part of a buildathon and must rebuild from scratch on a clean Linux machine. Keep every file the project needs inside this folder and use git, committing after each working step. Pin the runtime version (.nvmrc / .python-version / go.mod toolchain / rust-toolchain.toml) and always keep a lockfile; install dependencies only into the project (no global installs, no sudo outside the Dockerfile). Maintain a Dockerfile that installs every system package and dependency and can build and run the project, a single test command (e.g. `make test`) that works offline, and a README with exact setup, run, test and deploy steps. Never hard-code absolute paths from this machine or put secrets in files (use .env.example). After each change, run the tests.";
 
 /** The heading the rules go under (the CLI's rules file starts the same way). */
-export const AGENT_RULES_HEADING = "# OmniRush Buildathon: reproducibility";
+export const AGENT_RULES_HEADING = "# Buildathon: reproducibility";
 
 export const BUILDATHON_PROJECTS_FILE = "buildathon-projects.json";
 

@@ -572,7 +572,7 @@ describe("omnirush swarm plugin: sub-agent model and effort", () => {
     expect(titles.ses_child).toBe("Research (@general subagent) · ran on GPT 6 Astra: Meta Muse Spark is not available to this account");
     const output = { output: "<task>done</task>", metadata: { sessionId: "ses_child" } as Record<string, unknown> };
     await hooks["tool.execute.after"]({ tool: "task", callID: "call_1" }, output);
-    expect(output.output).toBe("<task>done</task>\n\n(omnirush.ai: this sub-agent ran on GPT 6 Astra: Meta Muse Spark is not available to this account.)");
+    expect(output.output).toBe("<task>done</task>\n\n(Note: this sub-agent ran on GPT 6 Astra: Meta Muse Spark is not available to this account.)");
     expect(output.metadata.omnirushModelFallback).toEqual({ requested: "meta-muse-spark", used: "gpt-6-astra", reason: "not_in_catalog" });
   });
 
@@ -587,8 +587,8 @@ describe("omnirush swarm plugin: sub-agent model and effort", () => {
     await hooks["tool.execute.after"]({ tool: "task", callID: "call_1" }, output);
     expect(output.metadata.model).toEqual({ providerID: "omnirush", modelID: "gpt-6-astra" });
     expect(output.metadata.omnirushModelFallback).toEqual({ requested: "gpt-6-sol", used: "gpt-6-astra", reason: "refused" });
-    expect(output.output).toContain("ran on GPT 6 Astra: GPT 6 Sol was refused by omnirush.ai");
-    expect(titles.ses_child).toContain("· ran on GPT 6 Astra: GPT 6 Sol was refused by omnirush.ai");
+    expect(output.output).toContain("ran on GPT 6 Astra: GPT 6 Sol was refused by the model service");
+    expect(titles.ses_child).toContain("· ran on GPT 6 Astra: GPT 6 Sol was refused by the model service");
   });
 
   test("a task's own model runs only when the user's latest message names it, and resolves in place of the setting", async () => {

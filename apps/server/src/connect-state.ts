@@ -115,12 +115,12 @@ function normalizeConnectState(value: Record<string, unknown>): PersistedConnect
 export function googleWorkspaceConnectGuidance(cloudHealthOrReady: CloudMcpHealth | boolean | null): string {
   const usable = typeof cloudHealthOrReady === "boolean" ? cloudHealthOrReady : cloudHealthOrReady?.usable === true;
   if (usable) {
-    return "Google Workspace is available through the OmniRush.ai Cloud connection: call search_capabilities to find the capability, then execute_capability to run it. Do not tell the user to reconfigure extensions; the relevant settings surface is Settings > Connect.";
+    return "Google Workspace is available through the Cloud connection: call search_capabilities to find the capability, then execute_capability to run it. Do not tell the user to reconfigure extensions; the relevant settings surface is Settings > Connect.";
   }
   if (cloudHealthOrReady && typeof cloudHealthOrReady !== "boolean" && cloudHealthOrReady.desired.present) {
     const failure = cloudHealthOrReady.firstFailure;
     const suffix = failure ? ` Current health check: ${failure.code}.` : "";
-    return `Google Workspace is connected through OmniRush.ai Connect, but agent access needs attention for this workspace. Direct the user to Settings > Connect.${suffix}`;
+    return `Google Workspace is connected through Connect, but agent access needs attention for this workspace. Direct the user to Settings > Connect.${suffix}`;
   }
   return "Google Workspace is not connected on this device. Direct the user to Settings > Connect to connect their account. Do not direct them to Settings > Extensions.";
 }

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -345,9 +345,9 @@ describe("omnirush runtime config file", () => {
     const agent = parsed.agent as Record<string, { prompt?: string }>;
     const prompt = agent.omnirush?.prompt ?? "";
 
-    expect(prompt.startsWith("You are omnirush.ai.")).toBe(true);
+    expect(prompt.startsWith("You are the user's coding assistant.")).toBe(true);
     expect(prompt).toContain("## Memory\n");
-    expect(prompt).toContain("## OmniRush.ai Artifacts");
+    expect(prompt).toContain("## Artifacts");
     expect(prompt).toContain("## Connected work");
     expect(prompt).toContain("Split real work: for a task of more than a few tool calls, start one sub-agent per independent part in one message");
     expect(prompt).toContain("make exactly that many task-tool calls, no more and no fewer, and start them all in one message");
@@ -361,8 +361,8 @@ describe("omnirush runtime config file", () => {
     expect(prompt).not.toContain("getMemorySearch");
     // Connect tool names appear exactly once each, in the base prompt's own
     // routing paragraph; the diagnostics prompt markers key on them.
-    expect(prompt.match(/omnirush-cloud_search_capabilities/g)).toHaveLength(1);
-    expect(prompt.match(/omnirush-cloud_execute_capability/g)).toHaveLength(1);
+    expect(prompt.match(/search_capabilities/g)).toHaveLength(1);
+    expect(prompt.match(/execute_capability/g)).toHaveLength(1);
     expect(prompt).not.toContain("2-4 keyword variants");
     // Skill capture defers to the runtime skill-authoring mode instead of
     // contradicting it with a workspace-only default.
@@ -413,10 +413,10 @@ describe("omnirush runtime config file", () => {
     expect(OMNIRUSH_SWARM_SKILL).toContain("Sub-agents do their own task themselves");
     expect(OMNIRUSH_SWARM_SKILL).toContain("never the user's whole message or instructions about sub-agents");
     // Sub-agents use the board tool instead of reading the whole board, and
-    // omnirush.ai (not the model) clears the board when the turn ends.
+    // the app (not the model) clears the board when the turn ends.
     expect(OMNIRUSH_SWARM_SKILL).toContain(`use the \`${OMNIRUSH_SWARM_TOOL_NAME}\` tool with your task id`);
     expect(OMNIRUSH_SWARM_SKILL).toContain("do not read or edit the board file");
-    expect(OMNIRUSH_SWARM_SKILL).toContain("omnirush.ai does that when the turn ends");
+    expect(OMNIRUSH_SWARM_SKILL).toContain("the app does that when the turn ends");
     const { data, body } = parseFrontmatter(omnirushSwarmSkillMarkdown());
     expect(data.name).toBe(OMNIRUSH_SWARM_SKILL_NAME);
     expect(String(data.description)).toContain("Required before starting 3 or more sub-agents for implementation work");
@@ -519,10 +519,46 @@ describe("omnirush runtime config file", () => {
     expect(await readConfigFile(config)).toMatchObject({ skills: { paths: [omnirushRuntimeSkillsDir(config)] } });
   });
 
+  test("skills written under their earlier names are removed; user files next to them stay", async () => {
+    const { config } = await setup();
+    const swarmDir = omnirushRuntimeSkillsDir(config);
+    const bestDir = omnirushBestPracticesSkillsDir(config);
+    const oldSwarm = join(swarmDir, "omnirush-swarm");
+    const oldGuide = join(bestDir, "omnirush-build");
+    const keptGuide = join(bestDir, "omnirush-debug");
+    const userSkill = join(swarmDir, "omnirush-notes");
+    await mkdir(oldSwarm, { recursive: true });
+    await writeFile(join(oldSwarm, "SKILL.md"), "---\nname: omnirush-swarm\ndescription: old\n---\n\nold\n", "utf8");
+    await mkdir(oldGuide, { recursive: true });
+    await writeFile(join(oldGuide, "SKILL.md"), "---\nname: omnirush-build\ndescription: old\n---\n\nold\n", "utf8");
+    // A folder with the user's own file next to the old guide keeps that file.
+    await mkdir(keptGuide, { recursive: true });
+    await writeFile(join(keptGuide, "SKILL.md"), "---\nname: omnirush-debug\ndescription: old\n---\n", "utf8");
+    await writeFile(join(keptGuide, "notes.md"), "mine\n", "utf8");
+    // A skill the user wrote under an old-looking name but a different declared name stays.
+    await mkdir(userSkill, { recursive: true });
+    await writeFile(join(userSkill, "SKILL.md"), "---\nname: my-notes\n---\n", "utf8");
+    await writeOmniRushRuntimeConfigFile(config);
+    expect(await stat(oldSwarm).then(() => true, () => false)).toBe(false);
+    expect(await stat(oldGuide).then(() => true, () => false)).toBe(false);
+    expect(await stat(join(keptGuide, "SKILL.md")).then(() => true, () => false)).toBe(false);
+    expect(await readFile(join(keptGuide, "notes.md"), "utf8")).toBe("mine\n");
+    expect(await readFile(join(userSkill, "SKILL.md"), "utf8")).toBe("---\nname: my-notes\n---\n");
+    expect(await readFile(join(swarmDir, OMNIRUSH_SWARM_SKILL_NAME, "SKILL.md"), "utf8")).toBe(omnirushSwarmSkillMarkdown());
+    expect(OMNIRUSH_SWARM_SKILL_NAME).toBe("agent-swarm");
+    expect(OMNIRUSH_BEST_PRACTICES.skills.map((skill) => skill.name)).toEqual([
+      "project-build", "project-debug", "project-feature", "project-handoff", "project-performance",
+      "project-refactor", "project-review", "project-setup", "project-test",
+    ]);
+    for (const skill of OMNIRUSH_BEST_PRACTICES.skills) {
+      expect(await readFile(join(bestDir, skill.name, "SKILL.md"), "utf8")).toBe(skill.content);
+    }
+  });
+
   test("live apply waits for both native prompt and owned skill readiness, and times out honestly", async () => {
     const { root, config } = await setup();
     const owned = OMNIRUSH_BEST_PRACTICES.skills.map((skill) => ({ name: skill.name, location: join(omnirushBestPracticesSkillsDir(config), skill.name, "SKILL.md") }));
-    const user = { name: "omnirush-feature", location: join(root, ".opencode", "skills", "omnirush-feature", "SKILL.md") };
+    const user = { name: "project-feature", location: join(root, ".opencode", "skills", "project-feature", "SKILL.md") };
     const stale = { agents: [{ name: "omnirush", prompt: `${OMNIRUSH_AGENT_PROMPT}\n\n${OMNIRUSH_BEST_PRACTICES.systemPrompt}` }], skills: [...owned, user] };
     const promptReady = { agents: [{ name: "omnirush", prompt: OMNIRUSH_AGENT_PROMPT }], skills: [...owned, user] };
     const allReady = { agents: promptReady.agents, skills: [user] };

@@ -1,6 +1,6 @@
 /** Static import: Node builds and compiled Bun binaries carry the same pack. */
 import bundle from "./bundled-best-practices.json" with { type: "json" };
-import { mkdir, readFile, realpath } from "node:fs/promises";
+import { mkdir, readFile, realpath, rm, rmdir } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writeFileAtomic } from "./atomic-write.js";
@@ -77,6 +77,32 @@ export async function waitForBestPracticesReady(input: {
     await new Promise((resolve) => setTimeout(resolve, Math.min(input.intervalMs ?? 100, remaining)));
   }
   throw new Error("Best practices engine readiness was not observed");
+}
+
+/** Guide names earlier versions wrote into the best-practices folder (renamed in 3.6). */
+export const LEGACY_BEST_PRACTICES_SKILL_NAMES = [
+  "omnirush-build", "omnirush-debug", "omnirush-feature", "omnirush-handoff", "omnirush-performance",
+  "omnirush-refactor", "omnirush-review", "omnirush-setup", "omnirush-test",
+] as const;
+
+/**
+ * Removes a skill folder the app itself generated under an old name: only its
+ * SKILL.md, and only when that file still declares the old name; the folder
+ * goes only once empty, so anything a user put next to it stays.
+ */
+export async function removeGeneratedSkill(root: string, name: string): Promise<void> {
+  const directory = join(root, name);
+  const path = join(directory, "SKILL.md");
+  const content = await readFile(path, "utf8").catch(() => undefined);
+  if (content === undefined || !content.replace(/\r\n/g, "\n").startsWith(`---\nname: ${name}\n`)) return;
+  await rm(path, { force: true });
+  await rmdir(directory).catch(() => undefined);
+}
+
+/** Drops the guides earlier versions wrote under their old names, so the engine no longer lists them. */
+export async function removeLegacyBestPracticesSkills(config: ServerConfig): Promise<void> {
+  const root = omnirushBestPracticesSkillsDir(config);
+  await Promise.all(LEGACY_BEST_PRACTICES_SKILL_NAMES.map((name) => removeGeneratedSkill(root, name)));
 }
 
 /** Only bundled bytes are written; no workspace, private inputs, or network. */

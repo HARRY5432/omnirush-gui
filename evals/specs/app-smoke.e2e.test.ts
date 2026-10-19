@@ -35,10 +35,10 @@ test("app boots with a control route and meaningful visible content", async ({ w
     expect(sessions.status).toBe(200);
     expect(sessions.body).toEqual([]);
     const tools = await world.packagedToolIds();
-    expect(tools).toEqual(expect.arrayContaining(["omnirush_docs_search", "omnirush_query"]));
+    expect(tools).toEqual(expect.arrayContaining(["app_docs_search", "app_query"]));
     evidence.recordAssertionEvidence(
       "The packaged engine loads OmniRush.ai Connect canary tools",
-      "The automatically selected default workspace exposes omnirush_docs_search and omnirush_query through the real engine tool registry without test-driven workspace creation or engine startup. The engine resolves the shipped plugins outside app.asar without repository dependencies.",
+      "The automatically selected default workspace exposes app_docs_search and app_query through the real engine tool registry without test-driven workspace creation or engine startup. The engine resolves the shipped plugins outside app.asar without repository dependencies.",
       true,
     );
     evidence.recordAssertionEvidence(

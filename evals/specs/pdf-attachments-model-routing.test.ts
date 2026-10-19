@@ -95,10 +95,10 @@ test("each model receives an attached PDF in the form it can take, and the trans
   expect(read.requests[1].parts.some((part) => part.startsWith("file:") || part.startsWith("image_url:"))).toBe(false);
   expect(read.reply).toBe(MOCK_REPLY);
   expect(read.persistedAttachments).toEqual(["application/pdf"]);
-  expect(world.requests.every((request) => request.tools.includes("omnirush_pdf_pages"))).toBe(true);
+  expect(world.requests.every((request) => request.tools.includes("pdf_pages"))).toBe(true);
   evidence.recordAssertionEvidence(
     "A text-only model that reads a PDF from disk through the Read tool receives its text instead of a PDF it cannot take, and the persisted tool result keeps the original attachment",
-    `The mock model asked the engine to read ${ON_DISK_PDF}; the follow-up request carried one tool result containing the OmniRush.ai PDF note and no file or image parts, the turn completed, and the transcript's tool part still holds an application/pdf attachment. Every request advertised the omnirush_pdf_pages tool.`,
+    `The mock model asked the engine to read ${ON_DISK_PDF}; the follow-up request carried one tool result containing the OmniRush.ai PDF note and no file or image parts, the turn completed, and the transcript's tool part still holds an application/pdf attachment. Every request advertised the pdf_pages tool.`,
     true,
   );
 

@@ -207,6 +207,8 @@ describe("git workflow command classification", () => {
     expect(markDestructiveCommands("echo $(git reset --hard) | cat").command).toBe(`echo $(${DESTRUCTIVE_MARKER} git reset --hard) | cat`);
     expect(markDestructiveCommands("git commit -m 'x'").command).toBe("git commit -m 'x'");
     expect(stripDestructiveMarkers(`${DESTRUCTIVE_MARKER} git status`)).toBe("git status");
+    expect(DESTRUCTIVE_MARKER).not.toMatch(/omni\s*rush/i);
+    expect(markDestructiveCommands("OMNIRUSH_DESTRUCTIVE=1 git push -f").command).toBe(`${DESTRUCTIVE_MARKER} git push -f`);
     expect(markDestructiveCommands(`${DESTRUCTIVE_MARKER} git status`).command).toBe("git status");
     expect(markDestructiveCommands(`${DESTRUCTIVE_MARKER} ${DESTRUCTIVE_MARKER} git push -f`).command).toBe(`${DESTRUCTIVE_MARKER} git push -f`);
   });

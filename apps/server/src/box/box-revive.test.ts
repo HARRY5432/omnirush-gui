@@ -86,7 +86,7 @@ describe("box revive", () => {
       writeFileSync(request, "{}");
       expect(await until(() => !existsSync(request))).toBe(true);
       expect((run.box as unknown as FakeBox).failed).toContain("could not start again (boxd did not answer in 30s)");
-      expect((run.box as unknown as FakeBox).failed).toContain("Restart OmniRush");
+      expect((run.box as unknown as FakeBox).failed).toContain("Restart the app");
       expect(await run.freeze("turn-2", { sessionId: "s1", turn: 2 })).toBeNull();
       expect(plan.restarts).toBe(2);
       expect(said.length).toBe(1);
@@ -117,7 +117,7 @@ describe("box revive", () => {
   test("reviveError names why and what to do", () => {
     const text = reviveError("dial tcp 127.0.0.1:44897: connect: connection refused");
     expect(text.startsWith("the sandbox stopped and could not start again (dial tcp 127.0.0.1:44897: connect: connection refused).")).toBe(true);
-    expect(text).toContain("Restart OmniRush (installs are kept)");
+    expect(text).toContain("Restart the app (installs are kept)");
     expect(reviveError("")).toContain("(it did not answer)");
   });
 

@@ -340,7 +340,7 @@ export const REVIVE_POLL_MS = 400;
 /** The record's error when boxd stopped and could not start again: why, and what the user can do. */
 export function reviveError(error: string | null | undefined): string {
   const why = String(error || "it did not answer").replace(/\s+/g, " ").slice(0, 240);
-  return `the sandbox stopped and could not start again (${why}). Restart OmniRush (installs are kept), reset this folder's sandbox for a fresh one, or turn the sandbox off for this folder to run it on this computer`;
+  return `the sandbox stopped and could not start again (${why}). Restart the app (installs are kept), reset this folder's sandbox for a fresh one, or turn the sandbox off for this folder to run it on this computer`;
 }
 
 /** Turn the record off (the project went on without the box). */

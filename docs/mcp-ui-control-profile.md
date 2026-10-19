@@ -49,7 +49,7 @@ This may navigate OmniRush.ai away from the user's current session while the loo
 
 ### OmniRush.ai agents
 
-Inside OmniRush.ai, agents control the app through the semantic tools (`omnirush_context`, `omnirush_query`, `omnirush_execute`) using affordance ids from context. External MCP clients can also use the hidden **OmniRush.ai UI Control** MCP via **Settings -> Extensions -> Show hidden**.
+Inside OmniRush.ai, agents control the app through the semantic tools (`app_context`, `app_query`, `app_execute`) using affordance ids from context. External MCP clients can also use the hidden **OmniRush.ai UI Control** MCP via **Settings -> Extensions -> Show hidden**.
 
 ## Install
 

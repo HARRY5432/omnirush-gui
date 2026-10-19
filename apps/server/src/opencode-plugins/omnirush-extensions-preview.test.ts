@@ -343,7 +343,7 @@ describe("OmniRushExtensionsPreview session tools", () => {
       },
     });
 
-    const output = await plugin.tool.omnirush_context.execute();
+    const output = await plugin.tool.app_context.execute();
     const parsed = z.object({
       context: z.object({
         contributions: z.array(z.object({
@@ -392,7 +392,7 @@ describe("OmniRushExtensionsPreview session tools", () => {
     startFakeOmniRushServer();
     const plugin = await OmniRushExtensionsPreview();
 
-    const output = await plugin.tool.omnirush_query.execute({
+    const output = await plugin.tool.app_query.execute({
       id: "session.read",
       args: { sessionId: "ses_archive", count: 2 },
     });
@@ -415,7 +415,7 @@ describe("OmniRushExtensionsPreview session tools", () => {
     startFakeOmniRushServer();
     const plugin = await OmniRushExtensionsPreview();
 
-    const output = await plugin.tool.omnirush_query.execute({
+    const output = await plugin.tool.app_query.execute({
       id: "session.read",
       args: { sessionId: "ses_foreign", count: 2 },
     });
@@ -429,7 +429,7 @@ describe("OmniRushExtensionsPreview session tools", () => {
     const fake = startFakeOmniRushServer();
     const plugin = await OmniRushExtensionsPreview();
 
-    const output = await plugin.tool.omnirush_query.execute({
+    const output = await plugin.tool.app_query.execute({
       id: "session.search",
       args: {
         query: "raven launch",
@@ -455,7 +455,7 @@ describe("OmniRushExtensionsPreview session tools", () => {
     const fake = startFakeOmniRushServer({ failSessionListWorkspaceId: "ws_2" });
     const plugin = await OmniRushExtensionsPreview();
 
-    const output = await plugin.tool.omnirush_query.execute({
+    const output = await plugin.tool.app_query.execute({
       id: "session.search",
       args: { query: "raven launch", scanLimit: 10 },
     });
@@ -526,10 +526,10 @@ describe("OmniRushExtensionsPreview session tools", () => {
 
     expect(requests).toEqual([{ query: { directory: "/tmp/archive" } }]);
     expect(output.system).toHaveLength(1);
-    // Branded identity leads, followed by app-control mechanics and live steering.
-    expect(output.system[0].startsWith("## OmniRush.ai identity")).toBe(true);
-    expect(output.system[0]).toContain("## OmniRush.ai app context");
-    expect(output.system[0].indexOf("## OmniRush.ai identity")).toBeLessThan(output.system[0].indexOf("## OmniRush.ai app context"));
+    // Identity leads, followed by app-control mechanics and live steering.
+    expect(output.system[0].startsWith("## Assistant identity")).toBe(true);
+    expect(output.system[0]).toContain("## App context");
+    expect(output.system[0].indexOf("## Assistant identity")).toBeLessThan(output.system[0].indexOf("## App context"));
     expect(output.system[0]).toContain(OMNIRUSH_EXTENSION_DISCOVERY_INSTRUCTION);
     expect(output.system[0].indexOf("## Built-in Browser")).toBeLessThan(output.system[0].indexOf(OMNIRUSH_EXTENSION_DISCOVERY_INSTRUCTION));
     expect(output.system[0]).toContain(OMNIRUSH_LOCAL_SKILL_AUTHORING_INSTRUCTION);
@@ -560,7 +560,7 @@ describe("OmniRushExtensionsPreview session tools", () => {
     const fake = startFakeOmniRushServer();
     const plugin = await OmniRushExtensionsPreview();
 
-    const output = await plugin.tool.omnirush_query.execute({
+    const output = await plugin.tool.app_query.execute({
       id: "session.read",
       args: { sessionId: "ses_archive", count: 2 },
     });
@@ -588,7 +588,7 @@ describe("OmniRushExtensionsPreview session tools", () => {
     const fake = startFakeOmniRushServer();
     const plugin = await OmniRushExtensionsPreview({ directory: "/tmp/archive" });
 
-    const output = await plugin.tool.omnirush_execute.execute({
+    const output = await plugin.tool.app_execute.execute({
       id: "session.create",
       args: {
         sessions: [
@@ -636,7 +636,7 @@ describe("OmniRushExtensionsPreview session tools", () => {
     const fake = startFakeOmniRushServer();
     const plugin = await OmniRushExtensionsPreview({ directory: "/tmp/archive" });
 
-    const output = await plugin.tool.omnirush_execute.execute({
+    const output = await plugin.tool.app_execute.execute({
       id: "session.create",
       args: { sessions: [{ title: "Look into dolphins", prompt: "Research dolphins." }] },
     }, { sessionID: "ses_origin" });
@@ -665,7 +665,7 @@ describe("OmniRushExtensionsPreview session tools", () => {
     const fake = startFakeOmniRushServer({ failPromptText: "Fail this prompt." });
     const plugin = await OmniRushExtensionsPreview({ directory: "/tmp/archive" });
 
-    await plugin.tool.omnirush_execute.execute({
+    await plugin.tool.app_execute.execute({
       id: "session.create",
       args: { sessions: [{ title: "Prompt failure", prompt: "Fail this prompt." }] },
     }, { sessionID: "ses_origin" });
@@ -686,7 +686,7 @@ describe("OmniRushExtensionsPreview session tools", () => {
     const fake = startFakeOmniRushServer();
     const plugin = await OmniRushExtensionsPreview({ directory: "/tmp/archive" });
 
-    await expect(plugin.tool.omnirush_execute.execute({
+    await expect(plugin.tool.app_execute.execute({
       id: "session.create",
       args: { workspaceId: "ws_missing", sessions: [{ title: "Nowhere", prompt: "Research nothing." }] },
     }, { sessionID: "ses_origin" })).rejects.toThrow("No workspace matched ws_missing");
@@ -699,7 +699,7 @@ describe("OmniRushExtensionsPreview session tools", () => {
     const fake = startFakeOmniRushServer();
     const plugin = await OmniRushExtensionsPreview({ directory: "/tmp/archive" });
 
-    await plugin.tool.omnirush_execute.execute({
+    await plugin.tool.app_execute.execute({
       id: "browser.open_url",
       args: { url: "https://example.com" },
       // An agent cannot claim to be another conversation.
@@ -725,7 +725,7 @@ describe("OmniRushExtensionsPreview session tools", () => {
     const fake = startFakeOmniRushServer({ failPromptText: "Fail this prompt." });
     const plugin = await OmniRushExtensionsPreview({ directory: "/tmp/archive" });
 
-    const output = await plugin.tool.omnirush_execute.execute({
+    const output = await plugin.tool.app_execute.execute({
       id: "session.create",
       args: { sessions: [{ title: "Prompt failure", prompt: "Fail this prompt." }] },
     }, { sessionID: "ses_origin" });
@@ -749,7 +749,7 @@ describe("OmniRushExtensionsPreview session tools", () => {
       prompt: `Research topic ${index + 1}.`,
     }));
 
-    const output = await plugin.tool.omnirush_execute.execute({
+    const output = await plugin.tool.app_execute.execute({
       id: "session.create",
       args: { sessions },
     }, { sessionID: "ses_origin" });
@@ -769,10 +769,10 @@ describe("OmniRushExtensionsPreview semantic tool surface", () => {
     const tools = Object.keys(plugin.tool).sort();
 
     expect(tools).toEqual([
-      "omnirush_context",
-      "omnirush_execute",
-      "omnirush_query",
-      "omnirush_visualization",
+      "app_context",
+      "app_execute",
+      "app_query",
+      "app_visualization",
       "webmcp_call_tool",
       "webmcp_list_tools",
     ]);
@@ -784,8 +784,8 @@ describe("OmniRushExtensionsPreview semantic tool surface", () => {
     expect(system).not.toContain("omnirush_session_");
     expect(system).not.toContain("omnirush_extension_");
     expect(system).not.toContain("omnirush_browser_");
-    expect(system).toContain("Use omnirush_context");
-    expect(system).toContain("use omnirush_visualization");
+    expect(system).toContain("Use app_context");
+    expect(system).toContain("use app_visualization");
     expect(system).toContain("session.search");
     expect(system).toContain("Start with browser_tabs");
     expect(system).toContain("Use webmcp_list_tools with the chosen tabId");
@@ -843,12 +843,12 @@ describe("OmniRushExtensionsPreview semantic tool surface", () => {
         { kind: "text", label: "Note", value: "<script>alert(1)</script>" },
       ] }],
     };
-    expect(JSON.parse(await plugin.tool.omnirush_visualization.execute(design))).toEqual(design);
+    expect(JSON.parse(await plugin.tool.app_visualization.execute(design))).toEqual(design);
     expect(fake.requests).toHaveLength(0);
-    await expect(plugin.tool.omnirush_visualization.execute({ ...design, sections: [] })).rejects.toThrow();
-    await expect(plugin.tool.omnirush_visualization.execute({ ...design, revision: 0 })).rejects.toThrow();
-    await expect(plugin.tool.omnirush_visualization.execute({ ...design, sections: Array(9).fill(design.sections[0]) })).rejects.toThrow();
-    await expect(plugin.tool.omnirush_visualization.execute({ ...design, sections: [{ title: "Unsafe", blocks: [{ kind: "html", label: "Code" }] }] })).rejects.toThrow();
+    await expect(plugin.tool.app_visualization.execute({ ...design, sections: [] })).rejects.toThrow();
+    await expect(plugin.tool.app_visualization.execute({ ...design, revision: 0 })).rejects.toThrow();
+    await expect(plugin.tool.app_visualization.execute({ ...design, sections: Array(9).fill(design.sections[0]) })).rejects.toThrow();
+    await expect(plugin.tool.app_visualization.execute({ ...design, sections: [{ title: "Unsafe", blocks: [{ kind: "html", label: "Code" }] }] })).rejects.toThrow();
     expect(fake.requests).toHaveLength(0);
   });
 
@@ -856,7 +856,7 @@ describe("OmniRushExtensionsPreview semantic tool surface", () => {
     const fake = startFakeOmniRushServer();
     const plugin = await OmniRushExtensionsPreview({ directory: "/tmp/archive" });
 
-    const output = await plugin.tool.omnirush_execute.execute({
+    const output = await plugin.tool.app_execute.execute({
       id: "automation.propose",
       args: {
         name: "Morning Slack check",
@@ -884,7 +884,7 @@ describe("OmniRushExtensionsPreview semantic tool surface", () => {
   test("discards a model-supplied workspaceId and pins the conversation's workspace", async () => {
     const plugin = await OmniRushExtensionsPreview({ directory: "/tmp/archive", workspaceId: "ws_conversation" });
 
-    const output = await plugin.tool.omnirush_execute.execute({
+    const output = await plugin.tool.app_execute.execute({
       id: "automation.propose",
       args: {
         name: "Morning Slack check",
@@ -903,7 +903,7 @@ describe("OmniRushExtensionsPreview semantic tool surface", () => {
   test("rejects a proposal whose schedule is not a supported kind", async () => {
     const plugin = await OmniRushExtensionsPreview({ directory: "/tmp/archive" });
 
-    await expect(plugin.tool.omnirush_execute.execute({
+    await expect(plugin.tool.app_execute.execute({
       id: "automation.propose",
       args: {
         name: "Every five minutes",

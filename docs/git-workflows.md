@@ -62,17 +62,17 @@ How it is wired:
 - The engine remembers "Allow for session" by command family, which would
   otherwise cover `git push --force` once a plain `git push` was approved. The
   managed-policy plugin therefore prefixes every destructive command with
-  `OMNIRUSH_DESTRUCTIVE=1` (an ordinary environment assignment). The prompt
+  `DESTRUCTIVE_COMMAND=1` (an ordinary environment assignment). The prompt
   shows the marker, the marked command matches the always-ask rule and never
   the remembered family. The agent is told not to add or remove the marker.
 - The engine parses the command line (tree-sitter) and evaluates every
   `command` node it finds, including the ones inside `if`, `for`, `while`,
   `!`, subshells and `$(...)`. The marker is therefore inserted in front of
-  the command itself, after any reserved word (`if OMNIRUSH_DESTRUCTIVE=1 git
-  push --force; then …`, `! OMNIRUSH_DESTRUCTIVE=1 git push -f`), so the node
+  the command itself, after any reserved word (`if DESTRUCTIVE_COMMAND=1 git
+  push --force; then …`, `! DESTRUCTIVE_COMMAND=1 git push -f`), so the node
   the engine evaluates starts with the marker. For an interpreter the engine
   only sees `bash -c '…'`, so the marker goes in front of the interpreter
-  (`OMNIRUSH_DESTRUCTIVE=1 bash -c 'git push --force'`) and the interpreter
+  (`DESTRUCTIVE_COMMAND=1 bash -c 'git push --force'`) and the interpreter
   families ask once per session like write commands.
 - Heredoc bodies and comments are left untouched: `cat > deploy.sh <<'EOF'`
   followed by `git push --force` on the next line writes exactly that line,
@@ -117,7 +117,7 @@ profile through the account store; a standalone server with
 The rules above are the `guarded` approval mode, the default. Settings >
 General > Approvals > "Full permissions" switches the engine to `full` mode:
 nothing asks. The injected `permission.bash` block becomes a single
-`"*": "allow"` rule (no git ask rules, no `OMNIRUSH_DESTRUCTIVE` marker rule),
+`"*": "allow"` rule (no git ask rules, no `DESTRUCTIVE_COMMAND` marker rule),
 `permission.read` becomes a single `"*": "allow"` rule (so `.env` files, which
 the engine asks about by default, are read without a prompt) and `edit`,
 `webfetch`, `websearch`, `doom_loop` and `external_directory` are set to
@@ -157,7 +157,7 @@ the engine.
   `gh auth git-credential`.
 - A write command asks on every call: answer "Allow for session" once per
   command family; "Allow once" is deliberately single-use.
-- A command shows `OMNIRUSH_DESTRUCTIVE=1` in the approval prompt: the plugin
+- A command shows `DESTRUCTIVE_COMMAND=1` in the approval prompt: the plugin
   classified it as destructive; approve it only if you meant it. "Allow for
   session" on such a prompt approves the plain family (for example `git push`)
   but destructive variants keep asking.

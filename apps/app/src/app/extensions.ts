@@ -160,7 +160,7 @@ export const BUILT_IN_OMNIRUSH_EXTENSION_MANIFESTS: OmniRushExtensionManifest[] 
     description: "Automate the built-in browser panel that stays visible inside omnirush.ai.",
     source: { format: "omnirush-builtin", origin: "builtin", trusted: true },
     icon: { src: "/omnirush-mark.png" },
-    composer: { prompt: "Use the omnirush.ai Browser extension to " },
+    composer: { prompt: "Use the built-in Browser extension to " },
     setup: {
       instructions: "omnirush.ai Browser is ready by default in desktop workspaces.",
     },
@@ -175,7 +175,7 @@ export const BUILT_IN_OMNIRUSH_EXTENSION_MANIFESTS: OmniRushExtensionManifest[] 
     contributions: [
       { type: "settings-panel", ref: "omnirush.browser.settings", location: "settings-detail" },
       { type: "session-side-panel", ref: "omnirush.browser.panel", location: "session-right-pane" },
-      { type: "composer-prompt", prompt: "Use the omnirush.ai Browser extension to ", location: "composer" },
+      { type: "composer-prompt", prompt: "Use the built-in Browser extension to ", location: "composer" },
     ],
     enablement: [
       { type: "toggle-enabled", ref: "omnirush-browser", label: "Enabled" },

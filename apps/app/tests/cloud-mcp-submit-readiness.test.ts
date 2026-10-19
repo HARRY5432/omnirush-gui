@@ -93,7 +93,7 @@ function health(input?: {
         missing: projectionPresent.length ? [] : ["omnirush-cloud_search_capabilities", "omnirush-cloud_execute_capability"],
       },
     },
-    pluginCanaries: { expected: ["omnirush_docs_search"], present: usable ? ["omnirush_docs_search"] : [], missing: usable ? [] : ["omnirush_docs_search"] },
+    pluginCanaries: { expected: ["app_docs_search"], present: usable ? ["app_docs_search"] : [], missing: usable ? [] : ["app_docs_search"] },
     compatibility: {
       omnirush: { serverVersion: "test", app: null },
       opencode: { expectedVersion: "test", actualVersion: "test", probe: "ok" },

@@ -76,7 +76,7 @@ describe("ensureWorkspaceFiles", () => {
     const pluginPath = omnirushExtensionsPreviewPluginPath();
     const plugin = await readFile(pluginPath, "utf8");
     expect(pluginPath).toContain(join("opencode-plugins", "omnirush-extensions-preview.ts"));
-    expect(plugin).toContain("omnirush_execute");
+    expect(plugin).toContain("app_execute");
   });
 
   test("uses external resources plugin path in packaged Electron", () => {
