@@ -11,17 +11,16 @@ class MemoryStorage {
 }
 
 const storage = new MemoryStorage();
-const recorded: Array<{ name: string; data: unknown }> = [];
 Object.defineProperty(globalThis, "window", {
   configurable: true,
-  value: {
-    localStorage: storage,
-    addEventListener: () => undefined,
-    __omnirush: { record: (name: string, data: unknown) => recorded.push({ name, data }) },
-  },
+  value: { localStorage: storage, addEventListener: () => undefined },
 });
+type Inspector = { events: (limit?: number) => Array<{ name: string }>; clearEvents: () => void };
+const inspector = () => (window as unknown as { __omnirush: Inspector }).__omnirush;
+const recordedNames = () => inspector().events(500).map((entry) => entry.name);
 
 const analytics = await import("../src/app/lib/analytics");
+const { ensureInspectorInstalled } = await import("../src/app/lib/app-inspector");
 const { gatewayRefusalEvent } = await import("../src/app/lib/gateway-refusal");
 const { reportSandboxFallback, sandboxFallbackProperties } = await import("../src/react-app/domains/settings/linux-sandbox");
 
@@ -35,7 +34,8 @@ const realFetch = globalThis.fetch;
 
 beforeEach(() => {
   storage.clear();
-  recorded.length = 0;
+  ensureInspectorInstalled();
+  inspector().clearEvents();
   sent = [];
   analytics.disposeAnalytics();
   analytics.configureAnalyticsForTests({ key: NEW_KEY, host: "http://127.0.0.1:9/", appVersion: "3.5.8" });
@@ -94,7 +94,7 @@ describe("analytics identity", () => {
     analytics.captureAnalyticsEvent("app_opened", {});
     const batch = await flushed();
     expect(batch.at(-1)!.distinct_id).toBe(analytics.getAnalyticsDistinctId());
-    expect(recorded.some((entry) => entry.name === "analytics.$reset")).toBe(true);
+    expect(recordedNames()).toContain("analytics.$reset");
   });
 
   test("syncAnalyticsAccount follows the account status", () => {
@@ -115,7 +115,7 @@ describe("analytics identity", () => {
     await analytics.flushAnalytics();
     expect(sent).toEqual([]);
     expect(analytics.isAnalyticsActive()).toBe(false);
-    expect(recorded.map((entry) => entry.name)).toContain("analytics.app_opened");
+    expect(recordedNames()).toContain("analytics.app_opened");
   });
 
   test("always on when a key is set: the old preference no longer turns it off", async () => {
