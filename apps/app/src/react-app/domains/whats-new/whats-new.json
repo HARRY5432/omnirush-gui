@@ -3,14 +3,22 @@
   "schema": 1,
   "cli": [
     {
+      "version": "2.6.3",
+      "date": "2026-10-20",
+      "new": [
+        "See what changed in each release with `/changelog` or `omnirush changelog`, and a short note after each update."
+      ],
+      "improved": [],
+      "fixed": []
+    },
+    {
       "version": "2.6.2",
       "date": "2026-10-20",
       "new": [
         "Permission modes: Careful asks before every change and command, Normal asks only before risky actions, Auto never asks. Switch with `/permissions` or `omnirush permissions <mode>`.",
         "Answer approval questions with one key: y allows once, a always, n rejects.",
         "A notification when a task finishes or waits for you while the terminal is in the background. Change it with `omnirush notify`.",
-        "The Figma MCP server can be used with the key from your own environment; in Normal mode only its read tools run without asking.",
-        "See what changed in each release with `/changelog` or `omnirush changelog`."
+        "The Figma MCP server can be used with the key from your own environment; in Normal mode only its read tools run without asking."
       ],
       "improved": [],
       "fixed": [
@@ -163,6 +171,15 @@
   ],
   "desktop": [
     {
+      "version": "3.6.4",
+      "date": "2026-10-20",
+      "new": [
+        "What's new: see what changed in each release from the sidebar, the Help menu or the command palette, and a short note after each update."
+      ],
+      "improved": [],
+      "fixed": []
+    },
+    {
       "version": "3.6.3",
       "date": "2026-10-20",
       "new": [
@@ -170,8 +187,7 @@
         "Permission modes: Careful asks before every change and command, Normal asks only before risky actions, Auto never asks. Pick one in the composer or in Settings.",
         "Answer approvals from the keyboard: Y allows once, A for this chat, N denies.",
         "Notifications when a task finishes or needs your approval while the window is in the background.",
-        "The Figma MCP server can be used with the key from your own environment; in Normal mode only its read tools run without asking.",
-        "What's new in the sidebar, the Help menu and the command palette."
+        "The Figma MCP server can be used with the key from your own environment; in Normal mode only its read tools run without asking."
       ],
       "improved": [
         "The chat works better when narrow: header actions fold into a menu, approval buttons wrap and the quality check stays readable.",
@@ -182,7 +198,8 @@
         "Skills you added are kept across updates, and skills lost in earlier updates are found again.",
         "The question about wrapping up a chat is asked once instead of coming back.",
         "Code from a project's own settings (plugins, tools, formatter and language-server commands) no longer runs on its own.",
-        "Chats are never sent to a sharing service."
+        "Chats are never sent to a sharing service.",
+        "The approval buttons fit in a narrow chat."
       ]
     },
     {
