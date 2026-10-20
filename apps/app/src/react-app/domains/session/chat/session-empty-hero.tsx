@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Zap } from "lucide-react";
 
 import type { ComposerAttachment } from "@/app/types";
@@ -89,6 +89,19 @@ export function SessionEmptyHero(props: SessionEmptyHeroProps) {
     if ((!trimmedPrompt && !attachments.length) || props.busy) return;
     return props.onRunTask(trimmedPrompt, attachments, handoff);
   };
+
+  // The editor's "Ask about selection" / "Fix with agent" before any chat exists: appended to the draft.
+  useEffect(() => {
+    const onPrefill = (event: Event) => {
+      const text = (event as CustomEvent<string>).detail;
+      if (typeof text !== "string" || !text) return;
+      event.preventDefault();
+      setPrompt((value) => (value.trim() ? `${value.replace(/\s+$/, "")}\n\n${text}` : text));
+      window.setTimeout(() => window.dispatchEvent(new Event("omnirush:focusPrompt")), 50);
+    };
+    window.addEventListener("omnirush:new-task-prefill", onPrefill);
+    return () => window.removeEventListener("omnirush:new-task-prefill", onPrefill);
+  }, []);
 
   return (
     <div className="mx-auto w-full max-w-[640px] space-y-4 px-4 max-lg:px-4 sm:px-6">
