@@ -211,7 +211,7 @@ export function SettingsBetaBadge({ className }: { className?: string }) {
   return (
     <span
       className={cn(
-        "shrink-0 rounded-full border border-amber-6/40 bg-amber-3/60 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-amber-11",
+        "shrink-0 rounded-full border border-amber-6/40 bg-amber-3/60 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-warning",
         className,
       )}
     >

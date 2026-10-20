@@ -58,7 +58,7 @@ const taxonomyStyle: Record<ExtensionTaxonomy, string> = {
   app: "bg-teal-3 text-teal-11",
   connection: "bg-blue-3 text-blue-11",
   mcp: "bg-dls-hover text-dls-secondary",
-  skill: "bg-amber-3 text-amber-11",
+  skill: "bg-amber-3 text-warning",
   command: "bg-orange-3 text-orange-11",
   agent: "bg-pink-3 text-pink-11",
   plugin: "bg-violet-3 text-violet-11",
@@ -131,7 +131,7 @@ function ExtensionBadges(props: {
           {props.connectedLabel}
         </span>
       ) : props.readiness === "partial" ? (
-        <span className="shrink-0 rounded-md bg-amber-3 px-1.5 py-0.5 text-[10px] font-medium text-amber-11">
+        <span className="shrink-0 rounded-md bg-amber-3 px-1.5 py-0.5 text-[10px] font-medium text-warning">
           Partially set up
         </span>
       ) : (
@@ -150,12 +150,12 @@ function ExtensionBadges(props: {
         </span>
       ) : null}
       {props.beta ? (
-        <span className="shrink-0 rounded-md bg-amber-3 px-1.5 py-0.5 text-[10px] font-medium text-amber-11">
+        <span className="shrink-0 rounded-md bg-amber-3 px-1.5 py-0.5 text-[10px] font-medium text-warning">
           {t("common.beta")}
         </span>
       ) : null}
       {props.disabledReason ? (
-        <span className="shrink-0 rounded-md bg-amber-3 px-1.5 py-0.5 text-[10px] font-medium text-amber-11">
+        <span className="shrink-0 rounded-md bg-amber-3 px-1.5 py-0.5 text-[10px] font-medium text-warning">
           Disabled
         </span>
       ) : null}
@@ -275,7 +275,7 @@ export function ExtensionCard(props: ExtensionCardProps) {
           </span>
         ) : null}
         {beta ? (
-          <span className="shrink-0 rounded-md bg-amber-3 px-1.5 py-0.5 text-[10px] font-medium text-amber-11">
+          <span className="shrink-0 rounded-md bg-amber-3 px-1.5 py-0.5 text-[10px] font-medium text-warning">
             {t("common.beta")}
           </span>
         ) : null}
@@ -319,7 +319,7 @@ export function ExtensionCard(props: ExtensionCardProps) {
             <div className="mt-1 text-[11px] text-dls-secondary">{meta}</div>
           ) : null}
           {disabledReason ? (
-            <div className="mt-2 text-[11px] font-medium text-amber-11">
+            <div className="mt-2 text-[11px] font-medium text-warning">
               {disabledReason}
             </div>
           ) : null}

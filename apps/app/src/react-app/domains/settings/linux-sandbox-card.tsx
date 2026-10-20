@@ -39,7 +39,7 @@ const TONE_CLASS: Record<LinuxSandboxView["tone"], string> = {
   off: "text-dls-secondary",
   busy: "text-dls-secondary",
   ready: "text-green-11",
-  attention: "text-amber-11",
+  attention: "text-warning",
   error: "text-red-11",
 };
 

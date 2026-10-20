@@ -151,11 +151,11 @@ export function SubagentRunLine({ part, className, parentActive = true, parentLa
           />
         ) : null}
       </span>
-      <span className={cn("min-w-0 truncate text-xs", permissionPending ? "font-medium text-amber-11" : "text-muted-foreground/70")}>
+      <span className={cn("min-w-0 truncate text-xs", permissionPending ? "font-medium text-warning" : "text-muted-foreground/70")}>
         {status}
         {!inFlight && !isFailed && duration ? ` · ${duration}` : ""}
         {ranOn ? (
-          <span data-subagent-model={ranOn.model} data-subagent-model-fallback={ranOn.fallbackFrom ?? undefined} className={ranOn.fallbackFrom ? "text-amber-11" : undefined}>
+          <span data-subagent-model={ranOn.model} data-subagent-model-fallback={ranOn.fallbackFrom ?? undefined} className={ranOn.fallbackFrom ? "text-warning" : undefined}>
             {` · ${resolveModelDisplayName(ranOn.model)}`}
             {ranOn.fallbackFrom ? ` (${resolveModelDisplayName(ranOn.fallbackFrom)} unavailable)` : ""}
           </span>

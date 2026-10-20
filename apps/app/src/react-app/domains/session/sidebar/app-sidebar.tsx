@@ -802,7 +802,7 @@ function RemoteConnectionIssueCard(props: {
           <div
             className={cn(
               "mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-red-3/60 text-red-11",
-              isOffline && "bg-amber-3/60 text-amber-11",
+              isOffline && "bg-amber-3/60 text-warning",
             )}
           >
             <AlertCircle size={14} />
@@ -817,7 +817,7 @@ function RemoteConnectionIssueCard(props: {
             <div
               className={cn(
                 "mt-2 rounded-lg border border-red-7/25 bg-red-1/40 px-2 py-1.5 text-[11px] leading-4 text-red-11 whitespace-pre-wrap wrap-anywhere",
-                isOffline && "border-amber-7/25 bg-amber-1/40 text-amber-11",
+                isOffline && "border-amber-7/25 bg-amber-1/40 text-warning",
               )}
               title={props.message}
             >

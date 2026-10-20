@@ -223,7 +223,7 @@ const ToolMessageInner = ({ part }: ToolMessageProps) => {
         <CirclePause aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
         <div>
           <div className="font-medium">Waiting for your action</div>
-          <div className="text-xs text-amber-11">Choose an option or approve the request to continue.</div>
+          <div className="text-xs text-warning">Choose an option or approve the request to continue.</div>
         </div>
       </div>
     )
@@ -661,7 +661,7 @@ function renderPlainTextWithLinks(text: string, highlightQuery: string | undefin
         href={url}
         target="_blank"
         rel="noreferrer noopener"
-        className="text-indigo-10 transition-colors hover:text-indigo-8 break-all"
+        className="text-[var(--omnirush-link,var(--indigo-10))] transition-colors hover:text-[var(--omnirush-link-hover,var(--indigo-8))] break-all"
       >
         {favicon ? (
           <img

@@ -65,7 +65,7 @@ function QueuedDraftContent(props: { draft: ComposerDraft }) {
       nodes.push(
         <span
           key={key}
-          className="mx-0.5 inline-flex items-center rounded-full border border-amber-6/35 bg-amber-3/15 px-2.5 py-1 text-xs font-medium text-amber-11 align-middle"
+          className="mx-0.5 inline-flex items-center rounded-full border border-amber-6/35 bg-amber-3/15 px-2.5 py-1 text-xs font-medium text-warning align-middle"
           title={`Pasted text · ${pasteMatch[1]}`}
         >
           {`Pasted · ${lines} line${lines === 1 ? "" : "s"}`}

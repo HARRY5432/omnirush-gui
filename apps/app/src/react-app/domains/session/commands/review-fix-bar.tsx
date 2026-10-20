@@ -9,7 +9,7 @@ import { REVIEW_SEVERITIES, severityLabel, type ReviewSeverity, type ReviewSumma
 const CHIP: Record<ReviewSeverity, string> = {
   critical: "border-red-6/50 bg-red-3/50 text-red-11",
   high: "border-orange-6/50 bg-orange-3/50 text-orange-11",
-  medium: "border-amber-6/50 bg-amber-3/50 text-amber-11",
+  medium: "border-amber-6/50 bg-amber-3/50 text-warning",
   low: "border-gray-6/60 bg-gray-3/50 text-gray-11",
 };
 

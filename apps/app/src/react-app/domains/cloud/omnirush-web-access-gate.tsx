@@ -84,7 +84,7 @@ export function OmniRushWebAccessGateScreen(props: {
           <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl border border-border bg-muted/40">
             {checking
               ? <OwDotTicker size="lg" />
-              : <AlertTriangle className="size-5 text-amber-11" aria-hidden="true" />}
+              : <AlertTriangle className="size-5 text-warning" aria-hidden="true" />}
           </div>
           <div className="min-w-0 flex-1">
             <p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">

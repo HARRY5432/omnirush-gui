@@ -80,7 +80,7 @@ describe("Settings > MCP: supported servers", () => {
     expect(html).toContain("From the project&#x27;s opencode.json");
     expect(html).not.toContain("text-red-11");
     // Blocked reads as a warning, not an error, and the remote hint is not said twice.
-    expect(html).toContain('text-amber-11">Blocked');
+    expect(html).toContain('text-warning">Blocked');
     expect(html).not.toContain(MCP_BLOCKED_HINTS.remote);
     // The configured preset says Added instead of offering it again.
     expect(html).toMatch(/data-testid="mcp-preset-filesystem".*Added/s);

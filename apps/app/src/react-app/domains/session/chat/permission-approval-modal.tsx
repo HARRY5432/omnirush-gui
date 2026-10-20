@@ -274,7 +274,7 @@ export function PermissionApprovalModal(props: PermissionApprovalModalProps) {
   const detailRows = permissionDetailRows(metadata);
   const Icon = presentation.isDoomLoop ? RefreshCcw : ShieldCheck;
   const iconClass = presentation.isDoomLoop
-    ? "bg-amber-3/30 text-amber-11"
+    ? "bg-amber-3/30 text-warning"
     : "bg-[rgba(var(--dls-accent-rgb),0.1)] text-[var(--omnirush-link,var(--dls-accent))]";
 
   useEffect(() => {
@@ -341,7 +341,7 @@ export function PermissionApprovalModal(props: PermissionApprovalModalProps) {
               {props.sourceTitle ? (
                 <div
                   data-permission-source="child-session"
-                  className="mt-2 text-[12px] font-medium text-amber-11"
+                  className="mt-2 text-[12px] font-medium text-warning"
                 >
                   {t("session.permission_requested_by", { session: displayRuntimeBrand(props.sourceTitle) })}
                 </div>
@@ -524,7 +524,7 @@ export function PermissionApprovalPanel(props: PermissionApprovalModalProps) {
               {props.sourceTitle ? (
                 <div
                   data-permission-source="child-session"
-                  className="mt-1 text-[12px] font-medium leading-5 text-amber-11"
+                  className="mt-1 text-[12px] font-medium leading-5 text-warning"
                 >
                   {t("session.permission_requested_by", { session: displayRuntimeBrand(props.sourceTitle) })}
                 </div>
@@ -533,7 +533,7 @@ export function PermissionApprovalPanel(props: PermissionApprovalModalProps) {
                 <div className="mt-1 text-[12px] leading-5 text-dls-secondary">{presentation.note}</div>
               ) : null}
               {confirmAlways ? (
-                <div data-permission-confirm="always" role="status" className="mt-1 text-[12px] font-medium leading-5 text-amber-11">
+                <div data-permission-confirm="always" role="status" className="mt-1 text-[12px] font-medium leading-5 text-warning">
                   {t("session.permission_confirm_always")}
                 </div>
               ) : null}

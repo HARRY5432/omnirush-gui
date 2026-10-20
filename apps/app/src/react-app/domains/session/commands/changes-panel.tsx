@@ -84,7 +84,7 @@ function FileRow({ file, defaultOpen }: { file: ChangedFile; defaultOpen: boolea
             "flex size-4 shrink-0 items-center justify-center rounded text-[10px] font-semibold",
             file.status === "added" && "bg-green-4 text-green-11",
             file.status === "deleted" && "bg-red-4 text-red-11",
-            file.status === "modified" && "bg-amber-4 text-amber-11",
+            file.status === "modified" && "bg-amber-4 text-warning",
           )}
           title={file.status}
         >

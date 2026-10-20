@@ -92,7 +92,7 @@ function PermissionModeMenu(props: { client: ApprovalsClient; workspaceId: strin
         // trigger. Auto reads as a warning (orange, alert shield): nothing asks.
         className={`flex h-9 max-h-9 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-sm transition-colors ${
           mode === "full"
-            ? "text-orange-11 hover:bg-orange-3"
+            ? "text-[color:var(--omnirush-warn,var(--orange-11))] hover:bg-orange-3"
             : "text-gray-10 hover:bg-gray-3 hover:text-gray-12"
         } ${locked ? "opacity-60" : ""}`}
       >
@@ -117,7 +117,7 @@ function PermissionModeMenu(props: { client: ApprovalsClient; workspaceId: strin
                   data-testid={`permission-mode-${item}`}
                   aria-label={itemLabel.title}
                   onClick={() => void select(item)}
-                  className={`gap-3 py-2.5 ${item === "full" ? "text-orange-11" : ""}`}
+                  className={`gap-3 py-2.5 ${item === "full" ? "text-[color:var(--omnirush-warn,var(--orange-11))]" : ""}`}
                 >
                   <ItemIcon className="size-5 shrink-0" />
                   <span className="min-w-0">

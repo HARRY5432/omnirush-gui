@@ -291,7 +291,7 @@ export function ExtensionDetailModal({
         </span>
       ) : null}
       {beta ? (
-        <span className="rounded-md bg-amber-3 px-1.5 py-0.5 text-[10px] font-medium text-amber-11">
+        <span className="rounded-md bg-amber-3 px-1.5 py-0.5 text-[10px] font-medium text-warning">
           Beta
         </span>
       ) : null}
@@ -559,14 +559,14 @@ export function ExtensionDetailModal({
               {beta ? (
                 <div className="flex items-center justify-between text-sm">
                   <span className="text-muted-foreground">Release stage</span>
-                  <span className="font-medium text-amber-11">Beta</span>
+                  <span className="font-medium text-warning">Beta</span>
                 </div>
               ) : null}
 
               {disabledReason ? (
                 <div className="flex items-center justify-between gap-4 text-sm">
                   <span className="text-muted-foreground">Availability</span>
-                  <span className="text-right font-medium text-amber-11">{disabledReason}</span>
+                  <span className="text-right font-medium text-warning">{disabledReason}</span>
                 </div>
               ) : null}
             </div>

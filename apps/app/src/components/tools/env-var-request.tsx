@@ -100,7 +100,7 @@ export function EnvVarRequestTool({ part }: EnvVarRequestToolProps) {
           />
 
           {!canModify ? (
-            <p className="rounded-lg border border-amber-6/40 bg-amber-3/20 px-3 py-2 text-xs text-amber-11">
+            <p className="rounded-lg border border-amber-6/40 bg-amber-3/20 px-3 py-2 text-xs text-warning">
               Environment variables can only be edited from a local desktop workspace.
             </p>
           ) : null}
@@ -134,7 +134,7 @@ export function EnvVarRequestTool({ part }: EnvVarRequestToolProps) {
             ) : null}
           </div>
 
-          <p className={cn("text-[11px] leading-4 text-dls-tertiary", saved && pendingChanges ? "text-amber-11" : "")}>
+          <p className={cn("text-[11px] leading-4 text-dls-tertiary", saved && pendingChanges ? "text-warning" : "")}>
             {saved && pendingChanges
               ? "Saved locally. Apply changes so local agents can read the latest value."
               : "The token is written through the same local Environment Variables store used by Settings."}

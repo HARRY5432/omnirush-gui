@@ -180,7 +180,7 @@ describe("CSS variables", () => {
         expect(vars["--slate-1"]).toBe(v.background);
         expect(vars["--omnirush-terminal-bg"]).toBe(v.terminal.bg);
         expect(vars["--omnirush-syntax-keyword"]).toBe(v.code.keyword);
-        expect(vars["--omnirush-highlight"]).toBe(v.highlight ?? v.accent);
+        if (mode === "dark") expect(vars["--omnirush-highlight"]).toBe(v.highlight ?? v.accent);
         expect(worstRatio(vars["--omnirush-link"]!, textBackgrounds(v))).toBeGreaterThanOrEqual(4.5);
         expect(vars["--radius"]).toBeUndefined();
         for (const [name, value] of Object.entries(vars)) expect(isSafeVar(name, value)).toBe(true);
@@ -198,6 +198,41 @@ describe("CSS variables", () => {
         expect(vars["--muted"]).not.toBe(v.background);
         expect(vars["--muted"]).not.toBe(v.surface);
         expect(contrastRatio(vars["--muted"]!, v.background)).toBeGreaterThan(1.1);
+      }
+    }
+  });
+
+  test("gray steps used as text pass on background, surface and fills; step 5 is a fill", () => {
+    for (const preset of THEME_PRESETS) {
+      for (const mode of presetModes(preset)) {
+        const active = resolveActiveTheme({ kind: "preset", id: preset.id }, mode, null);
+        const vars = paletteVars({ ...active, legacy: false });
+        const v = preset.variants[mode]!;
+        const bgs = [v.background, v.surface, vars["--gray-3"]!];
+        const target = preset.target === "AAA" ? 7 : 4.5;
+        for (const step of [8, 9, 10]) {
+          expect(worstRatio(vars[`--gray-${step}`]!, bgs)).toBeGreaterThanOrEqual(target);
+          expect(vars[`--slate-${step}`]).toBe(vars[`--gray-${step}`]);
+        }
+        expect(worstRatio(vars["--gray-7"]!, bgs)).toBeGreaterThanOrEqual(3);
+        expect(vars["--gray-11"]).toBe(v.textMuted);
+        expect(vars["--gray-6"]).toBe(v.border);
+        expect(contrastRatio(v.text, vars["--gray-5"]!)).toBeGreaterThanOrEqual(4.5);
+        expect(contrastRatio(v.textMuted, vars["--gray-5"]!)).toBeGreaterThanOrEqual(4.5);
+        expect(vars["--gray-5"]).not.toBe(v.border);
+      }
+    }
+  });
+
+  test("highlight is at least 3:1 on light pages; warn and link hover are set", () => {
+    for (const preset of THEME_PRESETS.filter((p) => p.id !== "default")) {
+      for (const mode of presetModes(preset)) {
+        const active = resolveActiveTheme({ kind: "preset", id: preset.id }, mode, null);
+        const vars = paletteVars(active);
+        const v = preset.variants[mode]!;
+        if (mode === "light") expect(worstRatio(vars["--omnirush-highlight"]!, [v.background, v.surface])).toBeGreaterThanOrEqual(3);
+        expect(vars["--omnirush-warn"]).toBe(v.warn);
+        expect(worstRatio(vars["--omnirush-link-hover"]!, textBackgrounds(v))).toBeGreaterThanOrEqual(4.5);
       }
     }
   });
@@ -267,8 +302,20 @@ describe("editor and terminal colours", () => {
     const fjord = resolveActiveTheme({ kind: "preset", id: "fjord" }, "light", null);
     const theme = xtermThemeFor(fjord);
     expect(theme.background).toBe(fjord.variant.terminal.bg);
-    for (const key of ANSI_KEYS) expect(theme[key]).toBe(fjord.variant.terminal[key]);
+    for (const key of ANSI_KEYS) if (key !== "white" && key !== "brightWhite") expect(theme[key]).toBe(fjord.variant.terminal[key]);
+    const fjordDark = resolveActiveTheme({ kind: "preset", id: "fjord" }, "dark", null);
+    for (const key of ANSI_KEYS) expect(xtermThemeFor(fjordDark)[key]).toBe(fjordDark.variant.terminal[key]);
     expect(xtermThemeFor(resolveActiveTheme({ kind: "preset", id: "default" }, "light", null))).toBe(LEGACY_XTERM_THEME);
+  });
+
+  test("white and bright white stay visible on light terminals", () => {
+    for (const preset of THEME_PRESETS.filter((p) => p.id !== "default")) {
+      const active = resolveActiveTheme({ kind: "preset", id: preset.id }, "light", null);
+      if (active.mode !== "light") continue;
+      const theme = xtermThemeFor(active);
+      expect(contrastRatio(theme.white!, theme.background)).toBeGreaterThanOrEqual(3);
+      expect(contrastRatio(theme.brightWhite!, theme.background)).toBeGreaterThanOrEqual(3);
+    }
   });
 });
 
@@ -331,6 +378,26 @@ describe("theme state and persistence", () => {
     expect(root.dataset.theme).toBe("light");
     expect(root.dataset.omnirushPalette).toBeUndefined();
     expect(props.size).toBe(0);
+  });
+
+  test("stored dark mode with no preset stays dark on Default (current and legacy key)", () => {
+    storage.setItem("omnirush.react.settings.theme-mode", "dark");
+    theme.bootstrapTheme();
+    expect(root.dataset.theme).toBe("dark");
+    expect(theme.getActiveTheme().legacy).toBe(true);
+    expect(root.dataset.omnirushPalette).toBeUndefined();
+    expect(props.get("--muted-foreground")).toBe("#858991");
+    expect(theme.readBootVars(storage.getItem(theme.THEME_BOOT_KEY), "dark")).toEqual({ mode: "dark", vars: { "--muted-foreground": "#858991" } });
+    storage.values.clear();
+    props.clear();
+    root.dataset = {};
+    theme.resetThemeStateForTests();
+    resetAppliedPaletteForTests();
+    storage.setItem("omnirush.themePref", "dark");
+    theme.bootstrapTheme();
+    expect(root.dataset.theme).toBe("dark");
+    expect(storage.getItem("omnirush.react.settings.theme-mode")).toBe("dark");
+    expect(theme.getThemeSelection()).toEqual({ kind: "preset", id: "default" });
   });
 
   test("system mode follows the OS for presets", () => {

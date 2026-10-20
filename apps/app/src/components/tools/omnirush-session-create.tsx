@@ -121,7 +121,7 @@ export function OmniRushSessionCreateTool({ part }: { part: DynamicToolUIPart })
       <div className="flex items-start gap-3 border-b border-dls-border px-4 py-3">
         <div className={allCreated
           ? "mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full border border-green-6/35 bg-green-3/30 text-green-11"
-          : "mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full border border-amber-6/35 bg-amber-3/30 text-amber-11"
+          : "mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full border border-amber-6/35 bg-amber-3/30 text-warning"
         }>
           <HeaderIcon className="size-4" />
         </div>
