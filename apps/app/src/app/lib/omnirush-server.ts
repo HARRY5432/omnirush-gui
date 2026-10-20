@@ -2846,6 +2846,24 @@ export function createOmniRushServerClient(options: { baseUrl: string; token?: s
         signal,
       }),
 
+    /** The formatters the project sets up itself (Prettier, gofmt, Ruff, Black, rustfmt), for Settings → Editor. */
+    editorFormatters: (workspaceId: string) =>
+      requestJson<{ formatters: string[] }>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/editor/formatters`, {
+        token,
+        hostToken,
+        timeoutMs: 10_000,
+      }),
+
+    /** The project's formatter on the editor's text (a user action): the formatted text, or null when none is set up. */
+    editorFormat: (workspaceId: string, path: string, text: string, timeoutMs = 3_000) =>
+      requestJson<{ formatter: string | null; text: string | null }>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/editor/format`, {
+        token,
+        hostToken,
+        method: "POST",
+        body: { path, text },
+        timeoutMs,
+      }),
+
     editorGitStatus: (workspaceId: string) =>
       requestJson<OmniRushEditorGitStatus>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/editor/git/status`, { token, hostToken, timeoutMs: 30_000 }),
 

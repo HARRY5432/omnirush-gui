@@ -4,6 +4,7 @@
  * everywhere), when it was read, and whether it has unsaved changes. Kept
  * while the app runs, so closing the panel keeps unsaved text.
  */
+import { useEditorSettings } from "./editor-settings";
 import type * as MonacoApi from "monaco-editor/editor/editor.api.js";
 
 import { onFilesRewound } from "@/app/lib/files-rewound";
@@ -72,6 +73,7 @@ export class EditorDocuments {
         if (file.binary) return { ok: false, reason: "binary", message: "This file is binary and cannot be edited here." };
         if (file.tooLarge || file.content === null) return { ok: false, reason: "too_large", message: "This file is too large to open in the editor (over 5 MB)." };
         const model = this.monaco.editor.createModel(file.content, languageForPath(path), this.uri(path));
+        model.detectIndentation(true, useEditorSettings.getState().tabSize);
         const doc: FileDoc = { path, model, updatedAt: file.updatedAt, savedVersion: model.getAlternativeVersionId(), conflict: false, missing: false };
         this.docs.set(path, doc);
         this.track(doc);
@@ -93,6 +95,7 @@ export class EditorDocuments {
     const existing = this.docs.get(path);
     if (existing) return existing;
     const model = this.monaco.editor.createModel("", languageForPath(path), this.uri(path));
+    model.updateOptions({ tabSize: useEditorSettings.getState().tabSize, insertSpaces: true });
     const doc: FileDoc = { path, model, updatedAt: null, savedVersion: model.getAlternativeVersionId(), conflict: false, missing: true };
     this.docs.set(path, doc);
     this.track(doc);

@@ -27,3 +27,29 @@
 .omnirush-hunk-btn-primary { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground, #fff); }
 .omnirush-hunk-btn-primary:hover { background: color-mix(in srgb, var(--primary) 88%, black); }
 .omnirush-hunk-bar-busy { opacity: 0.55; pointer-events: none; }
+
+/* Git gutter (git-gutter.ts): added = solid bar, changed = striped bar, removed = wedge. Read-only: no pointer. */
+.monaco-editor .omnirush-gutter-add,
+.monaco-editor .omnirush-gutter-change {
+  margin-left: 3px;
+  width: 3px !important;
+}
+.monaco-editor .omnirush-gutter-add { background: var(--omnirush-success, #30a46c); }
+.monaco-editor .omnirush-gutter-change {
+  background: repeating-linear-gradient(
+    to bottom,
+    var(--blue-9, #0090ff) 0 3px,
+    transparent 3px 5px
+  );
+}
+.monaco-editor .omnirush-gutter-delete::after,
+.monaco-editor .omnirush-gutter-delete-top::after {
+  content: "";
+  position: absolute;
+  left: 2px;
+  border-left: 5px solid var(--destructive, #e5484d);
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+}
+.monaco-editor .omnirush-gutter-delete::after { bottom: -4px; }
+.monaco-editor .omnirush-gutter-delete-top::after { top: -4px; }

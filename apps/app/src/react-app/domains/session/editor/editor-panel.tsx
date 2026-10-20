@@ -70,6 +70,8 @@ import {
 import type { AgentAction, SurfaceHandle } from "./editor-surface";
 import { baselinesForTurns, turnFileChange, type TurnFileChange } from "./review";
 import "./editor.css";
+import { AUTO_SAVE_DELAY_MS, useEditorSettings } from "./editor-settings";
+import { GitGutter } from "./git-gutter";
 
 /** How long a file stays the active one before its language features start. */
 const LSP_DWELL_MS = 2500;
@@ -542,6 +544,7 @@ export default function EditorPanel(props: EditorPanelProps) {
   const activeTab = state.tabs.find((tab) => tab.id === state.activeId) ?? null;
   const [surface, setSurface] = useState<SurfaceDoc | null>(null);
   const surfaceHandle = useRef<SurfaceHandle | null>(null);
+  const [surfaceReady, setSurfaceReady] = useState(false);
   const pendingReveal = useRef<{ path: string; line: number; column: number; endColumn?: number } | null>(null);
   const [searchFocus, setSearchFocus] = useState(0);
   const [problemsLoading, setProblemsLoading] = useState(false);
@@ -989,6 +992,21 @@ export default function EditorPanel(props: EditorPanelProps) {
     };
   }, [surface, lspActive, agentBusy]);
 
+  // The git gutter for the file shown (git-gutter.ts): HEAD texts are read again when git's state changes.
+  const gutter = useMemo(() => new GitGutter(client, workspaceId), [client, workspaceId]);
+  const gitFiles = gitQuery.data?.repo ? gitQuery.data.files : null;
+  useEffect(() => {
+    gutter.reset();
+  }, [gutter, gitQuery.dataUpdatedAt]);
+  useEffect(() => {
+    if (!surfaceReady || !surface || surface.kind !== "file" || !gitFiles) return;
+    const editor = surfaceHandle.current?.activeEditor();
+    if (!editor || editor.getModel() !== surface.doc.model) return;
+    const doc = surface.doc;
+    const changedInGit = gitFiles.some((file) => file.path === doc.path);
+    return gutter.attach(editor, doc.model, doc.path, changedInGit, () => docs.isDirty(doc));
+  }, [docs, gitFiles, gutter, surface, surfaceReady]);
+
   // Breadcrumbs: the symbols around the cursor.
   useEffect(() => {
     if (!surface || surface.kind !== "file" || !cursor) {
@@ -1008,11 +1026,47 @@ export default function EditorPanel(props: EditorPanelProps) {
   }, [cursor, surface, lspActive]);
 
   // ── save ───────────────────────────────────────────────────────────────
-  const save = useCallback(async (options: { force?: boolean } = {}) => {
-    if (!activeTab) return;
-    const path = activeTab.path;
+  /** No formatter for these extensions in this project: said once. */
+  const noFormatterNoted = useRef(new Set<string>());
+  /**
+   * Format on save: the project's own formatter on the buffer's text, applied as one undoable edit before writing.
+   * A formatter that fails or takes longer than 3 s never blocks the save: the file is saved as it is.
+   */
+  const formatBeforeSave = useCallback(async (path: string) => {
     const doc = docs.get(path);
     if (!doc) return;
+    const model = doc.model;
+    const version = model.getAlternativeVersionId();
+    const extension = path.includes(".") ? path.slice(path.lastIndexOf(".")) : path;
+    try {
+      const outcome = await client.editorFormat(workspaceId, path, model.getValue(), 3_000);
+      if (outcome.formatter === null || outcome.text === null) {
+        if (!noFormatterNoted.current.has(extension)) {
+          noFormatterNoted.current.add(extension);
+          toast(`No formatter set up for ${extension} files in this project; saved as is.`);
+        }
+        return;
+      }
+      // Typed while the formatter ran: that text wins, unformatted.
+      if (model.getAlternativeVersionId() !== version || outcome.text === model.getValue()) return;
+      model.pushStackElement();
+      model.pushEditOperations([], [{ range: model.getFullModelRange(), text: outcome.text }], () => null);
+      model.pushStackElement();
+    } catch {
+      toast("Couldn't format this file; it was saved as is.");
+    }
+  }, [client, docs, workspaceId]);
+
+  /**
+   * Saves one file. `manual` (Cmd/Ctrl+S, Save) and `focus` (auto save when focus leaves) also run the project's
+   * formatter when Format on save is on; `delay` (auto save after a delay) never formats. A file that changed on
+   * disk since it was loaded is never overwritten by an automatic save: it shows the Reload / Keep mine choice.
+   */
+  const saveFile = useCallback(async (path: string, trigger: "manual" | "delay" | "focus", options: { force?: boolean } = {}) => {
+    const doc = docs.get(path);
+    if (!doc) return;
+    if (trigger !== "manual" && (doc.conflict || !docs.isDirty(doc))) return;
+    if (useEditorSettings.getState().formatOnSave && trigger !== "delay") await formatBeforeSave(path);
     const result = await docs.save(path, { sessionId, source: "editor", force: options.force });
     if (result.ok) {
       void refreshFileDiagnostics(path);
@@ -1021,11 +1075,61 @@ export default function EditorPanel(props: EditorPanelProps) {
       return;
     }
     if (result.conflict) {
-      showConflict(path, { reload: () => void docs.revert(path), overwrite: () => void save({ force: true }), reason: "save" });
+      doc.conflict = true;
+      showConflict(path, { reload: () => void docs.revert(path), overwrite: () => void saveFile(path, "manual", { force: true }), reason: "save" });
       return;
     }
     toast.error(result.message);
-  }, [activeTab, docs, files, queryClient, sessionId, workspaceId]);
+  }, [docs, files, formatBeforeSave, queryClient, sessionId, workspaceId]);
+
+  const save = useCallback(async (options: { force?: boolean } = {}) => {
+    if (!activeTab) return;
+    await saveFile(activeTab.path, "manual", options);
+  }, [activeTab, saveFile]);
+
+  // Auto save. After a delay: a second after the last edit of a file, held while any chat's agent works (saved when
+  // the turn ends). When focus leaves: the editor or the window losing focus. Both skip files in conflict.
+  const autoSave = useEditorSettings((state) => state.autoSave);
+  const autoSaveTimers = useRef(new Map<string, number>());
+  const heldForAgent = useRef(new Set<string>());
+  const agentBusyRef = useRef(agentBusy);
+  useEffect(() => {
+    if (autoSave !== "afterDelay" || !surface || surface.kind !== "file") return;
+    const doc = surface.doc;
+    const subscription = doc.model.onDidChangeContent(() => {
+      const timers = autoSaveTimers.current;
+      window.clearTimeout(timers.get(doc.path));
+      timers.set(doc.path, window.setTimeout(() => {
+        timers.delete(doc.path);
+        if (agentBusyRef.current) heldForAgent.current.add(doc.path);
+        else void saveFile(doc.path, "delay");
+      }, AUTO_SAVE_DELAY_MS));
+    });
+    return () => subscription.dispose();
+  }, [autoSave, saveFile, surface]);
+  useEffect(() => {
+    agentBusyRef.current = agentBusy;
+    if (agentBusy || !heldForAgent.current.size) return;
+    const held = [...heldForAgent.current];
+    heldForAgent.current.clear();
+    for (const path of held) void saveFile(path, "delay");
+  }, [agentBusy, saveFile]);
+  useEffect(() => {
+    if (autoSave !== "onFocusChange") return;
+    const saveDirty = () => {
+      for (const path of Object.keys(useEditorStore.getState().dirty[workspaceId] ?? {})) void saveFile(path, "focus");
+    };
+    const onBlur = () => saveDirty();
+    window.addEventListener("blur", onBlur);
+    window.addEventListener("omnirush:editor-blur", onBlur);
+    return () => {
+      window.removeEventListener("blur", onBlur);
+      window.removeEventListener("omnirush:editor-blur", onBlur);
+    };
+  }, [autoSave, saveFile, workspaceId]);
+  useEffect(() => () => {
+    for (const timer of autoSaveTimers.current.values()) window.clearTimeout(timer);
+  }, []);
 
   // ── git ────────────────────────────────────────────────────────────────
   const stage = useCallback(async (paths: string[], doStage: boolean) => {
@@ -1270,6 +1374,7 @@ export default function EditorPanel(props: EditorPanelProps) {
             onAgentAction={agentAction}
             onReady={(handle) => {
               surfaceHandle.current = handle;
+              setSurfaceReady(Boolean(handle));
             }}
           />
         </div>

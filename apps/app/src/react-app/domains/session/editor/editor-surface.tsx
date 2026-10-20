@@ -12,6 +12,7 @@ import { subscribeToTheme } from "@/app/theme";
 import { applyMonacoTheme, monacoThemeName, type Monaco } from "./monaco";
 import type { FileDoc } from "./editor-models";
 import { hunkCounts, type LineHunk } from "./hunk-ops";
+import { monacoOptionsFor, useEditorSettings } from "./editor-settings";
 
 export type SurfaceDoc =
   | { kind: "file"; key: string; doc: FileDoc }
@@ -52,15 +53,12 @@ export type SurfaceHandle = {
 const BASE_OPTIONS: MonacoApi.editor.IStandaloneEditorConstructionOptions = {
   automaticLayout: true,
   fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-  fontSize: 12.5,
-  lineHeight: 19,
-  minimap: { enabled: false },
   scrollBeyondLastLine: false,
   renderLineHighlight: "line",
   smoothScrolling: false,
   padding: { top: 6, bottom: 6 },
-  // Indentation, not the outline: the outline would ask the language servers for symbols as soon as a file opens.
-  stickyScroll: { enabled: true, maxLineCount: 3, defaultModel: "indentationModel" },
+  // Font size, wrap, minimap and sticky scroll come from Settings → Editor (editor-settings.ts). Sticky scroll uses
+  // indentation, not the outline: the outline would ask the language servers for symbols as soon as a file opens.
   // Large files stay responsive: no tokenisation past 20k chars per line, no word-based suggestions on huge files.
   maxTokenizationLineLength: 20_000,
   wordBasedSuggestions: "currentDocument",
@@ -132,9 +130,11 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
   useEffect(() => {
     if (!codeHostRef.current || !diffHostRef.current) return;
     const themeName = monacoThemeName();
-    const code = monaco.editor.create(codeHostRef.current, { ...BASE_OPTIONS, model: null, theme: themeName });
+    const settingsOptions = monacoOptionsFor(useEditorSettings.getState());
+    const code = monaco.editor.create(codeHostRef.current, { ...BASE_OPTIONS, ...settingsOptions, model: null, theme: themeName });
     const diff = monaco.editor.createDiffEditor(diffHostRef.current, {
       ...BASE_OPTIONS,
+      ...settingsOptions,
       theme: themeName,
       renderSideBySide: false,
       useInlineViewWhenSpaceIsLimited: true,
@@ -179,6 +179,16 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
       },
       activeEditor: () => (modeRef.current === "diff" ? diff.getModifiedEditor() : modeRef.current === "file" ? code : null),
     });
+    // Auto save "when focus leaves": the panel listens for this.
+    const blurEvent = () => window.dispatchEvent(new Event("omnirush:editor-blur"));
+    disposables.push(code.onDidBlurEditorWidget(blurEvent), diff.getModifiedEditor().onDidBlurEditorWidget(blurEvent));
+    // Settings → Editor, live.
+    const unsubscribeSettings = useEditorSettings.subscribe((settings, previous) => {
+      const next = monacoOptionsFor(settings);
+      if (JSON.stringify(next) === JSON.stringify(monacoOptionsFor(previous))) return;
+      code.updateOptions(next);
+      diff.updateOptions(next);
+    });
     // Follows the app theme: light/dark, presets and custom themes (app/theme.ts).
     const unsubscribeTheme = subscribeToTheme(() => {
       applyMonacoTheme();
@@ -192,6 +202,7 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
       if (key) VIEW_STATES.set(key, modeRef.current === "diff" ? diff.saveViewState() : code.saveViewState());
       onReadyRef.current?.(null);
       unsubscribeTheme();
+      unsubscribeSettings();
       for (const disposable of disposables) disposable.dispose();
       code.dispose();
       diff.dispose();
