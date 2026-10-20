@@ -191,7 +191,7 @@ const PROTECTED_VALUE_NAME = /^(?:OPENCODE_SERVER_|OPENCODE_PASSWORD$)|^OMNIRUSH
 const PROTECTED_VALUE_NOT = /_(?:URL|DIR|PATH|FILE|STORE|MS|MODULE|MODE)$/i;
 export function protectedValues(engineEnv) {
   return [...new Set(Object.entries(engineEnv ?? {})
-    .filter(([k, v]) => typeof v === "string" && v.length >= 8 && PROTECTED_VALUE_NAME.test(k) && !(k.startsWith("OMNIRUSH_") && PROTECTED_VALUE_NOT.test(k)))
+    .filter(([k, v]) => typeof v === "string" && v.length >= 8 && PROTECTED_VALUE_NAME.test(k) && !(/^OMNIRUSH_/i.test(k) && PROTECTED_VALUE_NOT.test(k)))
     .map(([, v]) => v))];
 }
 
