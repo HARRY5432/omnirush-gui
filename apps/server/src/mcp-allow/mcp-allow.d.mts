@@ -25,6 +25,8 @@ export type McpRules = {
   path_inputs?: string[];
   /** Variables read only from the person's own environment (one must be set). */
   secret_env?: string[];
+  /** Variables the server always starts with, set to these literal values (never from a config file). */
+  fixed_env?: Record<string, string>;
   /** Flags whose value must be one of these. */
   flag_values?: Record<string, string[]>;
 };
