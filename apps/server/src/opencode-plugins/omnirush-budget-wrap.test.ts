@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { showWrapQuestion, startWrapNow, wrapFinished } from "./budget-wrap-rules";
+import { showWrapQuestion, startWrapNow, wrapFinished } from "./budget-wrap-rules.js";
 import { OmniRushBudgetWrap } from "./omnirush-budget-wrap.js";
 
 const originalFetch = globalThis.fetch;
@@ -13,6 +13,7 @@ const originalToken = process.env.OMNIRUSH_SERVER_TOKEN;
 const gatewayHeaders = new Map<string, Record<string, string>>();
 
 beforeAll(() => {
+  process.env.OMNIRUSH_WRAP_IDLE_SETTLE_MS = "0";
   process.env.OMNIRUSH_SERVER_URL = "http://localhost:3579";
   process.env.OMNIRUSH_SERVER_TOKEN = "local-token";
   globalThis.fetch = Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
@@ -246,6 +247,31 @@ describe("account budget wrap plugin: retry and busy", () => {
       await Bun.sleep(30);
       expect(compactCalls).toBe(2);
     } finally { await hooks.dispose!(); }
+  });
+});
+
+describe("account budget wrap plugin: queued turn", () => {
+  test("a turn queued right after idle never sees the question", async () => {
+    process.env.OMNIRUSH_WRAP_IDLE_SETTLE_MS = "60";
+    const controls: string[] = [];
+    const hooks = await OmniRushBudgetWrap({
+      serverUrl: "http://127.0.0.1:4096",
+      fetch: async (input, init) => {
+        controls.push(operation(init));
+        return Response.json({ ok: true, result: { choice: "pending" } });
+      },
+    });
+    try {
+      await modelRequest(hooks, "ses_flash", { "x-omnirush-wrap-required": "1", "x-omnirush-wrap-offer-id": "allowance-flash" });
+      await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "ses_flash" } } });
+      await Bun.sleep(10);
+      await hooks.event!({ event: { type: "session.status", properties: { sessionID: "ses_flash", status: { type: "busy" } } } });
+      await Bun.sleep(120);
+      expect(controls).not.toContain("offer");
+    } finally {
+      process.env.OMNIRUSH_WRAP_IDLE_SETTLE_MS = "0";
+      await hooks.dispose!();
+    }
   });
 });
 

@@ -13,7 +13,7 @@
  * only while the session is idle, once per offer, and a failed wrap turns
  * into a notice with a retry action instead of the question again.
  */
-import { replacesWrapOffer, startWrapNow, wrapFinished } from "./budget-wrap-rules";
+import { replacesWrapOffer, startWrapNow, wrapFinished } from "./budget-wrap-rules.js";
 
 const REQUIRED_HEADER = "x-omnirush-wrap-required";
 const WRAP_UP_HEADER = "x-omnirush-wrap-up";
@@ -23,6 +23,8 @@ type ModelRef = { providerID: string; modelID: string };
 type Offer = { id: string; scopes: string; watching: boolean; inFlight: boolean; approved: boolean; backendWrapped: boolean; compacted: boolean; failedAt?: number };
 /** How long a failed wrap's Retry stays available (the window's notice). */
 const RETRY_WINDOW_MS = 30_000;
+/** How long an idle session waits before the question shows. */
+const idleSettleMs = () => Number(process.env.OMNIRUSH_WRAP_IDLE_SETTLE_MS ?? 600);
 const pending = new Map<string, Offer>();
 /** Sessions with a turn running (`session.status` busy until idle). */
 const busy = new Set<string>();
@@ -171,6 +173,10 @@ export const OmniRushBudgetWrap = async (input: {
           body: JSON.stringify({ providerID: model.providerID, modelID: model.modelID }),
         },
       );
+      // The engine's `session.compacted` event may land just after summarize answers.
+      for (let waited = 0; response.ok && !entry.compacted && waited < 5_000; waited += 100) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      }
       if (!wrapFinished({ ok: response.ok, compacted: entry.compacted })) {
         throw new Error("the wrap did not finish (" + response.status + ")");
       }
@@ -199,6 +205,9 @@ export const OmniRushBudgetWrap = async (input: {
     const entry = pending.get(sessionID);
     if (!entry || entry.watching || entry.inFlight) return;
     entry.watching = true;
+    // A prompt queued behind the turn starts right after its idle: give its
+    // busy event a moment, so the question never flashes over it.
+    await new Promise<void>((resolve) => setTimeout(resolve, idleSettleMs()));
     // Only while the session is idle: a new turn hides the question and
     // ends this loop; the next idle starts it again.
     while (!disposed && pending.get(sessionID) === entry && !entry.inFlight && !busy.has(sessionID)) {

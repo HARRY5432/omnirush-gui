@@ -1923,7 +1923,9 @@ export class OmniRushGatewayBroker {
     headers.set("Content-Type", request.headers.get("content-type") || "application/json");
     headers.set("Accept", request.headers.get("accept") || "application/json");
     headers.set("x-omnirush-client-request-id", requestId);
-    for (const name of ["x-omnirush-session-id", "x-omnirush-task-id", PARENT_SESSION_HEADER]) {
+    // x-omnirush-context-wrap: the handoff plugin marks an accepted wrap's
+    // compaction so the gateway can hold it as the wrap (and confirm it).
+    for (const name of ["x-omnirush-session-id", "x-omnirush-task-id", PARENT_SESSION_HEADER, "x-omnirush-context-wrap"]) {
       const value = request.headers.get(name);
       if (value) headers.set(name, value);
     }
