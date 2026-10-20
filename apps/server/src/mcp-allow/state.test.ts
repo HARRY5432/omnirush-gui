@@ -118,6 +118,18 @@ describe("the engine plugin (omnirush-mcp-policy)", () => {
     ]);
   });
 
+  test("a server the user turned off is not listed as in use", async () => {
+    const { state, root } = setup();
+    rememberMcpPolicy(state, { mcp: policyFixture });
+    writeWorkspaceMcp(state, root, { files: { ...FILESYSTEM, enabled: false } });
+    const hooks = await omnirushMcpPolicy({ directory: root });
+    const output = { mcp: {} } as Record<string, unknown>;
+    await hooks.config({}, output);
+    const report = workspaceMcpReport(state, root);
+    expect(report?.decisions[0]?.enabled).toBe(false);
+    expect(mcpServersInUse(report)).toBeNull();
+  });
+
   test("a project whose sandbox is on runs its servers through the box shell", async () => {
     const { state, root } = setup();
     rememberMcpPolicy(state, { mcp: policyFixture });

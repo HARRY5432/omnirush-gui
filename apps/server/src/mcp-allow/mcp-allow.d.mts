@@ -52,6 +52,8 @@ export type McpDecision = {
   title?: string;
   version?: string;
   sandbox?: boolean;
+  /** Allowed entries: false when the user turned the server off (`enabled: false`). */
+  enabled?: boolean;
   renamed_to?: string;
   url_host?: string | null;
   notes?: string[];

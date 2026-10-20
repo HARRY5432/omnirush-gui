@@ -158,7 +158,7 @@ export type McpServerUse = { id: string; package: string; version: string; runti
 export function mcpServersInUse(report: McpReport | null): McpServerUse[] | null {
   if (!report || !report.enabled) return null;
   const used = report.decisions
-    .filter((decision) => decision.status === "allowed" && decision.id && decision.package && decision.version && decision.runtime)
+    .filter((decision) => decision.status === "allowed" && decision.enabled !== false && decision.id && decision.package && decision.version && decision.runtime)
     .map((decision) => ({
       id: decision.id as string,
       package: decision.package as string,

@@ -449,7 +449,7 @@ export function evaluateMcp(mcpMap, policy, ctx = {}) {
       if (Object.keys(environment).length) next.environment = environment; else delete next.environment;
     }
     out[entry.id] = next;
-    decisions.push({ name, status: "allowed", code: "allowed", ...base, version, sandbox: Boolean(box), ...(name !== entry.id ? { renamed_to: entry.id } : {}), notes });
+    decisions.push({ name, status: "allowed", code: "allowed", ...base, version, sandbox: Boolean(box), enabled: raw.enabled !== false, ...(name !== entry.id ? { renamed_to: entry.id } : {}), notes });
   }
   return { mcp: out, decisions };
 }
@@ -536,7 +536,11 @@ export function readReport(dir, root) {
 
 /** One line per decision, for a terminal or a notice. */
 export function describeDecision(d) {
-  if (d.status === "allowed") return `MCP ${d.id}${d.renamed_to && d.name !== d.id ? ` (${d.name})` : ""}: on${d.version ? `, ${d.package}@${d.version}` : ""}${d.notes?.length ? ` (${d.notes.join("; ")})` : ""}`;
+  if (d.status === "allowed") {
+    // The version is in the line already; the other notes say what the app changed.
+    const notes = (d.notes ?? []).filter((n) => !n.startsWith("runs version "));
+    return `MCP ${d.id}${d.renamed_to && d.name !== d.id ? ` (${d.name})` : ""}: ${d.enabled === false ? "turned off" : "on"}${d.version ? `, ${d.package}@${d.version}` : ""}${notes.length ? ` (${notes.join("; ")})` : ""}`;
+  }
   return `MCP ${d.name}: blocked. ${d.reason}`;
 }
 
