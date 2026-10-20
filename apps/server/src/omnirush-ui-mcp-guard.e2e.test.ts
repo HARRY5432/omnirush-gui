@@ -162,9 +162,16 @@ describe("MCP allowlist at the HTTP and runtime boundaries", () => {
         name: "omnirush-ui",
         config: { type: "local", command, enabled: true },
       });
-      expect(response.status).toBe(403);
-      expect(await response.json()).toMatchObject({ code: "mcp_not_supported" });
+      // Refused before the list is even consulted (a registry launch of the bundled UI server).
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ code: "unsafe_mcp_command" });
     }
+    const unlisted = await call("POST", "/workspace/ws_1/mcp", {
+      name: "tool",
+      config: { type: "local", command: ["npx", "-y", "some-unlisted-mcp"], enabled: true },
+    });
+    expect(unlisted.status).toBe(403);
+    expect(await unlisted.json()).toMatchObject({ code: "mcp_not_supported", details: { code: "not_allowed" } });
     const remote = await call("POST", "/workspace/ws_1/mcp", {
       name: "notion",
       config: { type: "remote", url: "https://mcp.notion.com/mcp", enabled: true },
