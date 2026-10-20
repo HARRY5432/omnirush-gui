@@ -118,6 +118,9 @@ export async function createManagedOpencodeV2Server(
       OPENCODE_PASSWORD: password,
       OPENCODE_DB: join(options.rootDir, "opencode.db"),
       OPENCODE_CONFIG_DIR: configDir,
+      // No session sharing to an outside share service.
+      OPENCODE_DISABLE_SHARE: "1",
+      OPENCODE_AUTO_SHARE: "false",
       ...(opencodeModelsUrl === undefined ? {} : { OPENCODE_MODELS_URL: opencodeModelsUrl }),
       ...(disableModelsFetch === undefined ? {} : { OPENCODE_DISABLE_MODELS_FETCH: disableModelsFetch }),
     },

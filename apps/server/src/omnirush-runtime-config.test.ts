@@ -180,6 +180,8 @@ describe("omnirush runtime config file", () => {
     const parsed = await readConfigFile(config);
     expect(parsed.mcp).toBeUndefined();
     expect(parsed.default_agent).toBe("omnirush");
+    // No session sharing to an outside share service.
+    expect(parsed.share).toBe("disabled");
     expect(Array.isArray(parsed.plugin)).toBe(true);
     if (!Array.isArray(parsed.plugin)) throw new Error("Expected runtime plugins");
     expect(parsed.plugin).not.toContain("opencode-chrome-devtools");

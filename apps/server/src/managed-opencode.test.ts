@@ -96,6 +96,27 @@ describe("managed OpenCode startup", () => {
     await managedOverride.close();
   });
 
+  test("spawns the engine with session sharing off, whatever the caller's environment says", async () => {
+    const root = await createRoot();
+    const dumpPath = join(root, "share-env.json");
+    const bin = await writeExecutable(root, "dump-share-env.mjs", [
+      "import { writeFileSync } from 'node:fs';",
+      "const port = Number(process.argv[process.argv.indexOf('--port') + 1]);",
+      "writeFileSync(process.env.ENV_DUMP_PATH, JSON.stringify({ disable: process.env.OPENCODE_DISABLE_SHARE, auto: process.env.OPENCODE_AUTO_SHARE }));",
+      "const server = Bun.serve({ hostname: '127.0.0.1', port, fetch: () => Response.json({ ok: true }) });",
+      "console.log(`opencode server listening on http://127.0.0.1:${server.port}`);",
+      "process.on('SIGTERM', () => { server.stop(true); process.exit(0); });",
+    ]);
+    const managed = await createManagedOpencodeServer({
+      bin,
+      cwd: root,
+      env: { ENV_DUMP_PATH: dumpPath, OPENCODE_DISABLE_SHARE: "0", OPENCODE_AUTO_SHARE: "1" },
+    });
+    try {
+      expect(JSON.parse(await readFile(dumpPath, "utf8"))).toEqual({ disable: "1", auto: "false" });
+    } finally { await managed.close(); }
+  });
+
   test("waits for inherited diagnostic streams before retrying a code-1 EADDRINUSE exit", async () => {
     const root = await createRoot();
     const attemptsPath = join(root, "attempts.log");

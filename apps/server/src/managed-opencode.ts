@@ -231,6 +231,10 @@ async function startManagedOpencodeServer(
     ...dataEnv,
     // The install log's wrappers, first on PATH for the engine's tool shells only (install-log-host.ts).
     ...engineInstallLogEnv(baseEnv),
+    // Session sharing off at the engine's network layer: it never contacts a
+    // share service, whatever a config file says (omnirush-runtime-config.ts).
+    OPENCODE_DISABLE_SHARE: "1",
+    OPENCODE_AUTO_SHARE: "false",
     OPENCODE_SERVER_USERNAME: username,
     OPENCODE_SERVER_PASSWORD: password,
   };

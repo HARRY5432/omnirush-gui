@@ -281,6 +281,11 @@ export function buildOmniRushRuntimeConfigObjectFromSnapshot(
     // below the main session (the engine's default of 1 forbids nesting).
     // The omnirush-swarm plugin bounds how many run and start.
     subagent_depth: OMNIRUSH_SUBAGENT_DEPTH,
+    // No session sharing: the engine's share would upload the chat to the
+    // upstream project's share service (a third party). The engine also runs
+    // with OPENCODE_DISABLE_SHARE=1 (managed-opencode.ts), so a project's
+    // own config cannot turn it back on.
+    share: "disabled",
     agent: {
       omnirush: {
         description: "omnirush.ai default agent",
