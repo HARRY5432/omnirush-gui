@@ -14,6 +14,8 @@ export type EditorTab =
   | { id: string; kind: "git"; path: string; ref: "HEAD" | "index" };
 
 export type EditorSideView = "files" | "changes" | "git";
+/** The window layout: Chat (sessions sidebar + chat) or IDE (files, editor and terminal, chat docked right). */
+export type LayoutMode = "chat" | "ide";
 export type ReviewScope = "turn" | "chat";
 
 type WorkspaceEditorState = {
@@ -33,6 +35,14 @@ type EditorStore = {
   toggleRequest: number;
   reviewScope: ReviewScope;
   sideOpen: boolean;
+  /** The layout per workspace (remembered); Chat when never set. */
+  modeByWorkspace: Record<string, LayoutMode>;
+  /** IDE mode: the chat panel folded away, and its width when open. */
+  ideChatCollapsed: boolean;
+  ideChatWidth: number;
+  /** One-shot requests from shortcuts: switch Chat/IDE (Cmd/Ctrl+Shift+Y), fold the chat (Cmd/Ctrl+Shift+H). */
+  modeToggleRequest: number;
+  chatToggleRequest: number;
   openTab: (workspaceId: string, tab: EditorTab, options?: { preview?: boolean }) => void;
   closeTab: (workspaceId: string, id: string) => void;
   selectTab: (workspaceId: string, id: string) => void;
@@ -43,7 +53,14 @@ type EditorStore = {
   requestToggle: () => void;
   setReviewScope: (scope: ReviewScope) => void;
   setSideOpen: (open: boolean) => void;
+  setMode: (workspaceId: string, mode: LayoutMode) => void;
+  setIdeChatCollapsed: (collapsed: boolean) => void;
+  setIdeChatWidth: (width: number) => void;
+  requestModeToggle: () => void;
+  requestChatToggle: () => void;
 };
+
+export const DEFAULT_IDE_CHAT_WIDTH = 420;
 
 const EMPTY: WorkspaceEditorState = { tabs: [], activeId: null, view: "files" };
 const MAX_TABS = 20;
@@ -66,6 +83,11 @@ export const useEditorStore = create<EditorStore>()(
       toggleRequest: 0,
       reviewScope: "turn",
       sideOpen: true,
+      modeByWorkspace: {},
+      ideChatCollapsed: false,
+      ideChatWidth: DEFAULT_IDE_CHAT_WIDTH,
+      modeToggleRequest: 0,
+      chatToggleRequest: 0,
       openTab: (workspaceId, tab) =>
         set((state) => {
           const current = state.byWorkspace[workspaceId] ?? EMPTY;
@@ -113,11 +135,24 @@ export const useEditorStore = create<EditorStore>()(
       requestToggle: () => set((state) => ({ toggleRequest: state.toggleRequest + 1 })),
       setReviewScope: (reviewScope) => set({ reviewScope }),
       setSideOpen: (sideOpen) => set({ sideOpen }),
+      setMode: (workspaceId, mode) =>
+        set((state) => (state.modeByWorkspace[workspaceId] === mode ? state : { modeByWorkspace: { ...state.modeByWorkspace, [workspaceId]: mode } })),
+      setIdeChatCollapsed: (ideChatCollapsed) => set({ ideChatCollapsed }),
+      setIdeChatWidth: (width) => set({ ideChatWidth: Math.round(Math.min(Math.max(width, 320), 1200)) }),
+      requestModeToggle: () => set((state) => ({ modeToggleRequest: state.modeToggleRequest + 1 })),
+      requestChatToggle: () => set((state) => ({ chatToggleRequest: state.chatToggleRequest + 1 })),
     }),
     {
       name: "omnirush:editor:v1",
       storage: createJSONStorage(() => localStorage),
-      partialize: (state) => ({ byWorkspace: state.byWorkspace, reviewScope: state.reviewScope, sideOpen: state.sideOpen }),
+      partialize: (state) => ({
+        byWorkspace: state.byWorkspace,
+        reviewScope: state.reviewScope,
+        sideOpen: state.sideOpen,
+        modeByWorkspace: state.modeByWorkspace,
+        ideChatCollapsed: state.ideChatCollapsed,
+        ideChatWidth: state.ideChatWidth,
+      }),
     },
   ),
 );

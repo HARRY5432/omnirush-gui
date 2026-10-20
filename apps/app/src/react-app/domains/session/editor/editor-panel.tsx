@@ -14,6 +14,8 @@ import {
   ChevronUp,
   CircleDot,
   FileCode2,
+  FileDiff,
+  Files,
   GitBranch,
   GitCommitHorizontal,
   Minus,
@@ -56,7 +58,10 @@ export type EditorPanelProps = {
   terminal: ReactNode | null;
   terminalOpen: boolean;
   onToggleTerminal: () => void;
-  onClose: () => void;
+  /** IDE layout slots: the header's left (mode toggle, workspace switch) and right (chat panel button), and the rail's foot (app destinations). */
+  headerStart?: ReactNode;
+  headerEnd?: ReactNode;
+  railFoot?: ReactNode;
 };
 
 const MAX_REVIEW_FILES = 60;
@@ -768,7 +773,7 @@ export default function EditorPanel(props: EditorPanelProps) {
       setSurface(null);
       return;
     }
-    const key = `${activeTab.id}`;
+    const key = `${workspaceId}|${activeTab.id}`;
     void (async () => {
       if (activeTab.kind === "file") {
         const opened = await docs.open(activeTab.path);
@@ -1054,25 +1059,67 @@ export default function EditorPanel(props: EditorPanelProps) {
     </div>
   );
 
-  const segment = (view: EditorSideView, label: string, badge?: number) => (
-    <button
-      type="button"
-      onClick={() => setView(view)}
-      data-editor-view={view}
-      aria-pressed={state.view === view && sideOpen}
-      className={cn(
-        "flex items-center gap-1 rounded-lg px-2.5 py-1 text-xs transition-colors",
-        state.view === view && sideOpen ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground",
-      )}
-    >
-      {label}
-      {badge ? <span className="rounded-full bg-primary px-1.5 text-[10px] leading-4 text-primary-foreground">{badge}</span> : null}
-    </button>
-  );
+  const mac = /Mac/i.test(navigator.platform);
+  const railItem = (view: EditorSideView, label: string, icon: ReactNode, shortcut: string | null, badge?: number) => {
+    const active = state.view === view && sideOpen;
+    return (
+      <Tooltip>
+        <TooltipTrigger
+          render={(
+            <button
+              type="button"
+              onClick={() => setView(view)}
+              data-editor-view={view}
+              aria-label={label}
+              aria-pressed={active}
+              className={cn(
+                "relative flex size-9 items-center justify-center rounded-lg transition-colors [&_svg]:size-[18px]",
+                active ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground",
+              )}
+            >
+              {icon}
+              {badge ? (
+                <span className="absolute right-0.5 top-0.5 min-w-3.5 rounded-full bg-primary px-1 text-center text-[9px] font-semibold leading-3.5 text-primary-foreground">
+                  {badge > 99 ? "99+" : badge}
+                </span>
+              ) : null}
+            </button>
+          )}
+        />
+        <TooltipContent side="right">{label}{shortcut ? ` (${shortcut})` : ""}</TooltipContent>
+      </Tooltip>
+    );
+  };
 
   return (
-    <div ref={panelRef} className="relative flex h-full min-h-0 flex-col bg-background" data-editor-panel>
-      <div className="flex h-10 shrink-0 items-center gap-0.5 border-b border-border px-1.5">
+    <div ref={panelRef} className="relative flex h-full min-h-0 bg-background" data-editor-panel data-editor-layout="ide">
+      {/* The activity rail: the side views, quick open, and the app's own destinations at its foot. */}
+      <nav aria-label="Editor views" className="flex w-12 shrink-0 flex-col items-center gap-1 border-e border-border py-2 mac:pt-10" data-editor-rail-views>
+        {railItem("files", "Files", <Files />, mac ? "⌘⇧E" : "Ctrl+Shift+E")}
+        {railItem("changes", "Agent changes", <FileDiff />, null, pendingCount)}
+        {railItem("git", "Git", <GitBranch />, null, gitQuery.data?.repo ? gitQuery.data.files.length : undefined)}
+        <Tooltip>
+          <TooltipTrigger
+            render={(
+              <button
+                type="button"
+                aria-label="Go to file"
+                onClick={() => useEditorStore.getState().setQuickOpen(true)}
+                className="flex size-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground [&_svg]:size-[18px]"
+              >
+                <Search />
+              </button>
+            )}
+          />
+          <TooltipContent side="right">Go to file ({mac ? "⌘P" : "Ctrl+P"})</TooltipContent>
+        </Tooltip>
+        <span className="flex-1" />
+        {props.railFoot}
+      </nav>
+      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex h-10 shrink-0 items-center gap-1.5 border-b border-border px-2 mac:titlebar-drag mac:ps-6 [&_button]:mac:titlebar-no-drag" data-editor-header>
+        {props.headerStart}
+        <span className="flex-1" />
         <Tooltip>
           <TooltipTrigger
             render={(
@@ -1082,20 +1129,6 @@ export default function EditorPanel(props: EditorPanelProps) {
             )}
           />
           <TooltipContent>{sideOpen ? "Hide side bar" : "Show side bar"}</TooltipContent>
-        </Tooltip>
-        {segment("files", "Files")}
-        {segment("changes", "Changes", pendingCount)}
-        {segment("git", "Git", gitQuery.data?.repo ? gitQuery.data.files.length : undefined)}
-        <span className="flex-1" />
-        <Tooltip>
-          <TooltipTrigger
-            render={(
-              <Button variant="ghost" size="icon-sm" aria-label="Go to file" onClick={() => useEditorStore.getState().setQuickOpen(true)}>
-                <Search />
-              </Button>
-            )}
-          />
-          <TooltipContent>Go to file ({/Mac/i.test(navigator.platform) ? "⌘P" : "Ctrl+P"})</TooltipContent>
         </Tooltip>
         <Tooltip>
           <TooltipTrigger
@@ -1112,18 +1145,9 @@ export default function EditorPanel(props: EditorPanelProps) {
               </Button>
             )}
           />
-          <TooltipContent>Terminal ({/Mac/i.test(navigator.platform) ? "⌘J" : "Ctrl+J"})</TooltipContent>
+          <TooltipContent>Terminal ({mac ? "⌘J" : "Ctrl+J"})</TooltipContent>
         </Tooltip>
-        <Tooltip>
-          <TooltipTrigger
-            render={(
-              <Button variant="ghost" size="icon-sm" aria-label="Close editor" onClick={props.onClose}>
-                <X />
-              </Button>
-            )}
-          />
-          <TooltipContent>Close editor</TooltipContent>
-        </Tooltip>
+        {props.headerEnd}
       </div>
       <ResizablePanelGroup orientation="vertical" className="min-h-0 flex-1">
         <ResizablePanel minSize="160px" className="min-h-0">
@@ -1150,6 +1174,7 @@ export default function EditorPanel(props: EditorPanelProps) {
           </>
         ) : null}
       </ResizablePanelGroup>
+      </div>
       {quickOpen ? (
         <QuickOpen
           files={files}

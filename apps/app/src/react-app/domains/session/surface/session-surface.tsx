@@ -912,7 +912,7 @@ function AdmissionOutcomeUnknownCard(props: { resuming: boolean; onResume: () =>
     <div
       data-testid="admission-outcome-unknown"
       role="status"
-      className="not-prose mx-auto flex w-full max-w-3xl flex-col items-start gap-2 px-2 md:px-10"
+      className="not-prose mx-auto flex w-full max-w-3xl flex-col items-start gap-2 px-2 @min-[40rem]/chatpane:px-10"
     >
       <div className="flex min-w-0 items-center gap-2 py-1 text-sm text-dls-secondary">
         <CirclePause aria-hidden="true" className="size-4 shrink-0" />

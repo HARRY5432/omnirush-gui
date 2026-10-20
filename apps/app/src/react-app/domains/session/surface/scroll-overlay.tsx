@@ -1,4 +1,5 @@
 import { memo, useCallback } from "react";
+import { ArrowDown, ArrowUp } from "lucide-react";
 
 import {
   selectSessionIsStickyBottom,
@@ -27,10 +28,13 @@ const JumpToStartButton = memo(function JumpToStartButton({
   return (
     <button
       type="button"
-      className="rounded-full px-3 py-1.5 text-xs text-dls-text transition-colors hover:bg-dls-hover"
+      className="flex items-center gap-1 rounded-full px-3 py-1.5 text-xs text-dls-text transition-colors hover:bg-dls-hover @max-[34rem]/chatpane:p-1.5"
       onClick={handleClick}
+      aria-label="Jump to start"
+      title="Jump to start"
     >
-      Jump to start
+      <ArrowUp className="hidden size-4 @max-[34rem]/chatpane:block" aria-hidden="true" />
+      <span className="@max-[34rem]/chatpane:hidden">Jump to start</span>
     </button>
   );
 });
@@ -49,10 +53,13 @@ const JumpToLatestButton = memo(function JumpToLatestButton({
   return (
     <button
       type="button"
-      className="rounded-full px-3 py-1.5 text-xs text-dls-text transition-colors hover:bg-dls-hover"
+      className="flex items-center gap-1 rounded-full px-3 py-1.5 text-xs text-dls-text transition-colors hover:bg-dls-hover @max-[34rem]/chatpane:p-1.5"
       onClick={handleClick}
+      aria-label="Jump to latest"
+      title="Jump to latest"
     >
-      Jump to latest
+      <ArrowDown className="hidden size-4 @max-[34rem]/chatpane:block" aria-hidden="true" />
+      <span className="@max-[34rem]/chatpane:hidden">Jump to latest</span>
     </button>
   );
 });
@@ -79,8 +86,9 @@ export const SessionScrollOverlay = memo(function SessionScrollOverlay({
   }
 
   return (
-    <div className="pointer-events-none absolute bottom-2 left-1/2 z-30 flex -translate-x-1/2 justify-center">
-      <div className="pointer-events-auto flex items-center gap-2 rounded-full border border-dls-border bg-dls-surface/95 p-1 shadow-(--dls-card-shadow) backdrop-blur-md">
+    // Narrow chat (under 34rem): small round buttons at the bottom right, clear of the text column.
+    <div className="pointer-events-none absolute bottom-2 left-1/2 z-30 flex -translate-x-1/2 justify-center @max-[34rem]/chatpane:left-auto @max-[34rem]/chatpane:right-3 @max-[34rem]/chatpane:translate-x-0">
+      <div className="pointer-events-auto flex items-center gap-2 rounded-full border border-dls-border bg-dls-surface p-1 shadow-(--dls-card-shadow) @max-[34rem]/chatpane:gap-1">
         {showJumpToStart ? (
           <JumpToStartButton onJumpToStartOfMessage={onJumpToStartOfMessage} />
         ) : null}

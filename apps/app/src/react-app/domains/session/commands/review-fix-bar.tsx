@@ -19,7 +19,7 @@ export function ReviewFixBar(props: { review: ReviewSummary; disabled?: boolean;
   // One click sends one fix command; the bar goes away once its turn starts.
   const [sent, setSent] = useState(false);
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-wrap items-center gap-2 px-2 md:px-10" data-testid="review-fix-bar">
+    <div className="mx-auto flex w-full max-w-3xl flex-wrap items-center gap-2 px-2 @min-[40rem]/chatpane:px-10" data-testid="review-fix-bar">
       {REVIEW_SEVERITIES.filter((severity) => props.review.counts[severity] > 0).map((severity) => (
         <span
           key={severity}

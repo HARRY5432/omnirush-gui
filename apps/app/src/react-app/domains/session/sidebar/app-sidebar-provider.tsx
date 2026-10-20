@@ -1,9 +1,12 @@
+import type { WorkspaceTasksClient } from "../../workspace/tasks/workspace-tasks-query";
 /** @jsxImportSource react */
 import * as React from "react";
 import type { WorkspaceConnectionState } from "../../../../app/types";
 import type { SessionNumberShortcutOs } from "../../../shell/session-number-shortcuts";
 
 export type SidebarContextValue = {
+  /** Parallel tasks boards: the client that lists a workspace's tasks, and how to open a workspace's board. */
+  parallelTasks?: { client: WorkspaceTasksClient; onOpen: (workspaceId: string) => void } | null;
   selectedWorkspaceId: string;
   selectedSessionId: string | null;
   developerMode: boolean;

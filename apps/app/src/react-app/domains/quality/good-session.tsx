@@ -2,7 +2,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { UIMessage } from "ai";
 import type { OmniRushSessionStatus } from "@omnirush/types/desktop-ipc";
-import { AlertTriangle, CircleCheck, CircleX, Star } from "lucide-react";
+import { AlertTriangle, ChevronDown, CircleCheck, CircleX, Star } from "lucide-react";
+
+const CHECKLIST_OPEN_KEY = "omnirush.goodSession.checklistOpen";
 
 import {
   AlertDialog,
@@ -419,6 +421,8 @@ export function GoodSessionChecklistBar(props: GoodSessionChecklistBarProps) {
   const prompts = useMemo(() => promptsInTranscript(props.messages), [props.messages]);
   const [followUpFor, setFollowUpFor] = useState<string | null>(null);
   const [followUpOff, setFollowUpOff] = useState(() => readPref(FOLLOW_UP_OFF_KEY) === "1");
+  // The checklist opens on demand (remembered); the summary always shows how many checks pass.
+  const [checklistOpen, setChecklistOpen] = useState(() => readPref(CHECKLIST_OPEN_KEY) === "1");
   const serverFollowUpOff = serverStatusUsable(server) && server.client?.oneMoreTurn === false;
   useEffect(() => {
     const sessionId = props.sessionId;
@@ -465,10 +469,12 @@ export function GoodSessionChecklistBar(props: GoodSessionChecklistBarProps) {
 
   if (!hasPrompt) return null;
   const verdict = checklist.verdict;
+  const passedChecks = checklist.checks.filter((check) => check.state === "pass").length;
   const dock = checklist.dock;
   const dockLink = dock?.link;
   return (
-    <div className="px-4 max-lg:px-3 lg:px-8" data-testid="good-session-checklist" data-verdict={verdict} data-source={checklist.source}>
+    // A container: the checklist lays out by the chat's own width (the chat can be narrow beside the editor), not the window's.
+    <div className="@container/quality px-4 max-lg:px-3 lg:px-8" data-testid="good-session-checklist" data-verdict={verdict} data-source={checklist.source}>
       {dock ? (
         <div
           role="status"
@@ -516,33 +522,51 @@ export function GoodSessionChecklistBar(props: GoodSessionChecklistBarProps) {
         </div>
       ) : null}
       {props.client ? <GoodSessionLine result={goodSession} /> : null}
-      <div className="mx-auto flex max-w-[800px] items-center gap-2 pb-1.5">
-        <div
-          className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 rounded-full border border-border bg-popover/60 px-2.5 py-1 text-[11px] leading-4 text-muted-foreground"
+      {/* At every width: a compact summary ("On track ★ 4/6") that opens to the full checklist,
+          and the guide link on its own line under it (never cut off at the right edge). */}
+      <div className="mx-auto flex max-w-[800px] flex-col items-start gap-1 pb-1.5" data-testid="good-session-row" data-expanded={checklistOpen ? "" : undefined}>
+        <button
+          type="button"
+          onClick={() => {
+            const next = !checklistOpen;
+            setChecklistOpen(next);
+            writePref(CHECKLIST_OPEN_KEY, next ? "1" : "0");
+          }}
+          aria-expanded={checklistOpen}
           aria-label={checklist.text}
           role="status"
+          data-testid="good-session-summary"
+          className={cn(
+            "flex max-w-full min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 border border-border bg-popover/60 px-2.5 py-1 text-start text-[11px] leading-4 text-muted-foreground transition-colors hover:bg-muted/60",
+            checklistOpen ? "w-full rounded-xl px-3 py-1.5" : "rounded-full",
+          )}
         >
-          <Star
-            data-testid="good-session-star"
-            data-filled={verdict === "good" ? "" : undefined}
-            className={cn("size-3 shrink-0", verdict === "good" ? "fill-current text-foreground" : verdict === "on-track" ? "text-foreground" : "text-muted-foreground")}
-            aria-hidden="true"
-          />
-          <span className="whitespace-nowrap font-medium text-foreground">{checklistHeading(verdict)}:</span>
-          {checklist.checks.map((check, index) => (
-            <span key={check.id} className="inline-flex items-center gap-1.5">
-              {index > 0 ? <span aria-hidden="true" className="text-muted-foreground/60">·</span> : null}
-              <CheckMark check={check} />
+          <span className="inline-flex min-w-0 items-center gap-1.5">
+            <Star
+              data-testid="good-session-star"
+              data-filled={verdict === "good" ? "" : undefined}
+              className={cn("size-3 shrink-0", verdict === "good" ? "fill-current text-foreground" : verdict === "on-track" ? "text-foreground" : "text-muted-foreground")}
+              aria-hidden="true"
+            />
+            <span className="truncate font-medium text-foreground">{checklistHeading(verdict)}</span>
+            <span className={cn("shrink-0 tabular-nums", passedChecks < checklist.checks.length && "text-amber-11")} data-testid="good-session-count">
+              {passedChecks}/{checklist.checks.length}
             </span>
-          ))}
-        </div>
+            <ChevronDown className={cn("size-3 shrink-0 transition-transform", checklistOpen && "rotate-180")} aria-hidden="true" />
+          </span>
+          {checklistOpen ? (
+            <span className="flex basis-full flex-wrap items-center gap-x-3 gap-y-1" data-testid="good-session-checks">
+              {checklist.checks.map((check) => <CheckMark key={check.id} check={check} />)}
+            </span>
+          ) : null}
+        </button>
         <Popover>
           <PopoverTrigger
             render={(
               <button
                 type="button"
                 data-testid="good-session-guide-link"
-                className="shrink-0 whitespace-nowrap text-[11px] text-muted-foreground underline-offset-2 transition hover:text-foreground hover:underline"
+                className="shrink-0 whitespace-nowrap ps-1 text-[11px] text-muted-foreground underline-offset-2 transition hover:text-foreground hover:underline"
               />
             )}
           >

@@ -136,6 +136,7 @@ import {
   type SessionNumberShortcutsState,
 } from "../../../shell/session-number-shortcuts";
 import type { SidebarContextValue } from "./app-sidebar-provider";
+import { runningTaskCount, useWorkspaceTasks } from "../../workspace/tasks/workspace-tasks-query";
 import {
   MAX_SESSIONS_PREVIEW,
   flattenSessionRows,
@@ -959,6 +960,8 @@ export type AppSidebarProps = {
   /** The parallel-task board of the selected repository, with how many of its tasks run. */
   tasksActive?: boolean;
   tasksRunningCount?: number;
+  /** Opens a workspace's parallel tasks board (any local workspace, not only the selected one). */
+  onOpenTasksForWorkspace?: (workspaceId: string) => void;
   onOpenTasks?: () => void;
   /** Opens the cross-session message search dialog (Cmd/Ctrl+Shift+F). */
   onOpenSessionSearch?: () => void;
@@ -1275,6 +1278,9 @@ export function AppSidebar(props: AppSidebarProps) {
     onRecoverWorkspace: props.onRecoverWorkspace,
     onTestWorkspaceConnection: props.onTestWorkspaceConnection,
     onRetryWorkspaceTasks: props.onRetryWorkspaceTasks,
+    parallelTasks: props.auditClient && props.onOpenTasksForWorkspace
+      ? { client: props.auditClient, onOpen: props.onOpenTasksForWorkspace }
+      : null,
     onEditWorkspaceConnection: props.onEditWorkspaceConnection,
     onForgetWorkspace: props.onForgetWorkspace,
     expandWorkspace,
@@ -2029,6 +2035,13 @@ function WorkspaceSidebarGroup({
                       </span>
                     </SidebarMenuSubButton>
                   </SidebarMenuSubItem>
+                ) : !isRemoteWorkspace && ctx.parallelTasks ? (
+                  <EmptyWorkspaceRow
+                    workspaceId={workspace.id}
+                    parallelTasks={ctx.parallelTasks}
+                    newTaskDisabled={ctx.newTaskDisabled}
+                    onCreateTask={() => ctx.onCreateTaskInWorkspace(workspace.id)}
+                  />
                 ) : (
                   <SidebarMenuSubItem>
                     <SidebarMenuSubButton
@@ -2690,5 +2703,51 @@ function SessionMenuItem({
     >
       {item}
     </SidebarReorderItem>
+  );
+}
+
+
+/**
+ * A local workspace with no chats: "No tasks yet.", unless its parallel tasks
+ * board has tasks (they run in copies of the repository, so their chats are
+ * not listed under it); then a row that opens the board.
+ */
+function EmptyWorkspaceRow(props: {
+  workspaceId: string;
+  parallelTasks: NonNullable<SidebarContextValue["parallelTasks"]>;
+  newTaskDisabled?: boolean;
+  onCreateTask: () => void;
+}) {
+  const tasks = useWorkspaceTasks(props.parallelTasks.client, props.workspaceId);
+  const total = tasks.data?.tasks.length ?? 0;
+  const running = runningTaskCount(tasks.data);
+  if (total > 0) {
+    return (
+      <SidebarMenuSubItem>
+        <SidebarMenuSubButton
+          className="text-xs text-foreground"
+          onClick={() => props.parallelTasks.onOpen(props.workspaceId)}
+          data-testid="sidebar-parallel-tasks-row"
+        >
+          <Layers className="size-3.5 shrink-0 text-muted-foreground" />
+          <span className="truncate">
+            {total === 1 ? "1 parallel task" : `${total} parallel tasks`}
+            {running ? <span className="text-muted-foreground"> · {running} running</span> : null}
+          </span>
+          <span aria-hidden="true" className="ml-auto text-muted-foreground">→</span>
+        </SidebarMenuSubButton>
+      </SidebarMenuSubItem>
+    );
+  }
+  return (
+    <SidebarMenuSubItem>
+      <SidebarMenuSubButton
+        className="text-muted-foreground text-xs"
+        onClick={props.onCreateTask}
+        aria-disabled={props.newTaskDisabled}
+      >
+        <span className="truncate">{t("workspace.no_tasks")}</span>
+      </SidebarMenuSubButton>
+    </SidebarMenuSubItem>
   );
 }
