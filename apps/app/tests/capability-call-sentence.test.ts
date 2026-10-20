@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { DynamicToolUIPart } from "ai";
 
-import { getCapabilityCallQuote, getCapabilityCallSentence } from "@/lib/capability-call";
+import { getCapabilityCallQuote, getCapabilityCallSentence, registerMcpServerTitles } from "@/lib/capability-call";
 
 function executeCapability(input: unknown): DynamicToolUIPart {
   return {
@@ -59,5 +59,15 @@ describe("capability call sentences", () => {
 
   test("falls back to a generic sentence only when the name is unusable", () => {
     expect(getCapabilityCallSentence(executeCapability({})).past).toBe("Ran a capability");
+  });
+
+  test("a supported MCP server's tool reads with the server's title and the tool's name", () => {
+    registerMcpServerTitles([{ id: "sqlite", title: "SQLite" }, { id: "sequential-thinking", title: "Sequential thinking" }]);
+    const call = (toolName: string): DynamicToolUIPart => ({ type: "dynamic-tool", toolName, toolCallId: "c", state: "output-available", input: {}, output: "ok" } as DynamicToolUIPart);
+    expect(getCapabilityCallSentence(call("sqlite_write_query"))).toMatchObject({ service: "SQLite", past: "Used SQLite: write_query", present: "Using SQLite: write_query" });
+    expect(getCapabilityCallSentence(call("sqlite_read_query")).past).toBe("Used SQLite: read_query");
+    expect(getCapabilityCallSentence(call("sequential-thinking_sequentialthinking")).past).toBe("Used Sequential thinking: sequentialthinking");
+    // Other MCP tools keep their sentences.
+    expect(getCapabilityCallSentence(call("granola_list_meetings")).past).toBe("Listed meetings · Granola");
   });
 });

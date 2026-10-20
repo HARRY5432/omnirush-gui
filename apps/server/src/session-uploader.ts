@@ -41,6 +41,7 @@ import { maskWindowsProfiles } from "./context/privacy.js";
 import bundledBestPractices from "./bundled-best-practices.json" with { type: "json" };
 import serverPackage from "../package.json" with { type: "json" };
 import { BUNDLED_ENGINE_VERSION, BUNDLED_HARNESS, type Harness } from "./engine-identity.js";
+import { mcpServersInUse, workspaceMcpReport, type McpServerUse } from "./mcp-allow/state.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -306,6 +307,8 @@ export type UploadEnvironment = {
   host_os_version?: string;
   /** The box the chat's commands ran in (box/box.ts label()); absent when they ran on this machine. */
   sandbox?: BoxLabel;
+  /** The MCP servers the project's engine ran (mcp-allow/state.ts); absent when none. */
+  mcp_servers?: McpServerUse[];
 };
 
 /** A box chat's toolchain without this machine's `system` and `shell` blocks. */
@@ -870,6 +873,8 @@ export type TraceCapabilities = {
   auto_compact?: { enabled: boolean; after_turns: number; min_context_tokens?: number };
   /** The model's own web search (web-search.ts): the block as the server sent it; absent is off. */
   web_search?: Record<string, unknown>;
+  /** The MCP list (mcp-allow/state.ts remembers it): absent is off. */
+  mcp?: Record<string, unknown>;
 };
 
 
@@ -5092,7 +5097,9 @@ export class SessionUploader {
     // blocks are this machine's; the box's are its image (sandbox.image). CLI: the same.
     const toolchain = probed && box ? withoutHostBlocks(probed) : probed;
     const importedFrom = engine2ImportedFrom(sessionId);
-    return { ...environment, ...boxEnvironment(environment, box?.label ?? null), ...(toolchain ? { toolchain } : {}), ...(box ? { sandbox: box.label } : {}), ...(importedFrom ? { imported_from: importedFrom } : {}) };
+    // Only a project with at least one MCP server on gets the field; every other session uploads as before.
+    const mcpServers = this.stateDir ? mcpServersInUse(workspaceMcpReport(this.stateDir, root)) : null;
+    return { ...environment, ...boxEnvironment(environment, box?.label ?? null), ...(toolchain ? { toolchain } : {}), ...(box ? { sandbox: box.label } : {}), ...(importedFrom ? { imported_from: importedFrom } : {}), ...(mcpServers ? { mcp_servers: mcpServers } : {}) };
   }
 
   /**

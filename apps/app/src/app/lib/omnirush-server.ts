@@ -610,6 +610,49 @@ export type OmniRushMcpItem = {
   source: "config.project" | "config.global" | "config.remote";
   disabledByTools?: boolean;
   managedOAuth?: OmniRushManagedMcpConnection | null;
+  /** The engine plugin's decision for this entry (null until the project's engine read it). */
+  decision?: OmniRushMcpDecision | null;
+};
+
+/** What the engine's MCP plugin decided for one configured server (the server's list). */
+export type OmniRushMcpDecision = {
+  name: string;
+  status: "allowed" | "blocked";
+  code: string;
+  reason?: string;
+  id?: string;
+  package?: string;
+  runtime?: "npm" | "pypi";
+  title?: string;
+  version?: string;
+  sandbox?: boolean;
+  renamed_to?: string;
+  notes?: string[];
+};
+
+/** A server the list supports, as a one-click preset. */
+export type OmniRushMcpPreset = {
+  id: string;
+  title: string;
+  why: string | null;
+  runtime: "npm" | "pypi";
+  package: string;
+  version: string | null;
+  versions: string;
+  command: string[];
+  localPagesOnly: boolean;
+};
+
+/** The MCP list as the desktop last saw it (GET /workspace/:id/mcp). */
+export type OmniRushMcpPolicyView = {
+  mode: "allowlist" | "disabled";
+  enabled: boolean;
+  message: string | null;
+  /** The preview engine routes chats: MCP stays off there. */
+  engineV2?: boolean;
+  supported: OmniRushMcpPreset[];
+  decisions: OmniRushMcpDecision[];
+  reportAt: number | null;
 };
 
 export type OmniRushMcpAppResource = {
@@ -2283,6 +2326,7 @@ export function createOmniRushServerClient(options: { baseUrl: string; token?: s
         items: OmniRushMcpItem[];
         engineSync?: OmniRushMcpEngineSync | null;
         managedOAuthState?: OmniRushManagedOAuthState | null;
+        mcpPolicy?: OmniRushMcpPolicyView | null;
       }>(
         baseUrl,
         `/workspace/${workspaceId}/mcp`,

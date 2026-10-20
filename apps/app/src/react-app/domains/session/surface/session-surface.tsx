@@ -146,6 +146,7 @@ import {
   type ChatMcpReconnectScope,
 } from "./mcp-chat-reconnect";
 import { OpenTargetProvider, type OpenTargetOptions } from "@/lib/target-provider";
+import { registerMcpServerTitles } from "@/lib/capability-call";
 import type { ThreadStatus } from "@/lib/messages";
 import {
   EnvironmentVariableProvider,
@@ -2844,9 +2845,18 @@ export function SessionSurface(props: SessionSurfaceProps) {
     return next;
   }, [props.client, props.workspaceId]);
 
+  // Chat labels for supported MCP servers' tools use their titles (lib/capability-call.ts).
+  useEffect(() => {
+    let current = true;
+    void props.client.listMcp(props.workspaceId).then((response) => {
+      if (current && response.mcpPolicy) registerMcpServerTitles([...response.mcpPolicy.supported, ...response.mcpPolicy.decisions]);
+    }).catch(() => undefined);
+    return () => { current = false; };
+  }, [props.client, props.workspaceId]);
+
   const listMcp = useCallback(async (): Promise<{ servers: McpServerEntry[]; statuses: McpStatusMap; status: string | null }> => {
     if (props.mcpDisabled === true) {
-      const status = "MCP servers are disabled in OmniRush.ai.";
+      const status = "This project's MCP servers are listed in Settings > MCP.";
       setToolMcpServers([]);
       setToolMcpStatuses({});
       setToolMcpStatus(status);

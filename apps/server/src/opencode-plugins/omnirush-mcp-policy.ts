@@ -1,89 +1,65 @@
-type ConfigTarget = {
-  mcp?: unknown;
-  permission?: unknown;
-  permissions?: unknown;
-  tools?: unknown;
-};
+// Engine plugin: MCP servers follow the server's list (mcp-allow/mcp-allow.mjs,
+// the same module as the CLI's). Loaded last, so no plugin before it can add
+// servers after the list was applied.
+//
+// - config: the project's MCP entries (its config files, plus the ones added
+//   in the app: OMNIRUSH_MCP_WORKSPACE_DIR) are replaced by the allowed ones,
+//   keyed by their id, pinned, paths checked, and run in the project's sandbox
+//   when it is on. The report (OMNIRUSH_MCP_REPORT_DIR) says which and why.
+// - tool.execute.before: servers limited to local pages refuse other pages.
+//
+// No policy file (OMNIRUSH_MCP_POLICY_FILE missing or unreadable): no MCP.
+// The engine calls every function a plugin module exports: export only the plugin.
+import { existsSync } from "node:fs";
+import path from "node:path";
 
-type ToolBeforeInput = {
-  tool?: unknown;
-};
+import { createMcpPolicyHooks, type McpBox } from "../mcp-allow/mcp-allow.mjs";
+import { readWorkspaceMcp } from "../mcp-allow/state.js";
+import { boxHome, desktopProjects, keyOf, record } from "../box/plugin-lib.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function configTarget(input: unknown, output: unknown): ConfigTarget | null {
-  if (isRecord(output)) return output;
-  return isRecord(input) ? input : null;
+// The same choice of target as the shared hooks (both engine hook shapes).
+function configTarget(input: unknown, output: unknown): Record<string, unknown> | null {
+  if (isRecord(output) && (Object.hasOwn(output, "mcp") || !isRecord(input))) return output;
+  return isRecord(input) ? input : isRecord(output) ? output : null;
 }
 
-function serverNamesFromConfig(value: unknown): string[] {
-  if (!isRecord(value) || !isRecord(value.mcp)) return [];
-  return Object.keys(value.mcp).filter((name) => name.trim().length > 0);
+/** The project's sandbox when the desktop has it on: its shell (boxsh), key and folder in the box. */
+function boxFor(root: string): McpBox | null {
+  const key = keyOf(root);
+  if (!desktopProjects().keys.has(key)) return null;
+  const rec = record(key);
+  if (!rec || rec.state === "off") return null;
+  const shell = path.join(boxHome(), "shell", process.platform === "win32" ? "bash.exe" : "bash");
+  if (!existsSync(shell)) return null;
+  return { shell, key, croot: typeof rec.croot === "string" ? rec.croot : null };
 }
 
-function normalizedServerName(name: string): string {
-  return name.replace(/[^a-zA-Z0-9_-]/g, "_");
-}
-
-function deniedPatterns(serverNames: Iterable<string>): string[] {
-  const patterns = new Set<string>(["mcp.*", "mcp:*", "mcp_*"]);
-  for (const name of serverNames) {
-    const normalized = normalizedServerName(name);
-    patterns.add(`${normalized}_*`);
-    patterns.add(`${normalized}___*`);
-    patterns.add(`mcp.${name}.*`);
-    patterns.add(`mcp:${name}:*`);
-    patterns.add(`tool.${normalized}_*`);
-  }
-  return [...patterns];
-}
-
-function withDenyRules(value: unknown, patterns: string[]): Record<string, unknown> {
-  const existing = isRecord(value) ? value : {};
-  return Object.fromEntries([
-    ...Object.entries(existing),
-    ...patterns.map((pattern) => [pattern, "deny"] as const),
-  ]);
-}
-
-function isDeniedMcpTool(tool: string, serverNames: Iterable<string>): boolean {
-  if (tool.startsWith("mcp_") || tool.startsWith("mcp.") || tool.startsWith("mcp:")) return true;
-  return [...serverNames].some((name) => {
-    const normalized = normalizedServerName(name);
-    return tool === normalized
-      || tool.startsWith(`${normalized}_`)
-      || tool.startsWith(`${normalized}___`);
+export default async function omnirushMcpPolicy(input?: { directory?: string }) {
+  const root = path.resolve(input?.directory || process.cwd());
+  const hooks = createMcpPolicyHooks({
+    directory: root,
+    policyFile: process.env.OMNIRUSH_MCP_POLICY_FILE || null,
+    reportDir: process.env.OMNIRUSH_MCP_REPORT_DIR || null,
+    box: boxFor,
   });
-}
-
-/**
- * Engine-side MCP fence. HTTP checks protect OmniRush routes, while these
- * hooks cover workspace/global config discovery inside a managed v1 engine.
- * The config hook supports both OpenCode hook shapes, and the execution hook
- * catches the actual `<server>_<tool>` IDs rather than relying on `mcp.*`.
- */
-export default async function omnirushMcpPolicy() {
-  const serverNames = new Set<string>();
-  const applyFence = (input: unknown, output?: unknown): void => {
-    const target = configTarget(input, output);
-    if (!target) return;
-    for (const name of serverNamesFromConfig(target)) serverNames.add(name);
-    const patterns = deniedPatterns(serverNames);
-    target.mcp = {};
-    target.permission = withDenyRules(target.permission, patterns);
-    target.permissions = withDenyRules(target.permissions, patterns);
-    target.tools = withDenyRules(target.tools, patterns);
-  };
-
   return {
-    config: async (input: unknown, output?: unknown) => {
-      applyFence(input, output);
+    config: async (configInput: unknown, output?: unknown) => {
+      const target = configTarget(configInput, output);
+      if (target) {
+        try {
+          const added = readWorkspaceMcp(process.env.OMNIRUSH_MCP_WORKSPACE_DIR, root);
+          if (Object.keys(added).length) target.mcp = { ...(isRecord(target.mcp) ? target.mcp : {}), ...added };
+        } catch {
+          // The app-added servers are left out; the config's own still go through the list.
+        }
+      }
+      // Fails closed: an error while applying the list leaves no servers at all.
+      await hooks.config(configInput, output);
     },
-    "tool.execute.before": async (input: ToolBeforeInput) => {
-      if (typeof input.tool !== "string" || !isDeniedMcpTool(input.tool, serverNames)) return;
-      throw new Error("MCP tools are disabled in this app.");
-    },
+    "tool.execute.before": hooks["tool.execute.before"],
   };
 }

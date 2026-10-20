@@ -33,8 +33,10 @@ import {
   removeMcpFromConfig,
   validateMcpServerName,
 } from "../../../app/mcp";
+import { registerMcpServerTitles } from "@/lib/capability-call";
 import {
   buildOmniRushWorkspaceBaseUrl,
+  type OmniRushMcpPolicyView,
   type OmniRushServerClient,
 } from "../../../app/lib/omnirush-server";
 import type {
@@ -78,7 +80,9 @@ const OMNIRUSH_UI_MCP_UNAVAILABLE = "UI control requires the omnirush.ai desktop
 const COMPUTER_USE_HELPER_UNAVAILABLE = "Computer Use helper app is unavailable. Restart omnirush.ai or reinstall the app.";
 const COMPUTER_USE_CONNECT_TIMEOUT_MS = 15_000;
 const COMPUTER_USE_RECONNECT_COOLDOWN_MS = 30_000;
-const MCP_DISABLED_BY_POLICY = "MCP servers are disabled in OmniRush.ai.";
+const MCP_DISABLED_BY_POLICY = "MCP servers are turned off for this account.";
+/** Connect and other account-linked MCP services: never run here (a session could not be repeated). */
+const ACCOUNT_LINKED_MCP_OFF: boolean = true;
 
 async function withLocalOmniRushServerRecoveryTimeout<T>(
   task: Promise<T>,
@@ -135,6 +139,8 @@ export type ConnectionsStoreSnapshot = {
   mcpAuthNeedsReload: boolean;
   /** False when the server reports managed OAuth secure storage is unavailable. */
   managedOAuthAvailable: boolean;
+  /** The server's MCP list for this project: supported servers and each configured one's decision. */
+  mcpPolicy: OmniRushMcpPolicyView | null;
 };
 
 type MutableState = ConnectionsStoreSnapshot;
@@ -184,6 +190,7 @@ export function createConnectionsStore(options: {
     mcpAuthEntry: null,
     mcpAuthNeedsReload: false,
     managedOAuthAvailable: true,
+    mcpPolicy: null,
   };
 
   const emitChange = () => {
@@ -202,6 +209,7 @@ export function createConnectionsStore(options: {
       mcpAuthEntry: state.mcpAuthEntry,
       mcpAuthNeedsReload: state.mcpAuthNeedsReload,
       managedOAuthAvailable: state.managedOAuthAvailable,
+      mcpPolicy: state.mcpPolicy,
     };
   };
 
@@ -272,6 +280,15 @@ export function createConnectionsStore(options: {
     return current.omnirushServerStatus !== "connected"
       || current.omnirushServerCapabilities?.mcp?.read !== true;
   };
+
+  // Adding or turning on a server needs the server's list to be on (the
+  // server checks each server against it again).
+  const mcpWritesDisabledByPolicy = () => {
+    if (mcpDisabledByPolicy()) return true;
+    if (state.mcpPolicy) return !state.mcpPolicy.enabled;
+    return getOmniRushSnapshot().omnirushServerCapabilities?.mcp?.write !== true;
+  };
+  const mcpPolicyMessage = () => state.mcpPolicy?.message?.trim() || MCP_DISABLED_BY_POLICY;
 
   const resolveOmniRushWorkspaceId = async () => {
     const current = options.runtimeWorkspaceId()?.trim();
@@ -471,6 +488,7 @@ export function createConnectionsStore(options: {
         }
       }
     }
+    if (response.mcpPolicy) registerMcpServerTitles([...response.mcpPolicy.supported, ...response.mcpPolicy.decisions]);
     const next = response.items.map((entry) => ({
       name: entry.name,
       config: entry.config as McpServerEntry["config"],
@@ -517,6 +535,7 @@ export function createConnectionsStore(options: {
       observedStatuses,
       engineSync,
       managedOAuthAvailable: response.managedOAuthState?.available ?? true,
+      mcpPolicy: response.mcpPolicy ?? null,
     };
   };
 
@@ -649,6 +668,7 @@ export function createConnectionsStore(options: {
           mcpLastUpdatedAt: Date.now(),
           mcpStatuses: projectedStatuses,
           managedOAuthAvailable: serverResult.managedOAuthAvailable,
+          mcpPolicy: serverResult.mcpPolicy,
           mcpStatus: failedNames
             ? `Some MCPs could not be registered with the engine: ${failedNames}. They may appear disconnected — try reloading the engine.`
             : serverResult.next.length ? null : "No MCP servers configured yet.",
@@ -797,9 +817,10 @@ export function createConnectionsStore(options: {
   }
 
   function mcpMutationDenied(builtIn: boolean) {
-    if (mcpDisabledByPolicy()) {
-      setStateField("mcpStatus", MCP_DISABLED_BY_POLICY);
-      return MCP_DISABLED_BY_POLICY;
+    if (mcpWritesDisabledByPolicy()) {
+      const message = mcpPolicyMessage();
+      setStateField("mcpStatus", message);
+      return message;
     }
     const restriction = builtIn ? "allowBuiltInExtensions" : "allowManageExtensions";
     if (!options.checkDesktopAppRestriction({ restriction })) return null;
@@ -1214,8 +1235,8 @@ export function createConnectionsStore(options: {
    * waiting for the marker to expire.
    */
   async function syncCloudControlMcp(options?: { force?: boolean }): Promise<"synced" | "unchanged" | "skipped"> {
-    if (mcpDisabledByPolicy()) {
-      setStateField("mcpStatus", MCP_DISABLED_BY_POLICY);
+    // The account-linked Connect server is not run in this app (the server refuses it).
+    if (mcpDisabledByPolicy() || ACCOUNT_LINKED_MCP_OFF) {
       return "skipped";
     }
     const settings = readDenSettings();

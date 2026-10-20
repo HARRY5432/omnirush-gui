@@ -135,6 +135,30 @@ function verbPhrase(action: string, tense: "present" | "past"): string {
   return `${prefix} ${humanize(action)}`
 }
 
+// Supported MCP servers (the account's list) by id, with their titles. The
+// engine names their tools `<id>_<tool>`; those calls read "Used <title>: <tool>".
+const mcpServerTitles = new Map<string, string>()
+
+/** Remember the titles of supported MCP servers (from GET /workspace/:id/mcp). */
+export function registerMcpServerTitles(entries: ReadonlyArray<{ id?: string | null; title?: string | null }>): void {
+  for (const entry of entries) {
+    const id = entry.id?.trim()
+    const title = entry.title?.trim()
+    if (id && title) mcpServerTitles.set(id, title)
+  }
+}
+
+function listedMcpServer(toolName: string): { title: string; tool: string } | null {
+  let best: { title: string; tool: string; length: number } | null = null
+  for (const [id, title] of mcpServerTitles) {
+    const prefix = `${id.replace(/[^a-zA-Z0-9_-]/g, "_")}_`
+    if (toolName.startsWith(prefix) && toolName.length > prefix.length && (!best || prefix.length > best.length)) {
+      best = { title, tool: toolName.slice(prefix.length), length: prefix.length }
+    }
+  }
+  return best ? { title: best.title, tool: best.tool } : null
+}
+
 /**
  * Build the human sentence for a dynamic (MCP / capability) tool call.
  * Tool names follow "{connection}_{tool}", e.g.
@@ -224,6 +248,17 @@ export function getCapabilityCallSentence(
       service: null,
       present: `Running a capability${quoted ? ` for${quoted}` : ""}`,
       past: `Ran a capability${quoted ? ` for${quoted}` : ""}`,
+    }
+  }
+
+  // A supported MCP server's tool: its title and the tool's own name.
+  const listed = listedMcpServer(toolName)
+  if (listed) {
+    const suffix = quoted ? ` —${quoted}` : ""
+    return {
+      service: listed.title,
+      present: `Using ${listed.title}: ${listed.tool}${suffix}`,
+      past: `Used ${listed.title}: ${listed.tool}${suffix}`,
     }
   }
 

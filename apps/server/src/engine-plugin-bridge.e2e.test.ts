@@ -9,6 +9,9 @@ import {
   omnirushMcpPolicyPluginPath,
   omnirushTitleRecoveryPluginPath,
 } from "./omnirush-extensions-plugin-path.js";
+import { readReport, writePolicyFile } from "./mcp-allow/mcp-allow.mjs";
+import { writeWorkspaceMcp } from "./mcp-allow/state.js";
+import policyFixture from "./mcp-allow/mcp-policy.fixture.json" with { type: "json" };
 
 /**
  * OmniRush plugins that patch the global fetch the engine sends model
@@ -19,8 +22,10 @@ import {
  *     reaches the provider, and a rejected optional title parameter
  *     (`reasoning_effort`, `temperature`, `top_p`) is retried without it, so the session
  *     still gets its title;
- *   - MCP policy: a configured local MCP is removed before the supported
- *     engine exposes its inventory or sends provider tools.
+ *   - MCP policy: the server's list applies to every configured MCP (the
+ *     engine config, the user's and the project's files, the app-added
+ *     ones): servers off the list never reach the engine's inventory or the
+ *     provider's tools, and the plugin's report says why.
  *
  * Skipped when the sidecar binary is not present (prepare:sidecar not run).
  */
@@ -132,6 +137,9 @@ rl.on("line", (line) => {
     mkdirSync(join(data, "xdg-config", "opencode"), { recursive: true });
     writeFileSync(join(data, "xdg-config", "opencode", "opencode.jsonc"), `// another tool\n${JSON.stringify({ mcp: { blender: userMcp(join(data, "blender-started")) } })}`);
     writeFileSync(join(work, "opencode.json"), JSON.stringify({ mcp: { supabase: userMcp(join(data, "supabase-started")) } }));
+    // The server's list (the backend's default) and one server the app added for this project.
+    writePolicyFile(join(data, "mcp", "policy.json"), policyFixture);
+    writeWorkspaceMcp(data, work, { "files-outside": { type: "local", command: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/etc"], enabled: true } });
     const configPath = join(data, "runtime-opencode-config.json");
     writeFileSync(configPath, JSON.stringify({
       model: "mock/mock-model",
@@ -155,6 +163,9 @@ rl.on("line", (line) => {
         OPENCODE_DISABLE_MODELS_FETCH: "1",
         OMNIRUSH_SERVER_URL: base,
         OMNIRUSH_POLICY_TOKEN: "policy",
+        OMNIRUSH_MCP_POLICY_FILE: join(data, "mcp", "policy.json"),
+        OMNIRUSH_MCP_REPORT_DIR: join(data, "mcp", "reports"),
+        OMNIRUSH_MCP_WORKSPACE_DIR: join(data, "mcp", "workspaces"),
         OMNIRUSH_SERVER_TOKEN: "server",
         HOME: join(data, "home"),
         OPENCODE_TEST_HOME: join(data, "home"),
@@ -196,7 +207,7 @@ rl.on("line", (line) => {
     console.log("title requests: optional parameters", JSON.stringify(refused));
   }, 90_000);
 
-  test("a configured MCP never reaches the engine inventory or provider tools", async () => {
+  test("MCP servers off the list never reach the engine inventory or provider tools; the report says why", async () => {
     seen.length = 0;
     const status = await waitFor(async () => {
       const response = await engineFetch("/mcp");
@@ -206,6 +217,16 @@ rl.on("line", (line) => {
     expect(status.anyof).toBeUndefined();
     expect(status.blender).toBeUndefined();
     expect(status.supabase).toBeUndefined();
+    expect(status["files-outside"]).toBeUndefined();
+    expect(status.filesystem).toBeUndefined();
+
+    const report = await waitFor(async () => readReport(join(data, "mcp", "reports"), work), "the MCP report");
+    expect(report.enabled).toBe(true);
+    const byName = Object.fromEntries(report.decisions.map((decision) => [decision.name, decision]));
+    expect(byName.anyof).toMatchObject({ status: "blocked", code: "unknown_command" });
+    expect(byName.supabase).toMatchObject({ status: "blocked", code: "unknown_command" });
+    expect(byName.blender).toMatchObject({ status: "blocked", code: "unknown_command" });
+    expect(byName["files-outside"]).toMatchObject({ status: "blocked", code: "outside_project" });
 
     await prompt({ providerID: "anth", modelID: "claude-mock" }, "Use the export tool.");
     await waitFor(async () => seen.find((entry) => entry.path === "/v1/messages"), "an Anthropic request");

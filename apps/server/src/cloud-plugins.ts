@@ -411,7 +411,7 @@ function mcpNoConfigWarning(title: string): string {
 }
 
 function mcpDisabledWarning(title: string): string {
-  return `MCP component "${title}" was skipped because MCP servers are disabled in OmniRush.ai.`;
+  return `MCP component "${title}" was skipped: MCP servers from plugins are not added. Add supported servers in Settings > MCP.`;
 }
 
 function mcpInactiveWarning(title: string): string {
