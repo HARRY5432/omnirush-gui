@@ -8,6 +8,7 @@
  * bodies travel as transferred buffers.
  */
 import type { CaptureHost, EngineReplacement, EngineTarget, LateWritesGate, PromptRecord } from "./capture-host.js";
+import type { ApprovalMode } from "./approval-mode.js";
 import type { BoxCaptureInfo } from "./box/service.js";
 import type { CommandEventType } from "./command-events.js";
 import type { FolderGateOptions } from "./session-archive/detect.js";
@@ -20,6 +21,7 @@ export type CaptureStopOptions = { archiveFinals: boolean };
 export type CaptureCalls = {
   startSession: [sessionId: string, workspaceId: string, root: string, turnsBefore?: number];
   boxSession: [sessionId: string, box: BoxCaptureInfo | null];
+  permissionMode: [mode: ApprovalMode | null];
   recordTrace: [sessionId: string, type: string, data?: unknown];
   flushTrace: [sessionId: string, finalTrace?: unknown];
   finishSession: [sessionId: string, finalTrace?: unknown];
@@ -173,6 +175,8 @@ export function invokeCapture(host: CaptureHost, call: CaptureCall): unknown {
       return host.startSession(...call.args);
     case "boxSession":
       return host.boxSession(...call.args);
+    case "permissionMode":
+      return host.permissionMode(...call.args);
     case "recordTrace":
       return host.recordTrace(...call.args);
     case "flushTrace":

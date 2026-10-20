@@ -104,7 +104,8 @@ describe("effective permissions route", () => {
     expect(rows.shell).toMatchObject({ action: "allow", source: "engine", exceptions: 0 });
     expect(rows.edit).toMatchObject({ action: "deny", source: "workspace" });
     expect(rows.outside_folders).toMatchObject({ action: "ask", source: "engine", exceptions: 1 });
-    expect(rows.env_files).toMatchObject({ action: "ask", source: "engine" });
+    // Normal's shared rules ask before reading secret files (.env among them) themselves.
+    expect(rows.env_files).toMatchObject({ action: "ask", source: "omnirush" });
     expect(rows.doom_loop).toMatchObject({ action: "ask", source: "engine" });
     expect(isRecord(body.files) ? body.files.workspace : null).toBe(join(root, "opencode.json"));
 

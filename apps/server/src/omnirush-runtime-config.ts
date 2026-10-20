@@ -230,7 +230,10 @@ export function buildOmniRushRuntimeConfigObjectFromSnapshot(
 ): Record<string, unknown> {
   const disabledProviders = runtimeDisabledProviderList(runtimeConfig);
   // OMNIRUSH_APPROVALS in the server environment wins over the persisted setting.
-  const permissions = legacyExecutionPermissions(runtimeConfig.managedPolicy?.execution, resolveApprovalMode(runtimeConfig, env).mode);
+  const { "*": catchAll, ...permissions } = legacyExecutionPermissions(runtimeConfig.managedPolicy?.execution, resolveApprovalMode(runtimeConfig, env).mode);
+  // A top-level `task` rule would reach every sub-agent (explore must not
+  // delegate): Careful's task allow goes to the main agent only.
+  const { task: mainAgentTask, ...topLevelPermissions } = permissions;
   // The global row's MCP entries are the account-linked Connect server, which
   // this app does not run; a project's own servers reach the engine through
   // its config files and the MCP plugin (opencode-plugins/omnirush-mcp-policy.ts).
@@ -266,7 +269,11 @@ export function buildOmniRushRuntimeConfigObjectFromSnapshot(
       ...ownProviders,
       ...(runtimeConfig.managedPolicy.allowZenModel !== false ? ["opencode"] : []),
     ] } : onlyOwnProviders ? { enabled_providers: ownProviders } : {}),
-    permission: { ...engineConfig.permission, ...permissions },
+    // Careful's "*" ask goes first: after the engine's own allow-everything
+    // default, but before the user's rules (authorized-folder grants) and
+    // ours, which all stay in force. The main agent's own block below leaves
+    // it out, or it would come after (and override) the user's grants.
+    permission: { ...(catchAll ? { "*": catchAll } : {}), ...engineConfig.permission, ...topLevelPermissions },
     // omnirush.ai's own on-demand skills (the swarm procedure).
     ...(skillPaths.length ? { skills: { paths: skillPaths } } : {}),
     default_agent: runtimeConfig.default_agent ?? "omnirush",
@@ -281,7 +288,8 @@ export function buildOmniRushRuntimeConfigObjectFromSnapshot(
         temperature: 0.2,
         prompt: enabled ? `${OMNIRUSH_AGENT_PROMPT}\n\n${OMNIRUSH_BEST_PRACTICES.systemPrompt}` : OMNIRUSH_AGENT_PROMPT,
         permission: {
-          ...permissions,
+          ...topLevelPermissions,
+          ...(mainAgentTask ? { task: mainAgentTask } : {}),
           skill: {
             // OmniRush.ai supplies its own current skill routing and no longer
             // supports these engine or legacy workspace skills.

@@ -28,12 +28,13 @@ import {
   omnirushAccountSignOut,
   omnirushAccountStatus,
 } from "../../../../app/lib/desktop";
-import type { OmniRushRuntimeApprovals } from "../../../../app/lib/omnirush-server";
+import type { OmniRushApprovalMode, OmniRushRuntimeApprovals } from "../../../../app/lib/omnirush-server";
 import { captureAnalyticsEvent, resetAnalyticsAccount, syncAnalyticsAccount } from "../../../../app/lib/analytics";
 import { omnirushUsageSummary } from "../../../../app/lib/omnirush-usage";
 import { isElectronRuntime } from "../../../../app/utils";
 import {
-  FULL_PERMISSIONS_HELP,
+  APPROVAL_MODES,
+  approvalModeLabel,
   approvalsEnvironmentHint,
   useApprovalMode,
   type ApprovalsClient,
@@ -156,42 +157,78 @@ export function accountServerLine(account: Pick<NativeAccountStatus, "connected"
 }
 
 /**
- * Settings > General > Approvals. The mode, busy flag and status come from
- * useApprovalMode, which the composer's "Full permissions" switch shares.
+ * Settings > General > Permissions: Careful / Normal / Auto. The mode, busy
+ * flag and status come from useApprovalMode, which the composer's permissions
+ * menu shares.
  */
 export function ApprovalsCard(props: {
   approvals: OmniRushRuntimeApprovals | null;
   busy: boolean;
   status: string;
-  onToggle: (enabled: boolean) => void;
+  onSelect: (mode: OmniRushApprovalMode) => void;
+  /** Set when the organisation's policy does not allow changing app settings. */
+  policyLocked?: boolean;
 }) {
-  const hint = props.approvals ? approvalsEnvironmentHint(props.approvals) : null;
-  const full = props.approvals?.mode === "full";
+  const hint = props.policyLocked
+    ? t("permissions.policy_lock")
+    : props.approvals ? approvalsEnvironmentHint(props.approvals) : null;
+  const current = props.approvals?.mode ?? null;
+  const disabled = props.busy || !props.approvals || hint !== null;
+  const summary = current ? approvalModeLabel(current).summary : t("permissions.card_desc");
   return (
     <div className="space-y-3">
       <div className="text-[11px] font-semibold uppercase tracking-[0.15em] text-dls-secondary">
-        Approvals
+        {t("permissions.title")}
       </div>
-      <div className="flex items-center gap-4 rounded-2xl border border-dls-border bg-dls-surface p-4">
+      <div className="flex items-start gap-4 rounded-2xl border border-dls-border bg-dls-surface p-4" data-testid="approvals-card">
         <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-dls-border bg-dls-hover">
-          <ShieldCheck size={17} className={full ? "text-amber-400" : "text-dls-secondary"} />
+          <ShieldCheck size={17} className={current === "full" ? "text-amber-400" : "text-dls-secondary"} />
         </div>
-        <div className="min-w-0 flex-1">
-          <div className="text-[13px] font-medium text-dls-text">Full permissions</div>
-          <div className="text-[11px] text-dls-secondary">{FULL_PERMISSIONS_HELP}</div>
+        <div className="min-w-0 flex-1 space-y-2">
+          <div>
+            <div className="text-[13px] font-medium text-dls-text">{t("permissions.card_desc")}</div>
+            <div className="text-[11px] text-dls-secondary" id="approval-mode-summary" data-testid="approval-mode-summary">{summary}</div>
+          </div>
+          <div
+            role="radiogroup"
+            aria-label={t("permissions.title")}
+            aria-describedby="approval-mode-summary"
+            aria-disabled={disabled || undefined}
+            className="inline-flex rounded-lg border border-dls-border bg-dls-hover p-0.5"
+          >
+            {APPROVAL_MODES.map((mode) => {
+              const selected = current === mode;
+              return (
+                <button
+                  key={mode}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  disabled={disabled}
+                  data-testid={`approval-mode-${mode}`}
+                  onClick={() => {
+                    if (!selected) props.onSelect(mode);
+                  }}
+                  className={`rounded-md px-3 py-1 text-[12px] font-medium transition-colors disabled:cursor-not-allowed ${
+                    selected
+                      ? mode === "full"
+                        ? "bg-dls-surface text-orange-11 shadow-sm"
+                        : "bg-dls-surface text-dls-text shadow-sm"
+                      : "text-dls-secondary hover:text-dls-text disabled:hover:text-dls-secondary"
+                  } ${disabled && !selected ? "opacity-60" : ""}`}
+                >
+                  {approvalModeLabel(mode).title}
+                </button>
+              );
+            })}
+          </div>
           {hint ? (
-            <div className="mt-0.5 text-[11px] text-dls-secondary" data-testid="approvals-env-hint">{hint}</div>
+            <div className="text-[11px] text-dls-secondary" data-testid="approvals-env-hint">{hint}</div>
           ) : null}
           {props.status ? (
-            <div className="mt-0.5 text-[11px] text-dls-secondary" data-testid="approvals-status">{props.status}</div>
+            <div className="text-[11px] text-dls-secondary" role="status" data-testid="approvals-status">{props.status}</div>
           ) : null}
         </div>
-        <Switch
-          aria-label="Full permissions"
-          checked={full}
-          disabled={props.busy || !props.approvals || hint !== null}
-          onCheckedChange={props.onToggle}
-        />
       </div>
     </div>
   );
@@ -505,7 +542,7 @@ export function GeneralSettingsView(props: GeneralSettingsViewProps) {
           approvals={approvalMode.approvals}
           busy={approvalMode.busy}
           status={approvalMode.status}
-          onToggle={(enabled) => void approvalMode.setFullPermissions(enabled)}
+          onSelect={(mode) => void approvalMode.setApprovalMode(mode)}
         />
       ) : null}
 

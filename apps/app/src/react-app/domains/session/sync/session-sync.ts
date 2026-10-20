@@ -961,7 +961,7 @@ function applyEvent(entry: SyncEntry, workspaceId: string, event: OpencodeEvent)
         });
         trackTaskFailed(sessionId, Date.now() - runStartedAt);
       }
-      notifyDesktopEvent({ type: "task.failed", sessionId, errorText });
+      notifyDesktopEvent({ type: "task.failed", sessionId, workspaceId, errorText });
       useSessionActivityStore.getState().setError(workspaceId, sessionId, errorText);
       stopTrackingLiveSession(entry, sessionId);
       if (isTrackedSession(entry, sessionId)) {
@@ -1035,6 +1035,7 @@ function applyEvent(entry: SyncEntry, workspaceId: string, event: OpencodeEvent)
     notifyDesktopEvent({
       type: "permission.asked",
       sessionId: permission.sessionID,
+      workspaceId,
       detail: permissionNotificationDetail(permission),
     });
     useSessionActivityStore.getState().setWaitingRequest(workspaceId, permission.sessionID, "permission", permission.id, true);
@@ -1057,6 +1058,7 @@ function applyEvent(entry: SyncEntry, workspaceId: string, event: OpencodeEvent)
     notifyDesktopEvent({
       type: "permission.asked",
       sessionId: permission.sessionID,
+      workspaceId,
       detail: permissionNotificationDetail(permission),
     });
     useSessionActivityStore.getState().setWaitingRequest(workspaceId, permission.sessionID, "permission", permission.id, true);
@@ -1086,6 +1088,7 @@ function applyEvent(entry: SyncEntry, workspaceId: string, event: OpencodeEvent)
     notifyDesktopEvent({
       type: "question.asked",
       sessionId: question.sessionID,
+      workspaceId,
       question: questionNotificationText(question),
     });
     useSessionActivityStore.getState().setWaitingRequest(workspaceId, question.sessionID, "question", question.id, true);
@@ -1449,7 +1452,7 @@ function applySessionRunStatus(
         duration_ms: Date.now() - runStartedAt,
       });
       trackTaskCompleted(sessionId, Date.now() - runStartedAt);
-      notifyDesktopEvent({ type: "task.completed", sessionId });
+      notifyDesktopEvent({ type: "task.completed", sessionId, workspaceId });
       entry.titleRecovery?.observe(sessionId);
     }
     const shouldRecordTerminal = wasLive || runStartedAt !== null;

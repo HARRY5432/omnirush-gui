@@ -6,15 +6,29 @@ import {
   type DesktopNotificationPreference,
 } from "@/react-app/kernel/desktop-notification-preferences";
 import { LOCAL_PREFERENCES_KEY } from "@/react-app/kernel/local-preferences-storage";
+import { legacySessionRoute, workspaceSessionRoute } from "@/react-app/shell/workspace-routes";
 
 type DesktopNotificationImportance = "important" | "routine";
 type WebNotificationHandler = (title: string, description?: string, href?: string) => Promise<void>;
 
+/** The workspace the session belongs to, so a click on the notification can open it. */
+type NotificationTarget = { sessionId: string; workspaceId?: string };
+
 export type DesktopNotificationEvent =
-  | { type: "task.completed"; sessionId: string }
-  | { type: "task.failed"; sessionId: string; errorText?: string }
-  | { type: "permission.asked"; sessionId: string; detail?: string }
-  | { type: "question.asked"; sessionId: string; question?: string };
+  | ({ type: "task.completed" } & NotificationTarget)
+  | ({ type: "task.failed"; errorText?: string } & NotificationTarget)
+  | ({ type: "permission.asked"; detail?: string } & NotificationTarget)
+  | ({ type: "question.asked"; question?: string } & NotificationTarget);
+
+/** Sent by the desktop shell when a notification is clicked: open this chat. */
+export const NOTIFICATION_OPEN_SESSION_EVENT = "omnirush:notification:open-session";
+
+/** The route of the chat a notification is about. */
+export function notificationSessionRoute(target: NotificationTarget): string {
+  return target.workspaceId?.trim()
+    ? workspaceSessionRoute(target.workspaceId, target.sessionId)
+    : legacySessionRoute(target.sessionId);
+}
 
 type NotificationCopy = {
   title: string;
@@ -94,12 +108,14 @@ export function notifyDesktopEvent(event: DesktopNotificationEvent): void {
   if (isAppInView()) return;
 
   if (!isDesktopRuntime()) {
-    void webNotificationHandler?.(copy.title, copy.body).catch(() => undefined);
+    void webNotificationHandler?.(copy.title, copy.body, notificationSessionRoute(event)).catch(() => undefined);
     return;
   }
 
   void desktopNotificationShow({
     title: copy.title,
     body: copy.body,
+    sessionId: event.sessionId,
+    ...(event.workspaceId ? { workspaceId: event.workspaceId } : {}),
   }).catch(() => undefined);
 }

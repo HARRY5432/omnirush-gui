@@ -56,7 +56,13 @@ export type DesktopNotificationInput = {
   body?: string;
   href?: string;
   silent?: boolean;
+  /** The chat the notification is about: a click focuses the window and opens it. */
+  sessionId?: string;
+  workspaceId?: string;
 };
+
+/** Sent to the renderer when a notification about a chat is clicked. */
+export type DesktopNotificationOpenSession = { sessionId: string; workspaceId?: string };
 
 export type DesktopNotificationResult =
   | { ok: true }
