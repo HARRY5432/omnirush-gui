@@ -789,6 +789,18 @@ export function SessionPage(props: SessionPageProps) {
   const closeRightPane = useCallback(() => {
     setCurrentSidePanel(null);
   }, [setCurrentSidePanel]);
+  // The editor stays open when the chat changes (a new chat starting, another chat picked):
+  // a chat that never had a side panel of its own gets the editor the last one had.
+  const lastSidePanel = useRef<{ key: string; panel: SidePanelItem | null }>({ key: sidePanelSessionKey, panel: sessionSidePanel });
+  useEffect(() => {
+    const last = lastSidePanel.current;
+    if (last.key !== sidePanelSessionKey && last.panel === "editor") {
+      const own = useUiStateStore.getState().sidePanelState[sidePanelSessionKey];
+      if (own === undefined) setSidePanelState(sidePanelSessionKey, "editor");
+    }
+    lastSidePanel.current = { key: sidePanelSessionKey, panel: useUiStateStore.getState().sidePanelState[sidePanelSessionKey] ?? (last.key !== sidePanelSessionKey && last.panel === "editor" ? "editor" : null) };
+  }, [sessionSidePanel, setSidePanelState, sidePanelSessionKey]);
+
   // Cmd/Ctrl+Shift+E toggles the editor; Cmd/Ctrl+P opens it with quick open (use-shell-shortcuts.ts).
   const editorShowRequest = useEditorStore((state) => state.showRequest);
   const editorToggleRequest = useEditorStore((state) => state.toggleRequest);
@@ -2065,7 +2077,7 @@ export function SessionPage(props: SessionPageProps) {
                 <ResizableHandle className="hidden bg-transparent lg:flex" />
                 <ResizablePanel
                   panelRef={browserPanelRef}
-                  defaultSize={`${activeSidePanel === "extensions" ? Math.max(browserPanelDefaultWidth, 480) : activeSidePanel === "editor" ? Math.max(browserPanelDefaultWidth, 640) : browserPanelDefaultWidth}px`}
+                  defaultSize={`${activeSidePanel === "extensions" ? Math.max(browserPanelDefaultWidth, 480) : activeSidePanel === "editor" ? Math.max(browserPanelDefaultWidth, 560) : browserPanelDefaultWidth}px`}
                   minSize={activeSidePanel === "extensions" ? "420px" : activeSidePanel === "editor" ? "420px" : "320px"}
                   maxSize="70%"
                   className="min-h-0 overflow-hidden pl-2 lg:flex lg:flex-col"

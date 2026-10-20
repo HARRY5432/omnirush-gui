@@ -26,3 +26,4 @@
 .omnirush-hunk-btn:hover { background: var(--muted); }
 .omnirush-hunk-btn-primary { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground, #fff); }
 .omnirush-hunk-btn-primary:hover { background: color-mix(in srgb, var(--primary) 88%, black); }
+.omnirush-hunk-bar-busy { opacity: 0.55; pointer-events: none; }

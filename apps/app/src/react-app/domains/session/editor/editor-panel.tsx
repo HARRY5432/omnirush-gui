@@ -65,6 +65,8 @@ const EMPTY_FILES: string[] = [];
 type ReviewFile = TurnFileChange & {
   /** The file before the reviewed turns; null when the turns created it; undefined when it could not be worked out. */
   baseline: string | null | undefined;
+  /** The file on disk when the review loaded (null: not there), for files without an open document. */
+  current: string | null;
 };
 
 type ReviewData = { key: string; turns: number; files: ReviewFile[] };
@@ -105,14 +107,21 @@ async function loadAgentChanges(input: {
     if (scope === "turn") break;
   }
   const paths = [...new Set(turns.flat().map((change) => change.path))].slice(0, MAX_REVIEW_FILES);
+  // "Before" is worked out from the text on disk, never from an open buffer (it may hold unsaved
+  // edits, or the text from before the turn until it refreshes).
   const current = new Map<string, string | null>();
   const unreadable = new Set<string>();
   await Promise.all(paths.map(async (path) => {
-    const opened = await docs.open(path);
-    if (opened.ok) current.set(path, opened.doc.model.getValue());
-    else if (opened.reason === "missing") current.set(path, null);
-    else unreadable.add(path);
+    try {
+      const file = await docs.client.editorReadFile(docs.workspaceId, path);
+      if (file.content === null) unreadable.add(path);
+      else current.set(path, file.content);
+    } catch (error) {
+      if ((error as { status?: number }).status === 404) current.set(path, null);
+      else unreadable.add(path);
+    }
   }));
+  await docs.refresh(paths.filter((path) => docs.get(path)));
   const baselines = baselinesForTurns(turns, (path) => current.get(path) ?? null);
   // Binary or very large files are listed without a review diff.
   for (const path of unreadable) baselines.set(path, undefined);
@@ -128,6 +137,7 @@ async function loadAgentChanges(input: {
         additions: (previous?.additions ?? 0) + change.additions,
         deletions: (previous?.deletions ?? 0) + change.deletions,
         baseline: baselines.get(change.path),
+        current: current.get(change.path) ?? null,
       });
     }
   }
@@ -231,8 +241,12 @@ function FilesView(props: {
     unsafeCSS: TREE_CSS,
   });
   const search = useFileTreeSearch(model);
-  useEffect(() => model.resetPaths(props.files), [model, props.files]);
-  useEffect(() => model.setGitStatus(treeGitStatus(props.git)), [model, props.git, props.files]);
+  useEffect(() => {
+    model.resetPaths(props.files);
+  }, [model, props.files]);
+  useEffect(() => {
+    model.setGitStatus(treeGitStatus(props.git));
+  }, [model, props.git, props.files]);
   useEffect(() => {
     if (!props.selected) return;
     const item = model.getItem(props.selected);
@@ -302,9 +316,9 @@ function ChangesView(props: {
               key={scope}
               type="button"
               onClick={() => props.onScope(scope)}
-              className={cn("rounded-md px-2 py-0.5", props.scope === scope ? "bg-background text-foreground shadow-sm" : "text-muted-foreground")}
+              className={cn("whitespace-nowrap rounded-md px-1.5 py-0.5", props.scope === scope ? "bg-background text-foreground shadow-sm" : "text-muted-foreground")}
             >
-              {scope === "turn" ? "Last turn" : "Whole chat"}
+              {scope === "turn" ? "Last turn" : "All turns"}
             </button>
           ))}
         </div>
@@ -399,7 +413,7 @@ function GitView(props: {
               className="opacity-60 group-hover:opacity-100"
               aria-label={isStaged ? `Unstage ${file.path}` : `Stage ${file.path}`}
               disabled={props.busy}
-              onClick={() => props.onStage([file.path], !isStaged)}
+              onClick={() => props.onStage(isStaged && file.from ? [file.path, file.from] : [file.path], !isStaged)}
             >
               {isStaged ? <Minus /> : <Plus />}
             </Button>
@@ -450,7 +464,7 @@ function GitView(props: {
       <div className="min-h-0 flex-1 overflow-y-auto px-1 pb-2">
         <div className="flex items-center px-2 pt-1 pb-0.5 text-[10.5px] font-medium uppercase tracking-wide text-muted-foreground">
           <span className="flex-1">Staged ({staged.length})</span>
-          {staged.length ? <button type="button" className="hover:text-foreground" onClick={() => props.onStage(staged.map((file) => file.path), false)}>Unstage all</button> : null}
+          {staged.length ? <button type="button" className="hover:text-foreground" onClick={() => props.onStage(staged.flatMap((file) => (file.from ? [file.path, file.from] : [file.path])), false)}>Unstage all</button> : null}
         </div>
         {staged.map((file) => row(file, true))}
         <div className="flex items-center px-2 pt-2 pb-0.5 text-[10.5px] font-medium uppercase tracking-wide text-muted-foreground">
@@ -488,7 +502,7 @@ export default function EditorPanel(props: EditorPanelProps) {
   const treeQuery = useQuery({
     queryKey: ["editor-tree", workspaceId] as const,
     queryFn: () => client.editorTree(workspaceId),
-    staleTime: 15_000,
+    staleTime: 30_000,
     refetchOnWindowFocus: true,
   });
   const gitQuery = useQuery({
@@ -523,33 +537,62 @@ export default function EditorPanel(props: EditorPanelProps) {
 
   // Back in the window: files may have changed outside the app.
   useEffect(() => {
-    const onFocus = () => void docs.refresh();
+    let last = 0;
+    const onFocus = () => {
+      // At most every 5 s: switching windows quickly must not re-read every open file each time.
+      if (Date.now() - last < 5_000) return;
+      last = Date.now();
+      void docs.refresh();
+    };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, [docs]);
 
   // ── review state ───────────────────────────────────────────────────────
   const reviewKey = review?.key ?? null;
+  // Older reviews' "before" models and documents nobody shows are let go when a new review loads.
+  const recentReviewKeys = useRef<string[]>([]);
+  useEffect(() => {
+    if (!reviewKey) return;
+    recentReviewKeys.current = [reviewKey, ...recentReviewKeys.current.filter((key) => key !== reviewKey)].slice(0, 2);
+    docs.disposeReviewModels(new Set(recentReviewKeys.current));
+    const keep = new Set<string>([
+      ...useEditorStore.getState().byWorkspace[workspaceId]?.tabs.map((tab) => tab.path) ?? [],
+      ...(review?.files.map((file) => file.path) ?? []),
+    ]);
+    docs.evict(keep);
+  }, [docs, review, reviewKey, workspaceId]);
   const baselineModel = useCallback((file: ReviewFile) => {
     // Created once per review (key + path): accepting a hunk edits it, and a refetch must not undo that.
     const uri = docs.uri(`review/${reviewKey}/${file.path}`, "omnirush-base");
     const existing = monaco.editor.getModel(uri);
     if (existing) return existing;
     // A file fully reviewed before a restart stays reviewed while its text is the one that was reviewed.
-    const current = docs.get(file.path)?.model.getValue() ?? null;
+    const current = docs.get(file.path)?.model.getValue() ?? file.current;
     const reviewed = current !== null && reviewKey !== null && isReviewed(reviewKey, file.path, current);
     return monaco.editor.createModel(reviewed ? current : file.baseline ?? "", languageForPath(file.path), uri);
   }, [docs, monaco, reviewKey]);
   const modifiedFor = useCallback((file: ReviewFile): FileDoc => {
     return docs.get(file.path) ?? docs.openMissing(file.path);
   }, [docs]);
+  /** The file's document, read from disk first when it is not open yet (an agent deletion: an empty one). */
+  const loadModified = useCallback(async (file: ReviewFile): Promise<FileDoc | null> => {
+    const existing = docs.get(file.path);
+    if (existing) return existing;
+    if (file.current === null) return docs.openMissing(file.path);
+    const opened = await docs.open(file.path);
+    if (opened.ok) return opened.doc;
+    toast.error(opened.message);
+    return null;
+  }, [docs]);
+  /** The file's text now: its document when open, else the disk text the review loaded with. */
+  const textNow = useCallback((file: ReviewFile) => docs.get(file.path)?.model.getValue() ?? file.current ?? "", [docs]);
   const isPending = useCallback((file: ReviewFile) => {
     if (file.baseline === undefined) return false;
     const base = baselineModel(file).getValue();
-    const now = docs.get(file.path)?.model.getValue() ?? "";
-    return base !== now;
+    return base !== textNow(file);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [baselineModel, docs, reviewTick]);
+  }, [baselineModel, textNow, reviewTick]);
 
   // Remembers files whose review is finished (before === now), so a restart does not ask again.
   useEffect(() => {
@@ -558,8 +601,8 @@ export default function EditorPanel(props: EditorPanelProps) {
       if (file.baseline === undefined) continue;
       const uri = docs.uri(`review/${reviewKey}/${file.path}`, "omnirush-base");
       const base = monaco.editor.getModel(uri)?.getValue();
-      const now = docs.get(file.path)?.model.getValue();
-      if (base !== undefined && now !== undefined && base === now) markReviewed(reviewKey, file.path, now);
+      const now = docs.get(file.path)?.model.getValue() ?? file.current ?? "";
+      if (base !== undefined && base === now) markReviewed(reviewKey, file.path, now);
     }
   }, [docs, monaco, reviewFiles, reviewKey, reviewTick]);
 
@@ -590,35 +633,61 @@ export default function EditorPanel(props: EditorPanelProps) {
     setLines(base, acceptHunk(base.getLinesContent(), doc.model.getLinesContent(), hunk), false);
     reportReview(file.path, "accept", hunkCounts(hunk), "hunk");
     setReviewTick((value) => value + 1);
+    return true;
   }, [baselineModel, modifiedFor, reportReview]);
+
+  /** Rejecting writes the file: not while the agent works on it, and not over the user's unsaved edits. */
+  const canReject = useCallback((doc: FileDoc) => {
+    if (sessionBusy) {
+      toast("Wait for the agent's turn to finish before rejecting changes.");
+      return false;
+    }
+    if (docs.isDirty(doc)) {
+      toast(`${doc.path} has unsaved edits: save or discard them first.`);
+      return false;
+    }
+    return true;
+  }, [docs, sessionBusy]);
 
   const rejectOne = useCallback((file: ReviewFile, hunk: LineHunk) => {
     const base = baselineModel(file);
     const doc = modifiedFor(file);
+    if (!canReject(doc)) return false;
     setLines(doc.model, rejectHunk(base.getLinesContent(), doc.model.getLinesContent(), hunk), true);
     reportReview(file.path, "reject", hunkCounts(hunk), "hunk");
     setReviewTick((value) => value + 1);
     void writeReviewed(file, doc);
-  }, [baselineModel, modifiedFor, reportReview, writeReviewed]);
+    return true;
+  }, [baselineModel, canReject, modifiedFor, reportReview, writeReviewed]);
 
-  const acceptFiles = useCallback((list: ReviewFile[]) => {
+  const acceptFiles = useCallback(async (list: ReviewFile[]) => {
     for (const file of list) {
+      const doc = await loadModified(file);
+      if (!doc) return;
       const base = baselineModel(file);
-      base.setValue(modifiedFor(file).model.getValue());
+      base.setValue(doc.model.getValue());
       reportReview(file.path, "accept", { added: file.additions, removed: file.deletions }, "file");
     }
     setReviewTick((value) => value + 1);
-  }, [baselineModel, modifiedFor, reportReview]);
+  }, [baselineModel, loadModified, reportReview]);
 
   const rejectFiles = useCallback(async (list: ReviewFile[]) => {
     for (const file of list) {
-      const doc = modifiedFor(file);
+      const doc = await loadModified(file);
+      if (!doc || !canReject(doc)) return;
       doc.model.pushEditOperations([], [{ range: doc.model.getFullModelRange(), text: baselineModel(file).getValue() }], () => null);
       reportReview(file.path, "reject", { added: file.additions, removed: file.deletions }, "file");
       await writeReviewed(file, doc);
     }
     setReviewTick((value) => value + 1);
-  }, [baselineModel, modifiedFor, reportReview, writeReviewed]);
+  }, [baselineModel, canReject, loadModified, reportReview, writeReviewed]);
+
+  const reviewFilesRef = useRef(reviewFiles);
+  reviewFilesRef.current = reviewFiles;
+  const acceptRef = useRef(acceptOne);
+  acceptRef.current = acceptOne;
+  const rejectRef = useRef(rejectOne);
+  rejectRef.current = rejectOne;
 
   // ── tabs ───────────────────────────────────────────────────────────────
   const openFile = useCallback((path: string) => {
@@ -661,6 +730,11 @@ export default function EditorPanel(props: EditorPanelProps) {
           setTabError(opened.message);
           return;
         }
+        if (opened.doc.missing && !docs.isDirty(opened.doc)) {
+          setSurface(null);
+          setTabError("This file was deleted.");
+          return;
+        }
         setSurface({ kind: "file", key, doc: opened.doc });
         return;
       }
@@ -676,12 +750,15 @@ export default function EditorPanel(props: EditorPanelProps) {
         const opened = file.status === "deleted" ? null : await docs.open(file.path);
         if (cancelled) return;
         const doc = opened && opened.ok ? opened.doc : docs.openMissing(file.path);
+        const path = file.path;
+        // Through refs: the bars outlive this render, and must act on the newest review data.
+        const current = () => reviewFilesRef.current.find((item) => item.path === path) ?? file;
         setSurface({
           kind: "diff",
           key: `${key}:${reviewKey}`,
           original: baselineModel(file),
           modified: doc.model,
-          review: { onAccept: (hunk) => acceptOne(file, hunk), onReject: (hunk) => rejectOne(file, hunk) },
+          review: { onAccept: (hunk) => acceptRef.current(current(), hunk), onReject: (hunk) => rejectRef.current(current(), hunk) },
         });
         return;
       }
@@ -765,7 +842,8 @@ export default function EditorPanel(props: EditorPanelProps) {
       if (!mod || event.altKey) return;
       const key = event.key.toLowerCase();
       // Cmd/Ctrl+S outside Monaco (tab strip, tree) still saves the active file.
-      if (key === "s" && !event.shiftKey && panelRef.current?.contains(document.activeElement)) {
+      const inMonaco = event.target instanceof Element && Boolean(event.target.closest(".monaco-editor"));
+      if (key === "s" && !event.shiftKey && !inMonaco && panelRef.current?.contains(document.activeElement)) {
         event.preventDefault();
         void save();
       }
@@ -773,6 +851,11 @@ export default function EditorPanel(props: EditorPanelProps) {
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
   }, [save]);
+
+  useEffect(() => {
+    if (!state.activeId) return;
+    panelRef.current?.querySelector(`[data-editor-tab="${CSS.escape(state.activeId)}"]`)?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [state.activeId]);
 
   const activePath = activeTab?.path ?? null;
   const activeDirty = activeTab && dirty?.[activeTab.path];
@@ -808,7 +891,7 @@ export default function EditorPanel(props: EditorPanelProps) {
           selected={activeTab?.kind === "review" ? activeTab.path : null}
           onScope={(scope) => useEditorStore.getState().setReviewScope(scope)}
           onOpen={openReview}
-          onAcceptAll={acceptFiles}
+          onAcceptAll={(list) => void acceptFiles(list)}
           onRejectAll={(list) => void rejectFiles(list)}
           onRefresh={() => void changesQuery.refetch()}
         />
@@ -918,12 +1001,12 @@ export default function EditorPanel(props: EditorPanelProps) {
         </div>
       </div>
       <div className="flex h-6 shrink-0 items-center gap-3 overflow-hidden whitespace-nowrap border-t border-border px-3 text-[11px] text-muted-foreground" data-editor-status>
-        {branch ? <span className="flex items-center gap-1"><GitBranch className="size-3" />{branch}</span> : null}
-        {gitQuery.data?.repo ? <span>{gitQuery.data.files.length} changed</span> : null}
+        {branch ? <span className="flex min-w-0 items-center gap-1 truncate"><GitBranch className="size-3 shrink-0" />{branch}</span> : null}
+        {gitQuery.data?.repo ? <span className="shrink-0">{gitQuery.data.files.length} changed</span> : null}
         <span className="flex-1" />
-        {cursor && activeTab ? <span>Ln {cursor.line}, Col {cursor.column}</span> : null}
-        {activePath ? <span>{languageForPath(activePath)}</span> : null}
-        {activeTab?.kind === "file" ? <span data-editor-saved={activeDirty ? "0" : "1"}>{activeDirty ? "Unsaved" : "Saved"}</span> : null}
+        {cursor && activeTab ? <span className="shrink-0 max-[1100px]:hidden">Ln {cursor.line}, Col {cursor.column}</span> : null}
+        {activePath ? <span className="shrink-0 max-[1250px]:hidden">{languageForPath(activePath)}</span> : null}
+        {activeTab?.kind === "file" ? <span className="shrink-0" data-editor-saved={activeDirty ? "0" : "1"}>{activeDirty ? "Unsaved" : "Saved"}</span> : null}
       </div>
     </div>
   );

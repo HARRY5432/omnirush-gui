@@ -126,6 +126,44 @@ describe("editor routes", () => {
     expect((await call("GET", "/file?path=link/secret.txt")).status).toBe(400);
     expect((await call("PUT", "/file", { path: "link/evil.txt", content: "x" })).status).toBe(400);
     expect((await call("PUT", "/file", { path: ".git/config", content: "x" })).status).toBe(400);
+    expect((await call("PUT", "/file", { path: ".GIT/config", content: "x" })).status).toBe(400);
+    expect((await call("PUT", "/file", { path: "sub/.git/hooks/pre-commit", content: "x" })).status).toBe(400);
+    expect((await call("PUT", "/file", { path: "/etc/passwd", content: "x" })).status).toBe(400);
+    await symlink(join(root, ".git"), join(root, "gitlink"));
+    expect((await call("PUT", "/file", { path: "gitlink/config", content: "x" })).status).toBe(400);
+  });
+
+  test("paths are never rewritten: workspace/ prefixes are real folders", async () => {
+    const root = await project();
+    await mkdir(join(root, "workspace"), { recursive: true });
+    await mkdir(join(root, "workspaces", "app", "src"), { recursive: true });
+    await writeFile(join(root, "workspace", "foo.ts"), "inner\n", "utf8");
+    await writeFile(join(root, "foo.ts"), "outer\n", "utf8");
+    const call = await serve(root);
+    expect((await call("GET", "/file?path=workspace/foo.ts")).body.content).toBe("inner\n");
+    await call("PUT", "/file", { path: "workspaces/app/src/index.ts", content: "deep\n" });
+    expect(await readFile(join(root, "workspaces", "app", "src", "index.ts"), "utf8")).toBe("deep\n");
+    expect(await readFile(join(root, "foo.ts"), "utf8")).toBe("outer\n");
+  });
+
+  test("a save keeps the file mode and leaves no temporary file", async () => {
+    const root = await project();
+    const script = join(root, "run.sh");
+    await writeFile(script, "echo a\n", { mode: 0o755 });
+    const call = await serve(root);
+    await call("PUT", "/file", { path: "run.sh", content: "echo b\n" });
+    const { stat: statFile, readdir: list } = await import("node:fs/promises");
+    expect((await statFile(script)).mode & 0o777).toBe(0o755);
+    expect((await list(root)).filter((name) => name.includes(".tmp-"))).toEqual([]);
+  });
+
+  test("stage takes paths literally, not as globs", async () => {
+    const root = await project();
+    await writeFile(join(root, "[ab].ts"), "x\n", "utf8");
+    await writeFile(join(root, "a.ts"), "a\n", "utf8");
+    const call = await serve(root);
+    const staged = await call("POST", "/git/stage", { paths: ["[ab].ts"] });
+    expect(staged.body.files.map((file: any) => `${file.index}${file.worktree} ${file.path}`)).toEqual(["A  [ab].ts", "?? a.ts"]);
   });
 
   test("git panel: status, stage, unstage, commit, original text", async () => {

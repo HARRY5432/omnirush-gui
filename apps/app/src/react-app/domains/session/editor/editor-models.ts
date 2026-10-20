@@ -18,6 +18,8 @@ export type FileDoc = {
   savedVersion: number;
   /** The file changed on disk while this document had unsaved changes. */
   conflict: boolean;
+  /** The file is gone from disk (deleted since it was opened, or an agent deletion under review). */
+  missing: boolean;
 };
 
 export type OpenResult =
@@ -67,7 +69,7 @@ export class EditorDocuments {
         if (file.binary) return { ok: false, reason: "binary", message: "This file is binary and cannot be edited here." };
         if (file.tooLarge || file.content === null) return { ok: false, reason: "too_large", message: "This file is too large to open in the editor (over 5 MB)." };
         const model = this.monaco.editor.createModel(file.content, languageForPath(path), this.uri(path));
-        const doc: FileDoc = { path, model, updatedAt: file.updatedAt, savedVersion: model.getAlternativeVersionId(), conflict: false };
+        const doc: FileDoc = { path, model, updatedAt: file.updatedAt, savedVersion: model.getAlternativeVersionId(), conflict: false, missing: false };
         this.docs.set(path, doc);
         this.track(doc);
         return { ok: true, doc };
@@ -88,7 +90,7 @@ export class EditorDocuments {
     const existing = this.docs.get(path);
     if (existing) return existing;
     const model = this.monaco.editor.createModel("", languageForPath(path), this.uri(path));
-    const doc: FileDoc = { path, model, updatedAt: null, savedVersion: model.getAlternativeVersionId(), conflict: false };
+    const doc: FileDoc = { path, model, updatedAt: null, savedVersion: model.getAlternativeVersionId(), conflict: false, missing: true };
     this.docs.set(path, doc);
     this.track(doc);
     return doc;
@@ -110,6 +112,7 @@ export class EditorDocuments {
       doc.updatedAt = result.updatedAt;
       doc.savedVersion = version;
       doc.conflict = false;
+      doc.missing = false;
       useEditorStore.getState().setDirty(this.workspaceId, path, this.isDirty(doc));
       return { ok: true };
     } catch (error) {
@@ -128,6 +131,7 @@ export class EditorDocuments {
       const doc = this.docs.get(path);
       if (doc) {
         doc.updatedAt = null;
+        doc.missing = true;
         doc.savedVersion = doc.model.getAlternativeVersionId();
         useEditorStore.getState().setDirty(this.workspaceId, path, false);
       }
@@ -148,17 +152,32 @@ export class EditorDocuments {
       try {
         file = await this.client.editorReadFile(this.workspaceId, doc.path);
       } catch (error) {
-        if ((error as { status?: number }).status === 404 && doc.updatedAt !== null && !this.isDirty(doc)) {
+        // Deleted on disk: a clean document empties and says so; a dirty one keeps the user's text.
+        if ((error as { status?: number }).status === 404 && !doc.missing) {
+          if (this.isDirty(doc)) {
+            doc.conflict = true;
+            return;
+          }
+          if (doc.model.getValueLength() > 0) doc.model.pushEditOperations([], [{ range: doc.model.getFullModelRange(), text: "" }], () => null);
           doc.updatedAt = null;
+          doc.missing = true;
+          doc.savedVersion = doc.model.getAlternativeVersionId();
+          useEditorStore.getState().setDirty(this.workspaceId, doc.path, false);
         }
         return;
       }
-      if (file.content === null || file.updatedAt === doc.updatedAt) return;
+      if (file.content === null) return;
       const current = doc.model.getValue(this.monaco.editor.EndOfLinePreference.TextDefined);
+      doc.missing = false;
       if (current === file.content) {
+        // Same text as on disk: the document is clean (also after a discard).
         doc.updatedAt = file.updatedAt;
+        doc.conflict = false;
+        doc.savedVersion = doc.model.getAlternativeVersionId();
+        useEditorStore.getState().setDirty(this.workspaceId, doc.path, false);
         return;
       }
+      if (file.updatedAt === doc.updatedAt) return;
       if (this.isDirty(doc)) {
         doc.conflict = true;
         return;
@@ -190,6 +209,26 @@ export class EditorDocuments {
       model.setValue(text);
     }
     return model;
+  }
+
+  /** Closes clean documents nobody shows (no tab, not under review), so a long session does not keep every file it touched. */
+  evict(keep: ReadonlySet<string>): void {
+    for (const [path, doc] of this.docs) {
+      if (keep.has(path) || this.isDirty(doc) || doc.conflict) continue;
+      doc.model.dispose();
+      this.docs.delete(path);
+    }
+  }
+
+  /** Review "before" models of reviews other than these keys. */
+  disposeReviewModels(keepKeys: ReadonlySet<string>): void {
+    for (const model of this.monaco.editor.getModels()) {
+      const uri = model.uri;
+      if (uri.scheme !== "omnirush-base" || !uri.path.startsWith("/review/")) continue;
+      if (uri.authority !== this.uri("x").authority) continue;
+      const key = uri.path.slice("/review/".length).split("/")[0] ?? "";
+      if (!keepKeys.has(key) && !model.isAttachedToEditor()) model.dispose();
+    }
   }
 
   dispose(): void {

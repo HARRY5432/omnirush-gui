@@ -10,13 +10,12 @@
  * without one, or for a chat that is not tracked, reports nothing.
  */
 import { spawn } from "node:child_process";
-import { chmod, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { ApiError } from "../errors.js";
 import { ignoredByRules, parseGitignoreRules, scopedIgnoreRules } from "../session-uploader.js";
 import type { ApprovalRequest, ServerConfig, TokenScope, WorkspaceInfo } from "../types.js";
-import { ensureDir, shortId } from "../utils.js";
-import { normalizeWorkspaceRelativePath } from "./files.js";
+import { ensureDir } from "../utils.js";
 import { addRoute, type RequestContext, type Route } from "./registry.js";
 
 /** The largest file the editor opens or saves. */
@@ -25,7 +24,9 @@ export const EDITOR_MAX_FILE_BYTES = 5_000_000;
 export const EDITOR_MAX_TREE_FILES = 200_000;
 const GIT_TIMEOUT_MS = 20_000;
 const GIT_MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
-const WALK_SKIPPED_DIRECTORIES = new Set([".git", "node_modules"]);
+const WALK_SKIPPED_DIRECTORIES = new Set([".git", "node_modules", ".venv", "venv", "__pycache__", ".cache", ".next", ".turbo", ".gradle", ".npm", ".pnpm-store"]);
+/** A folder that is not a repository is walked for at most this long (a home folder can hold millions of files). */
+const WALK_TIME_LIMIT_MS = 8_000;
 const COMMIT_MESSAGE_MAX = 20_000;
 const MAX_PATHS_PER_CALL = 5_000;
 
@@ -67,10 +68,14 @@ export function runEditorGit(root: string, args: string[], options: { input?: st
   return new Promise((resolvePromise) => {
     let child;
     try {
-      child = spawn("git", ["-c", "core.quotePath=false", "-c", "color.ui=false", ...args], {
+      // No inherited GIT_* settings (a GIT_DIR or GIT_WORK_TREE from the app's own environment
+      // would point git elsewhere); paths are literal, never globs; no fsmonitor program.
+      const env: NodeJS.ProcessEnv = {};
+      for (const [key, value] of Object.entries(process.env)) if (!key.startsWith("GIT_")) env[key] = value;
+      child = spawn("git", ["-c", "core.quotePath=false", "-c", "color.ui=false", "-c", "core.fsmonitor=false", ...args], {
         cwd: root,
         stdio: ["pipe", "pipe", "pipe"],
-        env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0", LC_ALL: "C" },
+        env: { ...env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0", GIT_LITERAL_PATHSPECS: "1", LC_ALL: "C" },
         windowsHide: true,
       });
     } catch (error) {
@@ -115,10 +120,30 @@ function splitNul(buffer: Buffer): string[] {
 }
 
 /** The workspace-relative path, checked (no `..`, no absolute paths, no reserved names). */
-function editorPath(input: unknown): string {
-  const path = normalizeWorkspaceRelativePath(String(input ?? ""), { allowSubdirs: true });
-  if (path === ".git" || path.startsWith(".git/")) throw new ApiError(400, "invalid_path", "The .git folder is not editable");
-  return path;
+const WINDOWS_RESERVED_NAME = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
+
+function isGitComponent(part: string): boolean {
+  return part.toLowerCase() === ".git";
+}
+
+/**
+ * The workspace-relative path, checked strictly and never rewritten: no
+ * absolute paths, no `..`, no NUL, no `.git` folder at any depth (any case).
+ */
+export function editorPath(input: unknown): string {
+  const raw = String(input ?? "").replace(/\\/g, "/");
+  const invalid = (message: string) => new ApiError(400, "invalid_path", message);
+  if (!raw.trim()) throw invalid("A path is required");
+  if (raw.includes("\0")) throw invalid("Invalid path");
+  if (raw.startsWith("/") || /^[A-Za-z]:/.test(raw)) throw invalid("Path must be relative to the workspace");
+  const parts = raw.split("/").filter((part) => part !== "" && part !== ".");
+  if (parts.length === 0) throw invalid("A path is required");
+  if (parts.some((part) => part === "..")) throw invalid("Path traversal is not allowed");
+  if (parts.some(isGitComponent)) throw invalid("The .git folder is not editable");
+  if (process.platform === "win32" && parts.some((part) => part.includes(":") || WINDOWS_RESERVED_NAME.test(part) || /[. ]$/.test(part))) {
+    throw invalid("This name is not valid on Windows");
+  }
+  return parts.join("/");
 }
 
 /** The file's absolute path inside the workspace; a symlinked folder that leads out of it is refused. */
@@ -136,6 +161,10 @@ async function resolveInside(root: string, relativePath: string): Promise<string
     if (real !== null) {
       if (real !== rootReal && !real.startsWith(rootReal + sep)) {
         throw new ApiError(400, "invalid_path", "Path leads outside the workspace");
+      }
+      // A symlink into a .git folder is refused like the folder itself.
+      if (relative(rootReal, real).split(sep).some(isGitComponent)) {
+        throw new ApiError(400, "invalid_path", "The .git folder is not editable");
       }
       break;
     }
@@ -180,8 +209,13 @@ async function gitTree(root: string): Promise<string[] | null> {
 async function walkTree(root: string, limit: number): Promise<{ files: string[]; truncated: boolean }> {
   const files: string[] = [];
   let truncated = false;
+  const deadline = Date.now() + WALK_TIME_LIMIT_MS;
   const walk = async (dir: string, rules: string[]) => {
     if (truncated) return;
+    if (Date.now() > deadline) {
+      truncated = true;
+      return;
+    }
     const rel = relative(root, dir).replace(/\\/g, "/");
     const local = await readFile(join(dir, ".gitignore"), "utf8").then(parseGitignoreRules).catch(() => [] as string[]);
     const scoped = [...rules, ...scopedIgnoreRules(rel, local)];
@@ -191,7 +225,7 @@ async function walkTree(root: string, limit: number): Promise<{ files: string[];
       if (truncated) return;
       const path = rel ? `${rel}/${entry.name}` : entry.name;
       if (entry.isDirectory()) {
-        if (WALK_SKIPPED_DIRECTORIES.has(entry.name) || ignoredByRules(`${path}/`, scoped)) continue;
+        if (WALK_SKIPPED_DIRECTORIES.has(entry.name) || isGitComponent(entry.name) || ignoredByRules(`${path}/`, scoped)) continue;
         await walk(join(dir, entry.name), scoped);
       } else if (entry.isFile() || entry.isSymbolicLink()) {
         if (ignoredByRules(path, scoped)) continue;
@@ -320,6 +354,11 @@ export function registerEditorRoutes(options: RegisterEditorRoutesOptions): void
   addRoute(routes, "PUT", "/workspace/:id/editor/file", "client", async (ctx) => {
     ensureWritable(config);
     requireClientScope(ctx, "collaborator");
+    // JSON-escaped text can be up to 6 bytes per byte; anything larger is refused before it is read.
+    const declared = Number(ctx.request.headers.get("content-length") ?? "0");
+    if (Number.isFinite(declared) && declared > EDITOR_MAX_FILE_BYTES * 6 + 64 * 1024) {
+      throw new ApiError(413, "file_too_large", "File exceeds size limit", { maxBytes: EDITOR_MAX_FILE_BYTES });
+    }
     const workspace = await resolveWorkspace(config, ctx.params.id);
     const body = await readJsonBody(ctx.request);
     const path = editorPath(body.path);
@@ -351,11 +390,10 @@ export function registerEditorRoutes(options: RegisterEditorRoutesOptions): void
     if (remove) {
       await rm(absolute, { force: true });
     } else {
+      // In place: no temporary file appears in the project (the session uploader watches it),
+      // and the file keeps its mode, hard links and symlink.
       await ensureDir(dirname(absolute));
-      const tmp = `${absolute}.tmp-${shortId()}`;
-      await writeFile(tmp, content, "utf8");
-      if (current) await chmod(tmp, current.mode & 0o7777).catch(() => undefined);
-      await rename(tmp, absolute);
+      await writeFile(absolute, content, "utf8");
     }
     const after = remove ? null : await stat(absolute);
     // A file whose old text could not be read (binary, too large) is not reported.
@@ -371,6 +409,8 @@ export function registerEditorRoutes(options: RegisterEditorRoutesOptions): void
   });
 
   addRoute(routes, "POST", "/workspace/:id/editor/review", "client", async (ctx) => {
+    ensureWritable(config);
+    requireClientScope(ctx, "collaborator");
     const workspace = await resolveWorkspace(config, ctx.params.id);
     const body = await readJsonBody(ctx.request);
     const sessionId = sessionIdOf(body.sessionId);

@@ -182,7 +182,9 @@ export function useShellShortcuts(input: UseShellShortcutsInput) {
       }
       return;
     }
-    if (key === "p" && isElectronRuntime()) {
+    // In the terminal Ctrl+P is the shell's (previous command); Cmd+P on macOS still opens quick open.
+    const inTerminal = Boolean(target?.closest?.(".xterm"));
+    if (key === "p" && isElectronRuntime() && !(inTerminal && !isMac)) {
       // Quick open: shows the editor (session-page) with its file finder.
       event.preventDefault();
       const editor = useEditorStore.getState();

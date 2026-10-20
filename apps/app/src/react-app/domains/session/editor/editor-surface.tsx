@@ -21,8 +21,9 @@ export type SurfaceDoc =
     modified: MonacoApi.editor.ITextModel;
     /** Review tabs: per-hunk decisions. Git tabs have none. */
     review?: {
-      onAccept: (hunk: LineHunk) => void;
-      onReject: (hunk: LineHunk) => void;
+      /** Applies the decision; false when it was refused (nothing changed). */
+      onAccept: (hunk: LineHunk) => boolean;
+      onReject: (hunk: LineHunk) => boolean;
     };
     readOnlyModified?: boolean;
   };
@@ -189,7 +190,36 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
     const diff = diffRef.current;
     if (!diff || !surface || surface.kind !== "diff") return;
     const modifiedEditor = diff.getModifiedEditor();
+    // After a decision the bars' line numbers are stale until the diff is computed again:
+    // they take no clicks until then, and a hunk is applied only if the diff still has it.
+    let locked = false;
+    let unlockTimer: ReturnType<typeof setTimeout> | null = null;
+    const setLocked = (value: boolean) => {
+      locked = value;
+      for (const widget of overlays.current) widget.getDomNode().classList.toggle("omnirush-hunk-bar-busy", value);
+    };
+    const decide = (apply: (hunk: LineHunk) => boolean) => (hunk: LineHunk) => {
+      if (locked) return false;
+      const still = (diff.getLineChanges() ?? []).some((change) =>
+        change.originalStartLineNumber === hunk.originalStartLineNumber
+        && change.originalEndLineNumber === hunk.originalEndLineNumber
+        && change.modifiedStartLineNumber === hunk.modifiedStartLineNumber
+        && change.modifiedEndLineNumber === hunk.modifiedEndLineNumber);
+      if (!still) return false;
+      setLocked(true);
+      const applied = apply(hunk);
+      if (!applied) setLocked(false);
+      else {
+        if (unlockTimer) clearTimeout(unlockTimer);
+        unlockTimer = setTimeout(() => setLocked(false), 3_000);
+      }
+      return applied;
+    };
+    const review = surface.review
+      ? { onAccept: decide(surface.review.onAccept), onReject: decide(surface.review.onReject) }
+      : null;
     const render = () => {
+      setLocked(false);
       const changes = (diff.getLineChanges() ?? []).map((change) => ({
         originalStartLineNumber: change.originalStartLineNumber,
         originalEndLineNumber: change.originalEndLineNumber,
@@ -205,13 +235,13 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
       modifiedEditor.changeViewZones((accessor) => {
         for (const id of zoneIds.current) accessor.removeZone(id);
         zoneIds.current = [];
-        if (!surface.review) return;
+        if (!review) return;
         const layout = modifiedEditor.getLayoutInfo();
         const left = layout.contentLeft;
         const width = Math.max(120, layout.width - layout.contentLeft - layout.verticalScrollbarWidth - 8);
         changes.forEach((hunk, index) => {
           const after = hunk.modifiedEndLineNumber === 0 ? hunk.modifiedStartLineNumber : hunk.modifiedStartLineNumber - 1;
-          const bar = hunkBar(hunk, index, changes.length, surface.review!);
+          const bar = hunkBar(hunk, index, changes.length, review);
           bar.style.position = "absolute";
           bar.style.left = `${left}px`;
           bar.style.width = `${width}px`;
@@ -249,6 +279,7 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
     const layout = modifiedEditor.onDidLayoutChange(() => render());
     render();
     return () => {
+      if (unlockTimer) clearTimeout(unlockTimer);
       subscription.dispose();
       scroll.dispose();
       layout.dispose();
