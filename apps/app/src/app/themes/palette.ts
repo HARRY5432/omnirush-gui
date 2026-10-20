@@ -4,7 +4,7 @@
  * style.setProperty. Only names from this module and only validated values
  * (#rrggbb, #rrggbbaa, "r g b", px and plain numbers) are ever written.
  */
-import { contrastRatio, hexToRgb, isDarkColour, rgbToHex, textSafeAccent } from "./contrast";
+import { contrastRatio, hexToRgb, isDarkColour, rgbToHex, suggestColour, textSafeAccent, worstRatio } from "./contrast";
 import { THEME_PRESETS } from "./presets";
 import {
   DEFAULT_FONT_SIZE_PX,
@@ -35,6 +35,8 @@ export type ActiveTheme = {
   legacy: boolean;
   radiusPx: number;
   fontSizePx: number;
+  /** High contrast: secondary text steps aim for 7:1. */
+  aaa?: boolean;
 };
 
 export function findPreset(id: string): ThemePreset | undefined {
@@ -82,6 +84,7 @@ export function resolveActiveTheme(
     selection: effectiveSelection,
     ...picked,
     legacy: preset.id === DEFAULT_PRESET_ID,
+    aaa: preset.target === "AAA",
     radiusPx: DEFAULT_RADIUS_PX,
     fontSizePx: DEFAULT_FONT_SIZE_PX,
   };
@@ -104,11 +107,12 @@ function rgbTriplet(hex: string): string {
     .join(" ");
 }
 
-// Steps of the neutral (gray/slate) scale as a blend from background (1) to text (12),
-// close to Radix slate's spacing; 2 = surface, 5 = border and 11 = muted text are exact.
-const NEUTRAL_MIX = [0, 0, 0, 0, 0, 0.15, 0.2, 0.28, 0.45, 0.5, 0, 1];
+// Steps of the neutral (gray/slate) scale. 1 = background, 2 = surface, 3-5 = fills,
+// 6 = border, 7 = stronger border, 8-10 = secondary text, 11 = muted text, 12 = text.
+// The app uses steps 7-12 as text colours, so those are contrast-checked.
 const NEUTRAL_ALPHA = [0.012, 0.027, 0.06, 0.09, 0.12, 0.15, 0.2, 0.28, 0.45, 0.5, 0.62, 0.9];
 
+/** A fill between surface and text, as strong as `amount` while muted text on it keeps 4.5:1. */
 function subtleFill(v: ThemeVariant, amount: number): string {
   for (let t = amount; t > 0.015; t -= 0.01) {
     const fill = mix(v.surface, v.text, t);
@@ -117,19 +121,33 @@ function subtleFill(v: ThemeVariant, amount: number): string {
   return v.surface;
 }
 
-function neutralScale(v: ThemeVariant): string[] {
-  return NEUTRAL_MIX.map((t, index) => {
-    if (index === 0) return v.background;
-    if (index === 1) return v.surface;
-    // Steps 3 and 4 fill subtle controls (chips, hovers, the user's message): visibly off the
-    // page and the surface, while muted text on them keeps 4.5:1.
-    if (index === 2) return subtleFill(v, 0.07);
-    if (index === 3) return subtleFill(v, 0.11);
-    if (index === 4) return v.border;
-    if (index === 10) return v.textMuted;
-    if (index === 11) return v.text;
-    return mix(v.background, v.text, t);
-  });
+/** `base` moved towards the text colour until it reaches `target` on every background given. */
+function liftToward(v: ThemeVariant, base: string, backgrounds: readonly string[], target: number): string {
+  for (let t = 0; t <= 1.0001; t += 0.02) {
+    const colour = mix(base, v.text, t);
+    if (worstRatio(colour, backgrounds) >= target) return colour;
+  }
+  return v.text;
+}
+
+function neutralScale(v: ThemeVariant, aaa: boolean): string[] {
+  const fill3 = subtleFill(v, 0.07);
+  const textOn = [v.background, v.surface, fill3];
+  const textTarget = aaa ? 7 : 4.5;
+  return [
+    v.background,
+    v.surface,
+    fill3,
+    subtleFill(v, 0.11),
+    subtleFill(v, 0.15),
+    v.border,
+    liftToward(v, mix(v.background, v.text, 0.3), textOn, 3),
+    liftToward(v, mix(v.background, v.text, 0.4), textOn, textTarget),
+    liftToward(v, mix(v.background, v.text, 0.45), textOn, textTarget),
+    liftToward(v, v.textMuted, textOn, textTarget),
+    v.textMuted,
+    v.text,
+  ];
 }
 
 /** Contrast fixes applied on top of today's stylesheet for the Default preset. */
@@ -140,11 +158,14 @@ const DEFAULT_PRESET_FIXES: Record<ThemeVariantMode, Record<string, string>> = {
 };
 
 /** CSS custom property name -> value for an active theme. */
-export function paletteVars(active: Pick<ActiveTheme, "variant" | "mode" | "legacy" | "radiusPx" | "fontSizePx">, darkVariant?: ThemeVariant | null): Record<string, string> {
+export function paletteVars(
+  active: Pick<ActiveTheme, "variant" | "mode" | "legacy" | "radiusPx" | "fontSizePx" | "aaa">,
+  darkVariant?: ThemeVariant | null,
+): Record<string, string> {
   if (active.legacy) return { ...DEFAULT_PRESET_FIXES[active.mode] };
   const v = active.variant;
   const dark = isDarkColour(v.background);
-  const scale = neutralScale(v);
+  const scale = neutralScale(v, Boolean(active.aaa));
   const vars: Record<string, string> = {};
   const set = (names: string[], value: string) => {
     for (const name of names) vars[name] = value;
@@ -178,10 +199,14 @@ export function paletteVars(active: Pick<ActiveTheme, "variant" | "mode" | "lega
   set(["--accent", "--sidebar-accent", "--dls-hover"], scale[2]!);
   set(["--dls-active"], scale[4]!);
   set(["--destructive"], v.danger);
-  set(["--warning"], v.warn);
+  set(["--warning", "--omnirush-warn"], v.warn);
   set(["--omnirush-success"], v.success);
-  set(["--omnirush-highlight"], v.highlight ?? v.accent);
-  set(["--omnirush-link"], textSafeAccent(v));
+  // Decorative highlight (connected dot, usage bar, ".ai" in the logo): at least 3:1 on light pages.
+  const highlight = v.highlight ?? v.accent;
+  set(["--omnirush-highlight"], dark ? highlight : suggestColour(highlight, [v.background, v.surface], 3));
+  const link = textSafeAccent(v);
+  set(["--omnirush-link"], link);
+  set(["--omnirush-link-hover"], mix(link, v.text, 0.3));
   set(["--omnirush-terminal-bg"], v.terminal.bg);
   set(["--omnirush-terminal-fg"], v.terminal.fg);
   set(["--omnirush-terminal-header"], mix(v.terminal.bg, v.terminal.fg, 0.06));

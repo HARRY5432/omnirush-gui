@@ -2,7 +2,7 @@
  * Code editor (Monaco) and terminal (xterm) colours for the active theme.
  * Pure: monaco.ts and terminal-runtime.ts apply the results.
  */
-import { hexToRgb, rgbToHex } from "./contrast";
+import { fixContrast, hexToRgb, isDarkColour, rgbToHex } from "./contrast";
 import type { ActiveTheme } from "./palette";
 import { ANSI_KEYS, type AnsiKey } from "./types";
 
@@ -141,5 +141,10 @@ export function xtermThemeFor(active: Pick<ActiveTheme, "variant" | "legacy">): 
     selectionBackground: mix(t.bg, t.fg, 0.25),
   };
   for (const key of ANSI_KEYS) theme[key] = t[key];
+  // On a light terminal, "white" text must still be visible (3:1).
+  if (!isDarkColour(t.bg)) {
+    theme.white = fixContrast(t.white, t.bg, 3);
+    theme.brightWhite = fixContrast(t.brightWhite, t.bg, 3);
+  }
   return theme;
 }

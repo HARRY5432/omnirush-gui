@@ -155,6 +155,16 @@ const applyTheme = (mode: ThemeMode) => {
   if (active.legacy) delete root.dataset.omnirushPalette;
   else root.dataset.omnirushPalette = active.selection.kind === "custom" ? CUSTOM_THEME_ID : active.selection.id;
   applyPaletteVars(root.style, paletteVars(active, darkVariantOf(active)));
+  syncThemeColorMeta(active);
+};
+
+/** The browser/OS chrome colour (<meta name="theme-color">) follows the theme; Default keeps index.html's. */
+const syncThemeColorMeta = (active: ActiveTheme) => {
+  if (typeof document.querySelectorAll !== "function") return;
+  for (const meta of document.querySelectorAll<HTMLMetaElement>('meta[name="theme-color"]')) {
+    if (meta.dataset.omnirushDefault === undefined) meta.dataset.omnirushDefault = meta.content;
+    meta.content = active.legacy ? meta.dataset.omnirushDefault : active.variant.background;
+  }
 };
 
 const emitThemeChange = () => {
@@ -200,6 +210,8 @@ export const bootstrapTheme = () => {
   applyTheme(mode);
   syncNativeTheme(mode);
   ensureSystemThemeSubscription();
+  // Once per start: the early script's copy of the colours matches this build's presets.
+  persistBootVars();
 };
 
 export const getInitialThemeMode = () => getCurrentMode();

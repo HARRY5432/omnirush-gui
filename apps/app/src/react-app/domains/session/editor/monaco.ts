@@ -132,7 +132,10 @@ export function appIsDark(): boolean {
 }
 
 let configured = false;
-let themeGeneration = 0;
+// Two fixed theme names used in turn: a change always switches name (so Monaco repaints)
+// without defining a new theme per change (a colour picker drag sends many).
+let currentThemeName = "";
+let currentThemeKey = "";
 
 /**
  * The editor theme from the active app theme: a preset or custom theme's code
@@ -156,10 +159,12 @@ function defineThemes(): string {
   } else {
     data = monacoThemeFor(active);
   }
-  // A fresh name per definition, so Monaco always switches (and repaints) to it.
-  themeGeneration += 1;
-  const name = `omnirush-${data.base === "vs-dark" ? "dark" : "light"}-${themeGeneration}`;
+  const key = JSON.stringify(data);
+  if (currentThemeName && key === currentThemeKey) return currentThemeName;
+  const name = currentThemeName === "omnirush-a" ? "omnirush-b" : "omnirush-a";
   monaco.editor.defineTheme(name, data);
+  currentThemeName = name;
+  currentThemeKey = key;
   return name;
 }
 
