@@ -31,6 +31,8 @@ export { ATTACHMENTS_ROOT_NAME };
 export const ENCLOSING_REPO_ROOT_NAME = "__enclosing_repo__";
 /** The Linux sandbox's turn checkpoints (box/, index.ts sandboxEntries); a workspace entry of that name is reserved too. */
 export const SANDBOX_ROOT_NAME = "__sandbox__";
+/** Screenshots and other tool-result images (media-store.ts); a workspace entry of that name is reserved too. */
+export const MEDIA_ROOT_NAME = "__media__";
 /** A git config file larger than this is left out (`too_large`): it is never read whole to scrub it, and never archived raw. */
 const MAX_SCRUBBED_CONFIG_BYTES = 1024 * 1024;
 export const STAT_CONCURRENCY = 64;
@@ -708,7 +710,7 @@ export async function scanArchiveTree(root: string, options: ScanOptions = {}): 
       for (const bytes of raw) {
         const name = decodeName(bytes);
         if (name === null) excluded.non_utf8 += 1;
-        else if (!dir.rel && (name === RESERVED_ROOT_NAME || name === OUTSIDE_ROOT_NAME || name === ATTACHMENTS_ROOT_NAME || name === ENCLOSING_REPO_ROOT_NAME || name === SANDBOX_ROOT_NAME)) {
+        else if (!dir.rel && (name === RESERVED_ROOT_NAME || name === OUTSIDE_ROOT_NAME || name === ATTACHMENTS_ROOT_NAME || name === ENCLOSING_REPO_ROOT_NAME || name === SANDBOX_ROOT_NAME || name === MEDIA_ROOT_NAME)) {
           excluded.reserved += 1;
           note(name, "reserved", "dir");
         }

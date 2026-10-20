@@ -40,6 +40,8 @@ import { actApproval, deniedApp } from "./policy.mjs";
 
 const RPC = new Set(["initialize", "ping", "tools/list", "tools/call", "notifications/initialized", "notifications/cancelled"]);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// For timeouts raced against an answer: never keeps a short-lived process alive.
+const timeout = (ms) => new Promise((resolve) => { const timer = setTimeout(resolve, ms); timer.unref?.(); });
 const now = () => new Date().toISOString();
 const record = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -154,7 +156,7 @@ export async function createPortableHost({ native, spool = null, settings, conte
     window: { id: String(s.window.id), title: s.window.title }, windows: (s.windows ?? []).map((w) => ({ id: String(w.id), title: w.title })),
     approval: s.approval ?? null, actions: s.actions, actions_left: Math.max(0, limits().actions_per_session - s.actions),
     seconds_left: Math.max(0, Math.ceil((s.expiresAt - Date.now()) / 1000)), can_continue: s.phase === "paused", log: s.log.slice(-30),
-    frame: s.lastFrame ?? null, chat: s.chat ?? null,
+    frame: s.lastFrame ?? null, chat: s.chat ?? null, hidden: s.hidden === true, window_bounds: { ...s.window.bounds },
   }));
   const update = () => { try { onState(publicState()); } catch { /* UI is best effort */ } };
 
@@ -226,7 +228,7 @@ export async function createPortableHost({ native, spool = null, settings, conte
       const png = encodePng(big, { level: 3 });
       full = { bytes: png, width: big.width, height: big.height, sha256: sha256(png) };
     }
-    const ocr = "none";
+    const ocr = raw.ocr === "client" ? "client" : "none";
     if (store && spool) {
       try { spool.put({ bytes, mime, width: model.width, height: model.height, full, thumb: encodeJpeg(fitLongSide(model, 320), { quality: 70 }), ocr, masked }); } catch { /* the archive copy is best effort */ }
     }
@@ -315,6 +317,8 @@ export async function createPortableHost({ native, spool = null, settings, conte
     // Tolerant stale check: the window must still look like the observation (caret masked).
     if (action.type !== "wait") {
       const fresh = await native.call("capture", { window: current }, 15_000);
+      // The observation's grid was taken after masking: mask the fresh frame the same way.
+      paintBoxes(fresh, fresh.secure ?? []);
       const grid = luminanceGrid(fitLongSide(fresh, l.model_long_side));
       const compare = compareGrids(observed.grid, grid, { mask: observed.caret ? [observed.caret] : [] });
       if (compare.stale) return finish({ ...common, approval, ok: false, code: "stale_observation", message: "The window changed since the observation. Observe again.", next: "computer_observe" });
@@ -350,12 +354,12 @@ export async function createPortableHost({ native, spool = null, settings, conte
 
   async function askAct(s, request) {
     const l = limits();
-    const timeout = sleep(l.approval_timeout_seconds * 1000).then(() => ({ allow: false }));
+    const expired = timeout(l.approval_timeout_seconds * 1000).then(() => ({ allow: false }));
     s.waiting = true; update();
     try {
       return await Promise.race([
         Promise.resolve(approve.act({ session_id: s.id, request_id: randomUUID(), app: { app_id: s.window.appId, app_name: s.window.appName, bundle_or_exe: s.window.executable, pid: s.window.pid }, window_title: s.window.title, purpose: s.purpose, intent: request.intent, action: request.action, reasons: request.reasons, points: request.points, frame: { width: request.frame.model.width, height: request.frame.model.height, sha256: request.frame.sha, data_url: `data:${request.frame.mime};base64,${request.frame.bytes.toString("base64")}` } })).then((v) => ({ allow: v?.allow === true })),
-        timeout,
+        expired,
       ]);
     } catch {
       return { allow: false };
@@ -407,7 +411,7 @@ export async function createPortableHost({ native, spool = null, settings, conte
       answer = await Promise.race([
         Promise.resolve(approve.open(request)).catch(() => ({ decision: "deny" })),
         pendingAnswer,
-        sleep(l.approval_timeout_seconds * 1000).then(() => ({ decision: "deny", timeout: true })),
+        timeout(l.approval_timeout_seconds * 1000).then(() => ({ decision: "deny", timeout: true })),
       ]);
       s.pendingApproval = null;
     }

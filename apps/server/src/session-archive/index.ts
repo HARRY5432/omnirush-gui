@@ -64,6 +64,7 @@ import { SEAL_CONTENT } from "./seal.js";
 import { findLockfiles, scanTouchedFiles, touchedChange, TouchedPathStore, type TouchedScanResult } from "./touched.js";
 import { isOutsideArchivePath, outsideSourcesOf, scanOutsideFiles } from "./outside.js";
 import { ATTACHMENTS_ROOT_NAME, AttachmentStore, type AttachmentRecord, type AttachmentSource } from "./attachments.js";
+import { MEDIA_ROOT_NAME, MediaStore, type MediaRecord } from "./media-store.js";
 import {
   ARCHIVE_SCHEMA_V2,
   captureV2Override,
@@ -517,7 +518,7 @@ function repoMarkers(entries: readonly ArchiveEntry[]): Array<{ path: string; gi
     if (entry.type === "symlink") continue;
     const parts = entry.path.split("/");
     if (parts[parts.length - 1] !== ".git" || parts.slice(0, -1).includes(".git")) continue;
-    if (parts[0] === ATTACHMENTS_ROOT_NAME || parts[0] === ENCLOSING_REPO_ROOT_NAME || isOutsideArchivePath(entry.path)) continue;
+    if (parts[0] === ATTACHMENTS_ROOT_NAME || parts[0] === MEDIA_ROOT_NAME || parts[0] === ENCLOSING_REPO_ROOT_NAME || isOutsideArchivePath(entry.path)) continue;
     markers.push({ path: entry.path, gitfile: entry.type === "file" });
   }
   return markers;
@@ -568,6 +569,7 @@ export class SessionArchiver {
   private readonly touched: TouchedPathStore;
   /** Capture v2: staged prompt attachments (attachments.ts). */
   private readonly attachments: AttachmentStore;
+  private readonly media: MediaStore;
   /** Capture v2: start scans waiting for their session's base. */
   private readonly prescans = new Map<string, Prescan>();
   /** Capture v2: the sessions whose chain is v2 (as last loaded or saved). */
@@ -626,6 +628,7 @@ export class SessionArchiver {
     this.includeCredentials = options.archiveIncludeCredentialFiles === true;
     this.filesUsed = new FilesUsedStore(join(this.dir, "files-used"));
     this.filesUsedTracker = new FilesUsedTracker({ archive: this, appDirs: this.appDirs, includeCredentialFiles: this.includeCredentials, log: this.log, ...(options.filesUsedSandbox ? { sandboxFor: options.filesUsedSandbox } : {}) });
+    this.media = new MediaStore(join(this.dir, "media"));
     this.attachments = new AttachmentStore(join(this.dir, "attachments"), (path) => !this.includeCredentials && isUploadPathDenied(path), { appDirs: this.appDirs, includeCredentialFiles: this.includeCredentials });
     this.touched = new TouchedPathStore(this.dirs.touched, {
       ready: () => this.start(),
@@ -1047,6 +1050,19 @@ export class SessionArchiver {
     const state = await this.loadSession(sessionId);
     if (!state?.v2 || state.stopped) return [];
     return this.attachments.add(sessionId, state.root || root, sources);
+  }
+
+  /**
+   * Screenshots and other tool-result images of the chat (media-store.ts),
+   * staged now and archived by the session's next capture under `__media__/`.
+   * Never throws.
+   */
+  async recordMedia(sessionId: string, records: readonly MediaRecord[]): Promise<number> {
+    if (records.length === 0 || this.disabled || !SESSION_ID_PATTERN.test(sessionId) || this.stoppedSessions.has(sessionId)) return 0;
+    await this.start();
+    const state = await this.loadSession(sessionId);
+    if (!state?.v2 || state.stopped) return 0;
+    return this.media.add(sessionId, records);
   }
 
   /**
@@ -1621,12 +1637,13 @@ export class SessionArchiver {
       const lockfiles = await findLockfiles(state.root, signal);
       // Capture v2 (#14): a touched file in a regenerable folder (a venv's tool, a cached dataset) is archived too, up to the per-file cap.
       const paths = new Set([...touchedPaths.filter((path) => (v2 ? !path.split("/").slice(0, -1).includes(".git") : !inRegenerableDir(path))), ...lockfiles.filter((path) => !inRegenerableDir(path))]);
-      for (const entry of baseline) if (!isOutsideArchivePath(entry.path) && !entry.path.startsWith(`${ATTACHMENTS_ROOT_NAME}/`)) paths.add(entry.path);
+      for (const entry of baseline) if (!isOutsideArchivePath(entry.path) && !entry.path.startsWith(`${ATTACHMENTS_ROOT_NAME}/`) && !entry.path.startsWith(`${MEDIA_ROOT_NAME}/`)) paths.add(entry.path);
       const scan = await scanTouchedFiles(state.root, paths, { excludedDirs: this.appDirs, includeCredentialFiles: this.includeCredentials, includeIgnored: true, hashCache: cache, ...(signal ? { signal } : {}) });
       if (excludedList) this.capOversized(scan, new Set(), excludedList);
       // The files outside the workspace the session touched (outside.ts).
       mergeScans(scan, await this.scanOutside(state, baseline, signal, filesUsed));
       if (v2) mergeScans(scan, await this.attachmentEntries(sessionId));
+      if (v2) mergeScans(scan, await this.mediaEntries(sessionId));
       mergeScans(scan, await this.sandboxEntries(sessionId));
       if (filesUsed) mergeStaged(scan, await this.filesUsed.entries(sessionId));
       if (options.trigger === "pre_tool" && options.before !== undefined) scanAsOf(scan.entries, new Map(baseline.map((entry) => [entry.path, entry])), options.before);
@@ -1658,6 +1675,7 @@ export class SessionArchiver {
       // The files outside the workspace the session touched (outside.ts).
       mergeScans(scan, await this.scanOutside(state, baseline, signal, filesUsed));
       if (v2) mergeScans(scan, await this.attachmentEntries(sessionId));
+      if (v2) mergeScans(scan, await this.mediaEntries(sessionId));
       mergeScans(scan, await this.sandboxEntries(sessionId));
       if (filesUsed) mergeStaged(scan, await this.filesUsed.entries(sessionId));
       // Capture v2: the .git of the repository above a session folder (enclosing.ts).
@@ -1690,6 +1708,8 @@ export class SessionArchiver {
     const archiveId = this.random.uuid();
     const sequence = state.next_sequence;
     const createdAt = this.now();
+    // The chat's screenshots in this archive: counted by the server apart from the project's files.
+    const mediaBytes = files.reduce((sum, entry) => (entry.type === "file" && entry.path.startsWith(`${MEDIA_ROOT_NAME}/`) ? sum + entry.size : sum), 0);
     let extraMembers: Array<{ name: string; content: Buffer }> = [];
     if (v2 && excludedList) {
       const stateKind: StateKind = kind === "base" ? "start" : options.trigger === "pre_tool" ? "pre_tool" : options.trigger === "final" ? "final" : "after";
@@ -1802,6 +1822,7 @@ export class SessionArchiver {
         kid: sealed.kid,
         content: SEAL_CONTENT,
         marker: state.marker,
+        ...(mediaBytes > 0 ? { media_bytes: mediaBytes } : {}),
       };
       const record: QueueRecord = {
         v: 1,
@@ -2046,6 +2067,21 @@ export class SessionArchiver {
         entries.push({ path: record.path, type: "file", size: record.size, sha256: record.sha256, source: record.blob, ...statFields(stats), mode: 0o644 });
       } catch {
         // Gone (signed out meanwhile): not archived.
+      }
+    }
+    entries.sort((left, right) => compareArchivePaths(left.path, right.path));
+    return { entries, gone: new Set(), excluded: emptyExcludedCounts(), ignored: 0 };
+  }
+
+  private async mediaEntries(sessionId: string): Promise<TouchedScanResult> {
+    const entries: ScannedEntry[] = [];
+    for (const record of await this.media.present(sessionId)) {
+      try {
+        const stats = await lstat(record.file, { bigint: true });
+        if (!stats.isFile()) continue;
+        entries.push({ path: record.path, type: "file", size: Number(stats.size), sha256: await sha256Path(record.file), source: record.file, ...statFields(stats), mode: 0o644 });
+      } catch {
+        // Gone from the spool: not archived.
       }
     }
     entries.sort((left, right) => compareArchivePaths(left.path, right.path));

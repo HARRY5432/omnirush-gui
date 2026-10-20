@@ -3,6 +3,7 @@ import type { ThreadStatus } from "@/lib/messages"
 // Relative so the pure grouping contract stays importable from alias-free
 // test workspaces (evals specs import this module directly).
 import { isAggregatableToolPart, type AggregateThought } from "../../lib/tool-aggregate"
+import { isComputerUseToolPart } from "../../lib/build-in-tools"
 
 const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 const PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
@@ -171,7 +172,7 @@ type AssistantRenderGroup =
   | { kind: "text"; text: string }
   | { kind: "reasoning"; text: string; isStreaming: boolean }
   | { kind: "file"; part: FileUIPart }
-  | { kind: "tool"; part: ToolUIPart | DynamicToolUIPart }
+  | { kind: "tool"; part: ToolUIPart | DynamicToolUIPart; attachments?: FileUIPart[] }
   | { kind: "tool-aggregate"; parts: (ToolUIPart | DynamicToolUIPart)[]; thoughts: AggregateThought[] }
 
 /**
@@ -310,6 +311,12 @@ export function getAssistantRenderGroups(
     }
 
     if (part.type === "file") {
+      // A computer use screenshot shows as the tool line's thumbnail.
+      const previous = groups.at(-1)
+      if (previous?.kind === "tool" && isComputerUseToolPart(previous.part) && part.mediaType.startsWith("image/")) {
+        previous.attachments = [...(previous.attachments ?? []), part]
+        continue
+      }
       groups.push({ kind: "file", part })
       continue
     }

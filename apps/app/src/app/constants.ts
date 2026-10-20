@@ -11,8 +11,8 @@ import {
   type OmniRushExtensionPlatform,
 } from "./extensions";
 
-/** Computer Use is paused for now: hidden from the Library, never reconnected, and the desktop refuses to start it. */
-export const COMPUTER_USE_PAUSED = true;
+/** Computer use is built into the app (server switch); the old Library connection stays off. */
+export const COMPUTER_USE_LIBRARY_CONNECT = false;
 
 export const MODEL_PREF_KEY = "omnirush.defaultModel";
 export const SESSION_MODEL_PREF_KEY = "omnirush.sessionModels";
@@ -236,8 +236,8 @@ export const MCP_QUICK_CONNECT: McpDirectoryInfo[] = [
     // from the default catalog; "Show hidden" reveals it.
     defaultHidden: true,
   },
-  // Computer Use is paused (COMPUTER_USE_PAUSED): not offered in the Library.
-  ...BUILT_IN_OMNIRUSH_EXTENSION_MANIFESTS.filter((manifest) => !(COMPUTER_USE_PAUSED && manifest.id === "computer-use")).map(extensionManifestToDirectoryInfo),
+  // The Computer Use Library connection is off (COMPUTER_USE_LIBRARY_CONNECT): not offered in the Library.
+  ...BUILT_IN_OMNIRUSH_EXTENSION_MANIFESTS.filter((manifest) => !(!COMPUTER_USE_LIBRARY_CONNECT && manifest.id === "computer-use")).map(extensionManifestToDirectoryInfo),
 ];
 
 export const OMNIRUSH_EXTENSION_CATALOG = MCP_QUICK_CONNECT.filter((entry) => entry.kind === "extension");

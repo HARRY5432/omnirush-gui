@@ -5,7 +5,7 @@ import { createInterface } from "node:readline";
 import { connect } from "node:net";
 const channel = connect({ host: "127.0.0.1", port: Number(process.env.OMNIRUSH_FIXTURE_PORT) });
 channel.on("connect", () => channel.write(JSON.stringify({ token: process.env.OMNIRUSH_FIXTURE_TOKEN }) + "\n"));
-import { checkComputerUsePermissions, getComputerUseMcpCommand, getComputerUseMcpEnvironment, getComputerUseState, computerUseAction } from "../../../../apps/desktop/electron/computer-use.mjs";
+import { checkComputerUsePermissions, getComputerUseMcpCommand, getComputerUseMcpEnvironment, getComputerUseState, computerUseControl } from "../../../../apps/desktop/electron/computer-use.mjs";
 app.setPath("userData", process.argv.at(-1));
 const ready = app.whenReady();
 createInterface({ input: channel }).on("line", async (line) => {
@@ -22,7 +22,7 @@ createInterface({ input: channel }).on("line", async (line) => {
       if (!["pause", "hide", "stop"].includes(request.params.action)) throw new Error("Invalid preview command.");
       await preview.webContents.executeJavaScript("document.getElementById(" + JSON.stringify(request.params.action) + ").click()"); result = {};
     }
-    else if (request.method === "action") { await computerUseAction(request.params); result = {}; }
+    else if (request.method === "action") { await computerUseControl(request.params); result = {}; }
     else throw new Error("Unknown host witness operation.");
     channel.write(JSON.stringify({ id: request.id, result }) + "\n");
   } catch (error) { channel.write(JSON.stringify({ id: request.id, error: { message: error.message } }) + "\n"); }

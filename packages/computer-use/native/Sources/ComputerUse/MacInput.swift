@@ -3,11 +3,11 @@ import ApplicationServices
 
 @MainActor
 final class MacInput {
-    private typealias SetWindowLocation = @convention(c) (CGEvent, CGPoint) -> Void
+    typealias SetWindowLocation = @convention(c) (CGEvent, CGPoint) -> Void
     // AppKit-targeted events carry a second, window-local point. On recent
     // macOS, setting only the public screen location leaves that point invalid.
     // Keep this compatibility hook isolated and fail before input if unavailable.
-    private static let setWindowLocation: SetWindowLocation? = {
+    static let setWindowLocation: SetWindowLocation? = {
         guard let library = dlopen(nil, RTLD_LAZY) else { return nil }
         defer { dlclose(library) }
         guard let symbol = dlsym(library, "CGEventSetWindowLocation") else { return nil }

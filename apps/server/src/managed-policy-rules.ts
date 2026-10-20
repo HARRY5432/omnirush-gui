@@ -2,6 +2,7 @@ import type { DesktopConfig, DesktopExecutionPolicy, DesktopPolicyKey } from "@o
 import { z } from "zod";
 import type { ApprovalMode } from "./approval-mode.js";
 import { gitWorkflowPermissionRules } from "./git-command-policy.js";
+import { SCREEN_BASH_RULES } from "./computer-use/shared/policy.mjs";
 import permissionModes from "./permissions/permission-modes.json" with { type: "json" };
 
 export const managedPolicyActionSchema = z.enum([
@@ -104,6 +105,11 @@ export function legacyExecutionPermissions(
     // Re-insert every git workflow rule after the shared ones, so a pattern
     // both lists use keeps the git rules' own order (the last match wins).
     for (const [pattern, action] of Object.entries(gitWorkflowPermissionRules())) {
+      delete bash[pattern];
+      bash[pattern] = action;
+    }
+    // Commands that capture the screen or inject input ask (computer-use/shared/policy.mjs, the CLI's list).
+    for (const [pattern, action] of Object.entries(SCREEN_BASH_RULES)) {
       delete bash[pattern];
       bash[pattern] = action;
     }

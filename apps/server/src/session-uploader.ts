@@ -43,6 +43,7 @@ import bundledBestPractices from "./bundled-best-practices.json" with { type: "j
 import serverPackage from "../package.json" with { type: "json" };
 import { BUNDLED_ENGINE_VERSION, BUNDLED_HARNESS, type Harness } from "./engine-identity.js";
 import { mcpServersInUse, workspaceMcpReport, type McpServerUse } from "./mcp-allow/state.js";
+import type { ComputerUseEnvironment } from "./computer-use/desktop.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -310,6 +311,8 @@ export type UploadEnvironment = {
   sandbox?: BoxLabel;
   /** The MCP servers the project's engine ran (mcp-allow/state.ts); absent when none. */
   mcp_servers?: McpServerUse[];
+  /** Computer use in this chat (computer-use/desktop.ts): only when it was used. */
+  computer_use?: ComputerUseEnvironment;
 };
 
 /** A box chat's toolchain without this machine's `system` and `shell` blocks. */
@@ -874,6 +877,8 @@ export type TraceCapabilities = {
   auto_compact?: { enabled: boolean; after_turns: number; min_context_tokens?: number };
   /** The model's own web search (web-search.ts): the block as the server sent it; absent is off. */
   web_search?: Record<string, unknown>;
+  /** Computer use (computer-use/desktop.ts): the block as the server sent it; absent is off. */
+  computer_use?: Record<string, unknown>;
   /** The MCP list (mcp-allow/state.ts remembers it): absent is off. */
   mcp?: Record<string, unknown>;
 };
@@ -4638,6 +4643,8 @@ export class SessionUploader {
   private readonly toolchains: ToolchainCache | null;
   /** Chats in their project's Linux sandbox (box/), and the toolchain probed in those boxes. */
   private readonly boxes = new Map<string, BoxCaptureInfo>();
+  /** Chats that used computer use, for the envelope's `environment.computer_use`. */
+  private readonly computerUse = new Map<string, ComputerUseEnvironment>();
   private readonly boxToolchains: ToolchainCache | null;
   private readonly excludedHashes: HashCache = new Map();
   private spoolCounter = 0;
@@ -5110,7 +5117,9 @@ export class SessionUploader {
     const importedFrom = engine2ImportedFrom(sessionId);
     // Only a project with at least one MCP server on gets the field; every other session uploads as before.
     const mcpServers = this.stateDir ? mcpServersInUse(workspaceMcpReport(this.stateDir, root)) : null;
-    return { ...environment, ...boxEnvironment(environment, box?.label ?? null), ...(toolchain ? { toolchain } : {}), ...(box ? { sandbox: box.label } : {}), ...(importedFrom ? { imported_from: importedFrom } : {}), ...(mcpServers ? { mcp_servers: mcpServers } : {}) };
+    // Only a chat that used computer use gets the field.
+    const computerUse = this.computerUse.get(sessionId) ?? null;
+    return { ...environment, ...boxEnvironment(environment, box?.label ?? null), ...(toolchain ? { toolchain } : {}), ...(box ? { sandbox: box.label } : {}), ...(importedFrom ? { imported_from: importedFrom } : {}), ...(mcpServers ? { mcp_servers: mcpServers } : {}), ...(computerUse ? { computer_use: computerUse } : {}) };
   }
 
   /**
@@ -5123,6 +5132,17 @@ export class SessionUploader {
   }
 
   /** Whether the chat's commands run in a box (its paths outside the project are the box's). */
+  /** The chat used computer use (a computer tool part, or a `computer.session` event with its screen). */
+  markComputerUse(sessionId: string, event?: Record<string, unknown>): void {
+    const known = this.computerUse.get(sessionId);
+    const os = typeof event?.os === "string" ? event.os : known?.os ?? (process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : process.platform);
+    const screens = [...(known?.screens ?? [])];
+    const screen = isRecord(event?.screen) ? event.screen : null;
+    if (screen && typeof screen.id === "string" && !screens.some((s) => s.id === screen.id)) screens.push({ id: screen.id, width: Number(screen.width) || 0, height: Number(screen.height) || 0, scale: Number(screen.scale) || 1 });
+    this.computerUse.set(sessionId, { enabled: true, host: isRecord(event?.virtual) ? "virtual" : known?.host ?? "native", os, screens: screens.slice(0, 8) });
+    while (this.computerUse.size > 512) this.computerUse.delete(this.computerUse.keys().next().value as string);
+  }
+
   inBox(sessionId: string): boolean {
     return this.boxes.has(sessionId);
   }
@@ -5722,6 +5742,7 @@ export class SessionUploader {
       this.appendTrace(state, "client.launch", clientLaunchData());
     }
     this.appendTrace(state, type, data);
+    if (type === "computer.session" && isRecord(data)) this.markComputerUse(sessionId, data);
     if (type === "turn.messages" && isRecord(data)) this.contextOf(sessionId)?.turnMessages(sessionId, data.messages);
   }
 

@@ -8,6 +8,7 @@
  * same behaviour. Every call takes and returns plain data, so the same calls
  * cross the thread boundary unchanged.
  */
+import { createMediaRewriter } from "./computer-use/media-capture.js";
 import type { ApprovalMode } from "./approval-mode.js";
 import type { ContextOptions } from "./context/index.js";
 import { readPromptAttachments, promptBodyForTrace, v2PromptBodyForTrace } from "./session-upload-attachments.js";
@@ -17,6 +18,7 @@ import {
   currentEngineTarget,
   engineReplaced,
   observeUploadedSession,
+  setEngineMessageRewrite,
   followToolStart, followContextToolEvents, followFilesUsedCalls,
   projectArchiveEngineReads,
   promptDispatched,
@@ -218,6 +220,12 @@ export class CaptureHost {
       ...(baseMaxDeferMs !== undefined ? { baseMaxDeferMs } : {}),
     });
     this.archive.start();
+    // Image data URLs in tool results become media references as messages are read (computer-use/media-capture.ts).
+    setEngineMessageRewrite(createMediaRewriter({
+      stateDir: options.stateDir,
+      onFiles: (sessionId, files) => this.archive.mediaFiles(sessionId, files),
+      onComputerUse: (sessionId) => this.sessionUploader.markComputerUse(sessionId),
+    }));
   }
 
   startSession(sessionId: string, workspaceId: string, root: string, turnsBefore = 0): void {

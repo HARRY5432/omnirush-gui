@@ -183,6 +183,8 @@ import { buildathonProjectsFile, reproStateFromBody, writeReproState } from "./b
 import { prepareBoxInstallLog } from "./box/install-log.js";
 import { rememberServerDefault, watchServerDefault } from "./box/launch.js";
 import { rememberWebSearchSwitch, watchWebSearchSwitch } from "./web-search.js";
+import { createChatTracker, rememberComputerUseSwitch } from "./computer-use/desktop.js";
+import { registerComputerUseRoutes } from "./computer-use/routes.js";
 import { normalizeBackend } from "./box/backends/index.js";
 import { buildOmniRushRuntimeConfigObject, omnirushGatewayConfigured, omnirushRuntimeConfigFilePath, writeOmniRushRuntimeConfigFile } from "./omnirush-runtime-config.js";
 import { assertMcpAllowed, mcpAllowed, mcpDisabledMessage, mcpPolicyForConfig, refuseAccountLinkedMcp } from "./mcp-policy.js";
@@ -281,6 +283,26 @@ const AUTO_COMPACT_SEED_WAIT_MS = 5_000;
 /** How long a sign-out waits for queued uploads to go (POST /omnirush/capture/flush); the rest stays queued for the account. */
 const SIGN_OUT_FLUSH_MS = 10_000;
 const turnActivityByServer = new WeakMap<ServerConfig, TurnActivity>();
+/** Fresh capabilities for computer use (Electron main asks every 60 s while a session is open), per server. */
+const computerUseCapabilitiesByServer = new WeakMap<ServerConfig, (maxAgeMs: number) => Promise<unknown>>();
+/** The chats prompted most recently, per server: a computer use call belongs to the latest one still running. */
+const computerUseChatsByServer = new WeakMap<ServerConfig, ReturnType<typeof createChatTracker>>();
+function computerUseChats(config: ServerConfig): ReturnType<typeof createChatTracker> {
+  let chats = computerUseChatsByServer.get(config);
+  if (!chats) {
+    chats = createChatTracker();
+    computerUseChatsByServer.set(config, chats);
+  }
+  return chats;
+}
+
+/** Restarts the engine's projects (when idle) so they pick up the built-in computer use server. */
+async function applyComputerUseEngine(config: ServerConfig): Promise<void> {
+  const pool = enginePoolForConfig(config);
+  const workspaces = config.workspaces.filter((workspace) => resolveWorkspaceOpencodeConnection(config, workspace).baseUrl?.trim());
+  const workspace = findManagedEngineWorkspace(workspaces) ?? workspaces[0];
+  if (pool && workspace) await pool.requestRollover({ reason: "computer_use", workspace, manual: true });
+}
 
 /** Whether the agent works on this server's engine (turn-activity.ts), for an embedding app that asked (onTurnActivity). */
 function turnActivityFor(config: ServerConfig): TurnActivity | null {
@@ -1266,6 +1288,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
     }));
   }
   if (gatewayBroker.enabled) sessionIntegrityByServer.set(config, (sessionId, options) => gatewayBroker.sessionIntegrity(sessionId, options));
+  if (gatewayBroker.enabled) computerUseCapabilitiesByServer.set(config, (maxAgeMs) => gatewayBroker.sessionUploadCapabilities({ strict: true, maxAgeMs }));
   voiceServicesByServer.set(config, new OmniRushVoiceService(gatewayBroker, {
     log: (level, message, attributes) => logger.log(level, message, attributes),
   }));
@@ -1332,6 +1355,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
   let stopBoxDefaultWatch: () => void = () => {};
   let stopWebSearchWatch: () => void = () => {};
   let stopMcpPolicyWatch: () => void = () => {};
+  let stopComputerUseWatch: () => void = () => {};
   if (gatewayBroker.enabled) {
     // Read before the first plan and the engine's first config (at most 1.5 s, else the last answer is
     // used until it comes): a switch flipped or rolled back on the server applies at this start.
@@ -1354,6 +1378,15 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
     });
     // Read again while the app stays open (from the capabilities cache: at most one request per its
     // TTL), so a switch flipped on the server reaches an app started before it without a restart.
+    // Computer use (computer-use/desktop.ts): remembered from the same answer; a change restarts the
+    // engine's projects so the built-in server comes or goes. Electron main reads it again every 60 s
+    // while a computer use session is open (POST /computer-use/refresh).
+    void gatewayBroker.sessionUploadCapabilities({ strict: true }).then((capabilities) => (rememberComputerUseSwitch(runtimeStorageDir(config), capabilities) ? applyComputerUseEngine(config) : undefined)).catch(() => undefined);
+    const computerUseTimer = setInterval(() => {
+      void gatewayBroker.sessionUploadCapabilities({ strict: true }).then((capabilities) => (rememberComputerUseSwitch(runtimeStorageDir(config), capabilities) ? applyComputerUseEngine(config) : undefined)).catch(() => undefined);
+    }, BOX_DEFAULT_REFRESH_MS);
+    computerUseTimer.unref?.();
+    stopComputerUseWatch = () => clearInterval(computerUseTimer);
     stopMcpPolicyWatch = watchMcpPolicy({
       stateDir: runtimeStorageDir(config),
       read: () => gatewayBroker.sessionUploadCapabilities(),
@@ -1731,6 +1764,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
     stopBoxDefaultWatch();
     stopWebSearchWatch();
     stopMcpPolicyWatch();
+    stopComputerUseWatch();
     bestPracticesReloads.stop();
     // First, and synchronously: archive part uploads in flight are aborted now, not after the other shutdown steps.
     const captureStopped = capture.stop();
@@ -1823,6 +1857,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
       stopBoxDefaultWatch();
       stopWebSearchWatch();
       stopMcpPolicyWatch();
+      stopComputerUseWatch();
       const archiveFinals = accountStillStored();
       if (boxes.hasChats() && await Promise.race([archiveFinals.catch(() => false), new Promise<false>((resolvePromise) => setTimeout(() => resolvePromise(false), 1_000).unref?.())])) {
         await boxes.finals({ budgetMs: 10_000 }).catch(() => []);
@@ -1926,6 +1961,7 @@ export async function proxyOpencodeV2Request(input: {
   // The agent works from here (the prompt is on its way) until the engine runs no session.
   const turnActivity = promptDispatch && collectible && sessionId !== null ? turnActivityFor(input.config) : null;
   turnActivity?.promptDispatched();
+  if (promptDispatch && sessionId !== null) computerUseChats(input.config).mark(sessionId);
   const target = new URL(input.connection.url);
   target.pathname = forwardedPath;
   target.search = input.url.search;
@@ -4836,6 +4872,24 @@ function createRoutes(
     resolveOutboxEnabled,
     resolveInboxMaxBytes,
     scopeRank,
+  });
+
+  // Computer use (computer-use/routes.ts): for Electron main, which runs the host.
+  registerComputerUseRoutes({
+    routes,
+    stateDir: () => runtimeStorageDir(config),
+    jsonResponse,
+    readJsonBody,
+    approvalMode: () => capturePermissionMode(config),
+    readCapabilities: async (maxAgeMs) => {
+      const read = computerUseCapabilitiesByServer.get(config);
+      if (!read) throw new Error("capabilities unavailable");
+      return read(maxAgeMs);
+    },
+    applyEngine: () => applyComputerUseEngine(config),
+    chats: computerUseChats(config),
+    runningSessions: async () => null,
+    recordTrace: (sessionId, type, data) => recordOpenSessionTrace(config, sessionId, type, data),
   });
 
   // The desktop editor. A save or a hunk review that names a chat the session

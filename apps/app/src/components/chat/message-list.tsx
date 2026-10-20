@@ -35,6 +35,7 @@ import { openTargetFromUrl } from "@/react-app/domains/session/artifacts/open-ta
 import { sessionErrorPresentationFromUIMessage } from "@/react-app/domains/session/sync/session-error"
 import { ApplyPatchTool } from "@/components/tools/apply-patch"
 import { BashTool } from "@/components/tools/bash"
+import { ComputerUseToolLine } from "@/components/tools/computer-use"
 import { EditTool } from "@/components/tools/edit"
 import { EnvVarRequestTool } from "@/components/tools/env-var-request"
 import { ReadFileTool, WriteFileTool } from "@/components/tools/file"
@@ -112,6 +113,7 @@ import {
   taskChildSessionId,
   isTodoWriteToolPart,
   isWebFetchToolPart,
+  isComputerUseToolPart,
   isWebSearchToolPart,
   isHostedWebSearchToolPart,
   isWriteToolPart,
@@ -161,6 +163,8 @@ function MessageTimestamp({ message, className }: { message: UIMessage; classNam
 
 interface ToolMessageProps {
   part: ToolUIPart | DynamicToolUIPart
+  /** Screenshots that came with the call (computer use). */
+  attachments?: FileUIPart[]
 }
 
 /**
@@ -187,11 +191,11 @@ class ToolMessage extends React.Component<ToolMessageProps, { failed: boolean }>
         <div className="text-xs text-muted-foreground">Tool step unavailable</div>
       )
     }
-    return <ToolMessageInner part={this.props.part} />
+    return <ToolMessageInner part={this.props.part} attachments={this.props.attachments} />
   }
 }
 
-const ToolMessageInner = ({ part }: ToolMessageProps) => {
+const ToolMessageInner = ({ part, attachments }: ToolMessageProps) => {
   const { connectorIdentities, onMcpReconnect, onMcpReopenAuthorization, onMcpRetry } = useMessageList()
   const parentRun = React.useContext(ParentRunContext)
   const resolveLifecycle = useCurrentToolLifecycleResolver()
@@ -315,6 +319,10 @@ const ToolMessageInner = ({ part }: ToolMessageProps) => {
 
   if (part.type === "dynamic-tool" && isAutomationProposalToolPart(part)) {
     return <OmniRushAutomationProposalTool part={part} />
+  }
+
+  if (isComputerUseToolPart(part)) {
+    return <ComputerUseToolLine part={part} attachments={attachments} />
   }
 
   // Failed calls use the same sentence line with the "failures are
@@ -575,7 +583,7 @@ const AssistantMessage = React.memo(
 
             return (
               <div key={`tool-${index}`} className="w-full">
-                <ToolMessage part={group.part} />
+                <ToolMessage part={group.part} attachments={group.attachments} />
               </div>
             )
           })}

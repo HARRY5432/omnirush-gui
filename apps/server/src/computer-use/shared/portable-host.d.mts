@@ -64,6 +64,10 @@ export type HostSessionState = {
   log: Array<{ at: string; action: string; intent: string; ok: boolean; code: string | null }>;
   frame: { sha: string; width: number; height: number; mime: string; data_url: string; at: string } | null;
   chat: string | null;
+  /** The person hid the floating pill. */
+  hidden: boolean;
+  /** The window's native bounds, for placing the floating pill. */
+  window_bounds: { x: number; y: number; width: number; height: number };
 };
 export type McpConnection = { id: string; handle(message: unknown): Promise<Record<string, unknown> | null>; close(): Promise<void> };
 export type PortableHost = {

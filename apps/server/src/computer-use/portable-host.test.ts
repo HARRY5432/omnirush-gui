@@ -6,7 +6,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import os from "node:os";
 import path from "node:path";
 
-import { createPortableHost } from "./shared/portable-host.mjs";
+import { createPortableHost, type ActRequest, type OpenRequest } from "./shared/portable-host.mjs";
 import { createMediaSpool } from "./shared/media.mjs";
 
 type Window = { id: number; pid: number; identity: string; executable: string; appId: string; appName: string; title: string; bounds: { x: number; y: number; width: number; height: number }; dpi: number; scale: number; monitor: string };
@@ -34,6 +34,7 @@ function fakeNative() {
   const native = {
     ready: Promise.resolve({ supported: true }),
     pid: 999_999,
+    held: { keys: [], buttons: [] },
     calls,
     state,
     windows,
@@ -64,8 +65,8 @@ function rig(mode: "careful" | "normal" | "auto", options: { decision?: "chat" |
   const dir = mkdtempSync(path.join(os.tmpdir(), "cu-host-"));
   dirs.push(dir);
   const events: Array<Record<string, unknown>> = [];
-  const opens: Array<Record<string, unknown>> = [];
-  const acts: Array<Record<string, unknown>> = [];
+  const opens: OpenRequest[] = [];
+  const acts: ActRequest[] = [];
   const settings = { enabled: options.enabled ?? true, real_screen: true, limits: options.limits ?? {}, deny_apps: [], mode };
   const hostPromise = createPortableHost({
     native,
@@ -73,8 +74,8 @@ function rig(mode: "careful" | "normal" | "auto", options: { decision?: "chat" |
     settings: () => settings,
     context: () => ({ ancestors: [], chat: "ses_1" }),
     approve: {
-      open: async (request: Record<string, unknown>) => { opens.push(request); return { decision: options.decision ?? "once", window_id: request.window_id }; },
-      act: async (request: Record<string, unknown>) => { acts.push(request); return { allow: options.allowAct ?? true }; },
+      open: async (request: OpenRequest) => { opens.push(request); return { decision: options.decision ?? "once", window_id: request.window_id }; },
+      act: async (request: ActRequest) => { acts.push(request); return { allow: options.allowAct ?? true }; },
     },
     onEvent: (event: Record<string, unknown>) => events.push(event),
   });
@@ -187,7 +188,7 @@ describe("portable host: observe and act", () => {
     const act = await call(c, "computer_act", { session_id: session, observation_id: obs.state.observation?.id, request_id: "a", intent: "Type a greeting", action: { type: "type", text: "hello" } });
     expect(act.state).toMatchObject({ ok: false, code: "approval_denied", approval: { asked: true, reasons: ["careful"] } });
     expect(r.acts[0]).toMatchObject({ intent: "Type a greeting", action: { type: "type", text: "hello" }, app: { app_name: "gedit" } });
-    expect(String((r.acts[0]?.frame as { data_url: string }).data_url)).toStartWith("data:image/");
+    expect(String(r.acts[0]?.frame.data_url)).toStartWith("data:image/");
     expect(r.native.calls.filter((x) => x.method === "act").length).toBe(0);
     await host.close();
   });

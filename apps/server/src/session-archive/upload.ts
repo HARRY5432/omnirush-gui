@@ -121,6 +121,8 @@ export type ArchiveCreateRequest = {
   kid: string;
   content: typeof SEAL_CONTENT;
   marker: string;
+  /** Bytes of the `__media__/` files in this archive (media-store.ts): the server counts them apart from the project's. */
+  media_bytes?: number;
 };
 
 export type ArchiveUploadState = {

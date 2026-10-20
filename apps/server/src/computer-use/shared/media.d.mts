@@ -45,6 +45,8 @@ export type MediaSpool = {
   fullPath(sha: string): string;
   thumb(sha: string): Buffer | null;
   has(sha: string, ext: string): boolean;
+  ref(sha: string, chat: string): void;
+  release(sha: string, chat: string): boolean;
   remove(sha: string): void;
 };
 export type MediaIndexState = { v: 1; seen: Record<string, { m: 0 | 1; f: 0 | 1 }>; model_bytes: number; full_bytes: number; frames: number };
@@ -64,7 +66,7 @@ export function parseImageDataUrl(url: unknown): { mime: string; bytes: Buffer }
 export function thumbnailOf(bytes: Uint8Array, mime: string): Buffer | null;
 export function createMediaSpool(dir: string): MediaSpool;
 export function createMediaIndex(file: string): MediaIndex;
-export function rewriteMessageMedia<T>(message: T, ctx: { spool: MediaSpool; index: MediaIndex; limits?: { media_full_bytes?: number; media_model_bytes?: number } | null; thumbBudget?: number }): { message: T; changed: boolean; files: MediaFile[] };
+export function rewriteMessageMedia<T>(message: T, ctx: { spool: MediaSpool; index: MediaIndex; limits?: { media_full_bytes?: number; media_model_bytes?: number } | null; thumbBudget?: number; chat?: string }): { message: T; changed: boolean; files: MediaFile[] };
 export function mediaRefsOf(message: unknown): Array<{ sha: string; ext: string }>;
 export function fileBytes(file: string): number;
-export function pruneImages(messages: unknown[], options?: { keep?: number; drop?: number }): number;
+export function pruneImages(messages: unknown[], options?: { keep?: number; drop?: number; match?: (part: Record<string, unknown>) => boolean }): number;

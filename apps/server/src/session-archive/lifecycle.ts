@@ -11,6 +11,7 @@
  * for what that missed, when the app starts again. Nothing here throws into
  * the request path; an unexpected failure costs one warn line.
  */
+import type { MediaRecord } from "./media-store.js";
 import { realpath } from "node:fs/promises";
 
 import { attachmentsFromMessages } from "./attachments.js";
@@ -22,7 +23,7 @@ import type { UsedToolCall } from "./files-used.js";
 export type ProjectArchiver = Pick<
   SessionArchiver,
   "captureBase" | "captureDelta" | "captureFinal" | "startFinalCandidates" | "recordTouched" | "forgetTouched" | "drain" | "signOut" | "stop"
-> & Partial<Pick<SessionArchiver, "claimAccount" | "discardAll" | "pendingStatus" | "startManifest" | "hasStartManifest" | "captureState" | "recordAttachments" | "recordBinary" | "filesUsedToolCallEnded" | "filesUsedTurnStarted" | "filesUsedTurnEnded" | "filesUsedMaybe" | "filesUsedStatus">>;
+> & Partial<Pick<SessionArchiver, "claimAccount" | "discardAll" | "pendingStatus" | "startManifest" | "hasStartManifest" | "captureState" | "recordAttachments" | "recordMedia" | "recordBinary" | "filesUsedToolCallEnded" | "filesUsedTurnStarted" | "filesUsedTurnEnded" | "filesUsedMaybe" | "filesUsedStatus">>;
 
 /** Engine reads for one session, resolving to the parsed JSON, or null when it cannot be read. */
 export type ArchiveEngineReads = {
@@ -395,6 +396,17 @@ export class ProjectArchiveLifecycle {
       if (this.sessions.get(sessionId) !== record) return;
       const root = record.root ?? record.start?.root;
       if (root) await stage(sessionId, root, sources);
+    });
+  }
+
+  /** Screenshots of the chat's tool results (computer-use/media-capture.ts), staged for its next archive under `__media__/`. */
+  mediaFiles(sessionId: string, records: readonly MediaRecord[]): void {
+    const record = this.sessions.get(sessionId);
+    if (!this.active || this.consentOff || !record || !this.archiver.recordMedia) return;
+    const stage = this.archiver.recordMedia.bind(this.archiver);
+    this.schedule(sessionId, "media", async () => {
+      if (this.sessions.get(sessionId) !== record) return;
+      await stage(sessionId, records);
     });
   }
 

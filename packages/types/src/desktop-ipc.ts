@@ -876,6 +876,79 @@ export type RunningAppsResult = {
   apps: string[];
 };
 
+/** Computer use (contract v2): the app identity the host verified (exe path / bundle id, pid). */
+export type ComputerUseAppRef = { app_id: string; app_name: string; bundle_or_exe: string; pid: number };
+
+/** One computer use session as the host sees it (apps/server/src/computer-use/shared/portable-host.mjs). */
+export type ComputerUseSessionState = {
+  id: string;
+  phase: "approval" | "working" | "paused" | "ended";
+  mode: "observe" | "control";
+  purpose: string;
+  status: string;
+  app: ComputerUseAppRef;
+  window: { id: string; title: string };
+  windows: Array<{ id: string; title: string }>;
+  approval: "once" | "chat" | null;
+  actions: number;
+  actions_left: number;
+  seconds_left: number;
+  can_continue: boolean;
+  log: Array<{ at: string; action: string; intent: string; ok: boolean; code: string | null }>;
+  frame: { sha: string; width: number; height: number; mime: string; data_url: string; at: string } | null;
+  chat: string | null;
+  hidden?: boolean;
+  window_bounds?: { x: number; y: number; width: number; height: number };
+};
+
+/** A question only the person answers, in the main window (never through the engine). */
+export type ComputerUseRequest =
+  | {
+    kind: "open";
+    request_id: string;
+    session_id: string;
+    app: ComputerUseAppRef;
+    /** The app's icon (PNG data URL) when the OS gives one. */
+    icon: string | null;
+    windows: Array<{ id: string; title: string }>;
+    window_id: string;
+    mode: "observe" | "control";
+    purpose: string;
+    os: string;
+    seconds: number;
+    chat_seconds: number;
+    chat: string | null;
+  }
+  | {
+    kind: "act";
+    request_id: string;
+    session_id: string;
+    app: ComputerUseAppRef;
+    icon: string | null;
+    window_title: string;
+    purpose: string;
+    intent: string;
+    action: Record<string, unknown>;
+    reasons: Array<{ code: string; detail?: string; text: string }>;
+    /** Points of the action, in pixels of `frame`. */
+    points: Array<{ x: number; y: number }>;
+    frame: { width: number; height: number; sha256: string; data_url: string };
+    chat: string | null;
+  };
+
+export type ComputerUseAnswer = { request_id: string; decision: "chat" | "once" | "deny" | "allow"; window_id?: string };
+export type ComputerUseControlAction = "stop" | "takeover" | "continue" | "hide" | "show";
+
+export type ComputerUseStatus = {
+  enabled: boolean;
+  supported: boolean;
+  /** Why it is off or unavailable (people-facing), when it is. */
+  message: string | null;
+  mode: "careful" | "normal" | "auto";
+  sessions: ComputerUseSessionState[];
+  requests: ComputerUseRequest[];
+};
+
 // ---------------------------------------------------------------------------
 // The command map
 // ---------------------------------------------------------------------------
@@ -962,8 +1035,9 @@ export type DesktopCommandMap = {
   getOmniRushUiMcpCommand: { args: []; result: string[] };
   getComputerUseMcpCommand: { args: []; result: string[] };
   getComputerUseMcpEnvironment: { args: []; result: Record<string, string> };
-  getComputerUseState: { args: []; result: unknown };
-  computerUseAction: { args: [value: { connectionId: string; id: string; action: string; windowId?: number }]; result: void };
+  getComputerUseState: { args: []; result: ComputerUseStatus };
+  computerUseAnswer: { args: [answer: ComputerUseAnswer]; result: void };
+  computerUseControl: { args: [value: { session_id: string; action: ComputerUseControlAction }]; result: void };
   getOmniRushUiMcpEnvironment: { args: []; result: Record<string, string> };
 
   // Computer use

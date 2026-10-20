@@ -137,7 +137,32 @@ export function createMediaSpool(dir) {
     fullPath(sha) { return path.join(dir, "full", `${sha}.png`); },
     thumb(sha) { try { return readFileSync(path.join(dir, "thumb", `${sha}.jpg`)); } catch { return null; } },
     has(sha, ext) { return existsSync(path.join(dir, `${sha}.${ext}`)); },
-    /** Deletes a frame's local files (after its upload). */
+    /** Records that a chat references a frame (one spool serves every chat). */
+    ref(sha, chat) {
+      if (!SHA.test(String(sha)) || !chat) return;
+      const file = path.join(dir, "refs", `${sha}.json`);
+      const value = readJson(file);
+      const chats = new Set(Array.isArray(value?.chats) ? value.chats : []);
+      if (chats.has(chat)) return;
+      chats.add(chat);
+      writeAtomic(file, JSON.stringify({ chats: [...chats] }));
+    },
+    /**
+     * A chat no longer needs a frame (its archive holds it): the local files
+     * go when no other chat references it. Whether they were deleted.
+     */
+    release(sha, chat) {
+      if (!SHA.test(String(sha))) return false;
+      const file = path.join(dir, "refs", `${sha}.json`);
+      const value = readJson(file);
+      const chats = new Set(Array.isArray(value?.chats) ? value.chats : []);
+      chats.delete(chat);
+      if (chats.size) { writeAtomic(file, JSON.stringify({ chats: [...chats] })); return false; }
+      spool.remove(sha);
+      rmSync(file, { force: true });
+      return true;
+    },
+    /** Deletes a frame's local files whatever references it (prefer release). */
     remove(sha) {
       if (!SHA.test(String(sha))) return;
       const meta = spool.meta(sha);
@@ -192,7 +217,8 @@ function budgets(limits) {
 /**
  * Replaces image data URLs in the tool parts of one engine message (in place
  * on a structured copy; the input is not changed) with media references.
- * `ctx`: { spool, index, limits, thumbBudget }. Returns
+ * `ctx`: { spool, index, limits, thumbBudget, chat } (chat: the chat's id, for
+ * the spool's references). Returns
  * { message, changed, files: [{ path, file, sha, kind: "model"|"full" }] }:
  * the archive files this message adds (each frame once per chat).
  * User file parts are left alone (the archive keeps those as attachments).
@@ -221,6 +247,7 @@ export function rewriteMessageMedia(message, ctx) {
       let entry = ctx.index.entry(sha);
       const first = !entry;
       if (first) {
+        if (ctx.chat) ctx.spool.ref(sha, ctx.chat);
         const model = ctx.index.state.model_bytes + meta.bytes <= budget.model;
         const full = Boolean(meta.full) && model && ctx.index.state.full_bytes + meta.full.bytes <= budget.full && existsSync(ctx.spool.fullPath(sha));
         entry = ctx.index.add(sha, { model, full, modelBytes: meta.bytes, fullBytes: meta.full?.bytes ?? 0 });
@@ -274,13 +301,14 @@ export const DROP_IMAGES = 8;
  * keeps up to KEEP_IMAGES tool-result images; when the count passes it, the
  * oldest DROP_IMAGES at a time are replaced by a text note, so the cached
  * prefix stays stable for several steps. Mutates `messages` in place and
- * returns the number of images dropped. `messages`: engine WithParts list.
+ * returns the number of images dropped. `messages`: engine WithParts list;
+ * `match(part)` limits it to some tool parts (default: every tool part).
  */
-export function pruneImages(messages, { keep = KEEP_IMAGES, drop = DROP_IMAGES } = {}) {
+export function pruneImages(messages, { keep = KEEP_IMAGES, drop = DROP_IMAGES, match = () => true } = {}) {
   const found = [];
   for (const message of Array.isArray(messages) ? messages : []) {
     for (const part of isRecord(message) && Array.isArray(message.parts) ? message.parts : []) {
-      if (!isRecord(part) || part.type !== "tool" || !isRecord(part.state) || !Array.isArray(part.state.attachments)) continue;
+      if (!isRecord(part) || part.type !== "tool" || !isRecord(part.state) || !Array.isArray(part.state.attachments) || !match(part)) continue;
       part.state.attachments.forEach((a, i) => { if (isRecord(a) && typeof a.mime === "string" && a.mime.startsWith("image/")) found.push({ part, index: i, attachment: a }); });
     }
   }

@@ -1,0 +1,91 @@
+/**
+ * The desktop's computer use routes, for Electron main only (client scope,
+ * loopback): the switch and permission mode it applies, the host file it
+ * writes when its host listens, and the `computer.session` events it reports.
+ *
+ *   GET  /computer-use/state     { enabled, setting, mode, dir, spool, chat }
+ *   POST /computer-use/refresh   reads /collect/capabilities again (≤ 60 s old), then the state
+ *   POST /computer-use/host      { command, environment } | { host: null }
+ *   POST /computer-use/event     a computer.session event → the chat's trace
+ */
+import { addRoute, type Route } from "../routes/registry.js";
+import {
+  computerUseDir,
+  computerUseSettingFor,
+  type createChatTracker,
+  mediaSpoolDir,
+  permissionModeName,
+  readHostFile,
+  rememberComputerUseSwitch,
+  sessionEventOf,
+  writeHostFile,
+} from "./desktop.js";
+
+export type ComputerUseRouteDeps = {
+  routes: Route[];
+  stateDir: () => string;
+  jsonResponse: (data: unknown, status?: number) => Response;
+  readJsonBody: (request: Request) => Promise<Record<string, unknown>>;
+  /** The desktop approval mode ("careful" | "guarded" | "full"), or null. */
+  approvalMode: () => Promise<string | null>;
+  /** Fresh capabilities (strict), or throws. */
+  readCapabilities: (maxAgeMs: number) => Promise<unknown>;
+  /** Restart the engine's projects so they pick up the built-in server. */
+  applyEngine: () => Promise<unknown>;
+  chats: ReturnType<typeof createChatTracker>;
+  /** The engine's running sessions, or null when unknown. */
+  runningSessions: () => Promise<string[] | null>;
+  /** Records a trace event on a chat the uploader has open. */
+  recordTrace: (sessionId: string, type: string, data: Record<string, unknown>) => void;
+};
+
+export function registerComputerUseRoutes(deps: ComputerUseRouteDeps): void {
+  const { routes, jsonResponse } = deps;
+  const state = async () => {
+    const dir = computerUseDir(deps.stateDir());
+    const setting = computerUseSettingFor(dir);
+    const mode = permissionModeName(await deps.approvalMode().catch(() => null));
+    const chat = deps.chats.resolve(await deps.runningSessions().catch(() => null));
+    return {
+      enabled: setting.enabled,
+      setting: { enabled: setting.enabled, real_screen: setting.real_screen, virtual_display: setting.virtual_display, limits: setting.limits, deny_apps: setting.deny_apps, models: setting.models, message: setting.message, reason: setting.reason, source: setting.source },
+      mode,
+      dir,
+      spool: mediaSpoolDir(deps.stateDir()),
+      host: readHostFile(dir) !== null,
+      chat,
+    };
+  };
+
+  addRoute(routes, "GET", "/computer-use/state", "client", async () => jsonResponse(await state()));
+
+  addRoute(routes, "POST", "/computer-use/refresh", "client", async () => {
+    try {
+      const capabilities = await deps.readCapabilities(60_000);
+      if (rememberComputerUseSwitch(deps.stateDir(), capabilities)) void deps.applyEngine().catch(() => undefined);
+    } catch {
+      // A failed read keeps the last answer.
+    }
+    return jsonResponse(await state());
+  });
+
+  addRoute(routes, "POST", "/computer-use/host", "client", async (ctx) => {
+    const body = await deps.readJsonBody(ctx.request);
+    const command = Array.isArray(body.command) && body.command.every((part) => typeof part === "string") ? (body.command as string[]) : null;
+    const environment = typeof body.environment === "object" && body.environment !== null && !Array.isArray(body.environment)
+      ? Object.fromEntries(Object.entries(body.environment as Record<string, unknown>).filter((entry): entry is [string, string] => typeof entry[1] === "string"))
+      : {};
+    const changed = writeHostFile(computerUseDir(deps.stateDir()), command && command.length ? { command, environment } : null);
+    if (changed) void deps.applyEngine().catch(() => undefined);
+    return jsonResponse({ ok: true, changed });
+  });
+
+  addRoute(routes, "POST", "/computer-use/event", "client", async (ctx) => {
+    const body = await deps.readJsonBody(ctx.request);
+    const event = sessionEventOf(body.event);
+    if (!event) return jsonResponse({ ok: false, error: "invalid_event" }, 400);
+    const chat = typeof body.chat === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(body.chat) ? body.chat : deps.chats.resolve(await deps.runningSessions().catch(() => null));
+    if (chat) deps.recordTrace(chat, "computer.session", event);
+    return jsonResponse({ ok: true, chat });
+  });
+}
