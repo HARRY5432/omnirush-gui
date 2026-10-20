@@ -135,8 +135,12 @@ function describeAction(a) {
  *              act(request) → { allow: boolean } }
  * - onEvent(event): `computer.session` events; onState(states); onFrame(frame)
  */
-export async function createPortableHost({ native, spool = null, settings, context = () => ({}), approve, onEvent = () => {}, onState = () => {}, onFrame = () => {}, platform = process.platform }) {
-  const availability = await native.ready;
+export async function createPortableHost({ native: firstNative, nativeFactory = null, spool = null, settings, context = () => ({}), approve, onEvent = () => {}, onState = () => {}, onFrame = () => {}, platform = process.platform }) {
+  let native = firstNative;
+  let availability = await native.ready;
+  let nativeDown = false;
+  const restarts = [];
+  let restartedNote = false;
   const os = osName(platform);
   const sessions = new Map();
   const grants = new Map();
@@ -177,11 +181,36 @@ export async function createPortableHost({ native, spool = null, settings, conte
     emit(s, "paused", by);
     update();
   }
-  native.onEvent((value) => {
+  const attach = (worker) => worker.onEvent((value) => {
+    if (worker !== native) return;
     // The person's own answer to a question (a click or key in the app) is not a takeover.
     if (value.event === "person-input") for (const s of sessions.values()) if (s.phase === "working" && s.mode === "control" && !s.waiting) pause(s, "person", "Your input paused computer use. Choose Continue when you are ready.");
-    if (value.event === "unavailable") for (const s of [...sessions.values()]) void stop(s, "stopped", "limit", { reason: "native_unavailable" });
+    if (value.event === "unavailable") {
+      nativeDown = true;
+      for (const s of [...sessions.values()]) void stop(s, "stopped", "limit", { reason: "native_unavailable" });
+    }
   });
+  attach(native);
+  /**
+   * After the native worker died (its held input already released by createNativeWorker), a new one
+   * is started on the next call, at most 3 times in 10 minutes. Whether the host can work now.
+   */
+  async function ensureNative() {
+    if (!nativeDown || !nativeFactory || closed) return !nativeDown;
+    const now = Date.now();
+    while (restarts.length && now - restarts[0] > 600_000) restarts.shift();
+    if (restarts.length >= 3) return false;
+    restarts.push(now);
+    try {
+      const next = nativeFactory();
+      const ready = await next.ready;
+      native = next; availability = ready; nativeDown = !ready.supported; restartedNote = ready.supported;
+      attach(next);
+    } catch {
+      return false;
+    }
+    return !nativeDown;
+  }
   const ticker = setInterval(() => {
     const l = limits();
     for (const s of [...sessions.values()]) {
@@ -370,6 +399,9 @@ export async function createPortableHost({ native, spool = null, settings, conte
       const w = await native.call("window", { id: s.window.id });
       const after = await observation(s, w);
       s.window = w; s.observation = { ...after, generation: s.generation };
+      // The agent's own act may retitle the window (an editor's title follows its text): the next
+      // "document changed" check compares with the title right after this act, not the approval-time one.
+      s.approved = { ...s.approved, title: w.title };
       return finish({ ...done, frame_after: { sha256: after.sha }, observation: after.ref, window: windowRef(w), next: "computer_act" }, { data: after.bytes, mime: after.mime });
     } catch (error) {
       return finish({ ...done, next: "computer_observe", message: `The action was done, but the window could not be observed: ${error.message}` });
@@ -465,7 +497,8 @@ export async function createPortableHost({ native, spool = null, settings, conte
     s.phase = "working"; s.lastOperation = Date.now();
     s.expiresAt = Date.now() + l.session_seconds * 1000;
     s.approved = { window_id: String(s.window.id), app_id: s.window.appId, title: s.window.title };
-    emit(s, "opened", "agent");
+    emit(s, "opened", "agent", restartedNote ? { reason: "worker_restarted" } : {});
+    restartedNote = false;
     emit(s, "approved", answer.reused ? "agent" : "person", answer.reused ? { reused: true } : {});
     update();
     return mcpResult({ ok: true, session_id: s.id, state: "active", mode: s.mode, approval: s.approval, window: windowRef(s.window), screen: s.screen, os, expires_in_seconds: l.session_seconds, actions_left: l.actions_per_session });
@@ -473,6 +506,7 @@ export async function createPortableHost({ native, spool = null, settings, conte
 
   async function call(connection, name, rawArgs) {
     if (!TOOLS.includes(name)) return mcpResult(failure("unknown_tool", "Unknown computer use tool."));
+    if (nativeDown && !(await ensureNative())) return mcpResult(failure("native_unavailable", "Desktop access stopped. Try again in a few minutes, or restart the app."));
     if (!availability.supported) return mcpResult(failure(availability.code ?? "desktop_unavailable", availability.error ?? "Computer use is unavailable on this desktop."));
     const valid = validateCall(name, rawArgs);
     if (!valid.ok) return mcpResult(failure(valid.code, valid.message));
@@ -608,5 +642,5 @@ export async function createPortableHost({ native, spool = null, settings, conte
   }
 
   update();
-  return { availability, os, connect, listen, control, stopAll, syntheticInput, watchInput, state: publicState, close };
+  return { get availability() { return availability; }, os, connect, listen, control, stopAll, syntheticInput, watchInput, state: publicState, close };
 }

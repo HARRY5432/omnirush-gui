@@ -44,6 +44,7 @@ export type SessionEvent = {
   approval?: "once" | "chat";
   screen?: { id: string; width: number; height: number; scale: number };
   os: string;
+  /** e.g. native_unavailable, action_limit, window_unavailable, worker_restarted (on "opened"). */
   reason?: string;
   reused?: boolean;
 };
@@ -71,7 +72,7 @@ export type HostSessionState = {
 };
 export type McpConnection = { id: string; handle(message: unknown): Promise<Record<string, unknown> | null>; close(): Promise<void> };
 export type PortableHost = {
-  availability: { supported: boolean; code?: string; error?: string };
+  readonly availability: { supported: boolean; code?: string; error?: string };
   os: string;
   connect(): McpConnection;
   listen(dir: string): Promise<{ discoveryPath: string; close(): Promise<void> }>;
@@ -84,6 +85,8 @@ export type PortableHost = {
 };
 export function createPortableHost(options: {
   native: NativeWorker;
+  /** Starts a new worker after this one died (at most 3 times in 10 minutes, on the next call). */
+  nativeFactory?: (() => NativeWorker) | null;
   spool?: MediaSpool | null;
   settings: () => HostSettings;
   /** May be async (read once per discover / open-session). */

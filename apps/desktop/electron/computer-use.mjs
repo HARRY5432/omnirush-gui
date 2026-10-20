@@ -168,8 +168,8 @@ async function startHost() {
       if (!executable) throw new Error("The Computer Use helper is unavailable. Rebuild or reinstall OmniRush.ai.");
       created = await createComputerUseHost({ executable, ...callbacks, shared: { portable: hostModule, policy: policyModule, contract: contractModule, image: imageModule } });
     } else {
-      const native = hostModule.createNativeWorker({ nodePath: process.execPath, nodeEnv: { ELECTRON_RUN_AS_NODE: "1" }, koffiPath: require.resolve("koffi") });
-      created = await hostModule.createPortableHost({ native, ...callbacks });
+      const nativeFactory = () => hostModule.createNativeWorker({ nodePath: process.execPath, nodeEnv: { ELECTRON_RUN_AS_NODE: "1" }, koffiPath: require.resolve("koffi") });
+      created = await hostModule.createPortableHost({ native: nativeFactory(), nativeFactory, ...callbacks });
       preview = createComputerPreview();
       preview.bind(created);
     }

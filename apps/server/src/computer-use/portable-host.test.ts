@@ -24,7 +24,7 @@ function fakeNative() {
   const listeners = new Set<(v: Record<string, unknown>) => void>();
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   let generation = 0;
-  const state = { occluded: false, synthetic: false };
+  const state: { occluded: boolean; synthetic: boolean; retitle: ((title: string) => string) | null } = { occluded: false, synthetic: false, retitle: null };
   const frame = (w: Window): Frame => {
     const width = Math.min(w.bounds.width, 640), height = Math.round((width * w.bounds.height) / w.bounds.width);
     const data = new Uint8Array(width * height * 4).fill(shade);
@@ -40,6 +40,7 @@ function fakeNative() {
     windows,
     setShade(v: number) { shade = v; },
     personInput() { generation += 1; for (const l of listeners) l({ event: "person-input", generation }); },
+    die() { for (const l of listeners) l({ event: "unavailable" }); },
     onEvent(listener: (v: Record<string, unknown>) => void) { listeners.add(listener); return () => listeners.delete(listener); },
     async call(method: string, params: Record<string, unknown> = {}) {
       calls.push({ method, params });
@@ -52,7 +53,11 @@ function fakeNative() {
       if (method === "start") return { generation };
       if (method === "hit") return { inside: (params.points as unknown[]).map(() => !state.occluded) };
       if (method === "input-source") return { synthetic: state.synthetic, at: Date.now(), kind: "pointer" };
-      if (method === "act") { if (params.generation !== generation) throw Object.assign(new Error("Your input paused computer use."), { code: "paused_by_person" }); return { generation }; }
+      if (method === "act") {
+        if (params.generation !== generation) throw Object.assign(new Error("Your input paused computer use."), { code: "paused_by_person" });
+        if (state.retitle) windows[0]!.title = state.retitle(windows[0]!.title);
+        return { generation };
+      }
       return {};
     },
     async close() {},
@@ -278,6 +283,57 @@ describe("portable host: observe and act", () => {
     expect(await host.syntheticInput()).toBe(false);
     r.native.state.synthetic = true;
     expect(await host.syntheticInput()).toBe(true);
+    await host.close();
+  });
+});
+
+describe("portable host: titles that follow the agent's own typing, and a worker that died", () => {
+  test("Normal: the agent's own act retitling the window does not ask; a change between acts does", async () => {
+    const r = rig("normal");
+    const { host, c, session, obs } = await opened(r);
+    r.native.state.retitle = () => "first line - Notepad";
+    const a = await call(c, "computer_act", { session_id: session, observation_id: obs.state.observation?.id, request_id: "a", intent: "Type the first line", action: { type: "type", text: "first line" } });
+    expect(a.state).toMatchObject({ ok: true, approval: { asked: false } });
+    r.native.state.retitle = null;
+    const b = await call(c, "computer_act", { session_id: session, observation_id: (a.state.observation as { id: string }).id, request_id: "b", intent: "Type more", action: { type: "type", text: " more" } });
+    expect(b.state).toMatchObject({ ok: true, approval: { asked: false } });
+    expect(r.acts.length).toBe(0);
+    // The window shows another document now, and not because of the agent's last act.
+    r.native.windows[0]!.title = "secrets.txt - Notepad";
+    const next = await call(c, "computer_observe", { session_id: session });
+    const d = await call(c, "computer_act", { session_id: session, observation_id: next.state.observation?.id, request_id: "d", intent: "Type more", action: { type: "type", text: "x" } });
+    expect(d.state).toMatchObject({ ok: true, approval: { asked: true, reasons: ["document_changed"] } });
+    await host.close();
+  });
+
+  test("a dead worker: sessions stop; the next open starts a new one (noted on the event); at most 3 in 10 minutes", async () => {
+    const workers: Array<ReturnType<typeof fakeNative>> = [];
+    const first = fakeNative();
+    const events: Array<Record<string, unknown>> = [];
+    const host = await createPortableHost({
+      native: first,
+      nativeFactory: () => { const w = fakeNative(); workers.push(w); return w; },
+      settings: () => ({ enabled: true, real_screen: true, mode: "auto" }),
+      context: () => ({ chat: "ses_r" }),
+      approve: { open: async (request: OpenRequest) => ({ decision: "once", window_id: request.window_id }), act: async () => ({ allow: true }) },
+      onEvent: (event: Record<string, unknown>) => events.push(event),
+    });
+    const c = host.connect();
+    const open = await call(c, "computer_open_session", { app_id: "/usr/bin/gedit", mode: "control", purpose: "x" });
+    first.die();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(events.at(-1)).toMatchObject({ event: "stopped", by: "limit", reason: "native_unavailable" });
+    expect((await call(c, "computer_observe", { session_id: open.state.session_id })).state.code).toBe("session_unavailable");
+    expect((await call(c, "computer_open_session", { app_id: "/usr/bin/gedit", mode: "control", purpose: "again" })).state).toMatchObject({ ok: true });
+    expect(workers.length).toBe(1);
+    expect(events.find((e) => e.event === "opened" && e.reason === "worker_restarted")).toBeTruthy();
+    for (let i = 0; i < 3; i += 1) {
+      workers.at(-1)!.die();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await call(c, "computer_discover", {});
+    }
+    expect(workers.length).toBe(3);
+    expect((await call(c, "computer_discover", {})).state.code).toBe("native_unavailable");
     await host.close();
   });
 });
