@@ -24,7 +24,7 @@ import {
 import { ThemeVariantThumb } from "./theme-preview";
 
 export const DISCORD_SHOWCASE_URL = "https://discord.com/channels/1554572994326827069/1556709953916641280";
-export const DISCORD_INVITE_URL = "https://discord.gg/HWMqU2Twp";
+export const DISCORD_INVITE_URL = "https://discord.gg/9nu5rMQTDP";
 
 type Props = {
   customTheme: CustomTheme | null;
