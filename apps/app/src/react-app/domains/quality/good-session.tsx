@@ -287,10 +287,15 @@ export function GoodSessionLine({ result }: { result: OmniRushGoodSession | null
   );
 }
 
-/** Two status lines that say the same ("Good session." and "Good session ★"): shown once in the tooltip. */
-function sameStatus(a: string, b: string): boolean {
-  const plain = (text: string) => text.toLowerCase().replace(/[★.\s]+/g, " ").trim();
-  return plain(a) === plain(b);
+/** A status line's lead ("Not a good session", "Good session"), for spotting two lines that give the same verdict. */
+function statusLead(text: string): string {
+  return text.toLowerCase().replace(/★/g, "").split(/[:.]/)[0]!.replace(/\s+/g, " ").trim();
+}
+
+/** A sentence for screen readers: ends with one full stop. */
+function sentence(text: string): string {
+  const trimmed = text.trim();
+  return /[.!?…★]$/.test(trimmed) ? trimmed : `${trimmed}.`;
 }
 
 const TONE_TEXT: Record<GoodSessionTone, string> = { amber: "text-amber-11", red: "text-red-11" };
@@ -476,13 +481,26 @@ export function GoodSessionChecklistBar(props: GoodSessionChecklistBarProps) {
   if (!hasPrompt) return null;
   const verdict = checklist.verdict;
   const passedChecks = checklist.checks.filter((check) => check.state === "pass").length;
-  const hasStatus = Boolean(checklist.message || checklist.reasons.length || checklist.delivery);
+  // The status (server message, reasons, delivery, the integrity verdict): in the chip's tooltip and
+  // expanded view only. One verdict, not two: while the integrity check is pending the server's message
+  // stands; when both give the same verdict, the more useful one stays (the integrity line has the
+  // reason, the fix and the guide link).
+  const verdictCopy = props.client ? goodSessionCopy(goodSession) : null;
+  let showMessage = Boolean(checklist.message);
+  let showVerdict = Boolean(verdictCopy);
+  if (verdictCopy && checklist.message) {
+    if (verdictCopy.state === "pending") showVerdict = false;
+    else if (statusLead(checklist.message) === statusLead(verdictCopy.text)) {
+      if (verdictCopy.state === "not-good") showMessage = false;
+      else showVerdict = false;
+    }
+  }
   const statusLines = [
-    ...(checklist.message ? [checklist.message] : []),
+    ...(showMessage && checklist.message ? [checklist.message] : []),
     ...checklist.reasons,
     ...(checklist.delivery ? [checklist.delivery] : []),
-    ...(props.client ? [goodSessionCopy(goodSession).text] : []),
-  ].filter((line, index, all) => all.findIndex((other) => sameStatus(other, line)) === index);
+    ...(showVerdict && verdictCopy ? [verdictCopy.text] : []),
+  ];
   const dock = checklist.dock;
   const dockLink = dock?.link;
   return (
@@ -528,7 +546,7 @@ export function GoodSessionChecklistBar(props: GoodSessionChecklistBarProps) {
       {/* At every width: a compact summary ("On track ★ 4/6") that opens to the full checklist,
           and the guide link on its own line under it (never cut off at the right edge). */}
       <div className="mx-auto flex max-w-[800px] flex-col items-start gap-1 pb-1.5" data-testid="good-session-row" data-expanded={checklistOpen ? "" : undefined}>
-        <span role="status" className="sr-only">{checklist.text}</span>
+        <span role="status" className="sr-only">{[checklist.text, ...statusLines].map(sentence).join(" ")}</span>
         <button
           type="button"
           onClick={() => {
@@ -537,7 +555,7 @@ export function GoodSessionChecklistBar(props: GoodSessionChecklistBarProps) {
             writePref(CHECKLIST_OPEN_KEY, next ? "1" : "0");
           }}
           aria-expanded={checklistOpen}
-          aria-label={[checklist.text, ...statusLines].join(". ")}
+          aria-label={checklist.text}
           title={statusLines.join("\n") || undefined}
           data-testid="good-session-summary"
           className={cn(
@@ -566,14 +584,14 @@ export function GoodSessionChecklistBar(props: GoodSessionChecklistBarProps) {
         </button>
         {/* The status (server message, reasons, delivery, the integrity verdict) lives here and in the
             chip's tooltip, never as extra lines over the chat. */}
-        {checklistOpen && (hasStatus || props.client) ? (
+        {checklistOpen && statusLines.length ? (
           <div className="w-full px-3 text-[11px] leading-4 text-muted-foreground" data-testid="good-session-server-message">
-            {checklist.message ? (
+            {showMessage && checklist.message ? (
               <p className={cn("font-medium", checklist.messageTone ? TONE_TEXT[checklist.messageTone] : "text-foreground")}>{checklist.message}</p>
             ) : null}
             {checklist.reasons.map((reason) => <p key={reason} className="text-amber-11">{reason}</p>)}
             {checklist.delivery ? <p data-testid="good-session-delivery">{checklist.delivery}</p> : null}
-            {props.client ? <GoodSessionLine result={goodSession} /> : null}
+            {showVerdict ? <GoodSessionLine result={goodSession} /> : null}
           </div>
         ) : null}
         <Popover>
