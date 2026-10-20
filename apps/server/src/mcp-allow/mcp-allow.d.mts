@@ -92,7 +92,7 @@ export function splitSpec(spec: string, runtime: McpRuntime): { name: string; ve
 export function parseLaunch(command: unknown): McpLaunch | null;
 export function launchCommand(entry: McpAllowEntry, launch: McpLaunch, version: string, npmPrefix: string): string[];
 export function windowsDirect(found: string, platform?: string, exists?: (file: string) => boolean): string[] | null;
-export function resolveRunner(runner: string, options?: { root?: string | null; platform?: string; env?: Record<string, string | undefined>; exists?: (file: string) => boolean }): string | null;
+export function resolveRunner(runner: string, options?: { root?: string | null; platform?: string; env?: Record<string, string | undefined>; exists?: (file: string) => boolean; home?: string; accept?: ((file: string) => boolean) | null }): string | null;
 export function projectCodeIgnored(cfg: unknown): McpIgnored[];
 export function describeIgnored(items: McpIgnored[] | null | undefined): string | null;
 export function insideRoot(root: string, p: string, platform?: string): boolean;
@@ -101,7 +101,7 @@ export function shellQuote(word: string): string;
 export function evaluateMcp(
   mcpMap: unknown,
   policy: McpPolicy | null,
-  ctx?: { root?: string; platform?: string; box?: McpBox | null; npmPrefix?: string; resolveRunner?: (runner: string, options: { root: string; platform: string }) => string | null; exists?: (file: string) => boolean },
+  ctx?: { root?: string; platform?: string; box?: McpBox | null; npmPrefix?: string; resolveRunner?: (runner: string, options: { root: string; platform: string; accept?: (file: string) => boolean }) => string | null; exists?: (file: string) => boolean },
 ): { mcp: Record<string, Record<string, unknown>>; decisions: McpDecision[] };
 export function toolPrefix(name: string): string;
 export function mcpPermissionRules(decisions: McpDecision[] | null | undefined, mode: unknown): Record<string, "allow" | "ask">;
@@ -121,7 +121,7 @@ export function createMcpPolicyHooks(options?: {
   reportDir?: string | null;
   box?: McpBox | null | ((root: string) => McpBox | null);
   npmPrefix?: string;
-  resolveRunner?: (runner: string, options: { root: string; platform: string }) => string | null;
+  resolveRunner?: (runner: string, options: { root: string; platform: string; accept?: (file: string) => boolean }) => string | null;
   permissionMode?: string | null | (() => string | null | undefined);
   platform?: string;
   now?: () => number;

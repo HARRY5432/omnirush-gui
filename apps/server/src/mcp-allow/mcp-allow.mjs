@@ -312,22 +312,29 @@ export function windowsDirect(found, platform = process.platform, exists = exist
 /**
  * `runner` (npx, uvx) as an absolute path from PATH: only absolute PATH
  * folders outside the project (after links) count, never the current
- * folder; on Windows the .exe or .cmd file. null when there is none.
+ * folder; on Windows the .exe or .cmd file. A project in the home folder (or
+ * a drive root) does not rule out the PATH folders under it (nvm, ~/.local/bin):
+ * only the folder itself is skipped. `accept` (optional) picks among the
+ * matches in PATH order (the first it takes). null when there is none.
  */
-export function resolveRunner(runner, { root = null, platform = process.platform, env = process.env, exists = existsSync } = {}) {
+export function resolveRunner(runner, { root = null, platform = process.platform, env = process.env, exists = existsSync, home = os.homedir(), accept = null } = {}) {
   const lib = platform === "win32" ? path.win32 : path.posix;
   const raw = platform === "win32" ? (env.Path ?? env.PATH ?? env.path ?? "") : (env.PATH ?? "");
   const exts = platform === "win32" ? [".exe", ".cmd"] : [""];
   for (const dir of String(raw).split(platform === "win32" ? ";" : ":")) {
     const folder = dir.trim().replace(/^"(.*)"$/, "$1");
     if (!folder || !lib.isAbsolute(folder) || (platform === "win32" && !/^[A-Za-z]:[\\/]|^\\\\/.test(folder))) continue;
-    if (root && insideRootReal(root, folder, platform)) continue;
+    if (root) {
+      const wide = samePlatformPath(lib.resolve(root), platform) === samePlatformPath(lib.resolve(home), platform)
+        || lib.resolve(root) === lib.parse(lib.resolve(root)).root;
+      if (wide ? samePlatformPath(lib.resolve(folder), platform) === samePlatformPath(lib.resolve(root), platform) : insideRootReal(root, folder, platform)) continue;
+    }
     // The app's own package-manager wrappers (the install log's folder holds an `omnirush-pkg` file) look the
     // real tool up on PATH again, relative entries included: skip them for the tool itself.
     if (exists(lib.join(folder, "omnirush-pkg")) || exists(lib.join(folder, "omnirush-pkg.exe"))) continue;
     for (const ext of exts) {
       const file = lib.join(folder, `${runner}${ext}`);
-      if (exists(file)) return file;
+      if (exists(file) && (!accept || accept(file))) return file;
     }
   }
   return null;
@@ -554,8 +561,10 @@ export function evaluateMcp(mcpMap, policy, ctx = {}) {
     if (!box) {
       // By absolute path: the engine starts the server in the project folder, and on Windows a bare name
       // is looked up there before PATH (a repo's own npx.cmd would run instead).
-      const found = (ctx.resolveRunner ?? resolveRunner)(argv[0], { root, platform });
-      const program = found ? windowsDirect(found, platform, ctx.exists ?? existsSync) : null;
+      const exists = ctx.exists ?? existsSync;
+      // The first match on PATH that can be started directly (on Windows, an npx.cmd with npm's node.exe beside it).
+      const found = (ctx.resolveRunner ?? resolveRunner)(argv[0], { root, platform, accept: (file) => windowsDirect(file, platform, exists) !== null });
+      const program = found ? windowsDirect(found, platform, exists) : null;
       if (!program) { decisions.push(blocked(name, "runner_missing", { ...base, version })); continue; }
       if (platform === "win32" && argv.slice(1).some((a) => /["\r\n%]/.test(a))) {
         decisions.push(blocked(name, "invalid", { ...base, version, reason: `${MCP_REASONS.invalid} (an argument holds a quote, % or a line break)` }));
@@ -719,7 +728,7 @@ export function describeIgnored(items) {
   if (lsp.length) parts.push(`language servers ${lsp.slice(0, 3).join(", ")}`);
   if (fmt.length) parts.push(`formatters ${fmt.slice(0, 3).join(", ")}`);
   if (providers.length) parts.push("model provider settings");
-  return `Not loaded from this project's config: ${parts.join("; ")}. A project's own plugins, tools, commands and providers could run code just by opening it; the built-in language servers and formatters still work, and your own (user-level) settings apply as usual.`;
+  return `Not loaded from this project's config: ${parts.join("; ")}. A project's own plugins, tools, commands and providers could run code just by opening it; the built-in language servers and formatters still work (some use the project's own installed copy), and your own (user-level) settings apply as usual.`;
 }
 
 /** One line per decision, for a terminal or a notice. */
