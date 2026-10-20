@@ -9,9 +9,10 @@ import { useEffect, useRef, useState } from "react";
 import type * as MonacoApi from "monaco-editor/editor/editor.api.js";
 
 import { subscribeToTheme } from "@/app/theme";
-import { applyMonacoTheme, monacoThemeName, type Monaco } from "./monaco";
+import { addGroupKeys, applyMonacoTheme, monacoThemeName, scopeEditor, type Monaco } from "./monaco";
 import type { FileDoc } from "./editor-models";
 import { hunkCounts, type LineHunk } from "./hunk-ops";
+import { monacoOptionsFor, useEditorSettings } from "./editor-settings";
 
 export type SurfaceDoc =
   | { kind: "file"; key: string; doc: FileDoc }
@@ -47,20 +48,19 @@ export type AgentAction = "ask" | "explain" | "refactor" | "tests";
 export type SurfaceHandle = {
   reveal: (line: number, column: number, endColumn?: number) => void;
   activeEditor: () => MonacoApi.editor.ICodeEditor | null;
+  /** The code (non-diff) editor, whatever is shown now (the git gutter attaches before the mode switches). */
+  codeEditor: () => MonacoApi.editor.ICodeEditor;
 };
 
 const BASE_OPTIONS: MonacoApi.editor.IStandaloneEditorConstructionOptions = {
   automaticLayout: true,
   fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-  fontSize: 12.5,
-  lineHeight: 19,
-  minimap: { enabled: false },
   scrollBeyondLastLine: false,
   renderLineHighlight: "line",
   smoothScrolling: false,
   padding: { top: 6, bottom: 6 },
-  // Indentation, not the outline: the outline would ask the language servers for symbols as soon as a file opens.
-  stickyScroll: { enabled: true, maxLineCount: 3, defaultModel: "indentationModel" },
+  // Font size, wrap, minimap and sticky scroll come from Settings → Editor (editor-settings.ts). Sticky scroll uses
+  // indentation, not the outline: the outline would ask the language servers for symbols as soon as a file opens.
   // Large files stay responsive: no tokenisation past 20k chars per line, no word-based suggestions on huge files.
   maxTokenizationLineLength: 20_000,
   wordBasedSuggestions: "currentDocument",
@@ -132,9 +132,11 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
   useEffect(() => {
     if (!codeHostRef.current || !diffHostRef.current) return;
     const themeName = monacoThemeName();
-    const code = monaco.editor.create(codeHostRef.current, { ...BASE_OPTIONS, model: null, theme: themeName });
+    const settingsOptions = monacoOptionsFor(useEditorSettings.getState());
+    const code = monaco.editor.create(codeHostRef.current, { ...BASE_OPTIONS, ...settingsOptions, model: null, theme: themeName });
     const diff = monaco.editor.createDiffEditor(diffHostRef.current, {
       ...BASE_OPTIONS,
+      ...settingsOptions,
       theme: themeName,
       renderSideBySide: false,
       useInlineViewWhenSpaceIsLimited: true,
@@ -145,12 +147,20 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
       hideUnchangedRegions: { enabled: false },
     });
     const save = () => onSaveRef.current();
-    code.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, save);
-    diff.getModifiedEditor().addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, save);
+    const modified = diff.getModifiedEditor() as MonacoApi.editor.IStandaloneCodeEditor;
+    // Keys scoped per editor (monaco.ts scopeEditor): Monaco shares keybindings between editors.
+    const contexts = new Map<MonacoApi.editor.IStandaloneCodeEditor, string>([[code, scopeEditor(code, "code")], [modified, scopeEditor(modified, "diff")]]);
+    const saveAction = (editor: MonacoApi.editor.IStandaloneCodeEditor) => editor.addAction({
+      id: "omnirush.editor.save",
+      label: "Save",
+      keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
+      keybindingContext: contexts.get(editor),
+      run: save,
+    });
     const cursor = (editor: MonacoApi.editor.ICodeEditor) => editor.onDidChangeCursorPosition((event) => {
       onCursorRef.current({ line: event.position.lineNumber, column: event.position.column });
     });
-    const disposables = [cursor(code), cursor(diff.getModifiedEditor())];
+    const disposables = [cursor(code), cursor(diff.getModifiedEditor()), saveAction(code), saveAction(modified)];
     // The agent in the editor: first in the right-click menu, and Cmd/Ctrl+L to ask. Monaco always sorts its
     // "navigation" group first, so the agent items join it with orders below Go to Definition (1.1).
     const agentActions = (editor: MonacoApi.editor.IStandaloneCodeEditor) => ([
@@ -162,11 +172,13 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
       id: item.id,
       label: item.label,
       keybindings: item.keybindings,
+      keybindingContext: contexts.get(editor),
       contextMenuGroupId: "navigation",
       contextMenuOrder: item.order / 10,
       run: (target: MonacoApi.editor.ICodeEditor) => onAgentRef.current?.(item.action, target),
     }));
-    disposables.push(...agentActions(code), ...agentActions(diff.getModifiedEditor() as MonacoApi.editor.IStandaloneCodeEditor));
+    disposables.push(...agentActions(code), ...agentActions(modified));
+    disposables.push(addGroupKeys(monaco, code, contexts.get(code)!), addGroupKeys(monaco, modified, contexts.get(modified)!));
     codeRef.current = code;
     diffRef.current = diff;
     onReadyRef.current?.({
@@ -178,6 +190,17 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
         editor.focus();
       },
       activeEditor: () => (modeRef.current === "diff" ? diff.getModifiedEditor() : modeRef.current === "file" ? code : null),
+      codeEditor: () => code,
+    });
+    // Auto save "when focus leaves": the panel listens for this.
+    const blurEvent = () => window.dispatchEvent(new Event("omnirush:editor-blur"));
+    disposables.push(code.onDidBlurEditorWidget(blurEvent), diff.getModifiedEditor().onDidBlurEditorWidget(blurEvent));
+    // Settings → Editor, live.
+    const unsubscribeSettings = useEditorSettings.subscribe((settings, previous) => {
+      const next = monacoOptionsFor(settings);
+      if (JSON.stringify(next) === JSON.stringify(monacoOptionsFor(previous))) return;
+      code.updateOptions(next);
+      diff.updateOptions(next);
     });
     // Follows the app theme: light/dark, presets and custom themes (app/theme.ts).
     const unsubscribeTheme = subscribeToTheme(() => {
@@ -192,6 +215,7 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
       if (key) VIEW_STATES.set(key, modeRef.current === "diff" ? diff.saveViewState() : code.saveViewState());
       onReadyRef.current?.(null);
       unsubscribeTheme();
+      unsubscribeSettings();
       for (const disposable of disposables) disposable.dispose();
       code.dispose();
       diff.dispose();

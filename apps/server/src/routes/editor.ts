@@ -11,7 +11,7 @@
  */
 import { spawn } from "node:child_process";
 import { readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import { ApiError } from "../errors.js";
 import { ignoredByRules, parseGitignoreRules, scopedIgnoreRules } from "../session-uploader.js";
 import type { ApprovalRequest, ServerConfig, TokenScope, WorkspaceInfo } from "../types.js";
@@ -147,6 +147,20 @@ export function editorPath(input: unknown): string {
   }
   return parts.join("/");
 }
+
+/** Image types the editor previews, by extension. */
+const EDITOR_IMAGE_TYPES: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".avif": "image/avif",
+  ".bmp": "image/bmp",
+  ".ico": "image/x-icon",
+  ".svg": "image/svg+xml",
+};
+const EDITOR_MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 
 /** The file's absolute path inside the workspace; a symlinked folder that leads out of it is refused. */
 async function resolveInside(root: string, relativePath: string): Promise<string> {
@@ -351,6 +365,26 @@ export function registerEditorRoutes(options: RegisterEditorRoutesOptions): void
     const buffer = await readFile(absolute);
     if (looksBinary(buffer)) return jsonResponse({ path, content: null, binary: true, bytes: info.size, updatedAt: info.mtimeMs });
     return jsonResponse({ path, content: buffer.toString("utf8"), bytes: info.size, updatedAt: info.mtimeMs });
+  });
+
+  // An image file's bytes, for the editor's image preview: image types only, inside the project, capped.
+  addRoute(routes, "GET", "/workspace/:id/editor/raw", "client", async (ctx) => {
+    const workspace = await resolveWorkspace(config, ctx.params.id);
+    const path = editorPath(ctx.url.searchParams.get("path"));
+    const type = EDITOR_IMAGE_TYPES[extname(path).toLowerCase()];
+    if (!type) throw new ApiError(415, "unsupported_type", "Only images can be previewed");
+    const absolute = await resolveInside(workspace.path, path);
+    const info = await stat(absolute).catch(() => null);
+    if (!info?.isFile()) throw new ApiError(404, "file_not_found", "File not found");
+    if (info.size > EDITOR_MAX_IMAGE_BYTES) {
+      throw new ApiError(413, "file_too_large", "Too large to preview", { bytes: info.size, maxBytes: EDITOR_MAX_IMAGE_BYTES });
+    }
+    const buffer = await readFile(absolute);
+    // SVG goes back as an image the page shows with <img> only (no scripts run there); nothing else may embed it.
+    return new Response(buffer, {
+      status: 200,
+      headers: { "Content-Type": type, "Content-Length": String(buffer.length), "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'", "Cache-Control": "no-store" },
+    });
   });
 
   addRoute(routes, "PUT", "/workspace/:id/editor/file", "client", async (ctx) => {

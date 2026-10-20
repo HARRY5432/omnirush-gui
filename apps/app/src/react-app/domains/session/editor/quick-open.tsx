@@ -8,13 +8,14 @@ import { rankPaths } from "./quick-open-rank";
 type QuickOpenProps = {
   files: readonly string[];
   recent: readonly string[];
-  onOpen: (path: string) => void;
+  /** `side`: Cmd/Ctrl+Enter, open in the other editor group. */
+  onOpen: (path: string, side?: boolean) => void;
   onClose: () => void;
 };
 
 const LIMIT = 60;
 
-/** Cmd/Ctrl+P: type part of a file name, arrows to move, Enter to open, Esc to close. */
+/** Cmd/Ctrl+P: type part of a file name, arrows to move, Enter to open (Cmd/Ctrl+Enter: in the other group), Esc to close. */
 export function QuickOpen({ files, recent, onOpen, onClose }: QuickOpenProps) {
   const [query, setQuery] = useState("");
   const [index, setIndex] = useState(0);
@@ -62,7 +63,7 @@ export function QuickOpen({ files, recent, onOpen, onClose }: QuickOpenProps) {
             } else if (event.key === "Enter") {
               event.preventDefault();
               const path = results[index];
-              if (path) onOpen(path);
+              if (path) onOpen(path, event.metaKey || event.ctrlKey);
             }
           }}
           placeholder="Go to file…"

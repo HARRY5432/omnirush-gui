@@ -119,6 +119,7 @@ import { externalFetch, loopbackFetch } from "./server-fetch.js";
 import { registerCoreRoutes } from "./routes/core.js";
 import { registerFileRoutes } from "./routes/files.js";
 import { registerEditorRoutes } from "./routes/editor.js";
+import { registerEditorFormatRoutes } from "./routes/editor-format.js";
 import { registerEditorSearchRoutes } from "./routes/editor-search.js";
 import { registerOperationRoutes } from "./routes/operations.js";
 import { addRoute, matchRoute, type AuthMode, type RequestContext, type Route } from "./routes/registry.js";
@@ -4900,6 +4901,7 @@ function createRoutes(
   // uploader is tracking adds a "user_edit" / "user_review" trace event to it;
   // nothing else in a chat's upload changes (editor-events.ts).
   registerEditorSearchRoutes({ routes, config, jsonResponse, readJsonBody, resolveWorkspace });
+  registerEditorFormatRoutes({ routes, config, jsonResponse, readJsonBody, resolveWorkspace, ensureWritable, requireClientScope });
   registerEditorRoutes({
     routes,
     config,

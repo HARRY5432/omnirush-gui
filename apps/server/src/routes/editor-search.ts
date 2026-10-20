@@ -7,7 +7,7 @@
  */
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { engineDataDir, userDataHome } from "../engine-data-home.js";
 import { ApiError } from "../errors.js";
 import type { ServerConfig, WorkspaceInfo } from "../types.js";
@@ -43,13 +43,21 @@ type RegisterOptions = {
   resolveWorkspace: (config: ServerConfig, id: string) => Promise<WorkspaceInfo>;
 };
 
+/** A program on PATH (absolute PATH folders only; `.exe` on Windows), or null. */
+export function findOnPath(program: string, env: NodeJS.ProcessEnv = process.env): string | null {
+  const name = process.platform === "win32" ? `${program}.exe` : program;
+  for (const dir of (env.PATH ?? env.Path ?? "").split(process.platform === "win32" ? ";" : ":")) {
+    if (dir && isAbsolute(dir) && existsSync(join(dir, name))) return join(dir, name);
+  }
+  return null;
+}
+
 /** ripgrep: on PATH, or the copy the engine downloads into its data folder (the desktop engine's own, else the default one). */
 export function findRipgrep(env: NodeJS.ProcessEnv = process.env): string | null {
   const name = process.platform === "win32" ? "rg.exe" : "rg";
   if (env.OMNIRUSH_RG && existsSync(env.OMNIRUSH_RG)) return env.OMNIRUSH_RG;
-  for (const dir of (env.PATH ?? "").split(process.platform === "win32" ? ";" : ":")) {
-    if (dir && existsSync(join(dir, name))) return join(dir, name);
-  }
+  const onPath = findOnPath("rg", env);
+  if (onPath) return onPath;
   for (const dataDir of [engineDataDir(env), join(userDataHome(env), "omnirush")]) {
     const engineCopy = join(dataDir, "bin", name);
     if (existsSync(engineCopy)) return engineCopy;

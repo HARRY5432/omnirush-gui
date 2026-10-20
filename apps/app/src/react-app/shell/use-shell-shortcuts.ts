@@ -188,6 +188,12 @@ export function useShellShortcuts(input: UseShellShortcutsInput) {
       else setSessionSearchOpen((value) => !value);
       return;
     }
+    // Cmd/Ctrl+\ (the Backslash key wherever the layout puts it): split the editor, IDE layout only.
+    if (ideLayout && !event.shiftKey && !event.altKey && event.code === "Backslash") {
+      event.preventDefault();
+      editorCommand("split");
+      return;
+    }
     if (event.shiftKey && !event.altKey && event.key?.toLowerCase() === "p") {
       event.preventDefault();
       setCommandPaletteOpen(true);

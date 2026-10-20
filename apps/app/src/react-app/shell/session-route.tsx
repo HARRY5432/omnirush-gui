@@ -2947,6 +2947,10 @@ export function SessionRoute() {
       ["editor.quick-open", "Go to file", "Open a project file by name", "Cmd/Ctrl+P", "quick-open"],
       ["editor.symbol", "Go to symbol in file", "Jump to a function, class or variable", "Cmd/Ctrl+Shift+O", "symbol"],
       ["editor.outline", "Show outline", "The active file's symbols, under Files", "", "outline"],
+      ["editor.split", "Split editor", "Open the current file in a second editor group", "Cmd/Ctrl+\\", "split"],
+      ["editor.preview", "Open Markdown preview to the side", "The current Markdown file, rendered in the other group", "Cmd/Ctrl+Shift+V", "preview-side"],
+      ["editor.preview-here", "Open Markdown preview", "The current Markdown file, rendered in this group", "", "preview-here"],
+      ["editor.focus-other-group", "Focus the other editor group", "Move the keyboard to the other side of a split editor", "", "focus-other-group"],
     ] as const).map(([id, title, detail, meta, command]) => ({
       id,
       title,

@@ -11,7 +11,12 @@ export type EditorTab =
   /** The agent's change to one file, for review (accept/reject per hunk). */
   | { id: string; kind: "review"; path: string }
   /** A file against git (HEAD or the index), from the git panel. */
-  | { id: string; kind: "git"; path: string; ref: "HEAD" | "index" };
+  | { id: string; kind: "git"; path: string; ref: "HEAD" | "index" }
+  /** A Markdown file rendered (read-only, follows the file's text as you type). */
+  | { id: string; kind: "preview"; path: string };
+
+/** The second editor group (split editor): its own tabs, files and previews only. */
+export type EditorGroup2 = { tabs: EditorTab[]; activeId: string | null };
 
 export type EditorSideView = "files" | "changes" | "git" | "search";
 /** The window layout: Chat (sessions sidebar + chat) or IDE (files, editor and terminal, chat docked right). */
@@ -22,6 +27,8 @@ type WorkspaceEditorState = {
   tabs: EditorTab[];
   activeId: string | null;
   view: EditorSideView;
+  /** The split editor's second group, when open (remembered per project). */
+  group2?: EditorGroup2 | null;
 };
 
 type EditorStore = {
@@ -66,6 +73,14 @@ type EditorStore = {
   setProblemsOpen: (open: boolean) => void;
   setBottomTab: (tab: "problems" | "terminal") => void;
   setLanguageFeatures: (on: boolean) => void;
+  /** Which editor group has the keyboard (1 = the main one). */
+  focusedGroup: 1 | 2;
+  setFocusedGroup: (group: 1 | 2) => void;
+  openTab2: (workspaceId: string, tab: EditorTab) => void;
+  selectTab2: (workspaceId: string, id: string) => void;
+  closeTab2: (workspaceId: string, id: string) => void;
+  /** Closes the second group; its tabs move into the main one (folds the split away). */
+  foldGroup2: (workspaceId: string) => void;
 };
 
 export const DEFAULT_IDE_CHAT_WIDTH = 420;
@@ -74,6 +89,7 @@ const EMPTY: WorkspaceEditorState = { tabs: [], activeId: null, view: "files" };
 const MAX_TABS = 20;
 
 export function tabId(tab: { kind: EditorTab["kind"]; path: string; ref?: "HEAD" | "index" }): string {
+  if (tab.kind === "preview") return `preview:${tab.path}`;
   return tab.kind === "git" ? `git:${tab.ref ?? "HEAD"}:${tab.path}` : `${tab.kind}:${tab.path}`;
 }
 
@@ -155,6 +171,44 @@ export const useEditorStore = create<EditorStore>()(
       setProblemsOpen: (problemsOpen) => set(problemsOpen ? { problemsOpen, bottomTab: "problems" } : { problemsOpen }),
       setBottomTab: (bottomTab) => set({ bottomTab }),
       setLanguageFeatures: (languageFeatures) => set({ languageFeatures }),
+      focusedGroup: 1,
+      setFocusedGroup: (focusedGroup) => set((state) => (state.focusedGroup === focusedGroup ? state : { focusedGroup })),
+      openTab2: (workspaceId, tab) =>
+        set((state) => {
+          const current = state.byWorkspace[workspaceId] ?? EMPTY;
+          const group = current.group2 ?? { tabs: [], activeId: null };
+          const tabs = group.tabs.some((item) => item.id === tab.id) ? group.tabs : [...group.tabs, tab].slice(-MAX_TABS);
+          return { focusedGroup: 2, byWorkspace: { ...state.byWorkspace, [workspaceId]: { ...current, group2: { tabs, activeId: tab.id } } } };
+        }),
+      selectTab2: (workspaceId, id) =>
+        set((state) => {
+          const current = state.byWorkspace[workspaceId] ?? EMPTY;
+          const group = current.group2;
+          if (!group || !group.tabs.some((item) => item.id === id)) return state;
+          return { focusedGroup: 2, byWorkspace: { ...state.byWorkspace, [workspaceId]: { ...current, group2: { ...group, activeId: id } } } };
+        }),
+      closeTab2: (workspaceId, id) =>
+        set((state) => {
+          const current = state.byWorkspace[workspaceId] ?? EMPTY;
+          const group = current.group2;
+          if (!group) return state;
+          const index = group.tabs.findIndex((item) => item.id === id);
+          if (index < 0) return state;
+          const tabs = group.tabs.filter((item) => item.id !== id);
+          // The last tab closed: the group goes.
+          if (!tabs.length) return { focusedGroup: 1, byWorkspace: { ...state.byWorkspace, [workspaceId]: { ...current, group2: null } } };
+          const activeId = group.activeId === id ? (tabs[Math.min(index, tabs.length - 1)]?.id ?? null) : group.activeId;
+          return { byWorkspace: { ...state.byWorkspace, [workspaceId]: { ...current, group2: { tabs, activeId } } } };
+        }),
+      foldGroup2: (workspaceId) =>
+        set((state) => {
+          const current = state.byWorkspace[workspaceId] ?? EMPTY;
+          const group = current.group2;
+          if (!group) return state;
+          const known = new Set(current.tabs.map((item) => item.id));
+          const tabs = [...current.tabs, ...group.tabs.filter((item) => !known.has(item.id))].slice(-MAX_TABS);
+          return { focusedGroup: 1, byWorkspace: { ...state.byWorkspace, [workspaceId]: { ...current, tabs, activeId: current.activeId ?? group.activeId, group2: null } } };
+        }),
     }),
     {
       name: "omnirush:editor:v1",

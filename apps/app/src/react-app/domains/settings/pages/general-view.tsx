@@ -1,6 +1,7 @@
 /** @jsxImportSource react */
 import { useEffect, useState } from "react";
 import {
+  Code2,
   ArrowRight,
   Bot,
   Coffee,
@@ -84,6 +85,7 @@ const workspaceCards: SettingsCardDefinition[] = [
 const globalCards: SettingsCardDefinition[] = [
   { tab: "ai", icon: Sparkles, title: "AI Providers", desc: "Connect services that provide AI models." },
   { tab: "appearance", icon: Paintbrush, title: "Appearance", desc: "Theme, font size, and display." },
+  { tab: "editor", icon: Code2, title: "Editor", desc: "Code editor text, saving, and keys." },
   { tab: "voice", icon: Mic, title: "Voice", desc: "Dictation, microphone, and hotkey." },
   { tab: "environment", icon: Terminal, title: "Environment", desc: "Environment variables and paths." },
   { tab: "updates", icon: RefreshCcw, title: "Updates", desc: "App version and update channel." },

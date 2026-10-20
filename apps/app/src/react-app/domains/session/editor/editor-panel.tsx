@@ -29,9 +29,12 @@ import {
   SquareTerminal,
   Undo2,
   X,
+  Columns2,
+  Eye,
 } from "lucide-react";
 
 import type { Client } from "@/app/types";
+import type * as MonacoApi from "monaco-editor/editor/editor.api.js";
 import type { OmniRushEditorGitFile, OmniRushEditorGitStatus, OmniRushServerClient } from "@/app/lib/omnirush-server";
 import { Button } from "@/components/ui/button";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
@@ -70,6 +73,20 @@ import {
 import type { AgentAction, SurfaceHandle } from "./editor-surface";
 import { baselinesForTurns, turnFileChange, type TurnFileChange } from "./review";
 import "./editor.css";
+import { AUTO_SAVE_DELAY_MS, useEditorSettings } from "./editor-settings";
+import { GitGutter } from "./git-gutter";
+import { Group2Editor } from "./group2-editor";
+import { ImageView, isImagePath } from "./image-view";
+import { MarkdownPreview } from "./markdown-preview";
+import { openDesktopUrl } from "@/app/lib/desktop";
+import { useGroupRef } from "react-resizable-panels";
+import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from "@/components/ui/context-menu";
+
+/** What the main group shows: a text file or diff (Monaco), a Markdown preview, or an image. */
+type PanelSurface = SurfaceDoc | { kind: "preview"; key: string; doc: FileDoc } | { kind: "image"; key: string; path: string };
+/** Each editor group needs this much width; below twice this the split folds away. */
+const MIN_GROUP_PX = 320;
+const isMarkdownPath = (path: string) => /\.(md|markdown|mdx)$/i.test(path);
 
 /** How long a file stays the active one before its language features start. */
 const LSP_DWELL_MS = 2500;
@@ -261,12 +278,15 @@ function FilesView(props: {
   const fileSet = useMemo(() => new Set(props.files), [props.files]);
   const fileSetRef = useRef(fileSet);
   fileSetRef.current = fileSet;
+  // Selecting the shown file in the tree (below) is not the user opening it (a preview tab shows the same path).
+  const programmatic = useRef(false);
   const { model } = useFileTree({
     density: "compact",
     fileTreeSearchMode: "hide-non-matches",
     flattenEmptyDirectories: true,
     initialExpansion: 1,
     onSelectionChange: (paths) => {
+      if (programmatic.current) return;
       const path = paths.at(-1);
       if (path && fileSetRef.current.has(path)) onOpenRef.current(path);
     },
@@ -285,8 +305,13 @@ function FilesView(props: {
     if (!props.selected) return;
     const item = model.getItem(props.selected);
     if (!item) return;
-    for (const path of model.getSelectedPaths()) if (path !== props.selected) model.getItem(path)?.deselect();
-    item.select();
+    programmatic.current = true;
+    try {
+      for (const path of model.getSelectedPaths()) if (path !== props.selected) model.getItem(path)?.deselect();
+      item.select();
+    } finally {
+      programmatic.current = false;
+    }
   }, [model, props.files, props.selected]);
   return (
     <div className="flex h-full min-h-0 flex-col" data-editor-files={props.files.length}>
@@ -540,8 +565,9 @@ export default function EditorPanel(props: EditorPanelProps) {
   const reviewScope = useEditorStore((store) => store.reviewScope);
   const sideOpen = useEditorStore((store) => store.sideOpen);
   const activeTab = state.tabs.find((tab) => tab.id === state.activeId) ?? null;
-  const [surface, setSurface] = useState<SurfaceDoc | null>(null);
+  const [surface, setSurface] = useState<PanelSurface | null>(null);
   const surfaceHandle = useRef<SurfaceHandle | null>(null);
+  const [surfaceReady, setSurfaceReady] = useState(false);
   const pendingReveal = useRef<{ path: string; line: number; column: number; endColumn?: number } | null>(null);
   const [searchFocus, setSearchFocus] = useState(0);
   const [problemsLoading, setProblemsLoading] = useState(false);
@@ -649,6 +675,8 @@ export default function EditorPanel(props: EditorPanelProps) {
     docs.disposeReviewModels(new Set(recentReviewKeys.current));
     const keep = new Set<string>([
       ...useEditorStore.getState().byWorkspace[workspaceId]?.tabs.map((tab) => tab.path) ?? [],
+      // The split editor's second group shows documents too.
+      ...useEditorStore.getState().byWorkspace[workspaceId]?.group2?.tabs.map((tab) => tab.path) ?? [],
       ...(review?.files.map((file) => file.path) ?? []),
     ]);
     docs.evict(keep);
@@ -876,7 +904,11 @@ export default function EditorPanel(props: EditorPanelProps) {
     }
     const key = `${workspaceId}|${activeTab.id}`;
     void (async () => {
-      if (activeTab.kind === "file") {
+      if (activeTab.kind === "file" && isImagePath(activeTab.path)) {
+        setSurface({ kind: "image", key, path: activeTab.path });
+        return;
+      }
+      if (activeTab.kind === "file" || activeTab.kind === "preview") {
         const opened = await docs.open(activeTab.path);
         if (cancelled) return;
         if (!opened.ok) {
@@ -889,7 +921,7 @@ export default function EditorPanel(props: EditorPanelProps) {
           setTabError("This file was deleted.");
           return;
         }
-        setSurface({ kind: "file", key, doc: opened.doc });
+        setSurface({ kind: activeTab.kind, key, doc: opened.doc });
         return;
       }
       if (activeTab.kind === "review") {
@@ -916,6 +948,7 @@ export default function EditorPanel(props: EditorPanelProps) {
         });
         return;
       }
+      if (activeTab.kind !== "git") return;
       // Git: the file against HEAD (staged view) or the index (working-tree view).
       const [original, opened] = await Promise.all([
         client.editorGitOriginal(workspaceId, activeTab.path, activeTab.ref).catch(() => null),
@@ -989,6 +1022,21 @@ export default function EditorPanel(props: EditorPanelProps) {
     };
   }, [surface, lspActive, agentBusy]);
 
+  // The git gutter for the file shown (git-gutter.ts): HEAD texts are read again when git's state changes.
+  const gutter = useMemo(() => new GitGutter(client, workspaceId), [client, workspaceId]);
+  const gitFiles = gitQuery.data?.repo ? gitQuery.data.files : null;
+  useEffect(() => {
+    gutter.reset();
+  }, [gutter, gitQuery.dataUpdatedAt]);
+  useEffect(() => {
+    if (!surfaceReady || !surface || surface.kind !== "file" || !gitFiles) return;
+    const editor = surfaceHandle.current?.codeEditor();
+    if (!editor) return;
+    const doc = surface.doc;
+    const changedInGit = gitFiles.some((file) => file.path === doc.path);
+    return gutter.attach(editor, doc.model, doc.path, changedInGit, () => docs.isDirty(doc));
+  }, [docs, gitFiles, gutter, surface, surfaceReady]);
+
   // Breadcrumbs: the symbols around the cursor.
   useEffect(() => {
     if (!surface || surface.kind !== "file" || !cursor) {
@@ -1008,11 +1056,49 @@ export default function EditorPanel(props: EditorPanelProps) {
   }, [cursor, surface, lspActive]);
 
   // ── save ───────────────────────────────────────────────────────────────
-  const save = useCallback(async (options: { force?: boolean } = {}) => {
-    if (!activeTab) return;
-    const path = activeTab.path;
+  /** No formatter for these extensions in this project: said once. */
+  const noFormatterNoted = useRef(new Set<string>());
+  /**
+   * Format on save: the project's own formatter on the buffer's text, applied as one undoable edit before writing.
+   * A formatter that fails or takes longer than 3 s never blocks the save: the file is saved as it is.
+   */
+  const formatBeforeSave = useCallback(async (path: string) => {
     const doc = docs.get(path);
     if (!doc) return;
+    const model = doc.model;
+    const version = model.getAlternativeVersionId();
+    const extension = path.includes(".") ? path.slice(path.lastIndexOf(".")) : path;
+    try {
+      const outcome = await client.editorFormat(workspaceId, path, model.getValue(), 3_000);
+      if (outcome.formatter === null || outcome.text === null) {
+        if (!noFormatterNoted.current.has(extension)) {
+          noFormatterNoted.current.add(extension);
+          toast(`No formatter set up for ${extension} files in this project; saved as is.`);
+        }
+        return;
+      }
+      // Typed while the formatter ran: that text wins, unformatted. Line endings alone are no change.
+      const lf = (text: string) => text.replace(/\r\n/g, "\n");
+      if (model.getAlternativeVersionId() !== version || lf(outcome.text) === lf(model.getValue())) return;
+      model.pushStackElement();
+      model.pushEditOperations([], [{ range: model.getFullModelRange(), text: outcome.text }], () => null);
+      model.pushStackElement();
+      toast(`Formatted with ${outcome.formatter}`, { duration: 1500 });
+    } catch {
+      toast("Couldn't format this file; it was saved as is.");
+    }
+  }, [client, docs, workspaceId]);
+
+  /**
+   * Saves one file. `manual` (Cmd/Ctrl+S, Save) and `focus` (auto save when focus leaves) also run the project's
+   * formatter when Format on save is on; `delay` (auto save after a delay) never formats. A file that changed on
+   * disk since it was loaded is never overwritten by an automatic save: it shows the Reload / Keep mine choice.
+   */
+  const saveFile = useCallback(async (path: string, trigger: "manual" | "delay" | "focus", options: { force?: boolean } = {}) => {
+    const doc = docs.get(path);
+    if (!doc) return;
+    if (trigger !== "manual" && (doc.conflict || !docs.isDirty(doc))) return;
+    if (useEditorSettings.getState().formatOnSave && trigger !== "delay") await formatBeforeSave(path);
     const result = await docs.save(path, { sessionId, source: "editor", force: options.force });
     if (result.ok) {
       void refreshFileDiagnostics(path);
@@ -1021,11 +1107,47 @@ export default function EditorPanel(props: EditorPanelProps) {
       return;
     }
     if (result.conflict) {
-      showConflict(path, { reload: () => void docs.revert(path), overwrite: () => void save({ force: true }), reason: "save" });
+      doc.conflict = true;
+      showConflict(path, { reload: () => void docs.revert(path), overwrite: () => void saveFile(path, "manual", { force: true }), reason: "save" });
       return;
     }
     toast.error(result.message);
-  }, [activeTab, docs, files, queryClient, sessionId, workspaceId]);
+  }, [docs, files, formatBeforeSave, queryClient, sessionId, workspaceId]);
+
+  const save = useCallback(async (options: { force?: boolean } = {}) => {
+    if (!activeTab) return;
+    await saveFile(activeTab.path, "manual", options);
+  }, [activeTab, saveFile]);
+
+  // Auto save. After a delay: a second after the last edit of a file, held while any chat's agent works (saved when
+  // the turn ends). When focus leaves: the editor or the window losing focus. Both skip files in conflict.
+  const autoSave = useEditorSettings((state) => state.autoSave);
+  const autoSaveTimers = useRef(new Map<string, number>());
+  const heldForAgent = useRef(new Set<string>());
+  const agentBusyRef = useRef(agentBusy);
+  useEffect(() => {
+    agentBusyRef.current = agentBusy;
+    if (agentBusy || !heldForAgent.current.size) return;
+    const held = [...heldForAgent.current];
+    heldForAgent.current.clear();
+    for (const path of held) void saveFile(path, "delay");
+  }, [agentBusy, saveFile]);
+  useEffect(() => {
+    if (autoSave !== "onFocusChange") return;
+    const saveDirty = () => {
+      for (const path of Object.keys(useEditorStore.getState().dirty[workspaceId] ?? {})) void saveFile(path, "focus");
+    };
+    const onBlur = () => saveDirty();
+    window.addEventListener("blur", onBlur);
+    window.addEventListener("omnirush:editor-blur", onBlur);
+    return () => {
+      window.removeEventListener("blur", onBlur);
+      window.removeEventListener("omnirush:editor-blur", onBlur);
+    };
+  }, [autoSave, saveFile, workspaceId]);
+  useEffect(() => () => {
+    for (const timer of autoSaveTimers.current.values()) window.clearTimeout(timer);
+  }, []);
 
   // ── git ────────────────────────────────────────────────────────────────
   const stage = useCallback(async (paths: string[], doStage: boolean) => {
@@ -1054,6 +1176,150 @@ export default function EditorPanel(props: EditorPanelProps) {
     }
   }, [client, queryClient, workspaceId]);
 
+  // ── second editor group (split editor) ────────────────────────────────
+  const group2 = state.group2 ?? null;
+  const group2Tab = group2?.tabs.find((tab) => tab.id === group2.activeId) ?? null;
+  const focusedGroup = useEditorStore((store) => store.focusedGroup);
+  const [group2Doc, setGroup2Doc] = useState<FileDoc | null>(null);
+  const [group2Error, setGroup2Error] = useState<string | null>(null);
+  const group2EditorRef = useRef<MonacoApi.editor.IStandaloneCodeEditor | null>(null);
+  const [group2Ready, setGroup2Ready] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    setGroup2Error(null);
+    if (!group2Tab || (group2Tab.kind !== "file" && group2Tab.kind !== "preview") || isImagePath(group2Tab.path)) {
+      setGroup2Doc(null);
+      return;
+    }
+    void docs.open(group2Tab.path).then((opened) => {
+      if (cancelled) return;
+      if (!opened.ok) {
+        setGroup2Doc(null);
+        setGroup2Error(opened.message);
+        return;
+      }
+      setGroup2Doc(opened.doc);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [docs, group2Tab, docsTick]);
+  // The git gutter in group 2 too.
+  useEffect(() => {
+    const editor = group2EditorRef.current;
+    if (!group2Ready || !editor || !group2Doc || group2Tab?.kind !== "file" || !gitFiles) return;
+    const changedInGit = gitFiles.some((file) => file.path === group2Doc.path);
+    return gutter.attach(editor, group2Doc.model, group2Doc.path, changedInGit, () => docs.isDirty(group2Doc));
+  }, [docs, gitFiles, group2Doc, group2Ready, group2Tab, gutter]);
+
+  // The editor area's width: two groups need room, else the split folds into one group (tabs and unsaved text kept).
+  const editorAreaRef = useRef<HTMLDivElement | null>(null);
+  const [editorWidth, setEditorWidth] = useState(0);
+  useEffect(() => {
+    const element = editorAreaRef.current;
+    if (!element) return;
+    const observer = new ResizeObserver(([entry]) => setEditorWidth(Math.round(entry?.contentRect.width ?? 0)));
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  const splitAllowed = editorWidth === 0 || editorWidth >= MIN_GROUP_PX * 2;
+  // Folds only when the width stays too small (not on one reading while panels settle or a sidebar animates).
+  useEffect(() => {
+    if (!group2 || splitAllowed) return;
+    const timer = window.setTimeout(() => {
+      useEditorStore.getState().foldGroup2(workspaceId);
+      toast("The window got too narrow for two editor groups, so they were joined. Split again when it is wider.");
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [group2, splitAllowed, workspaceId]);
+  const splitGroupRef = useGroupRef();
+
+  const focusGroup = useCallback((group: 1 | 2) => {
+    useEditorStore.getState().setFocusedGroup(group);
+    const editor = group === 2 ? group2EditorRef.current : surfaceHandle.current?.activeEditor();
+    window.setTimeout(() => editor?.focus(), 0);
+  }, []);
+
+  /** Cmd/Ctrl+\: the current file in the other group (a new group on the right when there is one group). */
+  const splitEditor = useCallback(() => {
+    const store = useEditorStore.getState();
+    if (!splitAllowed) {
+      toast("Widen the window or hide the file tree to split the editor.");
+      return;
+    }
+    if (store.focusedGroup === 2 && group2Tab) {
+      store.openTab(workspaceId, group2Tab);
+      focusGroup(1);
+      return;
+    }
+    if (!activeTab || (activeTab.kind !== "file" && activeTab.kind !== "preview")) {
+      toast("Open a file to split the editor.");
+      return;
+    }
+    store.openTab2(workspaceId, { ...activeTab });
+    focusGroup(2);
+  }, [activeTab, focusGroup, group2Tab, splitAllowed, workspaceId]);
+
+  /** Markdown preview: in the other group (`side`) or in the focused group. */
+  const openPreview = useCallback((where: "side" | "here") => {
+    const store = useEditorStore.getState();
+    const source = store.focusedGroup === 2 ? group2Tab : activeTab;
+    if (!source || !isMarkdownPath(source.path)) {
+      toast("Open a Markdown file to preview it.");
+      return;
+    }
+    const tab: EditorTab = { id: tabId({ kind: "preview", path: source.path }), kind: "preview", path: source.path };
+    const inGroup2 = (store.focusedGroup === 2) === (where === "here");
+    if (inGroup2 && !splitAllowed && !group2) {
+      store.openTab(workspaceId, tab);
+      return;
+    }
+    if (inGroup2) store.openTab2(workspaceId, tab);
+    else {
+      store.openTab(workspaceId, tab);
+      store.setFocusedGroup(1);
+    }
+  }, [activeTab, group2, group2Tab, splitAllowed, workspaceId]);
+
+  const moveToOtherGroup = useCallback((tab: EditorTab, from: 1 | 2, keepOpen: boolean) => {
+    const store = useEditorStore.getState();
+    if (from === 1) {
+      if (!splitAllowed) {
+        toast("Widen the window or hide the file tree to split the editor.");
+        return;
+      }
+      store.openTab2(workspaceId, { ...tab });
+      if (!keepOpen) store.closeTab(workspaceId, tab.id);
+    } else {
+      store.openTab(workspaceId, { ...tab });
+      store.setFocusedGroup(1);
+      if (!keepOpen) store.closeTab2(workspaceId, tab.id);
+    }
+  }, [splitAllowed, workspaceId]);
+
+  // The files shown in either group (typing happens there).
+  const shownDocs = useMemo(() => {
+    const list: FileDoc[] = [];
+    if (surface?.kind === "file") list.push(surface.doc);
+    if (group2Doc && state.group2 && !list.includes(group2Doc)) list.push(group2Doc);
+    return list;
+  }, [group2Doc, state.group2, surface]);
+  useEffect(() => {
+    if (autoSave !== "afterDelay" || !shownDocs.length) return;
+    const subscriptions = shownDocs.map((doc) => doc.model.onDidChangeContent(() => {
+      const timers = autoSaveTimers.current;
+      window.clearTimeout(timers.get(doc.path));
+      timers.set(doc.path, window.setTimeout(() => {
+        timers.delete(doc.path);
+        if (agentBusyRef.current) heldForAgent.current.add(doc.path);
+        else void saveFile(doc.path, "delay");
+      }, AUTO_SAVE_DELAY_MS));
+    }));
+    return () => {
+      for (const subscription of subscriptions) subscription.dispose();
+    };
+  }, [autoSave, saveFile, shownDocs]);
+
   // Commands from the app's shortcuts and palette (use-shell-shortcuts.ts, session-route.tsx).
   useEffect(() => {
     const onCommand = (event: Event) => {
@@ -1074,11 +1340,19 @@ export default function EditorPanel(props: EditorPanelProps) {
         editor?.trigger("palette", "editor.action.quickOutline", null);
       } else if (command === "outline") {
         useEditorStore.getState().setView(workspaceId, "files");
+      } else if (command === "split") {
+        splitEditor();
+      } else if (command === "preview-side") {
+        openPreview("side");
+      } else if (command === "preview-here") {
+        openPreview("here");
+      } else if (command === "focus-other-group") {
+        if (useEditorStore.getState().byWorkspace[workspaceId]?.group2) focusGroup(useEditorStore.getState().focusedGroup === 1 ? 2 : 1);
       }
     };
     window.addEventListener("omnirush:editor-command", onCommand);
     return () => window.removeEventListener("omnirush:editor-command", onCommand);
-  }, [workspaceId]);
+  }, [focusGroup, openPreview, splitEditor, workspaceId]);
 
   // ── keys ───────────────────────────────────────────────────────────────
   const panelRef = useRef<HTMLDivElement | null>(null);
@@ -1135,7 +1409,12 @@ export default function EditorPanel(props: EditorPanelProps) {
           selected={activePath}
           loading={treeQuery.isFetching}
           error={treeQuery.isError}
-          onOpen={openFile}
+          onOpen={(path) => {
+            // In the group that has the keyboard, like VS Code.
+            const store = useEditorStore.getState();
+            if (store.focusedGroup === 2 && store.byWorkspace[workspaceId]?.group2) store.openTab2(workspaceId, { id: tabId({ kind: "file", path }), kind: "file", path });
+            else openFile(path);
+          }}
           onRefresh={() => void treeQuery.refetch()}
         />
         </div>
@@ -1176,49 +1455,109 @@ export default function EditorPanel(props: EditorPanelProps) {
     </div>
   );
 
-  const main = (
-    <div className="flex h-full min-h-0 min-w-0 flex-col">
-      <div className="flex h-8 shrink-0 items-stretch overflow-x-auto border-b border-border [scrollbar-width:none]" role="tablist" data-editor-tabs>
-        {state.tabs.map((tab) => {
-          const active = tab.id === state.activeId;
-          const name = tab.path.split("/").pop() ?? tab.path;
-          const isDirty = tab.kind === "file" && dirty?.[tab.path];
-          return (
-            <div
-              key={tab.id}
-              role="tab"
-              aria-selected={active}
-              title={tab.path}
-              data-editor-tab={tab.id}
-              onMouseDown={(event) => {
-                if (event.button === 1) {
-                  event.preventDefault();
-                  closeTab(tab);
-                }
+  const mac = /Mac/i.test(navigator.platform);
+  /** A group takes the keyboard when used, except through the split / preview buttons: those act on the focused one. */
+  const focusFrom = (event: React.SyntheticEvent, group: 1 | 2) => {
+    if ((event.target as HTMLElement).closest("[data-editor-tools]")) return;
+    useEditorStore.getState().setFocusedGroup(group);
+  };
+  const renderTab = (tab: EditorTab, group: 1 | 2, active: boolean) => {
+    const name = tab.path.split("/").pop() ?? tab.path;
+    const isDirty = (tab.kind === "file") && dirty?.[tab.path];
+    const focused = group === focusedGroup;
+    const close = () => (group === 1 ? closeTab(tab) : useEditorStore.getState().closeTab2(workspaceId, tab.id));
+    const canMove = tab.kind === "file" || tab.kind === "preview";
+    return (
+      <ContextMenu key={tab.id}>
+        <ContextMenuTrigger className="flex shrink-0">
+          <div
+            role="tab"
+            aria-selected={active}
+            title={tab.path}
+            data-editor-tab={tab.id}
+            data-editor-tab-group={group}
+            onMouseDown={(event) => {
+              if (event.button === 1) {
+                event.preventDefault();
+                close();
+              }
+            }}
+            className={cn(
+              "group flex max-w-48 shrink-0 cursor-pointer items-center gap-1.5 border-e border-border ps-3 pe-1.5 text-xs",
+              active
+                ? cn("bg-background text-foreground", focused || !group2 ? "shadow-[inset_0_-2px_0_var(--primary)]" : "shadow-[inset_0_-2px_0_var(--border)]")
+                : "text-muted-foreground hover:text-foreground",
+            )}
+            onClick={() => (group === 1 ? useEditorStore.getState().selectTab(workspaceId, tab.id) : useEditorStore.getState().selectTab2(workspaceId, tab.id))}
+          >
+            {tab.kind === "review" ? <CircleDot className="size-3 shrink-0 text-link" /> : tab.kind === "git" ? <GitBranch className="size-3 shrink-0" /> : tab.kind === "preview" ? <Eye className="size-3 shrink-0" /> : null}
+            <span className="truncate">{tab.kind === "preview" ? `Preview ${name}` : name}{tab.kind === "git" ? ` (${tab.ref === "HEAD" ? "staged" : "working"})` : ""}</span>
+            <button
+              type="button"
+              aria-label={`Close ${name}`}
+              onClick={(event) => {
+                event.stopPropagation();
+                close();
               }}
-              className={cn(
-                "group flex max-w-48 shrink-0 cursor-pointer items-center gap-1.5 border-e border-border ps-3 pe-1.5 text-xs",
-                active ? "bg-background text-foreground shadow-[inset_0_-2px_0_var(--primary)]" : "text-muted-foreground hover:text-foreground",
-              )}
-              onClick={() => useEditorStore.getState().selectTab(workspaceId, tab.id)}
+              className="flex size-4 items-center justify-center rounded hover:bg-muted"
             >
-              {tab.kind === "review" ? <CircleDot className="size-3 shrink-0 text-link" /> : tab.kind === "git" ? <GitBranch className="size-3 shrink-0" /> : null}
-              <span className="truncate">{name}{tab.kind === "git" ? ` (${tab.ref === "HEAD" ? "staged" : "working"})` : ""}</span>
-              <button
-                type="button"
-                aria-label={`Close ${name}`}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  closeTab(tab);
-                }}
-                className="flex size-4 items-center justify-center rounded hover:bg-muted"
-              >
-                {isDirty ? <span className="size-2 rounded-full bg-foreground group-hover:hidden" /> : null}
-                <X className={cn("size-3", isDirty && "hidden group-hover:block")} />
-              </button>
-            </div>
-          );
-        })}
+              {isDirty ? <span className="size-2 rounded-full bg-foreground group-hover:hidden" /> : null}
+              <X className={cn("size-3", isDirty && "hidden group-hover:block")} />
+            </button>
+          </div>
+        </ContextMenuTrigger>
+        <ContextMenuContent>
+          <ContextMenuItem disabled={!canMove} onClick={() => moveToOtherGroup(tab, group, false)}>Move to other group</ContextMenuItem>
+          <ContextMenuItem disabled={!canMove} onClick={() => moveToOtherGroup(tab, group, true)}>Open in other group</ContextMenuItem>
+          {isMarkdownPath(tab.path) && tab.kind === "file" ? (
+            <ContextMenuItem onClick={() => openPreview("side")}>Open preview to the side</ContextMenuItem>
+          ) : null}
+          <ContextMenuItem onClick={close}>Close</ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
+    );
+  };
+
+  const focusedTab = focusedGroup === 2 ? group2Tab : activeTab;
+  const tabTools = (
+    <div className="ms-auto flex shrink-0 items-center gap-0.5 px-1" data-editor-tools>
+      {focusedTab && focusedTab.kind === "file" && isMarkdownPath(focusedTab.path) ? (
+        <Tooltip>
+          <TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label="Open preview to the side" onClick={() => openPreview("side")} data-editor-preview-button><Eye /></Button>} />
+          <TooltipContent>Open preview to the side ({mac ? "⌘⇧V" : "Ctrl+Shift+V"})</TooltipContent>
+        </Tooltip>
+      ) : null}
+      <Tooltip>
+        <TooltipTrigger
+          render={(
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              aria-label="Split editor"
+              aria-disabled={!splitAllowed}
+              className={cn(!splitAllowed && "opacity-50")}
+              onClick={splitEditor}
+              data-editor-split
+            >
+              <Columns2 />
+            </Button>
+          )}
+        />
+        <TooltipContent>{splitAllowed ? `Split editor (${mac ? "⌘\\" : "Ctrl+\\"})` : "Widen the window or hide the file tree to split"}</TooltipContent>
+      </Tooltip>
+    </div>
+  );
+
+  const group1 = (
+    <div
+      className="flex h-full min-h-0 min-w-0 flex-col"
+      data-editor-group="1"
+      onFocusCapture={(event) => focusFrom(event, 1)}
+      onPointerDownCapture={(event) => focusFrom(event, 1)}
+    >
+      <div className="flex h-8 shrink-0 items-stretch overflow-x-auto border-b border-border [scrollbar-width:none]" role="tablist" data-editor-tabs>
+        {state.tabs.map((tab) => renderTab(tab, 1, tab.id === state.activeId))}
+        {!group2 ? tabTools : null}
       </div>
       {activeTab?.kind === "review" ? (
         <div className="flex h-8 shrink-0 items-center gap-2 overflow-hidden whitespace-nowrap border-b border-border bg-primary/5 px-3 text-xs" data-editor-review-bar>
@@ -1260,9 +1599,10 @@ export default function EditorPanel(props: EditorPanelProps) {
           </div>
         ) : null}
         <div className={cn("flex min-h-0 flex-1", state.tabs.length === 0 && "hidden")}>
+          <div className={cn("flex min-h-0 min-w-0 flex-1", (surface?.kind === "preview" || surface?.kind === "image") && "hidden")}>
           <EditorSurface
             monaco={monaco}
-            surface={surface}
+            surface={surface && (surface.kind === "file" || surface.kind === "diff") ? surface : null}
             onSave={() => void save()}
             onCursor={setCursor}
             onHunks={setHunks}
@@ -1270,9 +1610,106 @@ export default function EditorPanel(props: EditorPanelProps) {
             onAgentAction={agentAction}
             onReady={(handle) => {
               surfaceHandle.current = handle;
+              setSurfaceReady(Boolean(handle));
             }}
           />
+          </div>
+          {surface?.kind === "preview" ? (
+            <MarkdownPreview
+              client={client}
+              workspaceId={workspaceId}
+              path={surface.doc.path}
+              model={surface.doc.model}
+              isDirty={() => docs.isDirty(surface.doc)}
+              onOpenFile={openFile}
+              onOpenExternal={(url) => void openDesktopUrl(url).catch(() => toast.error("Could not open the link."))}
+            />
+          ) : null}
+          {surface?.kind === "image" ? <ImageView client={client} workspaceId={workspaceId} path={surface.path} /> : null}
         </div>
+      </div>
+    </div>
+  );
+
+  const group2View = group2 ? (
+    <div
+      className="flex h-full min-h-0 min-w-0 flex-col"
+      data-editor-group="2"
+      onFocusCapture={(event) => focusFrom(event, 2)}
+      onPointerDownCapture={(event) => focusFrom(event, 2)}
+    >
+      <div className="flex h-8 shrink-0 items-stretch overflow-x-auto border-b border-border [scrollbar-width:none]" role="tablist" aria-label="Second editor group" data-editor-tabs-2>
+        {group2.tabs.map((tab) => renderTab(tab, 2, tab.id === group2.activeId))}
+        {tabTools}
+        <Tooltip>
+          <TooltipTrigger
+            render={(
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                className="my-auto me-1 shrink-0"
+                aria-label="Close group"
+                onClick={() => {
+                  for (const tab of group2.tabs) useEditorStore.getState().closeTab2(workspaceId, tab.id);
+                }}
+                data-editor-close-group
+              >
+                <X />
+              </Button>
+            )}
+          />
+          <TooltipContent>Close group (its tabs close; unsaved text stays until you reopen the file)</TooltipContent>
+        </Tooltip>
+      </div>
+      {group2Error ? <div className="flex min-h-0 flex-1 items-center justify-center p-6 text-center text-sm text-muted-foreground">{group2Error}</div> : null}
+      <div className={cn("flex min-h-0 flex-1", (group2Error || group2Tab?.kind !== "file" || isImagePath(group2Tab.path)) && "hidden")}>
+        <Group2Editor
+          monaco={monaco}
+          model={group2Tab?.kind === "file" && group2Doc?.path === group2Tab.path ? group2Doc.model : null}
+          onSave={() => {
+            if (group2Tab) void saveFile(group2Tab.path, "manual");
+          }}
+          onFocus={() => useEditorStore.getState().setFocusedGroup(2)}
+          onAgentAction={agentAction}
+          onReady={(editor) => {
+            group2EditorRef.current = editor;
+            setGroup2Ready(Boolean(editor));
+            // Just split (Cmd/Ctrl+\): the new group takes the keyboard.
+            if (editor && useEditorStore.getState().focusedGroup === 2) window.setTimeout(() => editor.focus(), 0);
+          }}
+        />
+      </div>
+      {group2Tab?.kind === "preview" && group2Doc && group2Doc.path === group2Tab.path ? (
+        <MarkdownPreview
+          client={client}
+          workspaceId={workspaceId}
+          path={group2Doc.path}
+          model={group2Doc.model}
+          isDirty={() => docs.isDirty(group2Doc)}
+          onOpenFile={(path) => useEditorStore.getState().openTab2(workspaceId, { id: tabId({ kind: "file", path }), kind: "file", path })}
+          onOpenExternal={(url) => void openDesktopUrl(url).catch(() => toast.error("Could not open the link."))}
+        />
+      ) : null}
+      {group2Tab?.kind === "file" && isImagePath(group2Tab.path) ? <ImageView client={client} workspaceId={workspaceId} path={group2Tab.path} /> : null}
+    </div>
+  ) : null;
+
+  const main = (
+    <div className="flex h-full min-h-0 min-w-0 flex-col" ref={editorAreaRef}>
+      <div className="flex min-h-0 flex-1">
+        {/* Always a panel group, so splitting adds group 2 beside group 1 without rebuilding group 1's editor. */}
+        <ResizablePanelGroup orientation="horizontal" className="h-full min-h-0" groupRef={splitGroupRef}>
+          <ResizablePanel id="editor-group-1" minSize={`${MIN_GROUP_PX}px`} className="min-h-0 min-w-0">{group1}</ResizablePanel>
+          {group2View && splitAllowed ? (
+            <>
+              <ResizableHandle
+                aria-label="Resize editor groups (double-click: equal widths)"
+                onDoubleClick={() => splitGroupRef.current?.setLayout({ "editor-group-1": 50, "editor-group-2": 50 })}
+              />
+              <ResizablePanel id="editor-group-2" minSize={`${MIN_GROUP_PX}px`} className="min-h-0 min-w-0">{group2View}</ResizablePanel>
+            </>
+          ) : null}
+        </ResizablePanelGroup>
       </div>
       <div className="flex h-6 shrink-0 items-center gap-3 overflow-hidden whitespace-nowrap border-t border-border px-3 text-[11px] text-muted-foreground" data-editor-status>
         {branch ? <span className="flex min-w-0 items-center gap-1 truncate"><GitBranch className="size-3 shrink-0" />{branch}</span> : null}
@@ -1290,13 +1727,12 @@ export default function EditorPanel(props: EditorPanelProps) {
         </button>
         <span className="flex-1" />
         {cursor && activeTab ? <span className="shrink-0 max-[1100px]:hidden">Ln {cursor.line}, Col {cursor.column}</span> : null}
-        {activePath ? <span className="shrink-0 max-[1250px]:hidden">{languageForPath(activePath)}</span> : null}
-        {activeTab?.kind === "file" ? <span className="shrink-0" data-editor-saved={activeDirty ? "0" : "1"}>{activeDirty ? "Unsaved" : "Saved"}</span> : null}
+        {activePath ? <span className="shrink-0 max-[1250px]:hidden">{surface?.kind === "image" ? `Image (${activePath.slice(activePath.lastIndexOf(".") + 1).toUpperCase()})` : surface?.kind === "preview" ? "Markdown preview" : languageForPath(activePath)}</span> : null}
+        {activeTab?.kind === "file" && surface?.kind !== "image" ? <span className="shrink-0" data-editor-saved={activeDirty ? "0" : "1"}>{activeDirty ? "Unsaved" : "Saved"}</span> : null}
       </div>
     </div>
   );
 
-  const mac = /Mac/i.test(navigator.platform);
   const railItem = (view: EditorSideView, label: string, icon: ReactNode, shortcut: string | null, badge?: number) => {
     const active = state.view === view && sideOpen;
     return (
@@ -1387,7 +1823,7 @@ export default function EditorPanel(props: EditorPanelProps) {
           <ResizablePanelGroup orientation="horizontal" className="h-full min-h-0">
             {sideOpen ? (
               <>
-                <ResizablePanel defaultSize="230px" minSize="160px" maxSize="50%" className="min-h-0">
+                <ResizablePanel defaultSize="230px" minSize="160px" maxSize="50%" groupResizeBehavior="preserve-pixel-size" className="min-h-0">
                   {side}
                 </ResizablePanel>
                 <ResizableHandle />
@@ -1467,9 +1903,12 @@ export default function EditorPanel(props: EditorPanelProps) {
         <QuickOpen
           files={files}
           recent={recentRef.current}
-          onOpen={(path) => {
+          onOpen={(path, side) => {
             useEditorStore.getState().setQuickOpen(false);
-            openFile(path);
+            const store = useEditorStore.getState();
+            const inGroup2 = side ? splitAllowed : store.focusedGroup === 2 && Boolean(store.byWorkspace[workspaceId]?.group2);
+            if (inGroup2) store.openTab2(workspaceId, { id: tabId({ kind: "file", path }), kind: "file", path });
+            else openFile(path);
           }}
           onClose={() => useEditorStore.getState().setQuickOpen(false)}
         />

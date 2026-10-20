@@ -131,7 +131,38 @@ import "monaco-editor/languages/definitions/wgsl/register.js";
 import "monaco-editor/languages/definitions/xml/register.js";
 import "monaco-editor/languages/definitions/yaml/register.js";
 
+import type * as MonacoApi from "monaco-editor/editor/editor.api.js";
 export type Monaco = typeof monaco;
+
+/**
+ * Monaco's keybindings are shared by every editor on the page: the last editor to register a key wins, whichever
+ * has the focus. Each of our editors therefore carries its own `omnirushEditor` context key, and its keys are scoped
+ * to it with `editorKeyContext(name)`.
+ */
+export type EditorScope = "code" | "diff" | "group2";
+export function scopeEditor(editor: MonacoApi.editor.IStandaloneCodeEditor, name: EditorScope): string {
+  editor.createContextKey("omnirushEditor", name);
+  return `omnirushEditor == '${name}'`;
+}
+
+/**
+ * Editor keys for the editor groups: Cmd/Ctrl+Shift+V opens the Markdown preview in the other group. (Cmd/Ctrl+K is
+ * the app's command palette, so VS Code's Cmd/Ctrl+K chords are not used.)
+ */
+export function addGroupKeys(monaco: Monaco, editor: MonacoApi.editor.IStandaloneCodeEditor, context: string): MonacoApi.IDisposable {
+  const { KeyMod, KeyCode } = monaco;
+  return editor.addAction({
+    id: "omnirush.editor.previewToSide",
+    label: "Open Markdown preview to the side",
+    keybindings: [KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyV],
+    keybindingContext: context,
+    precondition: "editorLangId == 'markdown'",
+    run: () => {
+      window.dispatchEvent(new CustomEvent("omnirush:editor-command", { detail: "preview-side" }));
+    },
+  });
+}
+
 
 /** The app's theme: `data-theme` on <html> (app/theme.ts), or a `dark` class. */
 export function appIsDark(): boolean {
