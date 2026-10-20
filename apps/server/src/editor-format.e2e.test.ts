@@ -149,8 +149,9 @@ describe("format on save: arguments, configuration and the sandbox switch", () =
     await writeFile(join(root, "--plugin=..cjs"), "const a=1\n");
     const ask = await formatRequest({ root, path: "--plugin=..cjs", text: "const a=1\n", trust: null, hash: null, store, sandboxOn: false });
     if (!("trust" in ask) || ask.trust !== "ask") return; // not a Prettier file type here
-    await formatRequest({ root, path: "--plugin=..cjs", text: "const a=1\n", trust: "once", hash: ask.hash, store, sandboxOn: false }).catch(() => null);
+    const done = await formatRequest({ root, path: "--plugin=..cjs", text: "const a=1\n", trust: "once", hash: ask.hash, store, sandboxOn: false });
     expect(existsSync(join(root, "PWNED"))).toBe(false);
+    expect("text" in done ? done.text : null).toBe("const a = 1;\n");
   });
 
   test("a Prettier config added in a subfolder asks again", async () => {

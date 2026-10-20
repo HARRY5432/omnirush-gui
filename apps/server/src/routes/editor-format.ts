@@ -172,12 +172,13 @@ export function formatterFor(root: string, file: string, env: NodeJS.ProcessEnv 
 }
 
 /** The trust hash: what runs and every configuration file's content (a change asks again). */
-export function formatterHash(formatter: Formatter, sandbox = false): string {
+export function formatterHash(formatter: Formatter, sandbox = false, root?: string): string {
   const hash = createHash("sha256");
   // Where it runs is part of what was allowed: turning the sandbox off asks again.
   hash.update(`${formatter.name}\0${formatter.command}\0${formatter.args.slice(0, 1).join(" ")}\0${sandbox ? "box" : "host"}\0`);
   for (const file of formatter.configFiles) {
-    hash.update(`${basename(file)}\0`);
+    // Where the file sits matters (relative plugin paths resolve from it), not only its name.
+    hash.update(`${root ? relative(root, file) : basename(file)}\0`);
     hash.update(readText(file) ?? "\u0000missing");
     hash.update("\0");
   }
@@ -324,7 +325,7 @@ export async function formatRequest(options: {
   const formatter = formatterFor(root, file, env);
   if (!formatter) return { formatter: null, text: null };
   const sandbox = options.sandboxOn;
-  const hash = formatterHash(formatter, sandbox);
+  const hash = formatterHash(formatter, sandbox, root);
   const stored = options.store.get(root);
   const current = stored && stored.hash === hash ? stored : null;
   if (options.trust) {
