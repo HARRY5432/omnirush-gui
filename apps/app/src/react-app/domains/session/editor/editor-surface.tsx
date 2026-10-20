@@ -48,6 +48,8 @@ export type AgentAction = "ask" | "explain" | "refactor" | "tests";
 export type SurfaceHandle = {
   reveal: (line: number, column: number, endColumn?: number) => void;
   activeEditor: () => MonacoApi.editor.ICodeEditor | null;
+  /** The code (non-diff) editor, whatever is shown now (the git gutter attaches before the mode switches). */
+  codeEditor: () => MonacoApi.editor.ICodeEditor;
 };
 
 const BASE_OPTIONS: MonacoApi.editor.IStandaloneEditorConstructionOptions = {
@@ -180,6 +182,7 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
         editor.focus();
       },
       activeEditor: () => (modeRef.current === "diff" ? diff.getModifiedEditor() : modeRef.current === "file" ? code : null),
+      codeEditor: () => code,
     });
     // Auto save "when focus leaves": the panel listens for this.
     const blurEvent = () => window.dispatchEvent(new Event("omnirush:editor-blur"));

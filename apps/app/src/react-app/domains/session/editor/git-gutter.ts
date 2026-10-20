@@ -74,7 +74,8 @@ export class GitGutter {
         return;
       }
       const marks = await diffInWorker(head, current);
-      if (disposed || mine !== generation || model.isDisposed()) return;
+      // Only while the editor shows this file (it may switch to it a moment after the gutter attaches).
+      if (disposed || mine !== generation || model.isDisposed() || editor.getModel() !== model) return;
       decorations.set((marks ?? []).map((mark) => ({
         range: { startLineNumber: Math.max(1, mark.startLine), startColumn: 1, endLineNumber: Math.max(1, mark.endLine), endColumn: 1 },
         options: {
@@ -85,14 +86,19 @@ export class GitGutter {
       })));
     };
     void update();
-    const subscription = model.onDidChangeContent(() => {
+    const schedule = () => {
       window.clearTimeout(timer);
       timer = window.setTimeout(() => void update(), DEBOUNCE_MS);
+    };
+    const subscription = model.onDidChangeContent(schedule);
+    const modelChange = editor.onDidChangeModel(() => {
+      if (editor.getModel() === model) void update();
     });
     return () => {
       disposed = true;
       window.clearTimeout(timer);
       subscription.dispose();
+      modelChange.dispose();
       decorations.clear();
     };
   }

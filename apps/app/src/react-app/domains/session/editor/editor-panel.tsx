@@ -1020,8 +1020,8 @@ export default function EditorPanel(props: EditorPanelProps) {
   }, [gutter, gitQuery.dataUpdatedAt]);
   useEffect(() => {
     if (!surfaceReady || !surface || surface.kind !== "file" || !gitFiles) return;
-    const editor = surfaceHandle.current?.activeEditor();
-    if (!editor || editor.getModel() !== surface.doc.model) return;
+    const editor = surfaceHandle.current?.codeEditor();
+    if (!editor) return;
     const doc = surface.doc;
     const changedInGit = gitFiles.some((file) => file.path === doc.path);
     return gutter.attach(editor, doc.model, doc.path, changedInGit, () => docs.isDirty(doc));
@@ -1210,7 +1210,6 @@ export default function EditorPanel(props: EditorPanelProps) {
   useEffect(() => {
     const editor = group2EditorRef.current;
     if (!group2Ready || !editor || !group2Doc || group2Tab?.kind !== "file" || !gitFiles) return;
-    if (editor.getModel() !== group2Doc.model) return;
     const changedInGit = gitFiles.some((file) => file.path === group2Doc.path);
     return gutter.attach(editor, group2Doc.model, group2Doc.path, changedInGit, () => docs.isDirty(group2Doc));
   }, [docs, gitFiles, group2Doc, group2Ready, group2Tab, gutter]);
