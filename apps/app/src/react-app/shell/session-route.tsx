@@ -2860,18 +2860,18 @@ export function SessionRoute() {
     };
   }, [client, endpointForWorkspace, workspaces]);
 
-  // The home screen (no chat open): recent projects and chats across workspaces, searched on this computer.
+  // The start screen (no chat open): a quiet row of recent chats to continue and the chat search.
   const homeView = useMemo<HomeViewContext>(() => ({
     sessions: paletteSessionOptions,
     workspaces: workspaces.map((workspace) => ({ id: workspace.id, name: workspace.displayNameResolved, task: Boolean(workspace.task) })),
-    fetchMessages: sessionSearchFetcher,
+    onOpenSearch: () => setSessionSearchOpen(true),
     onOpenSession: (workspaceId, sessionId) => {
       setLegacySelectedWorkspaceId(workspaceId);
       writeActiveWorkspaceId(workspaceId);
       writeLastSessionFor(workspaceId, sessionId);
       navigateToWorkspaceSession(workspaceId, sessionId);
     },
-  }), [navigateToWorkspaceSession, paletteSessionOptions, sessionSearchFetcher, setLegacySelectedWorkspaceId, workspaces]);
+  }), [navigateToWorkspaceSession, paletteSessionOptions, setLegacySelectedWorkspaceId, setSessionSearchOpen, workspaces]);
 
   const tasksPaletteItems = useMemo<PaletteItem[]>(() => tasksAvailable ? [{
     id: "tasks.open",

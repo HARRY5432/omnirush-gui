@@ -1,165 +1,105 @@
 /** @jsxImportSource react */
-import { useEffect, useMemo, useState } from "react";
-import { FolderGit2, Loader2, MessageSquare, Search } from "lucide-react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Search } from "lucide-react";
 
 import { formatRelativeTime } from "@/app/utils";
-import { Input } from "@/components/ui/input";
-import {
-  createSessionSearcher,
-  searchableSessionKey,
-  type SearchableSession,
-  type SessionMessageFetcher,
-  type SessionSearchSnippet,
-} from "@/react-app/domains/session/search/session-search";
-import { homeChatTitle, recentChats, recentProjects, titleMatches, type HomeWorkspace } from "./home-view-model";
+import type { SearchableSession } from "@/react-app/domains/session/search/session-search";
+import { homeChatTitle, recentChats, type HomeWorkspace } from "./home-view-model";
 
-const MIN_QUERY_LENGTH = 2;
-const DEBOUNCE_MS = 200;
-const RESULT_LIMIT = 8;
+/** How many recent chats the start screen offers to continue. */
+export const HOME_CONTINUE_CHATS = 3;
 
-/** What the home screen needs; every read is of chats already on this computer. */
+/** What the start screen needs; every read is of chats already on this computer. */
 export type HomeViewContext = {
   sessions: SearchableSession[];
   workspaces: HomeWorkspace[];
-  fetchMessages: SessionMessageFetcher | null;
   onOpenSession: (workspaceId: string, sessionId: string) => void;
+  /** Opens the app's chat search (the same dialog as Cmd/Ctrl+Shift+F). */
+  onOpenSearch?: () => void;
 };
 
-type SearchResult = { session: SearchableSession; snippet?: SessionSearchSnippet };
-
-function useLocalChatSearch(context: HomeViewContext, query: string) {
-  const searcher = useMemo(() => (context.fetchMessages ? createSessionSearcher(context.fetchMessages) : null), [context.fetchMessages]);
-  const [debounced, setDebounced] = useState("");
-  const [results, setResults] = useState<SearchResult[]>([]);
-  const [searching, setSearching] = useState(false);
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => setDebounced(query.trim()), DEBOUNCE_MS);
-    return () => window.clearTimeout(timer);
-  }, [query]);
-
-  useEffect(() => {
-    if (debounced.length < MIN_QUERY_LENGTH) {
-      setResults([]);
-      setSearching(false);
-      return;
-    }
-    const found = new Map<string, SearchResult>();
-    for (const session of titleMatches(context.sessions, debounced)) found.set(searchableSessionKey(session), { session });
-    setResults([...found.values()].slice(0, RESULT_LIMIT));
-    if (!searcher) return;
-    setSearching(true);
-    const run = searcher.search({
-      query: debounced,
-      sessions: context.sessions,
-      onMatch: (match) => {
-        const key = searchableSessionKey(match.session);
-        if (found.has(key) || found.size >= RESULT_LIMIT) return;
-        found.set(key, { session: match.session, snippet: match.snippet });
-        setResults([...found.values()]);
-      },
-      onProgress: (progress) => setSearching(!progress.done),
-    });
-    return () => run.cancel();
-  }, [context.sessions, debounced, searcher]);
-
-  return { results, searching, active: debounced.length >= MIN_QUERY_LENGTH };
+function searchShortcut(): string {
+  const isMac = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
+  return isMac ? "⇧⌘F" : "Ctrl+Shift+F";
 }
 
-export function HomeRecent({ context }: { context: HomeViewContext }) {
-  const [query, setQuery] = useState("");
-  const search = useLocalChatSearch(context, query);
-  const projects = useMemo(() => recentProjects(context.sessions, context.workspaces), [context.sessions, context.workspaces]);
-  const chats = useMemo(() => recentChats(context.sessions), [context.sessions]);
-  if (!context.sessions.length) return null;
+/**
+ * One quiet line under the composer: "Continue" with the latest chats as
+ * text-like pills (chat · project) on the left, the chat search on the right.
+ * Never wraps: a pill that does not fit whole is left out. The projects live
+ * in the sidebar, past chats in the search.
+ */
+export function HomeContinue({ context }: { context: HomeViewContext }) {
+  const chats = useMemo(() => {
+    const tasks = new Set(context.workspaces.filter((workspace) => workspace.task).map((workspace) => workspace.id));
+    return recentChats(context.sessions.filter((session) => !tasks.has(session.workspaceId)), HOME_CONTINUE_CHATS);
+  }, [context.sessions, context.workspaces]);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const [fits, setFits] = useState(HOME_CONTINUE_CHATS);
+
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    if (!list) return;
+    const measure = () => {
+      const available = list.clientWidth;
+      const pills = [...list.querySelectorAll<HTMLElement>("[data-pill]")];
+      let used = 0;
+      let count = 0;
+      for (const pill of pills) {
+        used += pill.scrollWidth + (count ? 2 : 0);
+        if (available > 0 && used > available) break;
+        count += 1;
+      }
+      setFits(available > 0 ? count : pills.length);
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(list);
+    return () => observer.disconnect();
+  }, [chats]);
+
+  if (!chats.length) return null;
 
   return (
-    <div className="space-y-4" data-testid="home-recent">
-      <div className="relative">
-        <Search className="pointer-events-none absolute top-1/2 left-3 size-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
-        <Input
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search your past chats"
-          aria-label="Search your past chats"
-          className="h-9 ps-8 text-[13px]"
-          data-testid="home-search"
-        />
-        {search.searching ? <Loader2 className="absolute top-1/2 right-3 size-3.5 -translate-y-1/2 animate-spin text-muted-foreground" aria-label="Searching" /> : null}
+    <nav aria-label="Recent chats" className="-mt-2 flex h-6 items-center gap-2 pb-1 text-[12px] text-muted-foreground" data-testid="home-continue">
+      <span className="shrink-0 opacity-80">Continue</span>
+      <div ref={listRef} className="flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
+        {chats.map((session, index) => {
+          const title = homeChatTitle(session.title);
+          return (
+            <button
+              key={`${session.workspaceId}/${session.sessionId}`}
+              type="button"
+              data-pill=""
+              className={`group inline-flex h-6 max-w-[180px] shrink-0 items-center gap-1 rounded-md px-2 transition-colors hover:bg-accent focus-visible:bg-accent focus-visible:outline-none ${index < fits ? "" : "invisible absolute"}`}
+              onClick={() => context.onOpenSession(session.workspaceId, session.sessionId)}
+              title={`${title} \u2014 ${session.workspaceTitle} \u00b7 ${formatRelativeTime(session.updatedAt)}`}
+              aria-label={`Continue ${title} in ${session.workspaceTitle}`}
+              aria-hidden={index < fits ? undefined : true}
+              tabIndex={index < fits ? undefined : -1}
+              data-testid="home-chat"
+            >
+              <span className="max-w-[130px] truncate group-hover:text-foreground">{title}</span>
+              <span aria-hidden="true" className="shrink-0 opacity-50">·</span>
+              <span className="shrink-0 opacity-70">{session.workspaceTitle}</span>
+            </button>
+          );
+        })}
       </div>
-
-      {search.active ? (
-        <section aria-label="Search results" className="space-y-1">
-          {search.results.length ? search.results.map((result) => (
-            <ChatRow key={searchableSessionKey(result.session)} session={result.session} snippet={result.snippet} onOpen={context.onOpenSession} />
-          )) : (
-            <p className="px-1 py-2 text-[12px] text-muted-foreground">{search.searching ? "Searching your chats…" : "No chat matches."}</p>
-          )}
-        </section>
-      ) : (
-        <>
-          {projects.length ? (
-            <section aria-label="Recent projects" className="space-y-1.5">
-              <h3 className="px-1 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">Recent projects</h3>
-              <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
-                {projects.map((project) => (
-                  <button
-                    key={project.workspaceId}
-                    type="button"
-                    className="flex min-w-0 flex-col items-start gap-0.5 rounded-lg border border-border/80 bg-background px-3 py-2 text-left transition-colors hover:bg-accent"
-                    onClick={() => context.onOpenSession(project.workspaceId, project.lastSessionId)}
-                    title={`Open the latest chat in ${project.name}`}
-                    data-testid="home-project"
-                  >
-                    <span className="flex w-full min-w-0 items-center gap-1.5 text-[12px] font-medium text-foreground">
-                      <FolderGit2 className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
-                      <span className="truncate">{project.name}</span>
-                    </span>
-                    <span className="text-[11px] text-muted-foreground">
-                      {project.chats} chat{project.chats === 1 ? "" : "s"} · {formatRelativeTime(project.updatedAt)}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </section>
-          ) : null}
-          <section aria-label="Recent chats" className="space-y-1">
-            <h3 className="px-1 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">Recent chats</h3>
-            {chats.map((session) => (
-              <ChatRow key={searchableSessionKey(session)} session={session} onOpen={context.onOpenSession} />
-            ))}
-          </section>
-        </>
-      )}
-    </div>
-  );
-}
-
-function ChatRow(props: { session: SearchableSession; snippet?: SessionSearchSnippet; onOpen: (workspaceId: string, sessionId: string) => void }) {
-  const { session, snippet } = props;
-  return (
-    <button
-      type="button"
-      className="flex w-full min-w-0 items-start gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-accent"
-      onClick={() => props.onOpen(session.workspaceId, session.sessionId)}
-      data-testid="home-chat"
-    >
-      <MessageSquare className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
-      <span className="min-w-0 flex-1">
-        <span className="flex min-w-0 items-baseline gap-2">
-          <span className="truncate text-[12px] font-medium text-foreground">{homeChatTitle(session.title)}</span>
-          <span className="ml-auto shrink-0 text-[11px] text-muted-foreground">{formatRelativeTime(session.updatedAt)}</span>
-        </span>
-        <span className="block truncate text-[11px] text-muted-foreground">
-          {snippet ? (
-            <>
-              {snippet.before}
-              <mark className="rounded-sm bg-amber-3 px-0.5 text-foreground">{snippet.match}</mark>
-              {snippet.after}
-            </>
-          ) : session.workspaceTitle}
-        </span>
-      </span>
-    </button>
+      {context.onOpenSearch ? (
+        <button
+          type="button"
+          className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md px-2 transition-colors hover:bg-accent hover:text-foreground focus-visible:bg-accent focus-visible:outline-none"
+          onClick={context.onOpenSearch}
+          aria-label={`Search chats (${searchShortcut()})`}
+          data-testid="home-search"
+        >
+          <Search className="size-3" aria-hidden="true" />
+          <span>Search</span>
+          <span className="ml-1.5 text-[11px] opacity-60">{searchShortcut()}</span>
+        </button>
+      ) : null}
+    </nav>
   );
 }
