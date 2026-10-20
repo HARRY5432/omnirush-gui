@@ -226,6 +226,20 @@ describe("portable host: observe and act", () => {
     await host.close();
   });
 
+  test("the person's answer (a click or key during the question) does not pause; input after it does", async () => {
+    const r = rig("careful");
+    const { host, c, session, obs } = await opened(r);
+    const native = r.native as ReturnType<typeof fakeNative>;
+    const original = r.acts.push.bind(r.acts);
+    r.acts.push = (...items: ActRequest[]) => { native.personInput(); return original(...items); };
+    const act = await call(c, "computer_act", { session_id: session, observation_id: obs.state.observation?.id, request_id: "a", intent: "Type a word", action: { type: "type", text: "ok" } });
+    expect(act.state).toMatchObject({ ok: true, approval: { asked: true } });
+    expect(host.state()[0]?.phase).toBe("working");
+    native.personInput();
+    expect(host.state()[0]?.phase).toBe("paused");
+    await host.close();
+  });
+
   test("person input pauses; only Continue resumes; first act after takeover asks in Normal", async () => {
     const r = rig("normal");
     const { host, c, session, obs } = await opened(r);

@@ -178,7 +178,8 @@ export async function createPortableHost({ native, spool = null, settings, conte
     update();
   }
   native.onEvent((value) => {
-    if (value.event === "person-input") for (const s of sessions.values()) if (s.phase === "working" && s.mode === "control") pause(s, "person", "Your input paused computer use. Choose Continue when you are ready.");
+    // The person's own answer to a question (a click or key in the app) is not a takeover.
+    if (value.event === "person-input") for (const s of sessions.values()) if (s.phase === "working" && s.mode === "control" && !s.waiting) pause(s, "person", "Your input paused computer use. Choose Continue when you are ready.");
     if (value.event === "unavailable") for (const s of [...sessions.values()]) void stop(s, "stopped", "limit", { reason: "native_unavailable" });
   });
   const ticker = setInterval(() => {
@@ -324,6 +325,9 @@ export async function createPortableHost({ native, spool = null, settings, conte
         approval = { asked: true, reasons: decision.reasons.map((r) => r.code), by: "person" };
         if (!answer.allow) return finish({ ...common, approval, ok: false, code: "approval_denied", message: "The person did not allow this action. Ask them or choose another way." });
         if (sessions.get(s.id) !== s || s.phase !== "working") return finish({ ...common, approval, ok: false, code: "paused_by_person", message: "The session was paused or ended." });
+        // Input from answering moved the worker's input generation on: act from the current one.
+        const now = await native.call("state").catch(() => null);
+        if (now && Number.isInteger(now.generation)) s.generation = now.generation;
         s.allowed.set(key, Date.now() + 30_000);
         if (s.allowed.size > 64) s.allowed.delete(s.allowed.keys().next().value);
       }
