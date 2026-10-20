@@ -131,7 +131,18 @@ import "monaco-editor/languages/definitions/wgsl/register.js";
 import "monaco-editor/languages/definitions/xml/register.js";
 import "monaco-editor/languages/definitions/yaml/register.js";
 
+import type * as MonacoApi from "monaco-editor/editor/editor.api.js";
 export type Monaco = typeof monaco;
+
+/**
+ * Editor keys for the editor groups: Cmd/Ctrl+Shift+V opens the Markdown preview in the other group. (Cmd/Ctrl+K is
+ * the app's command palette, so VS Code's Cmd/Ctrl+K chords are not used.)
+ */
+export function addGroupKeys(monaco: Monaco, editor: MonacoApi.editor.IStandaloneCodeEditor) {
+  const { KeyMod, KeyCode } = monaco;
+  editor.addCommand(KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyV, () => window.dispatchEvent(new CustomEvent("omnirush:editor-command", { detail: "preview-side" })));
+}
+
 
 /** The app's theme: `data-theme` on <html> (app/theme.ts), or a `dark` class. */
 export function appIsDark(): boolean {

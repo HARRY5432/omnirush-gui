@@ -2864,6 +2864,14 @@ export function createOmniRushServerClient(options: { baseUrl: string; token?: s
         timeoutMs,
       }),
 
+    /** An image file's bytes for the editor's image preview (image types only, capped by the server). */
+    editorRaw: (workspaceId: string, path: string) =>
+      requestBinary(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/editor/raw?path=${encodeURIComponent(path)}`, {
+        token,
+        hostToken,
+        timeoutMs: 30_000,
+      }),
+
     editorGitStatus: (workspaceId: string) =>
       requestJson<OmniRushEditorGitStatus>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/editor/git/status`, { token, hostToken, timeoutMs: 30_000 }),
 

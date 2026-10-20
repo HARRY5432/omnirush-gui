@@ -134,7 +134,8 @@ describe("editor documents after an undo", () => {
       Uri: { from: (value: unknown) => value },
       editor: {
         createModel: (content: string) => {
-          const model = fakeModel(content);
+          // Indentation settings are applied on open; the fake model takes them and does nothing.
+          const model = Object.assign(fakeModel(content), { detectIndentation: () => undefined, updateOptions: () => undefined });
           models.push(model);
           return model;
         },

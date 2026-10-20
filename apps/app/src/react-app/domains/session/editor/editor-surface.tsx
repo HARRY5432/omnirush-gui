@@ -9,7 +9,7 @@ import { useEffect, useRef, useState } from "react";
 import type * as MonacoApi from "monaco-editor/editor/editor.api.js";
 
 import { subscribeToTheme } from "@/app/theme";
-import { applyMonacoTheme, monacoThemeName, type Monaco } from "./monaco";
+import { addGroupKeys, applyMonacoTheme, monacoThemeName, type Monaco } from "./monaco";
 import type { FileDoc } from "./editor-models";
 import { hunkCounts, type LineHunk } from "./hunk-ops";
 import { monacoOptionsFor, useEditorSettings } from "./editor-settings";
@@ -167,6 +167,8 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
       run: (target: MonacoApi.editor.ICodeEditor) => onAgentRef.current?.(item.action, target),
     }));
     disposables.push(...agentActions(code), ...agentActions(diff.getModifiedEditor() as MonacoApi.editor.IStandaloneCodeEditor));
+    addGroupKeys(monaco, code);
+    addGroupKeys(monaco, diff.getModifiedEditor() as MonacoApi.editor.IStandaloneCodeEditor);
     codeRef.current = code;
     diffRef.current = diff;
     onReadyRef.current?.({
