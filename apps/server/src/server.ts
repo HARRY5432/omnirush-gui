@@ -124,6 +124,7 @@ import { addRoute, matchRoute, type AuthMode, type RequestContext, type Route } 
 import { registerSessionGroupRoutes } from "./routes/session-groups.js";
 import { registerUiControlRoutes } from "./routes/ui-control.js";
 import { registerWorkspaceRoutes } from "./routes/workspaces.js";
+import { noteTaskPrompt, registerWorkspaceTaskRoutes, type TaskEngine } from "./routes/workspace-tasks.js";
 import { registerCloudMcpRoutes } from "./routes/cloud-mcp.js";
 import { registerLocalWorkflowRoutes } from "./routes/local-workflows.js";
 import type { LocalWorkflowPromptDispatcher, LocalWorkflowService } from "./local-workflows.js";
@@ -306,6 +307,32 @@ function recordSubagentModelFallback(config: ServerConfig, rootSessionId: string
   const capture = captureServicesByServer.get(config);
   if (!rootSessionId || !capture?.uploadEnabled || !capture.hasSession(rootSessionId)) return;
   capture.recordTrace(rootSessionId, SUBAGENT_MODEL_FALLBACK_TRACE, data);
+}
+
+/** A trace event on a session the uploader has open (and nothing otherwise). */
+function recordOpenSessionTrace(config: ServerConfig, sessionId: string, type: string, data: Record<string, unknown>): void {
+  const capture = captureServicesByServer.get(config);
+  if (!capture?.uploadEnabled || !capture.hasSession(sessionId)) return;
+  capture.recordTrace(sessionId, type, data);
+}
+
+/** The engine reads of the parallel-task board (routes/workspace-tasks.ts), on the engine generation holding each session. */
+function workspaceTaskEngine(config: ServerConfig): TaskEngine {
+  return {
+    sessionBusy: async (workspace, sessionId) => {
+      const statuses = unwrapOpencodeResult(await createWorkspaceOpencodeClient(config, workspace, { sessionId }).session.status(), "/session/status");
+      const status = (statuses as Record<string, { type?: string } | undefined>)[sessionId];
+      return Boolean(status && status.type !== "idle");
+    },
+    abort: async (workspace, sessionId) => {
+      await createWorkspaceOpencodeClient(config, workspace, { sessionId }).session.abort({ sessionID: sessionId });
+    },
+    lastReply: async (workspace, sessionId) => {
+      const messages = unwrapOpencodeResult(await createWorkspaceOpencodeClient(config, workspace, { sessionId }).session.messages({ sessionID: sessionId, limit: 40 }), "/session/messages");
+      const last = [...messages].reverse().find((message) => message.info.role === "assistant" && message.parts.some((part) => part.type === "text" && part.text.trim()));
+      return last ? last.parts.flatMap((part) => part.type === "text" && !part.synthetic ? [part.text.trim()] : []).filter(Boolean).join("\n\n") : "";
+    },
+  };
 }
 
 function engineModelRef(value: unknown): (EngineModelRef & { variant: string | null }) | null {
@@ -1972,6 +1999,10 @@ export async function proxyOpencodeV2Request(input: {
     capture.captureSnapshot(uploadedSessionId, "prompt");
     capture.archiveSessionStarted(uploadedSessionId, input.workspace.path, engine);
   }
+  // A parallel task's first prompt (routes/workspace-tasks.ts): only task workspaces.
+  if (input.workspace.task && promptDispatch && sessionId) {
+    await noteTaskPrompt(input.workspace, sessionId, (id, type, data) => recordOpenSessionTrace(input.config, id, type, data));
+  }
   const response = await loopbackFetch(target.toString(), { method, headers, body, signal: input.recoverySignal });
   // The engine has the prompt: its session status says busy from now on.
   turnActivity?.promptDispatched();
@@ -2394,6 +2425,10 @@ export async function proxyOpencodeRequest(input: {
       capture.captureSnapshot(uploadedSessionId, "prompt");
       capture.archiveSessionStarted(uploadedSessionId, workspace.path, engineTarget(baseUrl, headers, search));
     }
+  }
+  // A parallel task's first prompt (routes/workspace-tasks.ts): only task workspaces.
+  if (workspace?.task && uploadedSessionId && !steer && isUploadPromptDispatch(method, proxyPath)) {
+    await noteTaskPrompt(workspace, uploadedSessionId, (id, type, data) => recordOpenSessionTrace(input.config, id, type, data));
   }
   // A review or its fixes (command-events.ts), typed or from a button: an additive event of the chat's
   // trace, recorded once the engine answers the command with a 2xx.
@@ -3410,6 +3445,20 @@ function createRoutes(
         trigger: "workspace_activate",
       }),
     stopWorkspaceWork: stopWorkspaceEngineWork,
+  });
+
+  registerWorkspaceTaskRoutes({
+    routes,
+    config,
+    onWorkspacesChanged,
+    jsonResponse,
+    readJsonBody,
+    ensureWritable,
+    resolveWorkspace,
+    serializeWorkspace,
+    stopWorkspaceWork: stopWorkspaceEngineWork,
+    engine: workspaceTaskEngine(config),
+    recordTrace: (sessionId, type, data) => recordOpenSessionTrace(config, sessionId, type, data),
   });
 
   registerSessionGroupRoutes({

@@ -7,6 +7,7 @@ import { CODING_STARTER_CARDS, resolveOrganizationPromptCardContent } from "@/co
 import { useCheckDesktopRestriction, useOrgRestrictions } from "@/react-app/domains/cloud/desktop-config-provider";
 import { BuildathonPromoCard } from "@/react-app/domains/buildathon/buildathon-promo";
 import { PlacementHomeCard } from "@/react-app/domains/placements/placements";
+import { HomeRecent, type HomeViewContext } from "@/react-app/domains/session/home/home-recent";
 import {
   NewTaskComposer,
   type NewTaskComposerContext,
@@ -79,6 +80,8 @@ export type SessionEmptyHeroProps = {
   onOpenProviderAuth?: () => void;
   /** Workspace-scoped wiring for the full composer (skills, agents, models). */
   composer?: NewTaskComposerContext | null;
+  /** Recent projects and chats, and the search of past chats (all local). */
+  home?: HomeViewContext | null;
 };
 
 /**
@@ -153,7 +156,9 @@ export function SessionEmptyHero(props: SessionEmptyHeroProps) {
         </button>
       ) : null}
 
-      <div className="grid grid-cols-2 gap-1.5">
+      {props.home?.sessions.length ? <HomeRecent context={props.home} /> : null}
+
+      {props.home?.sessions.length ? null : <div className="grid grid-cols-2 gap-1.5">
         {suggestions.map((suggestion) => (
           <button
             key={suggestion.title}
@@ -169,7 +174,7 @@ export function SessionEmptyHero(props: SessionEmptyHeroProps) {
             </span>
           </button>
         ))}
-      </div>
+      </div>}
 
       <BuildathonPromoCard />
 

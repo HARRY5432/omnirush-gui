@@ -1,4 +1,4 @@
-import type { WorkspaceWire } from "@omnirush/types/workspace";
+import type { WorkspaceTaskLink, WorkspaceWire } from "@omnirush/types/workspace";
 
 export type WorkspaceType = "local" | "remote";
 
@@ -33,6 +33,7 @@ export interface WorkspaceConfig {
   sandboxContainerName?: string;
   opencodeUsername?: string;
   opencodePassword?: string;
+  task?: WorkspaceTaskLink;
 }
 
 export interface WorkspaceInfo {
@@ -60,6 +61,8 @@ export interface WorkspaceInfo {
     username?: string;
     password?: string;
   };
+  /** A parallel task's own checkout of another workspace (routes/workspace-tasks.ts). */
+  task?: WorkspaceTaskLink;
 }
 
 // Compile-time contract tripwires against the shared wire shape consumed by

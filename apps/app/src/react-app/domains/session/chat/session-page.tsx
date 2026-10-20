@@ -66,6 +66,7 @@ import {
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 import { ShareWorkspaceModal } from "../../workspace/share-workspace-modal";
+import type { HomeViewContext } from "@/react-app/domains/session/home/home-recent";
 import { SessionEmptyHero } from "./session-empty-hero";
 import type { NewTaskComposerContext, NewTaskComposerHandoff } from "./new-task-composer";
 import type { SessionCloudMcpMaintenanceState } from "../../connections/use-session-mcp-maintenance";
@@ -190,6 +191,9 @@ export type SessionPageSidebarProps = {
   onOpenAutomations?: () => void;
   dashboardActive?: boolean;
   onOpenDashboard?: () => void;
+  tasksActive?: boolean;
+  tasksRunningCount?: number;
+  onOpenTasks?: () => void;
   /** Opens the cross-session message search dialog (Cmd/Ctrl+Shift+F). */
   onOpenSessionSearch?: () => void;
   onReorderWorkspaces?: (workspaceIds: string[]) => void;
@@ -282,6 +286,8 @@ export type SessionPageProps = {
   chatFirstBusy?: boolean;
   /** Workspace-scoped wiring for the empty-state hero's full composer. */
   newTaskComposer?: NewTaskComposerContext | null;
+  /** The home screen's recent projects and chats and local chat search (no session open). */
+  home?: HomeViewContext | null;
   onRenameSession?: (sessionId: string, title: string) => Promise<void> | void;
   onDeleteSession?: (sessionId: string) => Promise<void> | void;
   onArchiveSession?: (sessionId: string, archived: boolean) => Promise<void> | void;
@@ -1539,6 +1545,9 @@ export function SessionPage(props: SessionPageProps) {
           onOpenAutomations={props.sidebar.onOpenAutomations}
           dashboardActive={props.sidebar.dashboardActive}
           onOpenDashboard={props.sidebar.onOpenDashboard}
+          tasksActive={props.sidebar.tasksActive}
+          tasksRunningCount={props.sidebar.tasksRunningCount}
+          onOpenTasks={props.sidebar.onOpenTasks}
           conversationHistory={{
             canGoBack: canGoBackInConversationHistory,
             canGoForward: canGoForwardInConversationHistory,
@@ -2107,6 +2116,7 @@ export function SessionPage(props: SessionPageProps) {
                         }
                         onOpenProviderAuth={props.onOpenProviderAuth}
                         composer={props.newTaskComposer}
+                        home={props.home}
                       />
                     </div>
                   )}

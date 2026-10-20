@@ -67,6 +67,9 @@ export function buildWorkspaceInfos(
       sandboxContainerName: workspace.sandboxContainerName,
       opencodeUsername: workspace.opencodeUsername,
       opencodePassword: workspace.opencodePassword,
+      ...(typeof workspace.task?.parentWorkspaceId === "string" && typeof workspace.task.taskId === "string"
+        ? { task: { parentWorkspaceId: workspace.task.parentWorkspaceId, taskId: workspace.task.taskId } }
+        : {}),
     };
   });
 }

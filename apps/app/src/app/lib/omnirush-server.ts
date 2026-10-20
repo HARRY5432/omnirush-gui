@@ -260,6 +260,39 @@ export type OmniRushWorkspaceList = {
   activeId?: string | null;
 };
 
+/** One parallel task (apps/server routes/workspace-tasks.ts TaskView). */
+export type OmniRushWorkspaceTask = {
+  id: string;
+  title: string;
+  prompt: string;
+  state: "created" | "running" | "done" | "failed" | "stopped" | "applied" | "merged" | "missing";
+  label: string;
+  branch: string;
+  baseBranch: string | null;
+  baseCommit: string;
+  /** The main checkout had uncommitted changes when the task started: they are not in it. */
+  startedDirty: boolean;
+  name: string;
+  path: string;
+  workspaceId: string | null;
+  sessionId: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  age: string;
+  files: number | null;
+  finished: boolean;
+  result: { mode: "apply" | "merge"; files: number; at: string } | null;
+};
+
+export type OmniRushWorkspaceTaskList = {
+  git: boolean;
+  repo: string | null;
+  branch: string | null;
+  hasCommit: boolean;
+  tasks: OmniRushWorkspaceTask[];
+};
+
 export type OmniRushSessionMessage = {
   info: Message;
   parts: Part[];
@@ -1873,6 +1906,26 @@ export function createOmniRushServerClient(options: { baseUrl: string; token?: s
         timeoutMs: timeouts.binary,
       }),
     listWorkspaces: () => requestJson<OmniRushWorkspaceList>(baseUrl, "/workspaces", { token, hostToken, timeoutMs: timeouts.listWorkspaces }),
+    listWorkspaceTasks: (workspaceId: string) =>
+      requestJson<OmniRushWorkspaceTaskList>(baseUrl, `/workspaces/${encodeURIComponent(workspaceId)}/tasks`, { token, hostToken, timeoutMs: timeouts.status }),
+    createWorkspaceTask: (workspaceId: string, payload: { prompt: string; title?: string; parentSessionId?: string | null }) =>
+      requestJson<{ task: OmniRushWorkspaceTask; workspace: WorkspaceInfo }>(baseUrl, `/workspaces/${encodeURIComponent(workspaceId)}/tasks`, {
+        token, hostToken, method: "POST", body: payload, timeoutMs: timeouts.activateWorkspace * 3,
+      }),
+    showWorkspaceTask: (workspaceId: string, taskId: string) =>
+      requestJson<{ task: OmniRushWorkspaceTask; stat: string; reply: string }>(baseUrl, `/workspaces/${encodeURIComponent(workspaceId)}/tasks/${encodeURIComponent(taskId)}`, { token, hostToken, timeoutMs: timeouts.config }),
+    bringBackWorkspaceTask: (workspaceId: string, taskId: string, mode: "apply" | "merge") =>
+      requestJson<{ mode: "apply" | "merge"; files: Array<{ status: string; file: string }>; task: OmniRushWorkspaceTask }>(baseUrl, `/workspaces/${encodeURIComponent(workspaceId)}/tasks/${encodeURIComponent(taskId)}/${mode}`, {
+        token, hostToken, method: "POST", timeoutMs: timeouts.binary,
+      }),
+    stopWorkspaceTask: (workspaceId: string, taskId: string) =>
+      requestJson<{ stopped: boolean; task: OmniRushWorkspaceTask }>(baseUrl, `/workspaces/${encodeURIComponent(workspaceId)}/tasks/${encodeURIComponent(taskId)}/stop`, {
+        token, hostToken, method: "POST", timeoutMs: timeouts.config,
+      }),
+    removeWorkspaceTask: (workspaceId: string, taskId: string) =>
+      requestJson<{ ok: boolean; removed: string }>(baseUrl, `/workspaces/${encodeURIComponent(workspaceId)}/tasks/${encodeURIComponent(taskId)}`, {
+        token, hostToken, method: "DELETE", timeoutMs: timeouts.deleteWorkspace,
+      }),
     createLocalWorkspace: (payload: { folderPath: string; name: string; preset: string }) =>
       requestJson<WorkspaceList>(baseUrl, "/workspaces/local", {
         token,
