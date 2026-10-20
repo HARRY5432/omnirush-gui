@@ -25,6 +25,8 @@ import { modelHasWebSearch, type WebSearchSwitch } from "./web-search.js";
 /** Every effort a catalog model may list, lowest first. */
 export const OMNIRUSH_MODEL_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type OmniRushModelEffort = (typeof OMNIRUSH_MODEL_EFFORTS)[number];
+/** The CLI's default effort (omnirush-cli DEFAULT_ENGINE_EFFORT). */
+export const OMNIRUSH_DEFAULT_EFFORT: OmniRushModelEffort = "xhigh";
 
 const MODEL_STATUSES = ["active", "beta", "deprecated"] as const;
 export type OmniRushModelStatus = (typeof MODEL_STATUSES)[number];
@@ -211,42 +213,75 @@ export async function clearOmniRushModelCatalog(config: ServerConfig): Promise<v
 }
 
 /**
+ * The effort a catalog model runs at when the chat picked none: xhigh where the
+ * model offers it (the CLI's default), otherwise the level closest to medium
+ * (the higher one on a tie). Null for a model without effort control.
+ *
+ * PARITY: apps/app/src/app/lib/model-behavior.ts (getModelBehaviorSummary's
+ * default for the omnirush provider) picks the same level, so the effort the
+ * picker shows is the one the engine sends.
+ */
+export function omnirushDefaultEffort(levels: readonly OmniRushModelEffort[]): OmniRushModelEffort | null {
+  if (levels.includes(OMNIRUSH_DEFAULT_EFFORT)) return OMNIRUSH_DEFAULT_EFFORT;
+  const medium = OMNIRUSH_MODEL_EFFORTS.indexOf("medium");
+  let best: OmniRushModelEffort | null = null;
+  for (const level of levels) {
+    if (best === null) { best = level; continue; }
+    const distance = Math.abs(OMNIRUSH_MODEL_EFFORTS.indexOf(level) - medium);
+    const bestDistance = Math.abs(OMNIRUSH_MODEL_EFFORTS.indexOf(best) - medium);
+    if (distance < bestDistance || (distance === bestDistance && OMNIRUSH_MODEL_EFFORTS.indexOf(level) > OMNIRUSH_MODEL_EFFORTS.indexOf(best))) best = level;
+  }
+  return best;
+}
+
+/**
  * The `omnirush` provider's engine models. Each model's efforts become
- * variants carrying the client-facing `reasoning_effort` (the
- * omnirush-reasoning-effort plugin and the broker put it on the wire); every
- * other effort is declared disabled, because the engine merges its own
- * OpenAI reasoning defaults into a model's variants and drops only entries
- * marked disabled. `deprecated` is never passed on: the engine deletes
- * deprecated models, which would strand the sessions pinned to one.
+ * variants carrying `reasoningEffort` (the key the engine's OpenAI adapter
+ * reads; the omnirush-reasoning-effort plugin and the broker also put it on
+ * the wire); every other effort is declared disabled, because the engine
+ * merges its own OpenAI reasoning defaults into a model's variants and drops
+ * only entries marked disabled. The model-level `options.reasoningEffort` is
+ * the default effort (omnirushDefaultEffort): a message without a variant
+ * (a sub-agent on its own model, a send before the app knew the model's
+ * efforts) still runs at the effort the picker shows. `deprecated` is never
+ * passed on: the engine deletes deprecated models, which would strand the
+ * sessions pinned to one.
  */
 export function engineModelsFromCatalog(catalog: OmniRushModelCatalog, webSearch: WebSearchSwitch | null = null): Record<string, Record<string, unknown>> {
-  return Object.fromEntries(catalog.map((model) => [model.id, {
-    name: model.display_name,
-    reasoning: model.capabilities.reasoning,
-    tool_call: model.capabilities.tool_call,
-    structured_output: true,
-    temperature: true,
-    variants: {
-      ...Object.fromEntries(model.reasoning_levels.map((effort) => [effort, { reasoning_effort: effort }])),
-      ...Object.fromEntries(OMNIRUSH_MODEL_EFFORTS
-        .filter((effort) => !model.reasoning_levels.includes(effort))
-        .map((effort) => [effort, { disabled: true }])),
-    },
-    limit: { context: model.limits.context, output: model.limits.output },
-    modalities: {
-      input: [
-        "text",
-        ...(model.capabilities.image_input ? ["image"] : []),
-        ...(model.capabilities.file_input ? ["pdf"] : []),
-      ],
-      output: ["text"],
-    },
-    ...(model.family && model.family !== PROVIDER_FAMILY ? { family: model.family } : {}),
-    ...(model.status === "beta" ? { status: "beta" } : {}),
-    // The model's own web search (web-search.ts): the engine declares the
-    // provider's web_search tool for it. Off, no `options` key at all.
-    ...(modelHasWebSearch(model, webSearch) ? { options: { hostedWebSearch: { searchContextSize: webSearch!.searchContextSize } } } : {}),
-  }]));
+  return Object.fromEntries(catalog.map((model) => {
+    const effort = omnirushDefaultEffort(model.reasoning_levels);
+    const options = {
+      ...(effort ? { reasoningEffort: effort } : {}),
+      // The model's own web search (web-search.ts): the engine declares the
+      // provider's web_search tool for it. Off, no `hostedWebSearch` key.
+      ...(modelHasWebSearch(model, webSearch) ? { hostedWebSearch: { searchContextSize: webSearch!.searchContextSize } } : {}),
+    };
+    return [model.id, {
+      name: model.display_name,
+      reasoning: model.capabilities.reasoning,
+      tool_call: model.capabilities.tool_call,
+      structured_output: true,
+      temperature: true,
+      variants: {
+        ...Object.fromEntries(model.reasoning_levels.map((level) => [level, { reasoningEffort: level }])),
+        ...Object.fromEntries(OMNIRUSH_MODEL_EFFORTS
+          .filter((level) => !model.reasoning_levels.includes(level))
+          .map((level) => [level, { disabled: true }])),
+      },
+      limit: { context: model.limits.context, output: model.limits.output },
+      modalities: {
+        input: [
+          "text",
+          ...(model.capabilities.image_input ? ["image"] : []),
+          ...(model.capabilities.file_input ? ["pdf"] : []),
+        ],
+        output: ["text"],
+      },
+      ...(model.family && model.family !== PROVIDER_FAMILY ? { family: model.family } : {}),
+      ...(model.status === "beta" ? { status: "beta" } : {}),
+      ...(Object.keys(options).length > 0 ? { options } : {}),
+    }];
+  }));
 }
 
 /**

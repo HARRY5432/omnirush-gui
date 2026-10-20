@@ -139,7 +139,7 @@ import { getModelBehaviorSummary, nextModelBehaviorValue, previousModelBehaviorV
 import { computeModelAvailability, createUnavailableConfirmationGate, type ModelAvailability } from "@/react-app/domains/session/surface/model-availability";
 import { useSessionFindStore } from "@/react-app/domains/session/surface/find-store";
 import { useModelPicker } from "@/react-app/domains/session/modals/use-model-picker";
-import { getSessionModelSelection, useSessionModelStore } from "@/react-app/domains/session/surface/session-model-store";
+import { getSessionModelSelection, resolveSendVariant, useSessionModelStore } from "@/react-app/domains/session/surface/session-model-store";
 import { useWorkbenchStore } from "@/react-app/domains/session/chat/workbench-store";
 import { resolveWorkbenchPaneEndpoint } from "@/react-app/domains/session/chat/pane-runtime";
 import {
@@ -1396,7 +1396,8 @@ export function SessionRoute() {
         const sessionModelSelection = getSessionModelSelection(targetSessionId);
         const configuredSendModel = sessionModelSelection?.model ?? local.prefs.defaultModel;
         const sendModel = configuredSendModel;
-        const sendVariant = sessionModelSelection ? sessionModelSelection.variant : modelVariantValue;
+        // The effort the picker shows for this model, never a null it hides.
+        const sendVariant = resolveSendVariant(sendModel, sessionModelSelection ? sessionModelSelection.variant : modelVariantValue);
         // Send-time validation targets the exact provider/model identity this
         // conversation displays and will submit — not the global default.
         if (resolveModelAvailability(sendModel ?? null).status === "unavailable") {
@@ -1468,6 +1469,7 @@ export function SessionRoute() {
                     messageID: draft.messageId,
                     command: draft.command.name,
                     arguments: draft.command.arguments,
+                    ...(sendVariant ? { variant: sendVariant } : {}),
                   });
                   if (result.error) {
                     throw new Error(serializeSDKError(result.error));
@@ -1754,7 +1756,8 @@ export function SessionRoute() {
         const sessionModelSelection = getSessionModelSelection(targetSessionId);
         const configuredSendModel = sessionModelSelection?.model ?? local.prefs.defaultModel;
         const sendModel = configuredSendModel;
-        const sendVariant = sessionModelSelection ? sessionModelSelection.variant : modelVariantValue;
+        // The effort the picker shows for this model, never a null it hides.
+        const sendVariant = resolveSendVariant(sendModel, sessionModelSelection ? sessionModelSelection.variant : modelVariantValue);
         return submitWithCloudMcpReadiness({
           skipGate: true,
           send: async () => {
@@ -1806,6 +1809,7 @@ export function SessionRoute() {
                     messageID: draft.messageId,
                     command: draft.command.name,
                     arguments: draft.command.arguments,
+                    ...(sendVariant ? { variant: sendVariant } : {}),
                   });
                   if (result.error) throw new Error(serializeSDKError(result.error));
                   return;
@@ -3314,16 +3318,17 @@ export function SessionRoute() {
       runtimeKey: environmentRuntimeKey,
     });
     const model = local.prefs.defaultModel;
+    const variant = resolveSendVariant(model, modelVariantValue);
     const result = await engine.session.promptAsync({
       sessionID: session.id,
       parts: [{ type: "text", text: prompt }],
       model: model ?? undefined,
       agent: selectedAgent ?? undefined,
-      ...(modelVariantValue ? { variant: modelVariantValue } : {}),
+      ...(variant ? { variant } : {}),
       system,
     });
     if (result.error) throw new Error(serializeSDKError(result.error));
-    if (model) useSessionModelStore.getState().setModel(session.id, model, modelVariantValue ?? null);
+    if (model) useSessionModelStore.getState().setModel(session.id, model, variant);
     writeLastSessionFor(taskWorkspace.id, session.id);
     void queryClient.invalidateQueries({ queryKey: workspaceTasksQueryKey(workspaceId) });
     return created.task;

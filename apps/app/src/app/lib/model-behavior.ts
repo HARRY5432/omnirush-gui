@@ -1,6 +1,6 @@
 import type { ProviderListItem } from "../types";
 import type { ModelBehaviorOption } from "../types";
-import { OMNIRUSH_REASONING_EFFORTS } from "../constants";
+import { OMNIRUSH_DEFAULT_REASONING_EFFORT, OMNIRUSH_REASONING_EFFORTS } from "../constants";
 import { t } from "../../i18n";
 
 type ProviderModel = ProviderListItem["models"][string];
@@ -71,7 +71,8 @@ const sortVariantKeys = (keys: string[]) =>
     return a.localeCompare(b);
   });
 
-const getDefaultVariantKey = (keys: string[]) => {
+const getDefaultVariantKey = (keys: string[], preferred: string | null = null) => {
+  if (preferred && keys.includes(preferred)) return preferred;
   let selected: string | null = null;
   let selectedScore: number | null = null;
 
@@ -248,8 +249,13 @@ export const getModelBehaviorSummary = (
 ) => {
   const options = getModelBehaviorOptions(providerID, model, providerName);
   const sanitized = sanitizeModelBehaviorValue(providerID, model, value, providerName);
+  // omnirush.ai models default to the CLI's effort where they offer it, else
+  // the level nearest medium: the same default the server gives the engine
+  // (omnirush-model-catalog.ts omnirushDefaultEffort), so a chat that never
+  // picked an effort shows the one it runs at.
   const selectedValue = sanitized ?? getDefaultVariantKey(
     options.flatMap((option) => option.value == null ? [] : [option.value]),
+    isOmniRushProvider(providerID) ? OMNIRUSH_DEFAULT_REASONING_EFFORT : null,
   );
   const selected = options.find((option) => option.value === selectedValue) ?? options[0] ?? null;
   const title = getBehaviorTitle(providerID, model, getVariantKeys(model), providerName);
@@ -281,4 +287,22 @@ export const getModelBehaviorSummary = (
     value: null,
     options,
   };
+};
+
+/**
+ * The effort a send carries: exactly the value the picker shows for this
+ * model and stored choice (getModelBehaviorSummary), so the two cannot drift.
+ * A stored choice the model does not offer, or none, resolves to the model's
+ * default. Without the model's details (providers not loaded yet) the stored
+ * choice is passed through as is; with none, the engine's model-level default
+ * applies, which is the same effort.
+ */
+export const resolveModelBehaviorValue = (
+  providerID: string,
+  model: ProviderModel | null | undefined,
+  value: string | null,
+  providerName?: string | null,
+): string | null => {
+  if (!model) return normalizeModelBehaviorValue(value);
+  return getModelBehaviorSummary(providerID, model, value, providerName).value;
 };

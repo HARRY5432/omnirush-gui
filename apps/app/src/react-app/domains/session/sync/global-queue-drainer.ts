@@ -23,7 +23,7 @@ import {
   nextObservationProbeAt,
   subscribeQueuedDrain,
 } from "../surface/queued-drain-machine";
-import { getSessionModelSelection, useSessionModelStore } from "../surface/session-model-store";
+import { getSessionModelSelection, resolveSendVariant, useSessionModelStore } from "../surface/session-model-store";
 import { draftToParts } from "./draft-parts";
 import { buildOmniRushSessionSystemContext } from "./env-context";
 import {
@@ -102,7 +102,8 @@ async function performQueuedDraftSend(
 
   const sessionModelSelection = getSessionModelSelection(sessionId);
   const sendModel = sessionModelSelection?.model ?? readStoredDefaultModelSafely() ?? context.model;
-  const sendVariant = sessionModelSelection ? sessionModelSelection.variant : context.variant;
+  // The effort the picker shows for this model, never a null it hides.
+  const sendVariant = resolveSendVariant(sendModel, sessionModelSelection ? sessionModelSelection.variant : context.variant);
   const createEngineClient = isOpencodeV2BaseUrl(context.opencodeBaseUrl) ? createClientV2 : createClient;
   const opencodeClient = createEngineClient(
     context.opencodeBaseUrl,
@@ -121,6 +122,7 @@ async function performQueuedDraftSend(
       messageID: draft.messageId,
       command: draft.command.name,
       arguments: draft.command.arguments,
+      ...(sendVariant ? { variant: sendVariant } : {}),
     });
     if (result.error) throw new Error(serializeSDKError(result.error));
     return;
