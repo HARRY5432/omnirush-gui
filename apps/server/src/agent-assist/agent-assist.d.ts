@@ -11,7 +11,8 @@ export const LSP_BUILTIN_IDS: string[];
 export const LSP_ENABLED_IDS: string[];
 export const LSP_HEAP_MB: number;
 export function lspConfig(): Record<string, { disabled: true }>;
-export function lspEngineEnv(env?: Record<string, string | undefined>): Record<string, string>;
+export function lspHeapMb(totalBytes?: number): number;
+export function lspEngineEnv(env?: Record<string, string | undefined>, options?: { totalBytes?: number }): Record<string, string>;
 export function restoreShellEnv(processEnv: Record<string, string | undefined>, output: { env?: Record<string, string> } | undefined): void;
 export function filterDiagnosticsOutput(text: string): { text: string; removed: number; kept: number };
 export function capDiagnosticsMetadata<T>(map: T, options?: { files?: number; per?: number }): T;
@@ -24,6 +25,7 @@ export type CheckResult = { ok: boolean; passed: number | null; failed: number |
 export function parseCheckResult(output: string, exitCode: number | null | undefined, command?: string): CheckResult;
 export function isCodeEdit(tool: string, args: unknown): boolean;
 export function skipRequested(text: string): boolean;
+export function declinesChange(text: string): boolean;
 export const SELF_CHECK_ATTEMPTS: number;
 export type CheckState = { edits: number; failures: number; ran: number; skip: boolean; last: CheckResult | null; shown: number };
 export const SELF_CHECK_NOTE_REPEATS: number;

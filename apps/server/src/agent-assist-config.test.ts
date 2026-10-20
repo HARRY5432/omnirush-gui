@@ -17,6 +17,7 @@ import {
   agentAssistFlags,
   agentAssistForced,
   agentAssistLspConfig,
+  lspHeapMb,
   normalizeAgentAssistSetting,
   writeAgentAssistFile,
 } from "./agent-assist-config.js";
@@ -49,6 +50,10 @@ describe("agent assist", () => {
     }
     const config = { configPath: "/data/server.json" } as unknown as ServerConfig;
     const env = agentAssistEngineEnv(config, { NODE_OPTIONS: "--trace-warnings" });
+    expect(lspHeapMb(4 * 1024 ** 3)).toBe(shared.lspHeapMb(4 * 1024 ** 3));
+    expect(lspHeapMb(64 * 1024 ** 3)).toBe(shared.lspHeapMb(64 * 1024 ** 3));
+    // Diagnostics off at the start: no heap cap in the engine's env.
+    expect(agentAssistEngineEnv(config, { NODE_OPTIONS: "--x" }, { diagnostics: false }).NODE_OPTIONS).toBeUndefined();
     const expected: Record<string, string> = shared.lspEngineEnv({ NODE_OPTIONS: "--trace-warnings" });
     expect({ NODE_OPTIONS: env.NODE_OPTIONS, OMNIRUSH_USER_NODE_OPTIONS: env.OMNIRUSH_USER_NODE_OPTIONS, OMNIRUSH_LSP_HEAP: env.OMNIRUSH_LSP_HEAP } as Record<string, string | undefined>).toEqual(expected);
   });

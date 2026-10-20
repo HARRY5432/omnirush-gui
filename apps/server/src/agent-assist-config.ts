@@ -20,6 +20,7 @@
  * of the server's build output); agent-assist-config.test.ts keeps them equal.
  */
 import { mkdir, readFile } from "node:fs/promises";
+import { totalmem } from "node:os";
 import { join } from "node:path";
 
 import { writeFileAtomic } from "./atomic-write.js";
@@ -48,6 +49,13 @@ export const LSP_BUILTIN_IDS = [
 ];
 export const LSP_ENABLED_IDS = ["typescript", "deno", "pyright", "gopls", "rust"];
 export const LSP_HEAP_MB = 3072;
+const LSP_HEAP_MIN_MB = 768;
+
+/** The servers' heap cap: LSP_HEAP_MB, at most a quarter of this machine's memory. */
+export function lspHeapMb(totalBytes = totalmem()): number {
+  const quarter = Math.floor(totalBytes / 4 / 1024 / 1024);
+  return Math.max(LSP_HEAP_MIN_MB, Math.min(LSP_HEAP_MB, quarter || LSP_HEAP_MB));
+}
 
 function switchValue(value: string | undefined): boolean | null {
   const text = String(value ?? "").trim().toLowerCase();
@@ -89,19 +97,21 @@ export function agentAssistFilePath(config: ServerConfig): string {
 
 /**
  * The engine's env: where the plugin reads its switches and keeps its notes,
- * and the language servers' heap cap (NODE_OPTIONS; the plugin puts the
- * person's own NODE_OPTIONS back for every shell call and terminal).
+ * and, while code diagnostics are on when the engine starts, the language
+ * servers' heap cap (NODE_OPTIONS; the plugin puts the person's own
+ * NODE_OPTIONS back for every shell call and terminal). Diagnostics turned on
+ * later run without the cap until the next start.
  */
-export function agentAssistEngineEnv(config: ServerConfig, env: NodeJS.ProcessEnv = process.env): Record<string, string> {
-  const own = typeof env.NODE_OPTIONS === "string" ? env.NODE_OPTIONS : "";
-  const capped = /--max-old-space-size[= ]/.test(own) ? own : `${own} --max-old-space-size=${LSP_HEAP_MB}`.trim();
-  return {
+export function agentAssistEngineEnv(config: ServerConfig, env: NodeJS.ProcessEnv = process.env, { diagnostics = true, totalBytes }: { diagnostics?: boolean; totalBytes?: number } = {}): Record<string, string> {
+  const base = {
     OMNIRUSH_AGENT_ASSIST_FILE: agentAssistFilePath(config),
     OMNIRUSH_AGENT_ASSIST_DIR: join(runtimeStorageDir(config), "agent-assist"),
-    NODE_OPTIONS: capped,
-    OMNIRUSH_USER_NODE_OPTIONS: own,
-    OMNIRUSH_LSP_HEAP: String(LSP_HEAP_MB),
   };
+  if (!diagnostics) return base;
+  const heap = lspHeapMb(totalBytes);
+  const own = typeof env.NODE_OPTIONS === "string" ? env.NODE_OPTIONS : "";
+  const capped = /--max-old-space-size[= ]/.test(own) ? own : `${own} --max-old-space-size=${heap}`.trim();
+  return { ...base, NODE_OPTIONS: capped, OMNIRUSH_USER_NODE_OPTIONS: own, OMNIRUSH_LSP_HEAP: String(heap) };
 }
 
 /** Rewrites the plugin's switch file when the features changed. */

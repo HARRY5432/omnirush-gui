@@ -3,13 +3,14 @@
 //
 // PARITY: this file is the same in omnirush-cli
 // (assets/extensions/omnirush/agent-assist/) and omnirush-gui
-// (apps/server/src/opencode-plugins/agent-assist/); PARITY.sha256 in both
+// (apps/server/src/agent-assist/); PARITY.sha256 in both
 // lists its hash. Plain JavaScript on node built-ins only: the engine loads it
 // as is (CLI) or bundled (desktop).
 //
 // Everything model-facing here is neutral wording; nothing names the app.
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 // --- feature switches ---------------------------------------------------------
@@ -85,8 +86,14 @@ export const LSP_BUILTIN_IDS = [
  * for files the four already cover.
  */
 export const LSP_ENABLED_IDS = ["typescript", "deno", "pyright", "gopls", "rust"];
-/** Heap cap (MB) for the Node-based servers (tsserver, pyright): VS Code's default for tsserver. */
+/** Heap cap (MB) for the Node-based servers (tsserver, pyright): VS Code's default for tsserver, at most a quarter of this machine's memory. */
 export const LSP_HEAP_MB = 3072;
+const LSP_HEAP_MIN_MB = 768;
+
+export function lspHeapMb(totalBytes = os.totalmem()) {
+  const quarter = Math.floor(totalBytes / 4 / 1024 / 1024);
+  return Math.max(LSP_HEAP_MIN_MB, Math.min(LSP_HEAP_MB, quarter || LSP_HEAP_MB));
+}
 
 /** The engine config's `lsp` value: every built-in server but the enabled ones turned off. */
 export function lspConfig() {
@@ -99,15 +106,27 @@ export function lspConfig() {
  * kept in OMNIRUSH_USER_NODE_OPTIONS and put back for every shell call and
  * terminal (restoreShellEnv), so their commands run exactly as before.
  */
-export function lspEngineEnv(env = {}) {
+export function lspEngineEnv(env = {}, { totalBytes } = {}) {
+  const heap = lspHeapMb(totalBytes);
   const own = typeof env.NODE_OPTIONS === "string" ? env.NODE_OPTIONS : "";
-  const capped = /--max-old-space-size[= ]/.test(own) ? own : `${own} --max-old-space-size=${LSP_HEAP_MB}`.trim();
-  return { NODE_OPTIONS: capped, OMNIRUSH_USER_NODE_OPTIONS: own, OMNIRUSH_LSP_HEAP: String(LSP_HEAP_MB) };
+  const capped = /--max-old-space-size[= ]/.test(own) ? own : `${own} --max-old-space-size=${heap}`.trim();
+  return { NODE_OPTIONS: capped, OMNIRUSH_USER_NODE_OPTIONS: own, OMNIRUSH_LSP_HEAP: String(heap) };
 }
 
+/** The engine env this plugin adds; shell calls and terminals never see them. */
+const OWN_ENV = ["OMNIRUSH_AGENT_ASSIST", "OMNIRUSH_AGENT_ASSIST_DIR", "OMNIRUSH_AGENT_ASSIST_FILE", "OMNIRUSH_USER_NODE_OPTIONS", "OMNIRUSH_LSP_HEAP"];
+
+/**
+ * A shell call's or terminal's env (the engine's `shell.env` hook): the
+ * person's own NODE_OPTIONS back (empty when they had none), and this
+ * plugin's variables blanked.
+ */
 export function restoreShellEnv(processEnv, output) {
-  if (!output || !output.env || typeof processEnv.OMNIRUSH_LSP_HEAP !== "string") return;
-  output.env.NODE_OPTIONS = typeof processEnv.OMNIRUSH_USER_NODE_OPTIONS === "string" ? processEnv.OMNIRUSH_USER_NODE_OPTIONS : "";
+  if (!output || !output.env) return;
+  if (typeof processEnv.OMNIRUSH_LSP_HEAP === "string") {
+    output.env.NODE_OPTIONS = typeof processEnv.OMNIRUSH_USER_NODE_OPTIONS === "string" ? processEnv.OMNIRUSH_USER_NODE_OPTIONS : "";
+  }
+  for (const name of OWN_ENV) if (typeof processEnv[name] === "string") output.env[name] = "";
 }
 
 const DIAG_BLOCK = /(\n*LSP errors detected in [^\n]*:\n)?<diagnostics file="([^"]*)">\n([\s\S]*?)\n<\/diagnostics>/g;
@@ -293,7 +312,7 @@ export function parseCheckResult(output, exitCode, command = "") {
     failed = count(text, /^(?:# |ℹ )fail (\d+)/m) ?? 0;
   }
   if (passed === null) {
-    const pytest = /=+ (?:(\d+) failed, )?(\d+) passed|=+ (\d+) failed/.exec(text);
+    const pytest = /^(?:=+ )?(?:(\d+) failed, )?(\d+) passed\b.* in [\d.]+s|^(?:=+ )?(\d+) failed\b.* in [\d.]+s/m.exec(text);
     if (pytest) { failed = Number(pytest[1] ?? pytest[3] ?? 0); passed = Number(pytest[2] ?? 0); }
   }
   if (passed === null) {
@@ -310,7 +329,8 @@ export function parseCheckResult(output, exitCode, command = "") {
   }
   const tscErrors = count(text, /Found (\d+) errors?/);
   const eslintProblems = count(text, /✖ (\d+) problems?/);
-  const ok = exitCode === 0 || (exitCode === null || exitCode === undefined ? (failed === 0 && passed !== null) : false);
+  // A null exit is a call that timed out or was stopped: never a pass. Without any exit (no metadata) the counts decide.
+  const ok = exitCode === 0 || (exitCode === undefined ? (failed === 0 && passed !== null) : false);
   const unit = /\bgo\s+test\b/.test(command) ? "packages" : "tests";
   let summary;
   if (passed !== null) {
@@ -347,9 +367,14 @@ export function isCodeEdit(tool, args) {
   return files.length === 0 || files.some((file) => !NOT_CODE.test(file));
 }
 
-/** Whether the person asked for no checks in this turn ("skip the tests", "don't run tests"). */
+/** Whether the person asked for no checks in this turn ("skip the tests", "don't run tests", "no need to run the checks"). */
 export function skipRequested(text) {
-  return /\b(?:skip|without|no need (?:to run|to|for)|don'?t run|do not run|no)\s+(?:running\s+)?(?:the\s+|any\s+)?(?:self[- ]?checks?|checks?|tests?|linters?|linting|type[- ]?checks?)\b/i.test(String(text || ""));
+  return /\b(?:skip(?:ping)?|don'?t run|do not run|no need to run|no need for|without running|never mind)\s+(?:the\s+|any\s+)?(?:self[- ]?checks?|checks?|tests?|test suite|linters?|linting|type[- ]?checks?)\b/i.test(String(text || ""));
+}
+
+/** Whether the person's answer to "apply this AGENTS.md change?" declines it. */
+export function declinesChange(text) {
+  return /^\s*(?:no\b|nope\b|nah\b|don'?t\b|do not\b|keep\b|leave\b|cancel\b|stop\b)/i.test(String(text || ""));
 }
 
 export const SELF_CHECK_ATTEMPTS = 3;
@@ -542,10 +567,13 @@ export function droppedLines(before, after) {
   return dropped;
 }
 
-function isNotesFile(file, root) {
+function isNotesFile(file, root, platform = process.platform) {
   if (typeof file !== "string" || !file) return false;
-  const full = path.resolve(root, file);
-  return path.basename(full) === NOTES_FILE && (full === root || full.startsWith(root.endsWith(path.sep) ? root : root + path.sep));
+  // Case-insensitive file systems (Windows, macOS): agents.md is the same file.
+  const fold = platform === "win32" || platform === "darwin" ? (text) => text.toLowerCase() : (text) => text;
+  const full = fold(path.resolve(root, file));
+  const base = fold(path.resolve(root));
+  return path.basename(full).toLowerCase() === NOTES_FILE.toLowerCase() && full.startsWith(base.endsWith(path.sep) ? base : base + path.sep);
 }
 
 /**
@@ -612,7 +640,7 @@ export function notesGuardMessage(drops) {
 
 // --- compaction -----------------------------------------------------------------
 
-const PREFERENCE = /^(?:keep|use|avoid|prefer|stick to|leave)\b|\b(?:always|never|don'?t|do not|please (?:use|keep|avoid|make)|prefer|make sure|must(?:n'?t)?|should(?:n'?t| not)?|from now on|instead of|avoid|only use|stick to)\b/i;
+const PREFERENCE = /^(?:keep|use|avoid|prefer|stick to|leave|never|always|don'?t|do not)\b|\b(?:always|never|please (?:use|keep|avoid|make|don'?t)|prefer|make sure|mustn'?t|must not|shouldn'?t|should not|from now on|instead of|only use|stick to)\b/i;
 const DECISION = /\b(?:decided|we(?:'ll| will) (?:use|go with|keep)|going with|let'?s (?:use|go with|keep)|chose|switch(?:ed|ing)? to|the plan is)\b/i;
 
 function sentences(text) {
@@ -648,7 +676,8 @@ export function sessionLedger(messages) {
     for (const part of partsOf(message)) {
       if (part?.type === "text" && !part.synthetic && !part.ignored && typeof part.text === "string") {
         for (const sentence of sentences(part.text)) {
-          if (role === "user" && PREFERENCE.test(sentence)) pushUnique(ledger.preferences, sentence, 12);
+          // A question is not a preference ("why should this fail?").
+          if (role === "user" && PREFERENCE.test(sentence) && !sentence.endsWith("?")) pushUnique(ledger.preferences, sentence, 12);
           if (DECISION.test(sentence)) pushUnique(ledger.decisions, sentence, 10);
         }
       }
