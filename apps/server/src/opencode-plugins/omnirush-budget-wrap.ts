@@ -20,7 +20,9 @@ const WRAP_UP_HEADER = "x-omnirush-wrap-up";
 const OFFER_HEADER = "x-omnirush-wrap-offer-id";
 const SESSION_HEADER = "x-omnirush-session-id";
 type ModelRef = { providerID: string; modelID: string };
-type Offer = { id: string; scopes: string; watching: boolean; inFlight: boolean; approved: boolean; backendWrapped: boolean; compacted: boolean };
+type Offer = { id: string; scopes: string; watching: boolean; inFlight: boolean; approved: boolean; backendWrapped: boolean; compacted: boolean; failedAt?: number };
+/** How long a failed wrap's Retry stays available (the window's notice). */
+const RETRY_WINDOW_MS = 30_000;
 const pending = new Map<string, Offer>();
 /** Sessions with a turn running (`session.status` busy until idle). */
 const busy = new Set<string>();
@@ -187,6 +189,7 @@ export const OmniRushBudgetWrap = async (input: {
       entry.inFlight = false;
       entry.compacted = false;
       entry.backendWrapped = false;
+      entry.failedAt = Date.now();
       await update(sessionID, entry, "fail");
       await notify("Wrap up did not finish", "Your session is unchanged. You can retry, or keep working.", "warning");
     }
@@ -201,6 +204,8 @@ export const OmniRushBudgetWrap = async (input: {
     while (!disposed && pending.get(sessionID) === entry && !entry.inFlight && !busy.has(sessionID)) {
       const offered = await update(sessionID, entry, "offer");
       if (offered === "decline" || offered === "done") { pending.delete(sessionID); break; }
+      // A failed wrap is retried only from its notice, while it is shown.
+      if (offered === "failed" && Date.now() - (entry.failedAt ?? 0) > RETRY_WINDOW_MS) { pending.delete(sessionID); break; }
       if (busy.has(sessionID)) break;
       if (startWrapNow({ choice: offered, busy: busy.has(sessionID), inFlight: entry.inFlight })) { await compact(sessionID); continue; }
       // "pending" (unanswered) or "failed" (a retry may come from the notice).
@@ -230,13 +235,12 @@ export const OmniRushBudgetWrap = async (input: {
       if (event.type === "session.status" && record(event.properties) && record(event.properties.status)) {
         const type = event.properties.status.type;
         if (type === "busy" || type === "retry") {
+          // Always busy, the compaction too: a prompt sent while it runs
+          // follows it with no new busy event, so a Retry must still wait.
+          // The compaction's own idle clears it.
+          busy.add(sessionID);
           const entry = pending.get(sessionID);
-          // The compaction itself runs the session too; only a person's
-          // turn hides the question.
-          if (!entry?.inFlight) {
-            busy.add(sessionID);
-            if (entry) void update(sessionID, entry, "hold");
-          }
+          if (entry && !entry.inFlight) void update(sessionID, entry, "hold");
         } else if (type === "idle") busy.delete(sessionID);
       }
       if (event.type === "session.idle") {

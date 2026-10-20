@@ -217,6 +217,38 @@ describe("account budget wrap plugin", () => {
   });
 });
 
+describe("account budget wrap plugin: retry and busy", () => {
+  test("a Retry during a turn queued behind the wrap waits for idle", async () => {
+    let compactCalls = 0;
+    let choice = "accept";
+    let hooks: Hooks;
+    hooks = await OmniRushBudgetWrap({
+      serverUrl: "http://127.0.0.1:4096",
+      fetch: async (input, init) => {
+        const url = String(input);
+        if (url.includes("/experimental/ui-control/request")) {
+          const action = operation(init);
+          if (action === "fail") choice = "accept"; // the person clicks Retry at once
+          return Response.json({ ok: true, result: { choice: action === "offer" ? choice : "ok" } });
+        }
+        compactCalls += 1;
+        // A prompt sent during the wrap keeps the session busy after it.
+        await hooks.event!({ event: { type: "session.status", properties: { sessionID: "ses_q", status: { type: "busy" } } } });
+        return new Response("{}", { status: 500 });
+      },
+    });
+    try {
+      await modelRequest(hooks, "ses_q", { "x-omnirush-wrap-required": "1", "x-omnirush-wrap-offer-id": "allowance-q" });
+      await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "ses_q" } } });
+      await Bun.sleep(60);
+      expect(compactCalls).toBe(1);
+      await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "ses_q" } } });
+      await Bun.sleep(30);
+      expect(compactCalls).toBe(2);
+    } finally { await hooks.dispose!(); }
+  });
+});
+
 describe("handoff offer rules (shared with the CLI)", () => {
   test("CLI/desktop parity: budget-wrap-rules.ts matches PARITY.sha256", () => {
     const rows = readFileSync(join(import.meta.dir, "PARITY.sha256"), "utf8").split("\n").filter((line) => line && !line.startsWith("#"));
