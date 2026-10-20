@@ -194,6 +194,7 @@ import {
   assertEngineStartedWithinLock,
   assertProxiedEngineRequestWithinProviderLock,
   currentProviderLockPolicy,
+  engineStartedUnlocked,
   parseJsoncContent,
   providerLockStatus,
   watchProviderLock,
@@ -1592,6 +1593,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
           if (!connection) {
             return finalize(jsonResponse({ error: "engine_v2_preview_not_running" }, 503));
           }
+          assertEngineStartedWithinLock(connection.url, request.method, mount.restPath);
           proxyService = "opencode";
           proxyBaseUrl = connection.url;
           await engineV2Preview.ensureWorkspaceReady(workspace.path);
@@ -2434,6 +2436,12 @@ export async function proxyOpencodeRequest(input: {
   const route = pool?.routeRequest(method, decodeEngineRoutePath(proxyPath)) ?? null;
   const baseUrl = route?.target.baseUrl ??
     (workspace ? resolveWorkspaceOpencodeConnection(input.config, workspace).baseUrl?.trim() ?? "" : "");
+  // The engine the request actually goes to (a draining one owns its sessions), and its fallback.
+  for (const target of [baseUrl, route?.fallback?.baseUrl]) {
+    if (!target) continue;
+    const switching = pool !== null && !pool.isPrimaryUrl(target) && !engineStartedUnlocked(pool.primaryUrl() ?? "");
+    assertEngineStartedWithinLock(target, method, proxyPath, currentProviderLockPolicy(), { switching });
+  }
   if (!baseUrl) {
     throw new ApiError(400, "opencode_unconfigured", "OmniRush base URL is missing for this workspace");
   }
@@ -3187,7 +3195,14 @@ async function applyBoxEngineConfig(config: ServerConfig, reason: string, option
     if (!pool || !workspace) return { status: "unmanaged" };
     // `restart`: the engine's environment changes too (the provider lock), so a new engine process, never
     // an in-place reload. If it cannot start, the old engine's prompts are refused (assertEngineStartedWithinLock).
-    const outcome = await pool.requestRollover({ reason, workspace, manual: true, ...(options.restart ? { forceStandby: true } : {}) });
+    // Under the lock, an engine started without it is closed, its running turns aborted, rather than drained.
+    const outcome = await pool.requestRollover({
+      reason,
+      workspace,
+      manual: true,
+      ...(options.restart ? { forceStandby: true } : {}),
+      ...(options.restart && currentProviderLockPolicy().locked ? { retireDrainingIf: engineStartedUnlocked } : {}),
+    });
     return { status: outcome.action === "coalesced" ? "deferred" : outcome.action === "skipped" ? "failed" : "applied" };
   } catch {
     return { status: "failed" };

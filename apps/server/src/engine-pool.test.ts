@@ -1007,6 +1007,32 @@ describe("engine pool", () => {
     expect(lines).toContain(`${oldPort} SIGTERM`);
   });
 
+  test("a rollover that retires matching draining engines aborts their running sessions and closes them at once", async () => {
+    setEnv("OMNIRUSH_ENGINE_ABORT_SETTLE_MS", "50");
+    const fixture = await createFixture();
+    const { pool, primary } = await createPool(fixture);
+    const oldPort = portOf(primary.url);
+    await fixture.setBusy(oldPort, ["ses_live"]);
+    await fixture.setRuntimeConfig(JSON.stringify({ generation: 2 }));
+
+    const outcome = await pool.requestRollover({
+      reason: "config_changed",
+      workspace: fixture.workspace,
+      manual: true,
+      forceStandby: true,
+      retireDrainingIf: (url) => portOf(url) === oldPort,
+    });
+
+    expect(outcome.action).toBe("rolled_over");
+    expect(primary.isAlive()).toBe(false);
+    expect(pool.snapshot().generations.map((entry) => entry.role)).toEqual(["primary"]);
+    expect(pool.isPrimaryUrl(pool.primaryUrl()!)).toBe(true);
+    expect(pool.isPrimaryUrl(primary.url)).toBe(false);
+    const lines = await fixture.logLines();
+    expect(lines).toContain(`${oldPort} POST /session/ses_live/abort`);
+    expect(lines).toContain(`${oldPort} SIGTERM`);
+  });
+
   test("uses one global activity stream across many workspaces and never aborts an active session", async () => {
     setEnv("OMNIRUSH_ENGINE_DRAIN_TIMEOUT_MS", "300");
     setEnv("OMNIRUSH_ENGINE_ABORT_SETTLE_MS", "100");

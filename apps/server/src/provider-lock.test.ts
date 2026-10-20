@@ -15,6 +15,7 @@ import {
   assertProxiedEngineRequestWithinProviderLock,
   currentProviderLockPolicy,
   engineRequestProviderLockDenial,
+  engineStartedUnlocked,
   lockedEngineEnv,
   providerAllowed,
   providerLockConfigViolations,
@@ -244,6 +245,10 @@ describe("provider lock: refusals", () => {
       ["POST", "/session/ses_1/command", { command: "c", model: "openai/gpt-x" }],
       ["POST", "/api/session/ses_1/prompt", { model: { providerID: "opencode", modelID: "zen" } }],
       ["POST", "/session", { model: { providerID: "lpr_org1", id: "m" } }],
+      ["POST", "/SESSION/ses_1/prompt_async", { model: { providerID: "openai", modelID: "gpt-x" } }],
+      ["PUT", "/Auth/openai", { type: "api", key: "sk-fake" }],
+      ["PATCH", "/API/Config", { model: "openai/gpt-x" }],
+      ["POST", "/session/ses_1/prompt_async", { parts: [{ type: "subtask", prompt: "p", model: { providerID: "openai", modelID: "gpt-x" } }] }],
     ];
     for (const [method, path, body] of refused) expect([method, path, engineRequestProviderLockDenial(method, path, body)]).toEqual([method, path, "Only OmniRush models are available."]);
     const allowed: Array<[string, string, Record<string, unknown>]> = [
@@ -310,15 +315,32 @@ describe("provider lock: the app's own provider and engines started unlocked", (
     noteEngineStarted("http://127.0.0.1:4001");
     resetProviderLock();
     noteEngineStarted("http://127.0.0.1:4002");
-    for (const [method, path] of [["POST", "/session"], ["POST", "/session/ses_1/prompt_async"], ["POST", "/opencode/session/ses_1/message"], ["POST", "/api/session/ses_1/command"], ["POST", "/session/ses_1/shell"], ["POST", "/session/ses_1/summarize"]] as const) {
+    for (const [method, path] of [["POST", "/session"], ["POST", "/session/ses_1/prompt_async"], ["POST", "/opencode/session/ses_1/message"], ["POST", "/api/session/ses_1/command"], ["POST", "/session/ses_1/shell"], ["POST", "/session/ses_1/summarize"], ["POST", "/session/ses_1/revert"], ["POST", "/session/ses_1/unrevert"], ["POST", "/Session/ses_1/Prompt_Async"]] as const) {
       expect(() => assertEngineStartedWithinLock("http://127.0.0.1:4001/", method, path)).toThrow("Only OmniRush models are available. Restart the app to continue.");
       expect(() => assertEngineStartedWithinLock("http://127.0.0.1:4002", method, path)).not.toThrow();
     }
     expect(() => assertEngineStartedWithinLock("http://127.0.0.1:4001", "GET", "/session/ses_1/message")).not.toThrow();
     expect(() => assertEngineStartedWithinLock("http://127.0.0.1:4001", "POST", "/session/ses_1/abort")).not.toThrow();
     expect(() => assertEngineStartedWithinLock("http://127.0.0.1:4999", "POST", "/session")).not.toThrow();
+    expect(engineStartedUnlocked("http://127.0.0.1:4001/x")).toBe(true);
+    expect(engineStartedUnlocked("http://127.0.0.1:4002")).toBe(false);
     applyProviderLockAnswer(UNLOCKED);
     expect(() => assertEngineStartedWithinLock("http://127.0.0.1:4001", "POST", "/session")).not.toThrow();
+  });
+
+  test("while a locked engine takes over, a draining unlocked one answers retry with 503", () => {
+    applyProviderLockAnswer(UNLOCKED);
+    noteEngineStarted("http://127.0.0.1:4001");
+    resetProviderLock();
+    const error = (() => {
+      try {
+        assertEngineStartedWithinLock("http://127.0.0.1:4001", "POST", "/session/ses_1/prompt_async", currentProviderLockPolicy(), { switching: true });
+      } catch (caught) {
+        return caught;
+      }
+      return null;
+    })();
+    expect(error).toMatchObject({ status: 503, code: "provider_locked", message: "Switching to OmniRush models, retry in a moment." });
   });
 });
 

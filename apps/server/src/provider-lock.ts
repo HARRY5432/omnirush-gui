@@ -233,17 +233,19 @@ export function engineRequestProviderLockDenial(
   if (!policy.locked) return null;
   const verb = method.toUpperCase();
   if (["GET", "HEAD", "OPTIONS", "DELETE"].includes(verb)) return null;
-  const path = enginePath.replace(/^\/api(?=\/)/, "");
-  const auth = path.match(/^\/auth\/([^/]+)\/?$/);
+  const path = enginePath.replace(/^\/api(?=\/)/i, "");
+  const auth = path.match(/^\/auth\/([^/]+)\/?$/i);
   if (auth) return providerAllowed(decodeURIComponent(auth[1] ?? ""), policy) ? null : policy.message;
-  const oauth = path.match(/^\/provider\/([^/]+)\/oauth(?:\/|$)/);
+  const oauth = path.match(/^\/provider\/([^/]+)\/oauth(?:\/|$)/i);
   if (oauth) return providerAllowed(decodeURIComponent(oauth[1] ?? ""), policy) ? null : policy.message;
-  if (/^\/(?:global\/)?config\/?$/.test(path)) {
+  if (/^\/(?:global\/)?config\/?$/i.test(path)) {
     if (configAddsPlugins(body)) return PLUGINS_LOCKED_MESSAGE;
     return providerLockConfigViolations(body, policy).length ? policy.message : null;
   }
-  if (/^\/session(?:\/|$)/.test(path)) {
-    for (const value of [body.model, body.providerID === undefined ? undefined : { providerID: body.providerID }]) {
+  if (/^\/session(?:\/|$)/i.test(path)) {
+    // The prompt's model, and each part's own model (a sub-task part names one).
+    const parts = Array.isArray(body.parts) ? body.parts.filter(isRecord).map((part) => part.model) : [];
+    for (const value of [body.model, body.providerID === undefined ? undefined : { providerID: body.providerID }, ...parts]) {
       const provider = modelProviderOf(value);
       if (provider !== undefined && provider !== null && !providerAllowed(provider, policy)) return policy.message;
     }
@@ -315,6 +317,11 @@ function originOf(url: string): string {
 const engineStarts = new Map<string, boolean>();
 
 /** An engine started at `url` under `policy` (managed-opencode.ts, managed-opencode-v2.ts). */
+/** An engine this app started before the lock applied (its prompts are refused, its runs closed). */
+export function engineStartedUnlocked(url: string): boolean {
+  return engineStarts.get(originOf(url)) === false;
+}
+
 export function noteEngineStarted(url: string, policy: ProviderLockPolicy = current): void {
   engineStarts.set(originOf(url), policy.locked);
 }
@@ -327,8 +334,8 @@ export function resetEngineStarts(): void {
 /** A request that makes the engine do model work: a new chat, a prompt, a command, a shell turn, a summary. */
 export function isModelWorkRequest(method: string, enginePath: string): boolean {
   if (method.toUpperCase() !== "POST") return false;
-  const path = enginePath.replace(/^\/opencode2?(?=\/|$)/, "").replace(/^\/api(?=\/)/, "").replace(/\/+$/, "");
-  return path === "/session" || /^\/session\/[^/]+\/(?:prompt|prompt_async|message|command|shell|summarize|init)$/.test(path);
+  const path = enginePath.replace(/^\/opencode2?(?=\/|$)/i, "").replace(/^\/api(?=\/)/i, "").replace(/\/+$/, "");
+  return /^\/session$/i.test(path) || /^\/session\/[^/]+\/(?:prompt|prompt_async|message|command|shell|summarize|init|revert|unrevert)$/i.test(path);
 }
 
 /**
@@ -338,9 +345,14 @@ export function isModelWorkRequest(method: string, enginePath: string): boolean 
  * providers): 403 provider_locked, asking for a restart. Engines the app
  * did not start, and every other request, pass.
  */
-export function assertEngineStartedWithinLock(engineUrl: string | null | undefined, method: string, enginePath: string, policy: ProviderLockPolicy = current): void {
+export const PROVIDER_SWITCHING_MESSAGE = "Switching to OmniRush models, retry in a moment.";
+
+export function assertEngineStartedWithinLock(engineUrl: string | null | undefined, method: string, enginePath: string, policy: ProviderLockPolicy = current, options: { switching?: boolean } = {}): void {
   if (!policy.locked || !engineUrl || !isModelWorkRequest(method, engineRoutePath(enginePath))) return;
-  if (engineStarts.get(originOf(engineUrl)) === false) throw new ApiError(403, PROVIDER_LOCKED_CODE, `${policy.message} Restart the app to continue.`);
+  if (engineStarts.get(originOf(engineUrl)) !== false) return;
+  // A newer engine under the lock is already serving (this one drains): the request can be sent again.
+  if (options.switching) throw new ApiError(503, PROVIDER_LOCKED_CODE, PROVIDER_SWITCHING_MESSAGE);
+  throw new ApiError(403, PROVIDER_LOCKED_CODE, `${policy.message} Restart the app to continue.`);
 }
 
 /** The policy for the app's UI (GET /omnirush/provider-lock). */
