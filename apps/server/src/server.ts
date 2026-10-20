@@ -6293,6 +6293,11 @@ async function writeWorkspaceMcpFile(config: ServerConfig, workspace: WorkspaceI
  * at runtime (it would skip the list) or its OAuth flow are not.
  */
 function assertEngineMcpRouteAllowed(config: ServerConfig, method: string, routePath: string): void {
+  // Config writes through the engine (the project's or the user's global
+  // file) could add servers outside Settings > MCP; the app never uses them.
+  if (method !== "GET" && method !== "HEAD" && /^(?:\/api)?\/(?:global\/)?config\/?$/.test(routePath.split("?")[0] ?? "")) {
+    throw new ApiError(403, "engine_config_private", "Engine configuration is private");
+  }
   const match = /^(?:\/api)?\/mcp(?:\/(.*))?$/.exec(routePath.split("?")[0] ?? "");
   if (!match) return;
   if (method === "GET" || method === "HEAD") return;

@@ -262,6 +262,11 @@ describe("MCP allowlist at the HTTP and runtime boundaries", () => {
     expect(await auth.json()).toMatchObject({ code: "mcp_account_linked" });
     const list = await call("GET", "/workspace/ws_1/opencode/mcp");
     expect(list.status).toBe(200);
+    for (const path of ["/workspace/ws_1/opencode/config", "/workspace/ws_1/opencode/global/config"]) {
+      const write = await call("PATCH", path, { mcp: { x: SAFE } });
+      expect(write.status).toBe(403);
+      expect(await write.json()).toMatchObject({ code: "engine_config_private" });
+    }
     expect(engine.pushedNames()).toEqual([]);
   });
 

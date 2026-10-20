@@ -50,9 +50,14 @@ export default async function omnirushMcpPolicy(input?: { directory?: string }) 
     config: async (configInput: unknown, output?: unknown) => {
       const target = configTarget(configInput, output);
       if (target) {
-        const added = readWorkspaceMcp(process.env.OMNIRUSH_MCP_WORKSPACE_DIR, root);
-        if (Object.keys(added).length) target.mcp = { ...(isRecord(target.mcp) ? target.mcp : {}), ...added };
+        try {
+          const added = readWorkspaceMcp(process.env.OMNIRUSH_MCP_WORKSPACE_DIR, root);
+          if (Object.keys(added).length) target.mcp = { ...(isRecord(target.mcp) ? target.mcp : {}), ...added };
+        } catch {
+          // The app-added servers are left out; the config's own still go through the list.
+        }
       }
+      // Fails closed: an error while applying the list leaves no servers at all.
       await hooks.config(configInput, output);
     },
     "tool.execute.before": hooks["tool.execute.before"],

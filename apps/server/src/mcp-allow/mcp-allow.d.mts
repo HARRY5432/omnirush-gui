@@ -2,6 +2,7 @@
 // omnirush-gui apps/server/src/mcp-allow/; PARITY.sha256).
 
 export const MCP_POLICY_FILE_VERSION: 1;
+export const BOX_NPM_PREFIX: string;
 export const MCP_REASONS: Record<McpDecisionCode, string>;
 
 export type McpRuntime = "npm" | "pypi";
@@ -17,6 +18,8 @@ export type McpRules = {
   require_flags?: string[];
   add_flags?: string[];
   forbid_flags?: string[];
+  /** When set, the only flags the server may be given (add_flags are the app's own). */
+  allow_flags?: string[];
   path_env?: Record<string, string>;
   local_urls?: boolean;
   path_inputs?: string[];
@@ -71,6 +74,8 @@ export type McpLaunch = {
   specIndex: number;
   rest: string[];
   restIndex: number;
+  /** The runner the config named (npx, bunx, pnpm, yarn, npm, uvx, uv). */
+  runner: string;
 };
 
 export function versionParts(value: unknown): number[] | null;
@@ -79,12 +84,14 @@ export function validRange(range: unknown): boolean;
 export function normalizePolicy(block: unknown): McpPolicy | null;
 export function splitSpec(spec: string, runtime: McpRuntime): { name: string; version: string | null } | null;
 export function parseLaunch(command: unknown): McpLaunch | null;
+export function launchCommand(entry: McpAllowEntry, launch: McpLaunch, version: string, npmPrefix: string): string[];
 export function insideRoot(root: string, p: string, platform?: string): boolean;
+export function insideRootReal(root: string, p: string, platform?: string): boolean;
 export function shellQuote(word: string): string;
 export function evaluateMcp(
   mcpMap: unknown,
   policy: McpPolicy | null,
-  ctx?: { root?: string; platform?: string; box?: McpBox | null },
+  ctx?: { root?: string; platform?: string; box?: McpBox | null; npmPrefix?: string },
 ): { mcp: Record<string, Record<string, unknown>>; decisions: McpDecision[] };
 export function toolPrefix(name: string): string;
 export function toolRefusal(
@@ -102,6 +109,7 @@ export function createMcpPolicyHooks(options?: {
   policyFile?: string | null;
   reportDir?: string | null;
   box?: McpBox | null | ((root: string) => McpBox | null);
+  npmPrefix?: string;
   platform?: string;
   now?: () => number;
 }): {

@@ -20,10 +20,14 @@
 // user called it. With the project's sandbox on, they run in the sandbox.
 
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 export const MCP_POLICY_FILE_VERSION = 1;
+
+/** The empty folder npx runs from inside the sandbox (see `launchCommand`). */
+export const BOX_NPM_PREFIX = "/tmp/omnirush-mcp-npx";
 
 /** Messages people see, by decision code. */
 export const MCP_REASONS = {
@@ -122,8 +126,8 @@ function normalizeRules(value) {
   if (Number.isInteger(rules.min_args) && rules.min_args > 0 && rules.min_args < 9) out.min_args = rules.min_args;
   const defaults = strings(rules.default_args, 8);
   if (defaults.length) out.default_args = defaults;
-  for (const key of ["path_flags", "require_flags", "add_flags", "forbid_flags"]) {
-    const list = strings(rules[key], 32).filter((f) => f.startsWith("-"));
+  for (const key of ["path_flags", "require_flags", "add_flags", "forbid_flags", "allow_flags"]) {
+    const list = strings(rules[key], 32).filter((f) => f.startsWith("-") && (key === "add_flags" || !f.includes("=")));
     if (list.length) out[key] = list;
   }
   if (isRecord(rules.path_env)) {
@@ -223,6 +227,7 @@ export function parseLaunch(command) {
   else if (PY_RUNNERS.has(prog)) runtime = "pypi";
   else if (prog === "uv" && argv[1] === "tool" && argv[2] === "run") { runtime = "pypi"; i = 3; }
   if (!runtime) return null;
+  const runner = prog === "uv" ? "uv" : prog;
   const valueFlags = runtime === "npm" ? NPX_VALUE_FLAGS : UVX_VALUE_FLAGS;
   let from = null;
   let fromIndex = -1;
@@ -255,21 +260,26 @@ export function parseLaunch(command) {
     specIndex: from !== null ? fromIndex : i,
     rest: argv.slice(i + 1),
     restIndex: i + 1,
+    runner,
   };
 }
 
-/** `command` with the package spec pinned to `version`. */
-function pinned(command, launch, version) {
-  const out = [...command];
-  const spec = launch.runtime === "npm" ? `${launch.name}@${version}` : `${launch.name}==${version}`;
-  if (launch.specIndex >= 0) {
-    if (launch.runtime === "pypi" && launch.bin === null) out[launch.specIndex] = `${launch.name}@${version}`;
-    else out[launch.specIndex] = spec;
-  } else {
-    const at = -2 - launch.specIndex;
-    out[at] = `${out[at].slice(0, out[at].indexOf("="))}=${spec}`;
+/**
+ * The command the engine runs for an allowed server: always `npx` or `uvx`
+ * by bare name (never a program path from the config), the entry's own
+ * package at the exact version, and runner settings that keep the project
+ * out of how it is fetched: npx runs from an empty `--prefix` folder, so a
+ * project's .npmrc (registry, node-options, script-shell) and its own
+ * node_modules copy of the package are not used; uvx runs with
+ * --no-config, so a project's uv.toml / pyproject.toml index settings are
+ * not either.
+ */
+export function launchCommand(entry, launch, version, npmPrefix) {
+  if (entry.runtime === "npm") {
+    const spec = `${entry.package}@${version}`;
+    return ["npx", "--prefix", npmPrefix, "-y", ...(launch.bin ? ["-p", spec, launch.bin] : [spec])];
   }
-  return out;
+  return ["uvx", "--no-config", ...(launch.bin ? ["--from", `${entry.package}==${version}`, launch.bin] : [`${entry.package}@${version}`])];
 }
 
 // ---------------------------------------------------------------------- paths
@@ -287,6 +297,31 @@ export function insideRoot(root, p, platform = process.platform) {
   const full = lib.resolve(base, value);
   const rel = lib.relative(samePlatformPath(base, platform), samePlatformPath(full, platform));
   return rel === "" || (!rel.startsWith("..") && !lib.isAbsolute(rel));
+}
+
+/**
+ * `insideRoot`, and also after links: the deepest part of the path that
+ * exists, resolved (a link the project holds, such as `data -> ../../..`,
+ * points the server outside the folder however the path reads). Only on
+ * this machine's own paths (`platform` is this process's); a path the
+ * sandbox alone sees is checked as text.
+ */
+export function insideRootReal(root, p, platform = process.platform) {
+  if (!insideRoot(root, p, platform)) return false;
+  if (platform !== process.platform) return true;
+  let real;
+  try { real = realpathSync(root); } catch { return true; }
+  let probe = path.resolve(root, String(p));
+  const rest = [];
+  while (!existsSync(probe)) {
+    const up = path.dirname(probe);
+    if (up === probe) return true;
+    rest.unshift(path.basename(probe));
+    probe = up;
+  }
+  let resolved;
+  try { resolved = realpathSync(probe); } catch { return false; }
+  return insideRoot(real, path.join(resolved, ...rest), platform);
 }
 
 /** A path inside `root` as the sandbox sees it (`croot`); relative paths stay relative. */
@@ -336,8 +371,9 @@ function blocked(name, code, extra = {}) {
 }
 
 /**
- * Apply `policy` to the engine's `mcp` map. `ctx`: `{root, platform, box}`
- * where `box` is `{shell, key, croot}` when the project's sandbox is on.
+ * Apply `policy` to the engine's `mcp` map. `ctx`: `{root, platform, box,
+ * npmPrefix}` where `box` is `{shell, key, croot}` when the project's
+ * sandbox is on and `npmPrefix` the empty folder npx runs from.
  * Returns `{mcp, decisions}`: the map the engine gets (allowed servers only,
  * keyed by their ids) and one decision per configured entry.
  */
@@ -377,17 +413,30 @@ export function evaluateMcp(mcpMap, policy, ctx = {}) {
       if (!entry.pin) { decisions.push(blocked(name, "version", { ...base, reason: `${MCP_REASONS.version} Name a version (for example ${launch.name}@1.2.3).` })); continue; }
       version = entry.pin;
       notes.push(`runs version ${version}`);
+    } else if (!versionParts(version)) {
+      // A tag, a range, a file:, git: or npm: alias: not a release the app can name.
+      decisions.push(blocked(name, "version", { ...base, version, reason: `${MCP_REASONS.version} Name a plain version like 1.2.3, or leave it out${entry.pin ? ` to run ${entry.pin}` : ""}.` }));
+      continue;
     } else if (!versionInRange(version, entry.versions)) {
       decisions.push(blocked(name, "version", { ...base, version, reason: `${MCP_REASONS.version} Supported: ${entry.versions}${entry.pin ? ` (leave the version out to run ${entry.pin})` : ""}.` }));
       continue;
     }
-    let argv = launch.version === null ? pinned(command, launch, version) : [...command];
-    const restAt = launch.restIndex;
-    let rest = argv.slice(restAt);
+    let rest = command.slice(launch.restIndex);
     const rules = entry.rules;
-    const environment = isRecord(raw.environment) ? Object.fromEntries(Object.entries(raw.environment).filter(([, v]) => typeof v === "string")) : {};
+    // Only the variables the entry's rules name reach the server: others
+    // (NODE_OPTIONS, npm_config_*, PYTHONPATH, LD_PRELOAD, tokens ...) could
+    // change what runs or what it reaches.
+    const given = isRecord(raw.environment) ? raw.environment : {};
+    const kept = new Set(Object.keys(rules.path_env ?? {}));
+    const environment = Object.fromEntries(Object.entries(given).filter(([k, v]) => kept.has(k) && typeof v === "string"));
+    const ignored = Object.keys(given).filter((k) => !kept.has(k));
+    if (ignored.length) notes.push(`ignores ${ignored.slice(0, 4).join(", ")}${ignored.length > 4 ? " ..." : ""}`);
     let refusal = null;
-    for (const flag of rules.forbid_flags ?? []) {
+    if (rules.allow_flags) {
+      const other = rest.map((a) => (a.includes("=") ? a.slice(0, a.indexOf("=")) : a)).find((a) => a.startsWith("-") && !rules.allow_flags.includes(a));
+      if (other) refusal = blocked(name, "flag", { ...base, version, reason: `${MCP_REASONS.flag} (${other})` });
+    }
+    if (!refusal) for (const flag of rules.forbid_flags ?? []) {
       if (flagValue(rest, flag)) { refusal = blocked(name, "flag", { ...base, version, reason: `${MCP_REASONS.flag} (${flag})` }); break; }
     }
     if (!refusal) for (const flag of rules.require_flags ?? []) {
@@ -395,10 +444,10 @@ export function evaluateMcp(mcpMap, policy, ctx = {}) {
       if (!found || !found.value) { refusal = blocked(name, "missing_flag", { ...base, version, reason: `${MCP_REASONS.missing_flag} (${flag} <file in the project>)` }); break; }
     }
     const cwd = typeof raw.cwd === "string" ? raw.cwd : null;
-    if (!refusal && cwd && !insideRoot(root, cwd, platform)) refusal = blocked(name, "outside_project", { ...base, version, reason: `${MCP_REASONS.outside_project} (cwd ${cwd})` });
+    if (!refusal && cwd && !insideRootReal(root, cwd, platform)) refusal = blocked(name, "outside_project", { ...base, version, reason: `${MCP_REASONS.outside_project} (cwd ${cwd})` });
     const lib = platform === "win32" ? path.win32 : path.posix;
     const workRoot = cwd ? lib.resolve(root, cwd) : root;
-    const inside = (p) => !String(p).startsWith("~") && insideRoot(root, lib.resolve(workRoot, String(p)), platform);
+    const inside = (p) => !String(p).startsWith("~") && insideRootReal(root, lib.resolve(workRoot, String(p)), platform);
     if (!refusal && rules.path_args === "positional") {
       const positional = rest.map((a, k) => [a, k]).filter(([a]) => !a.startsWith("-"));
       if (positional.length === 0 && rules.default_args) {
@@ -430,18 +479,22 @@ export function evaluateMcp(mcpMap, policy, ctx = {}) {
         refusal = blocked(name, "outside_project", { ...base, version, reason: `${MCP_REASONS.outside_project} (${key})` });
         break;
       } else {
-        environment[key] = boxPath(value, root, box, platform);
+        // Absolute: a server may resolve a relative path against its own install folder.
+        environment[key] = boxPath(lib.resolve(workRoot, value), root, box, platform);
       }
     }
     if (refusal) { decisions.push(refusal); continue; }
     for (const flag of rules.add_flags ?? []) {
-      if (!flagValue(rest, flag)) { rest = [...rest, flag]; notes.push(`adds ${flag}`); }
+      const at = flag.indexOf("=");
+      if (!flagValue(rest, at > 0 ? flag.slice(0, at) : flag)) { rest = [...rest, flag]; notes.push(`adds ${flag}`); }
     }
-    argv = [...argv.slice(0, restAt), ...rest];
+    const npmPrefix = box ? BOX_NPM_PREFIX : ctx.npmPrefix || path.join(os.homedir(), ".cache", "omnirush-mcp-npx");
+    const argv = [...launchCommand(entry, launch, version, npmPrefix), ...rest];
+    if (launch.runner !== (entry.runtime === "npm" ? "npx" : "uvx")) notes.push(`runs with ${argv[0]}`);
     const next = { ...raw, type: "local" };
     if (box) {
       const envWords = Object.entries(environment).map(([k, v]) => `${k}=${shellQuote(v)}`);
-      next.command = [box.shell, "-c", `exec ${envWords.length ? `env ${envWords.join(" ")} ` : ""}${argv.map(shellQuote).join(" ")}`];
+      next.command = [box.shell, "-c", `${entry.runtime === "npm" ? `mkdir -p ${BOX_NPM_PREFIX} && ` : ""}exec ${envWords.length ? `env ${envWords.join(" ")} ` : ""}${argv.map(shellQuote).join(" ")}`];
       next.environment = { OMNIRUSH_BOX_KEY: box.key };
       notes.push("runs in the sandbox");
     } else {
@@ -490,7 +543,7 @@ export function toolRefusal(state, tool, args) {
       if (value === undefined || value === null || value === "") continue;
       const roots = state.roots ?? [];
       const ok = typeof value === "string" && !value.startsWith("~")
-        && roots.some((r) => insideRoot(r.root, (r.platform === "win32" ? path.win32 : path.posix).resolve(r.root, value), r.platform));
+        && roots.some((r) => insideRootReal(r.root, (r.platform === "win32" ? path.win32 : path.posix).resolve(r.root, value), r.platform));
       if (!ok) return `${entry} may only use files inside the project folder in this app (${key}: ${String(value).slice(0, 200)}).`;
     }
   }
@@ -552,7 +605,7 @@ function configTarget(input, output) {
 /**
  * The engine plugin's hooks. `options`: `{directory, policyFile, reportDir,
  * box (null or a function of the root returning {shell, key, croot} or
- * null), platform, now}`. The `config` hook replaces `mcp` with the allowed
+ * null), npmPrefix (default: <reportDir>/../npx-prefix), platform, now}`. The `config` hook replaces `mcp` with the allowed
  * servers (none without a readable policy); `tool.execute.before` refuses
  * non-local pages for `local_urls` servers and paths outside the project
  * for `path_inputs` servers.
@@ -565,7 +618,11 @@ export function createMcpPolicyHooks(options = {}) {
     if (!target) return;
     const policy = readPolicyFile(options.policyFile);
     const box = typeof options.box === "function" ? options.box(root) : options.box ?? null;
-    const { mcp, decisions } = evaluateMcp(target.mcp, policy, { root, platform: options.platform, box });
+    const npmPrefix = options.npmPrefix || (options.reportDir ? path.join(options.reportDir, "..", "npx-prefix") : path.join(os.homedir(), ".cache", "omnirush-mcp-npx"));
+    if (!box) {
+      try { mkdirSync(npmPrefix, { recursive: true }); } catch { /* npx makes it */ }
+    }
+    const { mcp, decisions } = evaluateMcp(target.mcp, policy, { root, platform: options.platform, box, npmPrefix });
     target.mcp = mcp;
     const on = policy ? policy.allow.filter((e) => Object.hasOwn(mcp, e.id)) : [];
     state.localOnly = on.filter((e) => e.rules.local_urls).map((e) => e.id);
@@ -583,7 +640,17 @@ export function createMcpPolicyHooks(options = {}) {
     }
   };
   return {
-    config: async (input, output) => { apply(input, output); },
+    config: async (input, output) => {
+      try {
+        apply(input, output);
+      } catch {
+        // Never leave the engine's own list in place: no servers at all.
+        const target = configTarget(input, output);
+        if (target) target.mcp = {};
+        state.localOnly = [];
+        state.pathInputs = [];
+      }
+    },
     "tool.execute.before": async (input, output) => {
       const why = toolRefusal(state, input?.tool, output?.args ?? input?.args);
       if (why) throw new Error(why);
