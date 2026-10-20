@@ -278,12 +278,15 @@ function FilesView(props: {
   const fileSet = useMemo(() => new Set(props.files), [props.files]);
   const fileSetRef = useRef(fileSet);
   fileSetRef.current = fileSet;
+  // Selecting the shown file in the tree (below) is not the user opening it (a preview tab shows the same path).
+  const programmatic = useRef(false);
   const { model } = useFileTree({
     density: "compact",
     fileTreeSearchMode: "hide-non-matches",
     flattenEmptyDirectories: true,
     initialExpansion: 1,
     onSelectionChange: (paths) => {
+      if (programmatic.current) return;
       const path = paths.at(-1);
       if (path && fileSetRef.current.has(path)) onOpenRef.current(path);
     },
@@ -302,8 +305,13 @@ function FilesView(props: {
     if (!props.selected) return;
     const item = model.getItem(props.selected);
     if (!item) return;
-    for (const path of model.getSelectedPaths()) if (path !== props.selected) model.getItem(path)?.deselect();
-    item.select();
+    programmatic.current = true;
+    try {
+      for (const path of model.getSelectedPaths()) if (path !== props.selected) model.getItem(path)?.deselect();
+      item.select();
+    } finally {
+      programmatic.current = false;
+    }
   }, [model, props.files, props.selected]);
   return (
     <div className="flex h-full min-h-0 flex-col" data-editor-files={props.files.length}>
