@@ -1,11 +1,12 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, readdirSync } from "node:fs";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 
-import { formatterFor, projectFormatters, runFormatter } from "./routes/editor-format.js";
+import { boxKey, recordFile } from "./box/common.js";
+import { FormatTrustStore, formatRequest, formatterEnvironment, formatterFor, projectFormatters, runFormatter } from "./routes/editor-format.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -63,4 +64,67 @@ test("a formatter that rejects the text is an error, not an empty file", async (
   const formatter = formatterFor(root, join(root, "src/a.ts"));
   if (!formatter) return;
   await expect(runFormatter(formatter, root, "export const = = ;\n")).rejects.toThrow();
+});
+
+describe("format on save asks before running project code", () => {
+  async function prettierProject() {
+    const prettier = repoPrettier();
+    if (!prettier) return null;
+    const root = await project(true);
+    await mkdir(join(root, "node_modules"), { recursive: true });
+    await symlink(prettier, join(root, "node_modules", "prettier"), "dir");
+    return formatterFor(root, join(root, "src/a.ts")) ? root : null;
+  }
+
+  test("ask first, then once / always / never, and ask again when the configuration changes", async () => {
+    const root = await prettierProject();
+    if (!root) return;
+    const store = new FormatTrustStore(join(root, "..", `trust-${Date.now()}.json`));
+    roots.push(join(root, "..", "trust-placeholder"));
+    const text = "export   const   messy={a:1}\n";
+    const ask = await formatRequest({ root, path: "src/a.ts", text, trust: null, hash: null, store });
+    expect(ask).toMatchObject({ formatter: "Prettier", trust: "ask" });
+    if (!("trust" in ask) || ask.trust !== "ask") throw new Error("expected a prompt");
+    expect(ask.command).toBe("node node_modules/prettier/bin/prettier.cjs --stdin-filepath <file>");
+    // Once: runs, remembers nothing.
+    expect(await formatRequest({ root, path: "src/a.ts", text, trust: "once", hash: ask.hash, store })).toMatchObject({ text: "export const messy = { a: 1 };\n" });
+    expect((await formatRequest({ root, path: "src/a.ts", text, trust: null, hash: null, store })).formatter).toBe("Prettier");
+    expect(await formatRequest({ root, path: "src/a.ts", text, trust: null, hash: null, store })).toMatchObject({ trust: "ask" });
+    // Always: remembered for this project and configuration.
+    await formatRequest({ root, path: "src/a.ts", text, trust: "always", hash: ask.hash, store });
+    expect(await formatRequest({ root, path: "src/a.ts", text, trust: null, hash: null, store })).toMatchObject({ text: "export const messy = { a: 1 };\n" });
+    // A changed configuration asks again.
+    await writeFile(join(root, ".prettierrc"), JSON.stringify({ semi: false }));
+    const again = await formatRequest({ root, path: "src/a.ts", text, trust: null, hash: null, store });
+    expect(again).toMatchObject({ trust: "ask" });
+    if (!("trust" in again) || again.trust !== "ask") throw new Error("expected a prompt");
+    expect(again.hash).not.toBe(ask.hash);
+    // An answer for an older configuration does not run.
+    expect(await formatRequest({ root, path: "src/a.ts", text, trust: "once", hash: ask.hash, store })).toMatchObject({ trust: "ask" });
+    // Never: remembered, nothing runs.
+    expect(await formatRequest({ root, path: "src/a.ts", text, trust: "never", hash: again.hash, store })).toMatchObject({ trust: "denied" });
+    expect(await formatRequest({ root, path: "src/a.ts", text, trust: null, hash: null, store })).toMatchObject({ trust: "denied" });
+  });
+
+  test("the formatter's environment has no app tokens, engine password or other keys", () => {
+    const env = formatterEnvironment({ PATH: "/usr/bin", HOME: "/home/u", LANG: "C.UTF-8", OMNIRUSH_TOKEN: "x", OPENCODE_SERVER_PASSWORD: "y", GITHUB_TOKEN: "z", AWS_SECRET_ACCESS_KEY: "w", LC_ALL: "C" }, "linux");
+    expect(env).toEqual({ PATH: "/usr/bin", HOME: "/home/u", LANG: "C.UTF-8", LC_ALL: "C" });
+  });
+
+  test("a project that uses the sandbox never formats on this computer when its box is not running", async () => {
+    const root = await prettierProject();
+    if (!root) return;
+    const home = await mkdtemp(join(tmpdir(), "omnirush-boxhome-"));
+    roots.push(home);
+    const key = boxKey(root);
+    await mkdir(join(home, "boxes"), { recursive: true });
+    const record = { v: 1, key, root, croot: root, container: "c", backend: "docker", runtime: "docker", runtime_args: [], host: "127.0.0.1", port: 0, token: "", state: "starting", error: "", uid: 0, gid: 0, home: "/root", shell: "/bin/sh", path_prefix: "", env_file: "", updated: 0, pid: 0 };
+    await writeFile(recordFile(home, key), JSON.stringify(record));
+    const store = new FormatTrustStore(join(home, "trust.json"));
+    const env = { ...process.env, OMNIRUSH_BOX_HOME: home };
+    const ask = await formatRequest({ root, path: "src/a.ts", text: "const a=1\n", trust: null, hash: null, store, env });
+    expect(ask).toMatchObject({ trust: "ask", sandbox: true });
+    if (!("trust" in ask) || ask.trust !== "ask") throw new Error("expected a prompt");
+    await expect(formatRequest({ root, path: "src/a.ts", text: "const a=1\n", trust: "once", hash: ask.hash, store, env })).rejects.toThrow(/sandbox is not running/);
+  });
 });
