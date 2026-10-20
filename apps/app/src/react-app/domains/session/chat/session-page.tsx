@@ -4,7 +4,9 @@ import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } fro
 import { usePanelRef } from "react-resizable-panels";
 import { DesktopUpdateButton } from "../../settings/state/desktop-updater-provider";
 import { BuildathonChip } from "../../buildathon/buildathon";
-import { ArrowLeft, Cloud, Code2, FileText, Globe, Maximize2, MoreHorizontal, PanelRight, TextSearch, X, Zap } from "lucide-react";
+import { ArrowLeft, Cloud, Code2, FileDiff, FileText, Gauge, Redo2, Undo2, Globe, ListChecks, Maximize2, MoreHorizontal, PanelRight, TextSearch, X, Zap } from "lucide-react";
+import { SessionCommandControls } from "../commands/session-command-controls";
+import { useSessionCommandBridge, useSessionCommandsStore } from "../commands/session-commands-store";
 
 import { resolveExtensionIconSrc } from "@/react-app/design-system/extension-icon-src";
 import { t } from "../../../../i18n";
@@ -1190,6 +1192,12 @@ export function SessionPage(props: SessionPageProps) {
     (workspace) => workspace.id === props.selectedWorkspaceId && workspace.workspaceType === "remote",
   );
   const findButtonSessionId = props.selectedSessionId;
+  // Undo, Changes, Status and Review for the chat on screen (commands/).
+  const commandSessionId = canRenderReactSurface && !props.primarySlot && !hasMainContentTakeover ? props.selectedSessionId : null;
+  const commandBridge = useSessionCommandBridge(commandSessionId);
+  const openChangesPanel = useSessionCommandsStore((state) => state.openChanges);
+  const openStatusDialog = useSessionCommandsStore((state) => state.openStatus);
+  const headerActions = useSessionCommandsStore((state) => (commandSessionId ? state.headerActions[commandSessionId] ?? null : null));
   const canGoBackInConversationHistory = !pendingConversationHistoryNavigation && canNavigateSelectedConversationHistory(
     conversationHistory,
     props.selectedWorkspaceId,
@@ -1637,6 +1645,25 @@ export function SessionPage(props: SessionPageProps) {
             <div className="flex shrink-0 items-center gap-1.5 text-gray-10 mac:titlebar-no-drag">
               <BuildathonChip />
               <DesktopUpdateButton />
+              {commandSessionId && props.runtimeWorkspaceId ? (
+                <SessionCommandControls
+                  workspaceId={props.runtimeWorkspaceId}
+                  sessionId={commandSessionId}
+                  opencodeBaseUrl={reactSessionBaseUrl}
+                  token={reactSessionToken}
+                  workspaceRoot={props.surface?.workspaceRoot ?? props.selectedWorkspaceRoot}
+                  serverClient={props.omnirushServerClient}
+                  model={props.surface ? {
+                    selectedModel: props.surface.selectedModel,
+                    modelLabel: props.surface.modelLabel,
+                    modelVariant: props.surface.modelVariant,
+                    modelVariantLabel: props.surface.modelVariantLabel,
+                    modelBehaviorOptions: props.surface.modelBehaviorOptions,
+                    providerCatalog: props.surface.providerCatalog,
+                    onModelVariantChange: props.surface.onModelVariantChange,
+                  } : null}
+                />
+              ) : null}
               {!props.primarySlot && findButtonSessionId && !hasMainContentTakeover ? (
                 <Tooltip>
                   <TooltipTrigger
@@ -1714,6 +1741,39 @@ export function SessionPage(props: SessionPageProps) {
                     >
                       <TextSearch className="size-4" />
                       Find in conversation
+                    </DropdownMenuItem>
+                  ) : null}
+                  {commandSessionId && headerActions ? (
+                    <DropdownMenuItem disabled={!headerActions.canUndo} onClick={() => void headerActions.undo()}>
+                      <Undo2 className="size-4" />
+                      Undo last turn
+                    </DropdownMenuItem>
+                  ) : null}
+                  {commandSessionId && headerActions?.canRedo ? (
+                    <DropdownMenuItem onClick={() => void headerActions.redo()}>
+                      <Redo2 className="size-4" />
+                      Redo
+                    </DropdownMenuItem>
+                  ) : null}
+                  {commandSessionId ? (
+                    <DropdownMenuItem onClick={() => openStatusDialog(commandSessionId)}>
+                      <Gauge className="size-4" />
+                      Status
+                    </DropdownMenuItem>
+                  ) : null}
+                  {commandSessionId ? (
+                    <DropdownMenuItem onClick={() => openChangesPanel(commandSessionId)}>
+                      <FileDiff className="size-4" />
+                      Changes
+                    </DropdownMenuItem>
+                  ) : null}
+                  {commandSessionId ? (
+                    <DropdownMenuItem
+                      disabled={!commandBridge || commandBridge.busy}
+                      onClick={() => void commandBridge?.runCommand("/review")}
+                    >
+                      <ListChecks className="size-4" />
+                      Review changes
                     </DropdownMenuItem>
                   ) : null}
                   <DropdownMenuItem onClick={openArtifactRailPane}>

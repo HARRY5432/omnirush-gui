@@ -130,6 +130,9 @@ import { cn } from "@/lib/utils"
 import { DevProfiler } from "@/react-app/shell/dev-profiler"
 import { groupMessages, isMessageGroup, getLastTextPart, getAggregateOnlyParts, getAssistantRenderGroups, getFileTitle, getMediaBadge, getMessageCompleted, getMessageCreated, formatMessageTimestamp, splitTurnAtAnswer, type UIMessageWithIndex, getMessagesText, getSafeFileDownloadUrl, getSafeFileRevealPath } from "./utils"
 import type { AnyToolPart } from "@/lib/tool-aggregate"
+import { commandTemplateLabel, reviewForTurn } from "@/react-app/domains/session/commands/review-message"
+import { useSessionCommandBridge } from "@/react-app/domains/session/commands/session-commands-store"
+import { ReviewFixBar } from "@/react-app/domains/session/commands/review-fix-bar"
 import { resolveConnectorToolIdentity } from "@/react-app/domains/connections/connector-tool-identity"
 
 const SEARCH_HIGHLIGHT_MARK_CLASS = "rounded px-0.5 bg-amber-4/70 text-current"
@@ -740,6 +743,15 @@ const UserMessage = React.memo(
                   >
                     {inlineParts.map((part, index) => {
                       if (part.type === "text") {
+                        // A review or fix command arrives as its whole prompt: show the command the person ran.
+                        const command = commandTemplateLabel(part.text)
+                        if (command) {
+                          return (
+                            <span key={`text-${index}`} className="font-mono text-[13px]" title={part.text.slice(0, 2000)} data-command-label={command}>
+                              {command}
+                            </span>
+                          )
+                        }
                         return (
                           <span key={`text-${index}`} className="whitespace-pre-wrap">
                             {renderUserTextWithSkillChips(part.text, highlightQuery)}
@@ -1222,6 +1234,8 @@ interface AssistantMessageGroupProps {
   items: UIMessageWithIndex[]
   isLastGroup: boolean
   isStreaming: boolean
+  /** The text of the user message this group answers (a review turn offers "Fix these"). */
+  turnUserText?: string
 }
 
 function collectMcpAppParts(items: UIMessageWithIndex[]): DynamicToolUIPart[] {
@@ -1245,8 +1259,10 @@ function MessageGroup({
   items,
   isLastGroup,
   isStreaming,
+  turnUserText,
 }: AssistantMessageGroupProps) {
-  const { onRevertToUserMessage, onForkAtMessage, showThinking } = useMessageList()
+  const { onRevertToUserMessage, onForkAtMessage, showThinking, onRunCommand, sessionId } = useMessageList()
+  const commandBridge = useSessionCommandBridge(sessionId)
   const lastItem = items[items.length - 1]
   // Branch/revert must target a real server-side message id. Synthetic
   // client-side messages (e.g. session errors) don't exist on the server and
@@ -1261,6 +1277,11 @@ function MessageGroup({
   const renderableItems = getRenderableMessages(items)
   const lastTextMessage = getLastTextPart(lastItem.message)
   const mcpAppParts = collectMcpAppParts(items)
+  // A review reply with issues (the engine's review layout) offers "Fix these" while it is the newest reply.
+  const lastTextPart = lastTextMessage?.parts[0]
+  const review = onRunCommand && isLastGroup && !isStreaming && lastItem.message.role === "assistant" && lastTextPart?.type === "text"
+    ? reviewForTurn(turnUserText, lastTextPart.text)
+    : null
 
   // Leading messages without prose (tool/reasoning steps) render inline and
   // rely on the transcript's one scroll container. Tool activity must never
@@ -1445,6 +1466,9 @@ function MessageGroup({
           {/* <MessageSources messages={items.map((item) => item.message)} /> */}
         </div>
       )}
+      {review?.fixable && onRunCommand ? (
+        <ReviewFixBar review={review} disabled={commandBridge?.busy ?? false} onFix={() => onRunCommand("/fix")} />
+      ) : null}
       </div>
     </DevProfiler>
   )
@@ -1453,6 +1477,7 @@ function MessageGroup({
 function sameMessageGroupProps(left: AssistantMessageGroupProps, right: AssistantMessageGroupProps): boolean {
   return left.isLastGroup === right.isLastGroup
     && left.isStreaming === right.isStreaming
+    && left.turnUserText === right.turnUserText
     && left.items.length === right.items.length
     && left.items.every((item, index) => (
       item.index === right.items[index]?.index
@@ -1461,6 +1486,16 @@ function sameMessageGroupProps(left: AssistantMessageGroupProps, right: Assistan
 }
 
 const MemoizedMessageGroup = React.memo(MessageGroup, sameMessageGroupProps)
+
+/** The text of the newest user message before `index` (the prompt an assistant group answers). */
+function precedingUserText(messages: UIMessage[], index: number): string | undefined {
+  for (let at = index - 1; at >= 0; at -= 1) {
+    const message = messages[at]
+    if (message?.role !== "user") continue
+    return message.parts.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n")
+  }
+  return undefined
+}
 
 type StandaloneMessageProps = {
   message: UIMessage
@@ -1604,6 +1639,7 @@ export function MessageList({ messages, status, activityStatus, retryStatus, syn
               items={item.messages}
               isLastGroup={item.messages.at(-1)?.index === messages.length - 1}
               isStreaming={isStreaming && item.messages.at(-1)?.index === messages.length - 1}
+              turnUserText={precedingUserText(messages, item.messages[0]?.index ?? 0)}
             />
           )
         }

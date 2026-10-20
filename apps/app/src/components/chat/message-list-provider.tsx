@@ -38,6 +38,8 @@ interface MessageListContextValue {
   ) => Promise<ChatToolReconnectResult>
   onMcpReopenAuthorization: (action: ChatToolReconnectAction, authorizeUrl: string) => Promise<void>
   onMcpRetry: (action: ChatToolReconnectAction) => void | Promise<void>
+  /** Send a chat command ("/fix", "/fix 1, 3") like a typed one; absent where commands cannot be sent. */
+  onRunCommand?: (text: string) => void
 }
 
 const MessageListContext = React.createContext<MessageListContextValue | null>(null)
@@ -66,6 +68,7 @@ interface MessageListProviderProps {
   syncDegraded?: boolean
   dispatchAction: (action: DispatchAction) => void
   setPrompt: (prompt: string) => void
+  onRunCommand?: (text: string) => void | Promise<void>
 }
 
 export interface DispatchAction {
@@ -95,6 +98,7 @@ export function MessageListProvider({
   onMcpReconnect,
   onMcpReopenAuthorization,
   onMcpRetry,
+  onRunCommand,
 }: MessageListProviderProps) {
   const handlersRef = React.useRef({
     dispatchAction,
@@ -107,6 +111,7 @@ export function MessageListProvider({
     onMcpReconnect,
     onMcpReopenAuthorization,
     onMcpRetry,
+    onRunCommand,
   })
   React.useEffect(() => {
     handlersRef.current = {
@@ -120,6 +125,7 @@ export function MessageListProvider({
       onMcpReconnect,
       onMcpReopenAuthorization,
       onMcpRetry,
+      onRunCommand,
     }
   }, [
     dispatchAction,
@@ -132,6 +138,7 @@ export function MessageListProvider({
     onMcpReconnect,
     onMcpReopenAuthorization,
     onMcpRetry,
+    onRunCommand,
   ])
   const stableHandlers = React.useMemo(() => ({
     dispatchAction: (action: DispatchAction) => handlersRef.current.dispatchAction(action),
@@ -149,9 +156,11 @@ export function MessageListProvider({
       handlersRef.current.onMcpReopenAuthorization(action, authorizeUrl)
     ),
     onMcpRetry: (action: ChatToolReconnectAction) => handlersRef.current.onMcpRetry(action),
+    onRunCommand: (text: string) => void handlersRef.current.onRunCommand?.(text),
   }), [])
   const canOpenSubagentSession = Boolean(onOpenSubagentSession)
   const canResumeInterrupted = Boolean(onResumeInterrupted)
+  const canRunCommand = Boolean(onRunCommand)
   const value = React.useMemo(
     () => ({
       workspaceId,
@@ -170,6 +179,7 @@ export function MessageListProvider({
       onResumeInterrupted: canResumeInterrupted
         ? stableHandlers.onResumeInterrupted
         : undefined,
+      onRunCommand: canRunCommand ? stableHandlers.onRunCommand : undefined,
     }),
     [
       workspaceId,
@@ -184,6 +194,7 @@ export function MessageListProvider({
       stableHandlers,
       canOpenSubagentSession,
       canResumeInterrupted,
+      canRunCommand,
     ],
   )
 

@@ -54,6 +54,7 @@ import { ReactSessionComposer } from "./composer/composer";
 import { WorkspaceRunModeMenu } from "./composer/workspace-run-mode-menu";
 import { FullPermissionsToggle } from "./composer/full-permissions-toggle";
 import { SandboxStatusChip } from "./composer/sandbox-status-chip";
+import { useSessionCommandsStore } from "@/react-app/domains/session/commands/session-commands-store";
 import { SubagentModelMenu } from "./composer/subagent-model-menu";
 import { useSessionModelSelection } from "./session-model-store";
 import type { ProviderCatalog } from "./use-model-behavior";
@@ -1593,6 +1594,10 @@ export function SessionSurface(props: SessionSurfaceProps) {
   });
   const revertMessageId = snapshot?.session.revert?.messageID ?? null;
   const revertedMessageCount = snapshot && revertMessageId ? hiddenMessageCount(snapshot, revertMessageId) : 0;
+  // An undo rewinds the transcript below the last send's baseline: nothing is being waited for any more.
+  useEffect(() => {
+    if (revertMessageId) setAwaitingAssistantBaseline(null);
+  }, [revertMessageId]);
   const liveStatus = statusState ?? snapshot?.status ?? IDLE_STATUS;
   const preparingCloudTools = props.cloudMcpSubmissionState.status === "checking" ||
     props.cloudMcpSubmissionState.status === "repairing";
@@ -2364,6 +2369,16 @@ export function SessionSurface(props: SessionSurfaceProps) {
       setAttachmentsUploading(false);
     }
   }, [attachments, baseRenderedMessages, buildDraft, clearComposer, draft, liveStatus.type, persistedDraftKey, props.onDraftChange, props.sessionId, sendDraft, sessionOwner]);
+
+  // A chat command from a button ("/review", "/fix 1, 3"): sent like a typed one, the composer's draft left alone.
+  const runChatCommand = useCallback(async (text: string) => {
+    await handleSend({ draft: text, attachments: [], mentions: {}, pasteParts: [], revertMessageId: null });
+  }, [handleSend]);
+  const chatCommandBusy = chatStreaming || queuedDrainState.phase.kind === "sending" || queuedDrainState.phase.kind === "admission_unknown";
+  useEffect(
+    () => useSessionCommandsStore.getState().register(props.sessionId, { runCommand: runChatCommand, busy: chatCommandBusy }),
+    [chatCommandBusy, props.sessionId, runChatCommand],
+  );
 
   // One-step run from the empty-state hero: the route keeps the continuation
   // in this session's composer and marks the submitted snapshot for auto-send.
@@ -3387,6 +3402,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
                       onMcpReconnect={handleMcpReconnect}
                       onMcpReopenAuthorization={handleMcpReopenAuthorization}
                       onMcpRetry={handleMcpRetry}
+                      onRunCommand={runChatCommand}
                     >
                       <MessageList
                         messages={renderedMessages}

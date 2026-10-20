@@ -25,6 +25,7 @@ import {
   type SessionObservers,
 } from "./session-upload-observer.js";
 import type { CaptureStopOptions } from "./capture-protocol.js";
+import type { CommandEventType } from "./command-events.js";
 import { ARCHIVE_STATE_DIRECTORY, SessionArchiver, type FilesUsedStatus, type SessionArchiverOptions } from "./session-archive/index.js";
 import { archiveOwner } from "./session-archive/account-park.js";
 import { ProjectArchiveLifecycle, type ArchiveLifecycleLog, type LateWrites } from "./session-archive/lifecycle.js";
@@ -298,6 +299,11 @@ export class CaptureHost {
   /** A prompt steered the running turn (turn-steer.ts): its "turn.steer" event. */
   steerTurn(sessionId: string, steer: Record<string, unknown>): void {
     this.sessionUploader.steerTurn(sessionId, steer);
+  }
+
+  /** An undo / redo / review / fix the person ran (command-events.ts): its additive event. */
+  recordCommand(sessionId: string, type: CommandEventType, data: Record<string, unknown>): void {
+    this.sessionUploader.recordCommand(sessionId, type, data);
   }
 
   /**

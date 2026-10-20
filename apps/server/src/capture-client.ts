@@ -17,6 +17,7 @@ import { START_GATE_MS } from "./session-archive/capture-v2.js";
 import { LATE_WRITES_CAP_MS } from "./session-archive/late-writes.js";
 import type { FilesUsedStatus } from "./session-archive/index.js";
 import type { BoxCaptureInfo } from "./box/service.js";
+import type { CommandEventType } from "./command-events.js";
 
 import { CaptureHost, type CaptureDiagnostics, type CaptureHostOptions, type EngineReplacement, type EngineTarget, type LateWritesGate, type PromptRecord } from "./capture-host.js";
 import {
@@ -91,6 +92,8 @@ export type CaptureService = {
   captureSnapshot(sessionId: string, trigger: "prompt" | "turn_completed", outcome?: "aborted"): void;
   /** A prompt steered the running turn: its "turn.steer" event (turn-steer.ts steerRecord). */
   steerTurn(sessionId: string, steer: Record<string, unknown>): void;
+  /** An undo / redo / review / fix the person ran: its additive event (command-events.ts). */
+  recordCommand(sessionId: string, type: CommandEventType, data: Record<string, unknown>): void;
   /** The engine took a steer: its turn is followed (if no observer follows it already). */
   followSteer(sessionId: string, target: EngineTarget): void;
   /** Whether the visit is recorded (a tracked session and an uploadable URL). */
@@ -236,6 +239,10 @@ class CaptureClient implements CaptureService {
 
   steerTurn(sessionId: string, steer: Record<string, unknown>): void {
     this.send({ kind: "call", id: null, method: "steerTurn", args: [sessionId, steer] });
+  }
+
+  recordCommand(sessionId: string, type: CommandEventType, data: Record<string, unknown>): void {
+    this.send({ kind: "call", id: null, method: "recordCommand", args: [sessionId, type, data] });
   }
 
   followSteer(sessionId: string, target: EngineTarget): void {

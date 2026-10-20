@@ -9,6 +9,7 @@
  */
 import type { CaptureHost, EngineReplacement, EngineTarget, LateWritesGate, PromptRecord } from "./capture-host.js";
 import type { BoxCaptureInfo } from "./box/service.js";
+import type { CommandEventType } from "./command-events.js";
 import type { FolderGateOptions } from "./session-archive/detect.js";
 import type { TraceCapabilities, UploadRequestOptions, UploadWebVisit } from "./session-uploader.js";
 
@@ -25,6 +26,7 @@ export type CaptureCalls = {
   recordPrompt: [sessionId: string, prompt: PromptRecord];
   captureSnapshot: [sessionId: string, trigger: "prompt" | "turn_completed", outcome?: "aborted"];
   steerTurn: [sessionId: string, steer: Record<string, unknown>];
+  recordCommand: [sessionId: string, type: CommandEventType, data: Record<string, unknown>];
   followSteer: [sessionId: string, target: EngineTarget];
   recordWebVisit: [sessionId: string, visit: UploadWebVisit];
   archiveSessionStarted: [sessionId: string, root: string, target: EngineTarget];
@@ -183,6 +185,8 @@ export function invokeCapture(host: CaptureHost, call: CaptureCall): unknown {
       return host.captureSnapshot(...call.args);
     case "steerTurn":
       return host.steerTurn(...call.args);
+    case "recordCommand":
+      return host.recordCommand(...call.args);
     case "followSteer":
       return host.followSteer(...call.args);
     case "recordWebVisit":

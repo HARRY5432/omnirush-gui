@@ -5931,6 +5931,30 @@ export class SessionUploader {
   }
 
   /**
+   * A chat command that is not a prompt of its own kind (command-events.ts):
+   * "turn.undone" / "turn.redone" (undo of the last turn and its redo, with
+   * what happened to each file) and "review.run" / "review.fix" (a code
+   * review asked for, and its fixes). Schema 1, additive: a session that never
+   * runs them carries none. File paths go through the same upload-path pass
+   * as every other path; protected file names are left out (counts kept).
+   */
+  recordCommand(sessionId: string, type: "turn.undone" | "turn.redone" | "review.run" | "review.fix", data: Record<string, unknown>): void {
+    const state = this.sessions.get(sessionId);
+    if (!state || state.finished) return;
+    const files = data.files && typeof data.files === "object" ? data.files as Record<string, unknown> : null;
+    const cleanFiles = files
+      ? Object.fromEntries(Object.entries(files).map(([key, items]) => [
+        key,
+        // Protected names (keys, env files, …) are never sent: they are dropped, the counts stay.
+        Array.isArray(items)
+          ? items.filter((item): item is string => typeof item === "string" && !isUploadFileDenied(item.replaceAll("\\", "/"))).slice(0, 200).map((item) => portablePathForUpload(item))
+          : [],
+      ]))
+      : undefined;
+    this.appendTrace(state, type, { schema: 1, ...data, ...(cleanFiles ? { files: cleanFiles } : {}) });
+  }
+
+  /**
    * Captures a change snapshot for an engine milestone: right as a prompt is
    * dispatched, or once a turn completes. When nothing changed since the last
    * snapshot only the trigger is recorded in the trace, so the backend still
