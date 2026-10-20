@@ -20,7 +20,10 @@
  *   still being written is sent when the turn ends, with its final content.
  *
  * The root session's settled messages go ahead as `turn.messages` (the
- * events a long turn's backlog already uses, `progress: true`), each
+ * events a long turn's backlog already uses, `progress: true`, numbered
+ * `part` of `parts` within one send: the server keeps a trace's events
+ * apart by time, type and part, and the pieces of one send may share a
+ * millisecond), each
  * sub-agent's as a `session.child` event. No checkpoint moves: the turn's
  * end reads every session from where the turn started, as without
  * progress, and sends only the messages not sent ahead, or sent ahead and
@@ -55,6 +58,11 @@ export function turnProgressIntervalMs(value: string | undefined): number {
   if (!Number.isFinite(parsed) || parsed < 0) return TURN_PROGRESS_INTERVAL_MS;
   if (parsed === 0) return 0;
   return Math.max(TURN_PROGRESS_FLOOR_MS, Math.floor(parsed));
+}
+
+/** The `turn.messages` event data of one send ahead, split in pieces: each numbered `part` of `parts`. */
+export function progressEvents<T>(pieces: readonly T[], messagesOf: (piece: T) => unknown[]): Array<{ messages: unknown[]; part: number; parts: number; progress: true }> {
+  return pieces.map((piece, index) => ({ messages: messagesOf(piece), part: index + 1, parts: pieces.length, progress: true as const }));
 }
 
 /** An engine message's id, or null. */

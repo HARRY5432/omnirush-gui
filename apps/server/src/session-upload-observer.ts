@@ -16,7 +16,7 @@ import { turnWriters, type WriterSessionMessages } from "./session-archive/turn-
 import { watchToolStarts } from "./session-archive/tool-start.js";
 import { watchToolEvents } from "./context/tool-events.js";
 import { closeOpenToolParts } from "./context/open-tools.js";
-import { TurnProgress, turnProgressIntervalMs, type TurnProgressReason } from "./session-archive/turn-progress.js";
+import { progressEvents, TurnProgress, turnProgressIntervalMs, type TurnProgressReason } from "./session-archive/turn-progress.js";
 import type { ContextCapture } from "./context/index.js";
 
 /** The engine a captured request went to: base URL, request headers (the engine's auth), query and API generation. */
@@ -1162,9 +1162,10 @@ export function observeUploadedSession(input: {
       const history = await readEngineHistory(messages(), observer.lastMessageIds.get(sessionId), MAX_BACKLOG_MESSAGE_BYTES);
       if (history.omitted === 0 && !history.checkpointMissing) {
         const ahead = current.ahead(history.delta, history.sizes);
-        for (const part of ahead.messages.length > 0 ? messageParts(ahead.messages, ahead.sizes) : []) {
-          room(part.bytes);
-          sessionUploader.recordTrace(sessionId, "turn.messages", { messages: part.messages, progress: true });
+        const pieces = ahead.messages.length > 0 ? messageParts(ahead.messages, ahead.sizes) : [];
+        for (const [index, data] of progressEvents(pieces, (piece) => piece.messages).entries()) {
+          room(pieces[index]!.bytes);
+          sessionUploader.recordTrace(sessionId, "turn.messages", data);
         }
         current.markSent(ahead.messages, ahead.sizes);
         rootMessages = ahead.messages.length;

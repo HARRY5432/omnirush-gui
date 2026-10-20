@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 
 import { createSessionObservers, observeUploadedSession, type EngineTarget, type ObservedUploader } from "./session-upload-observer.js";
-import { settledMessage, settledPrefix, TurnProgress, turnProgressIntervalMs, TURN_PROGRESS_FLOOR_MS, TURN_PROGRESS_INTERVAL_MS } from "./session-archive/turn-progress.js";
+import { progressEvents, settledMessage, settledPrefix, TurnProgress, turnProgressIntervalMs, TURN_PROGRESS_FLOOR_MS, TURN_PROGRESS_INTERVAL_MS } from "./session-archive/turn-progress.js";
 
 // A long turn sends what is final while it runs (session-archive/turn-progress.ts,
 // the same file as the CLI's, PARITY.sha256): the parent's settled messages
@@ -26,6 +26,15 @@ test("settled messages: a user message, an ended answer with no open tool call",
   expect(settledMessage(running("b", 1))).toBe(false);
   expect(settledMessage({ info: { id: "c", role: "assistant", time: { created: 1, completed: 2 } }, parts: [{ type: "tool", state: { status: "pending" } }] })).toBe(false);
   expect(settledPrefix([user("u", "x", 1), done("a", 2), running("b", 3), done("c", 4)])).toBe(2);
+});
+
+test("the pieces of one send ahead are numbered part of parts (the server keeps events apart by time, type and part)", () => {
+  expect(progressEvents([{ messages: [1] }, { messages: [2, 3] }, { messages: [4] }], (piece) => piece.messages)).toEqual([
+    { messages: [1], part: 1, parts: 3, progress: true },
+    { messages: [2, 3], part: 2, parts: 3, progress: true },
+    { messages: [4], part: 3, parts: 3, progress: true },
+  ]);
+  expect(progressEvents([] as unknown[][], (piece) => piece)).toEqual([]);
 });
 
 test("the interval: default, off, floor, unreadable", () => {
@@ -174,6 +183,7 @@ test("a long turn with a sub-agent: progress while it runs, the end sends the re
 
   const ahead = events.filter((event) => event.type === "turn.messages" && (event.data as { progress?: boolean }).progress === true);
   expect(ahead.map((event) => ids((event.data as { messages: unknown }).messages))).toEqual([["u1"], ["a1"]]);
+  for (const event of ahead) expect([(event.data as { part: number }).part, (event.data as { parts: number }).parts]).toEqual([1, 1]);
   const end = flushes.filter((flush) => flush.final);
   expect(end.length).toBe(1);
   const final = end[0]!.final as { messages: Message[] };
