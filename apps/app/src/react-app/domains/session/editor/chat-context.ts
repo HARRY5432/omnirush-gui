@@ -8,6 +8,9 @@
 import { useComposerStateStore } from "../surface/composer-state-store";
 import { useEditorStore } from "./editor-store";
 
+/** Fired with the text for the new-task composer; the composer calls preventDefault() when it took it. */
+export const NEW_TASK_PREFILL_EVENT = "omnirush:new-task-prefill";
+
 export type ChatContextChip = {
   /** What the chip shows: `src/orders.ts L5–6 · selection` (no square brackets). */
   label: string;
@@ -18,7 +21,16 @@ export type ChatContextChip = {
 export type ChatHandoffResult = { ok: true } | { ok: false; reason: string };
 
 export function sendToChat(sessionId: string | null, instruction: string, chips: ChatContextChip[]): ChatHandoffResult {
-  if (!sessionId) return { ok: false, reason: "Open or start a chat first." };
+  if (!sessionId) {
+    // No chat yet: the new-task composer takes it as plain text (it has no chips). Unhandled = no composer on screen.
+    const text = [instruction, ...chips.map((chip) => chip.text)].filter(Boolean).join("\n\n");
+    const event = new CustomEvent(NEW_TASK_PREFILL_EVENT, { detail: text, cancelable: true });
+    if (!window.dispatchEvent(event)) {
+      useEditorStore.getState().setIdeChatCollapsed(false);
+      return { ok: true };
+    }
+    return { ok: false, reason: "Open or start a chat first." };
+  }
   const store = useComposerStateStore.getState();
   const state = store.sessions[sessionId];
   const draft = state?.draft ?? "";

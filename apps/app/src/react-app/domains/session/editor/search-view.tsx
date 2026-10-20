@@ -12,6 +12,7 @@ import type { OmniRushEditorSearchResult, OmniRushServerClient } from "@/app/lib
 import { Button } from "@/components/ui/button";
 import { toast } from "@/components/ui/sonner";
 import { cn } from "@/lib/utils";
+import { ConfirmModal } from "@/react-app/design-system/modals/confirm-modal";
 import type { EditorDocuments } from "./editor-models";
 
 type Flags = { regex: boolean; caseSensitive: boolean; wholeWord: boolean };
@@ -59,6 +60,7 @@ export function SearchView(props: {
   const [rerun, setRerun] = useState(0);
   const [collapsed, setCollapsed] = useState<Record<string, true>>({});
   const [dismissed, setDismissed] = useState<Record<string, true>>({});
+  const [confirming, setConfirming] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -173,8 +175,10 @@ export function SearchView(props: {
 
   const replaceAll = () => {
     if (!total) return;
-    const files = visible.length;
-    if (!window.confirm(`Replace ${total} match${total === 1 ? "" : "es"} in ${files} file${files === 1 ? "" : "s"} with "${replace}"? Each file can be undone in the editor.`)) return;
+    setConfirming(true);
+  };
+  const confirmReplaceAll = () => {
+    setConfirming(false);
     void apply(visible.flatMap((file) => file.matches.map((match) => absoluteTarget(file.path, match))));
   };
 
@@ -194,6 +198,15 @@ export function SearchView(props: {
 
   return (
     <div className="flex h-full min-h-0 flex-col text-xs" data-editor-search>
+      <ConfirmModal
+        open={confirming}
+        title="Replace all?"
+        message={`Replace ${total} match${total === 1 ? "" : "es"} in ${visible.length} file${visible.length === 1 ? "" : "s"} with "${replace}"? The files are saved; each one can be undone in the editor.`}
+        confirmLabel="Replace all"
+        cancelLabel="Cancel"
+        onConfirm={confirmReplaceAll}
+        onCancel={() => setConfirming(false)}
+      />
       <div className="flex shrink-0 flex-col gap-1 p-2">
         <div className="flex items-start gap-1">
           <button
