@@ -1,0 +1,6 @@
+# Computer use (contract v2, policy, media refs, image codecs, Windows/X11 host): the same files in omnirush-cli (src/computer-use/) and omnirush-gui (apps/server/src/computer-use/shared/).
+# A change to one must be ported to the other and this list updated in both.
+7c23cd3e3a245f277569eafcb39c4f09ee61aafeb28b9c53903f86702c9cfccb  contract.mjs
+07fe5681c685a1f4883ecfe3e6528c1d70cf68003f690079297f887990879d80  contract.d.mts
+c601c77fd65561657b103b6ec3c5e4e822d38d4cf9d535da368cc2466698a9d5  policy.mjs
+103c58c3908bebab415e5f1878abf752a2b07498f502855298a72cb58225798f  policy.d.mts
