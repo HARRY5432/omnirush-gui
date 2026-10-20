@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { ExternalLink } from "lucide-react";
 
 import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
-import { toast } from "@/components/ui/sonner";
+import { Toaster, toast } from "@/components/ui/sonner";
 import { cn } from "@/lib/utils";
 import { t } from "@/i18n";
 import { usePlatform } from "../../kernel/platform";
@@ -27,6 +27,9 @@ import {
 const UPDATE_TOAST_ID = "whats-new-update";
 const UPDATE_TOAST_MS = 12_000;
 const UPDATE_TOAST_SETTLE_MS = 2_500;
+/** Its own toaster: bottom right but above the chat's composer (the main toaster sits at the window's edge). */
+const UPDATE_TOASTER_ID = "whats-new";
+const UPDATE_TOASTER_OFFSET = { bottom: 168, right: 24 };
 
 const GROUPS = [
   { key: "new", label: () => t("whats_new.group_new"), dot: "bg-primary" },
@@ -70,7 +73,7 @@ function ReleaseCard({ release, current }: { release: WhatsNewRelease; current: 
       <header className="flex items-baseline gap-2">
         <h3 className="font-mono text-sm font-semibold text-foreground">{release.version}</h3>
         {current ? (
-          <span className="rounded-full border border-border bg-secondary px-2 py-px text-[11px] font-medium text-secondary-foreground">
+          <span className="rounded-full border border-primary/60 bg-primary/10 px-2 py-px text-[11px] font-medium text-foreground">
             {t("whats_new.current")}
           </span>
         ) : null}
@@ -132,7 +135,13 @@ export function WhatsNewSheet() {
           <SheetTitle className="text-lg font-semibold">{t("whats_new.title")}</SheetTitle>
           <SheetDescription>{t("whats_new.subtitle", { version })}</SheetDescription>
         </SheetHeader>
-        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3" data-testid="whats-new-body">
+        <div
+          className="min-h-0 flex-1 overflow-y-auto px-3 py-3 focus-visible:outline-none"
+          data-testid="whats-new-body"
+          tabIndex={0}
+          role="region"
+          aria-label={t("whats_new.title")}
+        >
           <WhatsNewReleases version={version} />
         </div>
         <SheetFooter className="flex-row items-center justify-between border-t border-border px-5 py-3">
@@ -179,10 +188,11 @@ export function WhatsNewUpdateToast() {
         id: UPDATE_TOAST_ID,
         duration: UPDATE_TOAST_MS,
         action: { label: t("whats_new.title"), onClick: () => openWhatsNew("toast") },
+        toasterId: UPDATE_TOASTER_ID,
       });
     }, UPDATE_TOAST_SETTLE_MS);
     return () => window.clearTimeout(timer);
   }, [due, turnRunning]);
 
-  return null;
+  return <Toaster id={UPDATE_TOASTER_ID} position="bottom-right" offset={UPDATE_TOASTER_OFFSET} mobileOffset={UPDATE_TOASTER_OFFSET} />;
 }

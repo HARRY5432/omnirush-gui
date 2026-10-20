@@ -69,6 +69,8 @@ interface ToastOptions {
   action?: ToastAction
   cancel?: ToastAction
   duration?: number
+  /** Show it in a separate <Toaster id=…> (its own position) instead of the app's main one. */
+  toasterId?: string
 }
 
 const TOAST_ICONS: Record<Exclude<ToastType, "default">, LucideIcon> = {
@@ -296,6 +298,7 @@ function showToast(type: ToastType, message: React.ReactNode, options?: ToastOpt
     {
       id: options?.id,
       duration: options?.duration,
+      toasterId: options?.toasterId,
       description: undefined,
       action: undefined,
       cancel: undefined,
