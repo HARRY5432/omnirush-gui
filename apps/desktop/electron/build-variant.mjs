@@ -1,8 +1,9 @@
 // Which build of the desktop app this is, fixed when it was packaged; nothing
 // at runtime (environment, settings) changes it.
 //
-// A packaged app reads <resources>/omnirush-build.json, written by
-// scripts/electron-build.mjs: { variant: "release" | "dev", engineSha256 }.
+// A packaged app reads server/omnirush-build.json inside its app.asar (with
+// the server it stamps), written by scripts/electron-build.mjs:
+// { variant: "release" | "dev", engineSha256 }.
 // The file missing or unreadable in a packaged app is a release build with no
 // engine it may run. An app run from the source tree (electron-dev) is dev.
 //
@@ -29,7 +30,7 @@ export function readDesktopBuild({
   const packaged = Boolean(resourcesPath) && exists(path.join(resourcesPath, "app.asar"));
   if (!packaged) return { variant: "dev", engineSha256: null, packaged: false };
   try {
-    const value = JSON.parse(read(path.join(resourcesPath, DESKTOP_BUILD_FILE)));
+    const value = JSON.parse(read(path.join(resourcesPath, "app.asar", "server", DESKTOP_BUILD_FILE)));
     const engineSha256 = typeof value?.engineSha256 === "string" && /^[0-9a-f]{64}$/.test(value.engineSha256) ? value.engineSha256 : null;
     return { variant: value?.variant === "dev" ? "dev" : "release", engineSha256, packaged: true };
   } catch {

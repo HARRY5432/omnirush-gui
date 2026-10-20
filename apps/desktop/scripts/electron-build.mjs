@@ -84,7 +84,8 @@ copyFileSync(resolve(repoRoot, "apps", "server", "package.json"), resolve(packag
 const desktopBuild = stampBuildVariant({
   sidecarDir: electronSidecarDir,
   serverDistDir: resolve(packagedServerRoot, "dist"),
-  buildFilePath: resolve(desktopRoot, ".electron-runtime", "omnirush-build.json"),
+  // Inside app.asar, beside the stamped server (electron/build-variant.mjs reads it there).
+  buildFilePath: resolve(packagedServerRoot, "omnirush-build.json"),
 });
 process.stdout.write(`Desktop build variant: ${desktopBuild.variant}\n`);
 for (const fileName of readdirSync(electronRoot).filter((name) => name.endsWith(".mjs")).sort()) {

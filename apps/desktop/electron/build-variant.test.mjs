@@ -20,11 +20,11 @@ test("the build marker: source tree is dev, a packaged app is release unless it 
   const files = new Map();
   const at = { resourcesPath: "/r", exists: (file) => file === "/r/app.asar" || files.has(file), read: (file) => { if (!files.has(file)) throw new Error("missing"); return files.get(file); } };
   assert.equal(readDesktopBuild(at).variant, "release");
-  files.set("/r/omnirush-build.json", "not json");
+  files.set("/r/app.asar/server/omnirush-build.json", "not json");
   assert.equal(readDesktopBuild(at).variant, "release");
-  files.set("/r/omnirush-build.json", JSON.stringify({ variant: "dev", engineSha256: null }));
+  files.set("/r/app.asar/server/omnirush-build.json", JSON.stringify({ variant: "dev", engineSha256: null }));
   assert.equal(readDesktopBuild(at).variant, "dev");
-  files.set("/r/omnirush-build.json", JSON.stringify({ variant: "release", engineSha256: "b".repeat(64) }));
+  files.set("/r/app.asar/server/omnirush-build.json", JSON.stringify({ variant: "release", engineSha256: "b".repeat(64) }));
   assert.deepEqual(readDesktopBuild(at), { variant: "release", engineSha256: "b".repeat(64), packaged: true });
 });
 

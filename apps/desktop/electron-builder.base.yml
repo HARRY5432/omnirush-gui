@@ -14,9 +14,6 @@ extraResources:
     to: computer-use/relay.mjs
   - from: .electron-runtime/omnirush-sentry.json
     to: omnirush-sentry.json
-  # The build variant (scripts/stamp-build-variant.mjs, electron/build-variant.mjs).
-  - from: .electron-runtime/omnirush-build.json
-    to: omnirush-build.json
   # Bundled UI-control MCP (scripts/prepare-ui-mcp.mjs). Launched with the app's
   # own binary and ELECTRON_RUN_AS_NODE=1; never fetched from a registry.
   - from: .electron-runtime/omnirush-ui-mcp
