@@ -250,10 +250,12 @@ describe("policy: approvals per permission mode", () => {
     expect(documentOf("● main.ts - Code", "Code")).toBe("main.ts");
   });
 
-  test("Normal, no readable text at the target: a click or Enter right after typing asks", () => {
-    expect(actApproval({ ...plain, target: {}, typed_before: true }).reasons).toEqual([{ code: "submit_after_typing" }]);
-    expect(actApproval({ ...plain, action: { type: "key", key: "Enter" }, target: {}, typed_before: true }).ask).toBe(true);
-    expect(actApproval({ ...plain, target: {}, typed_before: false }).ask).toBe(false);
+  test("Normal, no readable text at the target: a click asks (target unknown); Enter right after typing asks", () => {
+    expect(actApproval({ ...plain, target: {} }).reasons).toEqual([{ code: "target_unknown" }]);
+    expect(actApproval({ ...plain, action: { type: "right_click", x: 1, y: 1 }, target: {} }).ask).toBe(true);
+    expect(actApproval({ ...plain, action: { type: "key", key: "Enter" }, target: {}, typed_before: true }).reasons).toEqual([{ code: "submit_after_typing" }]);
+    expect(actApproval({ ...plain, action: { type: "key", key: "enter" }, target: {}, typed_before: false }).ask).toBe(false);
+    expect(actApproval({ ...plain, action: { type: "move", x: 1, y: 1 }, target: {} }).ask).toBe(false);
     // With text the host read there, the target rules decide instead.
     expect(actApproval({ ...plain, target: { text: "Bold" }, typed_before: true }).ask).toBe(false);
     expect(actApproval({ ...plain, mode: "auto", target: {}, typed_before: true }).ask).toBe(false);

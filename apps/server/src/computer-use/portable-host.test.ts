@@ -200,6 +200,7 @@ describe("portable host: observe and act", () => {
 
   test("Normal: plain acts run, risky ones ask", async () => {
     const r = rig("normal");
+    r.native.state.texts = [{ x: 0, y: 0, width: 100, height: 100, text: "Notes" }];
     const { host, c, session, obs } = await opened(r);
     const plain = await call(c, "computer_act", { session_id: session, observation_id: obs.state.observation?.id, request_id: "a", intent: "Put the cursor at the end", action: { type: "click", x: 5, y: 5 } });
     expect(plain.state).toMatchObject({ ok: true, approval: { asked: false } });
@@ -259,14 +260,15 @@ describe("portable host: observe and act", () => {
     const secure = await call(c, "computer_act", { session_id: session, observation_id: (sign.state.observation as { id: string }).id, request_id: "b", intent: "Fill in the field", action: { type: "type", text: "abc" } });
     expect(secure.state).toMatchObject({ ok: true, approval: { asked: false } });
     await host.close();
-    // A host that reads no text (X11, Windows): type, then a click asks.
+    // A host that reads no text (X11): every click asks (the app doesn't say what it is); typing does not.
     const x = rig("normal");
     const o = await opened(x);
     const typed = await call(o.c, "computer_act", { session_id: o.session, observation_id: o.obs.state.observation?.id, request_id: "t", intent: "Type the name", action: { type: "type", text: "Ada" } });
     expect(typed.state).toMatchObject({ ok: true, approval: { asked: false } });
     const click = await call(o.c, "computer_act", { session_id: o.session, observation_id: (typed.state.observation as { id: string }).id, request_id: "k", intent: "Go to the next field", action: { type: "click", x: 400, y: 300 } });
-    expect(click.state).toMatchObject({ ok: true, approval: { asked: true, reasons: ["submit_after_typing"] } });
-    const again = await call(o.c, "computer_act", { session_id: o.session, observation_id: (click.state.observation as { id: string }).id, request_id: "k2", intent: "Click again", action: { type: "click", x: 400, y: 300 } });
+    expect(click.state).toMatchObject({ ok: true, approval: { asked: true, reasons: ["target_unknown"] } });
+    // The same click on the same image within 30 s (a retry) is not asked again.
+    const again = await call(o.c, "computer_act", { session_id: o.session, observation_id: (click.state.observation as { id: string }).id, request_id: "k2", intent: "Go to the next field", action: { type: "click", x: 400, y: 300 } });
     expect(again.state).toMatchObject({ ok: true, approval: { asked: false } });
     expect(await o.host.physicalInput()).toBe(true);
     x.native.state.synthetic = true;
@@ -284,7 +286,7 @@ describe("portable host: observe and act", () => {
     await host.control({ session_id: session, action: "continue" });
     const next = await call(c, "computer_observe", { session_id: session });
     const act = await call(c, "computer_act", { session_id: session, observation_id: next.state.observation?.id, request_id: "b", intent: "Click in the text", action: { type: "click", x: 5, y: 5 } });
-    expect(act.state).toMatchObject({ ok: true, approval: { asked: true, reasons: ["after_takeover"] } });
+    expect(act.state).toMatchObject({ ok: true, approval: { asked: true, reasons: ["target_unknown", "after_takeover"] } });
     expect(r.events.map((e) => `${e.event}:${e.by}`)).toEqual(["opened:agent", "approved:person", "paused:person", "continued:person"]);
     await host.control({ session_id: session, action: "stop" });
     expect(r.events.at(-1)).toMatchObject({ event: "stopped", by: "person", app_id: "/usr/bin/gedit", app_name: "gedit", bundle_or_exe: "/usr/bin/gedit", mode: "control", approval: "once", os: "linux", screen: { id: "0", width: 3840, height: 2160 } });
@@ -363,6 +365,25 @@ describe("portable host: titles that follow the agent's own typing, and a worker
     }
     expect(workers.length).toBe(3);
     expect((await call(c, "computer_discover", {})).state.code).toBe("native_unavailable");
+    await host.close();
+  });
+});
+
+describe("portable host: the control under the point from the worker (Windows MSAA)", () => {
+  test("a named control decides (risky target, protected field); no name falls back to target_unknown", async () => {
+    const r = rig("normal");
+    let next: { name: string; role: number | null; protected: boolean } | null = { name: "Pay now", role: 43, protected: false };
+    const call0 = r.native.call.bind(r.native);
+    r.native.call = async (method: string, params: Record<string, unknown> = {}) => (method === "target" ? { targets: [next] } : call0(method, params));
+    const { host, c, session, obs } = await opened(r);
+    const pay = await call(c, "computer_act", { session_id: session, observation_id: obs.state.observation?.id, request_id: "p", intent: "Press the button", action: { type: "click", x: 10, y: 10 } });
+    expect(pay.state).toMatchObject({ ok: true, approval: { asked: true, reasons: ["risky_target"] } });
+    next = { name: "Bold", role: 43, protected: false };
+    const bold = await call(c, "computer_act", { session_id: session, observation_id: (pay.state.observation as { id: string }).id, request_id: "b", intent: "Make it bold", action: { type: "click", x: 20, y: 10 } });
+    expect(bold.state).toMatchObject({ ok: true, approval: { asked: false } });
+    next = { name: "", role: 42, protected: false };
+    const blank = await call(c, "computer_act", { session_id: session, observation_id: (bold.state.observation as { id: string }).id, request_id: "n", intent: "Click there", action: { type: "click", x: 30, y: 10 } });
+    expect(blank.state).toMatchObject({ ok: true, approval: { asked: true, reasons: ["target_unknown"] } });
     await host.close();
   });
 });

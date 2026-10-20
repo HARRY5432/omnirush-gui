@@ -365,9 +365,11 @@ export function actApproval(input = {}) {
     const targetWords = riskyWords(target.text);
     if (targetWords.length) reasons.push({ code: "risky_target", detail: targetWords.join(", ") });
   }
-  // No text the host could read at the target: a click or Enter right after typing in this window
-  // may submit what was typed (a login, a message, a payment), so it asks.
-  if (typeof target.text !== "string" && input.typed_before === true && (["click", "double_click"].includes(action.type) || (action.type === "key" && String(action.key).toLowerCase() === "enter"))) reasons.push({ code: "submit_after_typing" });
+  // No text the host could read at the target (X11; Windows when the control has no accessible name):
+  // a click could be "Pay" or "Delete account", so it asks; an Enter right after typing may submit what
+  // was typed (a login, a message, a payment), so it asks too.
+  if (typeof target.text !== "string" && ["click", "double_click", "right_click"].includes(action.type)) reasons.push({ code: "target_unknown" });
+  else if (typeof target.text !== "string" && input.typed_before === true && action.type === "key" && String(action.key).toLowerCase() === "enter") reasons.push({ code: "submit_after_typing" });
   if (action.type === "type") {
     if (target.secure === true) reasons.push({ code: "secure_field" });
     if (looksLikeCredential(action.text)) reasons.push({ code: "credential_text" });
@@ -396,7 +398,8 @@ export const ASK_REASONS = Object.freeze({
   other_window: "It would act in another window.",
   document_changed: "The window now shows a different page or document",
   after_takeover: "First action after you took over.",
-  submit_after_typing: "It would click or press Enter right after typing, which may send what was typed.",
+  submit_after_typing: "It would press Enter right after typing, which may send what was typed.",
+  target_unknown: "The agent wants to click here; the app doesn't say what this control is.",
 });
 
 /**

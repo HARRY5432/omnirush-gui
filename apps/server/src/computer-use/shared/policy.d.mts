@@ -56,7 +56,7 @@ export function looksLikeCredential(value: unknown): boolean;
 export function riskyChord(action: unknown): "paste" | "close_quit_delete" | null;
 export function documentOf(title: unknown, appName?: unknown): string;
 
-export type AskReasonCode = "careful" | "risky_intent" | "risky_target" | "secure_field" | "credential_text" | "paste" | "close_quit_delete" | "other_window" | "document_changed" | "after_takeover" | "submit_after_typing";
+export type AskReasonCode = "careful" | "risky_intent" | "risky_target" | "secure_field" | "credential_text" | "paste" | "close_quit_delete" | "other_window" | "document_changed" | "after_takeover" | "submit_after_typing" | "target_unknown";
 export type ApprovalInput = {
   mode?: PermissionMode | string;
   action?: Action | Record<string, unknown>;

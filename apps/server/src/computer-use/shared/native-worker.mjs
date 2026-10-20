@@ -272,6 +272,53 @@ function windows() {
     }
     return out;
   }
+  // The control under a screen point (MSAA, oleacc): its accessible name, role and protected state, for the
+  // host's per-act rules (risky targets, password fields). Never sent to the model. Null when unavailable.
+  let msaa = null;
+  const callPtr = (fn, proto, ...args) => (typeof koffi.call === "function" ? koffi.call(fn, proto, ...args) : koffi.decode(fn, koffi.pointer(proto))(...args));
+  const initMsaa = () => {
+    if (msaa !== null) return msaa;
+    try {
+      const ole = koffi.load("ole32.dll"), oleacc = koffi.load("oleacc.dll"), oleaut = koffi.load("oleaut32.dll");
+      f(ole, "int32_t __stdcall CoInitializeEx(void *reserved, uint32_t mode)")(null, 2);
+      koffi.struct("CU2_VARIANT", { vt: "uint16_t", r1: "uint16_t", r2: "uint16_t", r3: "uint16_t", lo: "int64_t", hi: "int64_t" });
+      msaa = {
+        fromPoint: f(oleacc, "int32_t __stdcall AccessibleObjectFromPoint(CU2_POINT point, _Out_ void **acc, _Out_ CU2_VARIANT *child)"),
+        length: f(oleaut, "uint32_t __stdcall SysStringLen(void *bstr)"),
+        free: f(oleaut, "void __stdcall SysFreeString(void *bstr)"),
+        name: koffi.proto("int32_t __stdcall CU2_ACC_NAME(void *self, CU2_VARIANT child, _Out_ void **name)"),
+        variant: koffi.proto("int32_t __stdcall CU2_ACC_VARIANT(void *self, CU2_VARIANT child, _Out_ CU2_VARIANT *out)"),
+        release: koffi.proto("uint32_t __stdcall CU2_ACC_RELEASE(void *self)"),
+      };
+    } catch { msaa = false; }
+    return msaa;
+  };
+  const low32 = (v) => Number(BigInt.asUintN(32, BigInt(v ?? 0)));
+  function targetAt(p) {
+    const m = initMsaa();
+    if (!m) return null;
+    const acc = [null], child = {};
+    try { if (m.fromPoint({ x: Math.round(p.x), y: Math.round(p.y) }, acc, child) < 0 || !acc[0]) return null; } catch { return null; }
+    // IAccessible vtable: IUnknown (0-2), IDispatch (3-6), get_accParent 7, ChildCount 8, Child 9, Name 10, Value 11, Description 12, Role 13, State 14.
+    const methods = koffi.decode(koffi.decode(acc[0], "void *"), "void *", 15);
+    try {
+      let name = "";
+      const bstr = [null];
+      if (callPtr(methods[10], m.name, acc[0], child, bstr) >= 0 && bstr[0]) {
+        try { const n = Math.min(m.length(bstr[0]), 400); name = Buffer.from(Uint16Array.from(koffi.decode(bstr[0], "uint16_t", n)).buffer).toString("utf16le"); }
+        finally { m.free(bstr[0]); }
+      }
+      const role = {}, state = {};
+      const hasRole = callPtr(methods[13], m.variant, acc[0], child, role) >= 0 && role.vt === 3;
+      const hasState = callPtr(methods[14], m.variant, acc[0], child, state) >= 0 && state.vt === 3;
+      // STATE_SYSTEM_PROTECTED (0x20000000): a password field.
+      return { name: name.trim().slice(0, 200), role: hasRole ? low32(role.lo) : null, protected: hasState && (low32(state.lo) & 0x20000000) !== 0 };
+    } catch {
+      return null;
+    } finally {
+      try { callPtr(methods[2], m.release, acc[0]); } catch { /* released with the process */ }
+    }
+  }
   function screens() {
     const out = [];
     const cb = koffi.register((monitor) => {
@@ -436,7 +483,7 @@ function windows() {
     } finally { release(); }
   }
   return {
-    poll, window, screens, ancestors, available, release, startMonitoring, stopMonitoring, check, hit, capture, act,
+    poll, window, screens, ancestors, targetAt, available, release, startMonitoring, stopMonitoring, check, hit, capture, act,
     cursor() { const p = {}; return cursorPos(p) ? { x: p.x, y: p.y } : null; },
     list() { const result = []; const cb = koffi.register((id) => { try { const item = window(id); if (item.title) result.push(item); } catch { /* skip */ } return 1; }, koffi.pointer(enumProto)); try { enumWindows(cb, 0); } finally { koffi.unregister(cb); } return result; },
     focus(expected) {
@@ -904,6 +951,7 @@ process.on("message", async (message) => {
     else if (method === "capture") result = await backend.capture(params.window);
     else if (method === "check") { backend.check(params.window, params.generation, params.deadline); result = {}; }
     else if (method === "hit") result = { inside: (params.points ?? []).map((p) => backend.hit(params.window, p)) };
+    else if (method === "target") result = { targets: backend.targetAt ? (params.points ?? []).map((p) => backend.targetAt(p)) : null };
     else if (method === "act") { await backend.act(params.window, params.generation, params.action, params.deadline); result = { generation }; }
     else fail("unknown_method", "Unknown native operation.");
     post({ id, result });
