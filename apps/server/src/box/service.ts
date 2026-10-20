@@ -446,6 +446,12 @@ export class BoxService {
     return this.status(workspace);
   }
 
+  /** Whether the project's work runs in its box (the same decision as status().on, without probing the runtime). */
+  async sandboxOn(workspace: BoxWorkspace): Promise<boolean> {
+    if (workspace.workspaceType !== "local") return false;
+    return (await this.mode(workspace)).on;
+  }
+
   async status(workspace: BoxWorkspace, { fresh = false }: { fresh?: boolean } = {}): Promise<BoxStatus> {
     const { settings, server, on, source, offer, hostBuilds: gate, lessRepro } = await this.mode(workspace);
     // The server's "offer": shown once per folder (CLI: the tip, once per folder).

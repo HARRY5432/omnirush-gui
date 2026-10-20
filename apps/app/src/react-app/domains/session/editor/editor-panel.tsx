@@ -81,6 +81,7 @@ import { MarkdownPreview } from "./markdown-preview";
 import { openDesktopUrl } from "@/app/lib/desktop";
 import { useGroupRef } from "react-resizable-panels";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from "@/components/ui/context-menu";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 /** What the main group shows: a text file or diff (Monaco), a Markdown preview, or an image. */
 type PanelSurface = SurfaceDoc | { kind: "preview"; key: string; doc: FileDoc } | { kind: "image"; key: string; path: string };
@@ -1062,30 +1063,58 @@ export default function EditorPanel(props: EditorPanelProps) {
    * Format on save: the project's own formatter on the buffer's text, applied as one undoable edit before writing.
    * A formatter that fails or takes longer than 3 s never blocks the save: the file is saved as it is.
    */
-  const formatBeforeSave = useCallback(async (path: string) => {
+  /** The trust prompt for running a project's formatter ("Run `<command>` from this project …?"). */
+  const [formatPrompt, setFormatPrompt] = useState<{ formatter: string; command: string; sandbox: boolean; answer: (choice: "once" | "always" | "never" | null) => void } | null>(null);
+  const askFormatTrust = (formatter: string, command: string, sandbox: boolean) =>
+    new Promise<"once" | "always" | "never" | null>((resolve) => {
+      setFormatPrompt({ formatter, command, sandbox, answer: (choice) => {
+        setFormatPrompt(null);
+        resolve(choice);
+      } });
+    });
+  const formatBeforeSave = useCallback(async (path: string, trigger: "manual" | "focus") => {
     const doc = docs.get(path);
     if (!doc) return;
     const model = doc.model;
     const version = model.getAlternativeVersionId();
     const extension = path.includes(".") ? path.slice(path.lastIndexOf(".")) : path;
     try {
-      const outcome = await client.editorFormat(workspaceId, path, model.getValue(), 3_000);
-      if (outcome.formatter === null || outcome.text === null) {
+      let outcome = await client.editorFormat(workspaceId, path, model.getValue());
+      if (outcome.formatter !== null && "trust" in outcome && outcome.trust === "ask") {
+        // The project's formatter is the project's code: it runs only after the person says so, and never from an
+        // automatic save (that saves the file as it is and says how to choose).
+        if (trigger !== "manual") {
+          if (!noFormatterNoted.current.has(`trust:${extension}`)) {
+            noFormatterNoted.current.add(`trust:${extension}`);
+            toast(`Saved without formatting: ${outcome.formatter} has not been allowed for this project yet. Save with ${/Mac/i.test(navigator.platform) ? "⌘S" : "Ctrl+S"} to choose.`);
+          }
+          return;
+        }
+        const choice = await askFormatTrust(outcome.formatter, outcome.command, outcome.sandbox);
+        if (!choice) return;
+        outcome = await client.editorFormat(workspaceId, path, model.getValue(), { trust: choice, hash: outcome.hash });
+        if ("trust" in outcome && outcome.trust === "ask") {
+          toast("The formatter's settings changed while you chose; saved as is. Save again to see the new command.");
+          return;
+        }
+      }
+      if (outcome.formatter === null) {
         if (!noFormatterNoted.current.has(extension)) {
           noFormatterNoted.current.add(extension);
           toast(`No formatter set up for ${extension} files in this project; saved as is.`);
         }
         return;
       }
+      if (!("text" in outcome) || typeof outcome.text !== "string") return;
       // Typed while the formatter ran: that text wins, unformatted. Line endings alone are no change.
       const lf = (text: string) => text.replace(/\r\n/g, "\n");
       if (model.getAlternativeVersionId() !== version || lf(outcome.text) === lf(model.getValue())) return;
       model.pushStackElement();
       model.pushEditOperations([], [{ range: model.getFullModelRange(), text: outcome.text }], () => null);
       model.pushStackElement();
-      toast(`Formatted with ${outcome.formatter}`, { duration: 1500 });
-    } catch {
-      toast("Couldn't format this file; it was saved as is.");
+      toast(`Formatted with ${outcome.formatter}${outcome.sandbox ? " (in the sandbox)" : ""}`, { duration: 1500 });
+    } catch (error) {
+      toast(`Couldn't format this file; it was saved as is.${error instanceof Error && error.message ? ` ${error.message}` : ""}`);
     }
   }, [client, docs, workspaceId]);
 
@@ -1098,7 +1127,7 @@ export default function EditorPanel(props: EditorPanelProps) {
     const doc = docs.get(path);
     if (!doc) return;
     if (trigger !== "manual" && (doc.conflict || !docs.isDirty(doc))) return;
-    if (useEditorSettings.getState().formatOnSave && trigger !== "delay") await formatBeforeSave(path);
+    if (useEditorSettings.getState().formatOnSave && trigger !== "delay") await formatBeforeSave(path, trigger);
     const result = await docs.save(path, { sessionId, source: "editor", force: options.force });
     if (result.ok) {
       void refreshFileDiagnostics(path);
@@ -1899,6 +1928,24 @@ export default function EditorPanel(props: EditorPanelProps) {
         ) : null}
       </ResizablePanelGroup>
       </div>
+      <Dialog open={Boolean(formatPrompt)} onOpenChange={(open) => !open && formatPrompt?.answer(null)}>
+        <DialogContent className="max-w-lg" data-editor-format-trust>
+          <DialogHeader>
+            <DialogTitle>Run this project's formatter?</DialogTitle>
+            <DialogDescription>
+              Format on save would run {formatPrompt?.formatter} from this project{formatPrompt?.sandbox ? ", in the project's sandbox" : " on this computer"}. It is the
+              project's own code (and its settings and plugins), so only allow it for projects you trust.
+            </DialogDescription>
+          </DialogHeader>
+          <code className="block break-all rounded-md border border-border bg-muted px-3 py-2 font-mono text-xs" data-editor-format-command>{formatPrompt?.command}</code>
+          <p className="text-xs text-muted-foreground">You are asked again if the formatter or its settings change.</p>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => formatPrompt?.answer("never")}>No</Button>
+            <Button variant="outline" onClick={() => formatPrompt?.answer("once")}>Allow once</Button>
+            <Button onClick={() => formatPrompt?.answer("always")}>Always for this project</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       {quickOpen ? (
         <QuickOpen
           files={files}

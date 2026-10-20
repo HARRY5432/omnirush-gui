@@ -4974,7 +4974,7 @@ function createRoutes(
   // uploader is tracking adds a "user_edit" / "user_review" trace event to it;
   // nothing else in a chat's upload changes (editor-events.ts).
   registerEditorSearchRoutes({ routes, config, jsonResponse, readJsonBody, resolveWorkspace });
-  registerEditorFormatRoutes({ routes, config, jsonResponse, readJsonBody, resolveWorkspace, ensureWritable, requireClientScope });
+  registerEditorFormatRoutes({ routes, config, jsonResponse, readJsonBody, resolveWorkspace, ensureWritable, requireClientScope, sandboxOn: (workspace) => boxServiceFor(config).sandboxOn(workspace) });
   registerEditorRoutes({
     routes,
     config,

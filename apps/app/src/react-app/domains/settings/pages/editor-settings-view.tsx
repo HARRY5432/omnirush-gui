@@ -196,7 +196,7 @@ export function EditorSettingsView(props: { client: OmniRushServerClient | null;
               <label htmlFor="editor-format-on-save">Format on save</label>
             </LayoutSectionItemTitle>
             <LayoutSectionItemDescription>
-              Runs the project's own formatter (Prettier, gofmt, ruff, …) when you save with Cmd/Ctrl+S or leave the editor; never a built-in one.
+              Runs the project's own formatter (Prettier, gofmt, Ruff, …) when you save with Cmd/Ctrl+S or leave the editor; never a built-in one. It is the project's code: the first time in each project you are shown the exact command and asked (again whenever it changes). With the sandbox on, it runs in the sandbox.
               {" "}<span data-editor-formatter>{formatterNote}</span>
             </LayoutSectionItemDescription>
             <LayoutSectionItemHeaderActions>

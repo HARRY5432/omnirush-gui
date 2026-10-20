@@ -2858,14 +2858,27 @@ export function createOmniRushServerClient(options: { baseUrl: string; token?: s
         timeoutMs: 10_000,
       }),
 
-    /** The project's formatter on the editor's text (a user action): the formatted text, or null when none is set up. */
-    editorFormat: (workspaceId: string, path: string, text: string, timeoutMs = 3_000) =>
-      requestJson<{ formatter: string | null; text: string | null }>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/editor/format`, {
+    /**
+     * The project's formatter on the editor's text (a user action). It runs only once trusted for the project:
+     * without `trust` the answer may be a prompt (`trust: "ask"`, the exact command and a configuration hash).
+     */
+    editorFormat: (
+      workspaceId: string,
+      path: string,
+      text: string,
+      options: { trust?: "once" | "always" | "never"; hash?: string; timeoutMs?: number } = {},
+    ) =>
+      requestJson<
+        | { formatter: null; text: null }
+        | { formatter: string; trust: "ask"; command: string; hash: string; sandbox: boolean }
+        | { formatter: string; trust: "denied" }
+        | { formatter: string; text: string; sandbox: boolean }
+      >(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/editor/format`, {
         token,
         hostToken,
         method: "POST",
-        body: { path, text },
-        timeoutMs,
+        body: { path, text, ...(options.trust ? { trust: options.trust, hash: options.hash } : {}) },
+        timeoutMs: options.timeoutMs ?? 3_000,
       }),
 
     /** An image file's bytes for the editor's image preview (image types only, capped by the server). */
