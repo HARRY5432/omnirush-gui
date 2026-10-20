@@ -28,6 +28,14 @@ function pendingPermission(id = "permission-1"): PendingPermission {
 
 const mounted: { root: Root; container: HTMLElement }[] = [];
 
+// The card counts keys only PERMISSION_SHORTCUT_ARM_MS after it appeared and after the last key.
+let clockOffset = 0;
+const realNow = Date.now.bind(Date);
+Date.now = () => realNow() + clockOffset;
+const advance = (ms = 700) => {
+  clockOffset += ms;
+};
+
 async function mount(props: { busy?: boolean; id?: string } = {}) {
   const replies: string[] = [];
   const container = document.createElement("div");
@@ -59,18 +67,56 @@ afterEach(async () => {
 });
 
 test("Y allows once, A allows for the chat, N and Escape deny", async () => {
-  for (const [key, reply] of [["y", "once"], ["Y", "once"], ["a", "always"], ["n", "reject"], ["Escape", "reject"]] as const) {
-    const { replies } = await mount({ id: `p-${key}` });
-    await press(key);
-    expect({ key, replies }).toEqual({ key, replies: [`p-${key}:${reply}`] });
+  for (const [keys, reply] of [[["y"], "once"], [["Y"], "once"], [["a", "y"], "always"], [["a", "Enter"], "always"], [["n"], "reject"], [["Escape"], "reject"]] as const) {
+    const id = `p-${keys.join("-")}`;
+    const { replies } = await mount({ id });
+    advance();
+    for (const key of keys) {
+      await press(key);
+      advance(200);
+    }
+    expect({ keys, replies }).toEqual({ keys, replies: [`${id}:${reply}`] });
     // One reply per request, even when the key is pressed again before the card goes away.
-    await press(key);
+    advance();
+    await press(keys[0]!);
     expect(replies).toHaveLength(1);
     for (const { root, container } of mounted.splice(0)) {
       await act(async () => root.unmount());
       container.remove();
     }
   }
+});
+
+test("a key right after the card appears, or while you keep typing, answers nothing", async () => {
+  const { replies } = await mount();
+  await press("y");
+  advance(300);
+  await press("n");
+  advance(300);
+  await press("y");
+  expect(replies).toEqual([]);
+  advance();
+  await press("y");
+  expect(replies).toEqual(["permission-1:once"]);
+});
+
+test("A asks for a confirming key; N or Escape cancels it", async () => {
+  const { replies, container } = await mount();
+  advance();
+  await press("a");
+  expect(container.querySelector('[data-permission-confirm="always"]')).not.toBeNull();
+  advance(200);
+  await press("n");
+  expect(replies).toEqual([]);
+  expect(container.querySelector('[data-permission-confirm="always"]')).toBeNull();
+  advance();
+  await press("a");
+  advance(200);
+  await press("Escape");
+  expect(replies).toEqual([]);
+  advance();
+  await press("y");
+  expect(replies).toEqual(["permission-1:once"]);
 });
 
 test("shows the keys on the buttons", async () => {
@@ -83,6 +129,7 @@ test("shows the keys on the buttons", async () => {
 
 test("never takes keystrokes from the composer or other text fields", async () => {
   const { replies } = await mount();
+  advance();
   const textarea = document.createElement("textarea");
   const input = document.createElement("input");
   const select = document.createElement("select");
@@ -106,6 +153,7 @@ test("never takes keystrokes from the composer or other text fields", async () =
 
 test("ignores modifier chords, other keys, other dialogs and a busy card", async () => {
   const { replies } = await mount();
+  advance();
   await press("y", document.body, { metaKey: true });
   await press("a", document.body, { ctrlKey: true });
   await press("n", document.body, { altKey: true });

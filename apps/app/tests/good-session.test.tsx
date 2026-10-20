@@ -724,6 +724,9 @@ describe("the server's auto-retry and one-more-turn nudge", () => {
     const facts = messageFacts([prompt(), assistant("a1", [declined], { finish: "tool-calls" })]);
     expect(facts.ended).toBe("stopped");
     expect(autoRetryMessage({ ...base, ended: facts.ended, retryable: facts.retryable })).toBeNull();
+    // A decline the model went on from (with feedback) and then ran another tool: no stop.
+    const goneOn = messageFacts([prompt(), assistant("a3", [tool("bash", { command: "git push" }, "output-error", "The user rejected permission to use this specific tool call with the following feedback: no"), tool("bash", { command: "ls" }, "output-available", "x")], { finish: "tool-calls" })]);
+    expect(goneOn.ended).not.toBe("stopped");
     // Any other failed tool call that cut the chain is still retried once.
     const failed = messageFacts([prompt(), assistant("a2", [tool("bash", { command: "make" }, "output-error", "exit 2")], { finish: "tool-calls" })]);
     expect(autoRetryMessage({ ...base, ended: failed.ended, retryable: failed.retryable })).toBe("Continue.");

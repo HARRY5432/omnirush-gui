@@ -882,7 +882,8 @@ function turnEndOf(turn: readonly UIMessage[], last: UIMessage): TurnEnding {
         afterLastTool = false;
         finalText = "";
         if (value.state === "input-streaming" || value.state === "input-available") unfinished = true;
-        else if (value.state === "output-error" && str(value.errorText).startsWith(DECLINED_TOOL)) declined = true;
+        // Only the turn's last tool call counts: a decline the model went on from is no stop.
+        declined = value.state === "output-error" && str(value.errorText).startsWith(DECLINED_TOOL);
       } else if (part.type === "text" && str(value.text).trim()) {
         afterLastTool = true;
         finalText = str(value.text);
