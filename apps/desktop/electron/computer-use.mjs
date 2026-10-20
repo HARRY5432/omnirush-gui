@@ -19,6 +19,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { app } from "electron";
+import { testAnswersAllowed } from "./computer-use-answers.mjs";
 import { createComputerUseHost } from "./computer-use-host.mjs";
 import { createComputerPreview } from "./computer-use-preview.mjs";
 
@@ -33,9 +34,10 @@ const secretHeaders = { "x-omnirush-computer-use-secret": HOST_SECRET };
 // The profile folder the local server expects the host in (computer-use/desktop.ts expectedHostCommand).
 const profileDir = () => process.env.OMNIRUSH_DESKTOP_USER_DATA_DIR?.trim() || app.getPath("userData");
 const SYNTHETIC_MESSAGE = "Use your own mouse or keyboard to approve.";
-// Answers need a physical press in this app's window. OMNIRUSH_COMPUTER_USE_TEST_ANSWERS=1 (rigs only: the
-// app's own environment, which the agent cannot set for a running app) accepts remote-debugging clicks.
-const testAnswers = process.env.OMNIRUSH_COMPUTER_USE_TEST_ANSWERS === "1";
+// Answers need a physical press in this app's window. OMNIRUSH_COMPUTER_USE_TEST_ANSWERS=1 accepts
+// remote-debugging clicks, in builds run from source only (the e2e rig).
+// Packaged apps ignore it (computer-use-answers.mjs).
+const testAnswers = testAnswersAllowed(process.env, app.isPackaged, (message) => console.warn(`[computer-use] ${message}`));
 async function personAnswered() {
   if (!host) return false;
   if (await host.syntheticInput()) return false;
