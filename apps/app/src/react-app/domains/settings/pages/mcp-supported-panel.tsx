@@ -25,6 +25,7 @@ export const MCP_BLOCKED_HINTS: Record<string, string> = {
   unknown_command: "Start it with npx or uvx.",
   outside_project: "Point it at a folder or file inside the project.",
   version: "Leave the version out to use the supported one.",
+  runner_missing: "Install Node.js (for npx) or uv (for uvx), then restart the app.",
 };
 
 export type McpServerState =
@@ -90,11 +91,18 @@ export function McpSupportedPanel(props: {
   const [addError, setAddError] = useState<{ id: string; message: string } | null>(null);
   const decisionFor = (name: string) => props.policy.decisions.find((decision) => decision.name === name) ?? null;
 
+  const ignoredNotice = props.policy.ignoredNotice?.trim() ? (
+    <p data-testid="mcp-project-code-ignored" className="text-xs text-dls-secondary">{props.policy.ignoredNotice.trim()}</p>
+  ) : null;
+
   if (!props.policy.enabled) {
     return (
-      <p data-testid="mcp-policy-off" className="mb-5 text-sm text-dls-secondary">
-        {props.policy.message?.trim() || "MCP servers are turned off for this account."}
-      </p>
+      <div className="mb-5 flex flex-col gap-2">
+        <p data-testid="mcp-policy-off" className="text-sm text-dls-secondary">
+          {props.policy.message?.trim() || "MCP servers are turned off for this account."}
+        </p>
+        {ignoredNotice}
+      </div>
     );
   }
 
@@ -111,6 +119,7 @@ export function McpSupportedPanel(props: {
 
   return (
     <div data-testid="mcp-supported-panel" className="mb-6 flex flex-col gap-5">
+      {ignoredNotice}
       {props.policy.engineV2 ? (
         <p data-testid="mcp-engine-v2-note" className="text-sm text-dls-secondary">{MCP_ENGINE_V2_NOTE}</p>
       ) : null}

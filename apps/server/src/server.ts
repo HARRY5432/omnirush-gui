@@ -187,7 +187,7 @@ import { buildOmniRushRuntimeConfigObject, omnirushGatewayConfigured, omnirushRu
 import { assertMcpAllowed, mcpAllowed, mcpDisabledMessage, mcpPolicyForConfig, refuseAccountLinkedMcp } from "./mcp-policy.js";
 import { currentMcpPolicy, rememberMcpPolicy, watchMcpPolicy, workspaceMcpReport, writeWorkspaceMcp } from "./mcp-allow/state.js";
 import { isOmniRushUiMcpRegistryEntry } from "./omnirush-ui-mcp-command.js";
-import type { McpAllowEntry } from "./mcp-allow/mcp-allow.mjs";
+import { describeIgnored, type McpAllowEntry } from "./mcp-allow/mcp-allow.mjs";
 import { omnirushModelWantsReasoningSummary, readOmniRushModelCatalog } from "./omnirush-model-catalog.js";
 import {
   SUBAGENT_MODEL_FALLBACK_TRACE,
@@ -5142,6 +5142,9 @@ function createRoutes(
         supported: enabled && policy ? policy.allow.map(mcpPreset) : [],
         decisions,
         reportAt: report?.at ?? null,
+        // What of the project's own config the engine left out (plugins, language server and formatter commands).
+        ignored: report?.ignored ?? [],
+        ignoredNotice: describeIgnored(report?.ignored),
       },
     });
   });

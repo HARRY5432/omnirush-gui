@@ -43,6 +43,7 @@ export const MCP_REASONS = {
   flag: "This MCP server setting is not supported: it reaches outside the project.",
   duplicate: "Another entry already starts this MCP server.",
   invalid: "This MCP server entry is not valid.",
+  runner_missing: "npx or uvx was not found on this computer outside the project folder, so the server does not start.",
 };
 
 const ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
@@ -293,6 +294,52 @@ export function launchCommand(entry, launch, version, npmPrefix) {
   return ["uvx", "--no-config", ...(launch.bin ? ["--from", `${entry.package}==${version}`, launch.bin] : [`${entry.package}@${version}`])];
 }
 
+/**
+ * The program words that start `runner` (an absolute path from resolveRunner). On Windows npx is a batch
+ * file (npx.cmd): cmd.exe re-reads its arguments, and the batch first runs npm's prefix lookup in the current
+ * folder (the project, whose .npmrc could point it at a copy of npx inside the project). So the batch never
+ * runs: npm's own `node.exe` beside it runs `node_modules/npm/bin/npx-cli.js` directly. null when they are
+ * not there. Anything else is started as found.
+ */
+export function windowsDirect(found, platform = process.platform, exists = existsSync) {
+  if (platform !== "win32" || !/\.(cmd|bat)$/i.test(found)) return [found];
+  const dir = path.win32.dirname(found);
+  const node = path.win32.join(dir, "node.exe");
+  const cli = path.win32.join(dir, "node_modules", "npm", "bin", `${path.win32.basename(found).replace(/\.(cmd|bat)$/i, "")}-cli.js`);
+  return exists(node) && exists(cli) ? [node, cli] : null;
+}
+
+/**
+ * `runner` (npx, uvx) as an absolute path from PATH: only absolute PATH
+ * folders outside the project (after links) count, never the current
+ * folder; on Windows the .exe or .cmd file. A project in the home folder (or
+ * a drive root) does not rule out the PATH folders under it (nvm, ~/.local/bin):
+ * only the folder itself is skipped. `accept` (optional) picks among the
+ * matches in PATH order (the first it takes). null when there is none.
+ */
+export function resolveRunner(runner, { root = null, platform = process.platform, env = process.env, exists = existsSync, home = os.homedir(), accept = null } = {}) {
+  const lib = platform === "win32" ? path.win32 : path.posix;
+  const raw = platform === "win32" ? (env.Path ?? env.PATH ?? env.path ?? "") : (env.PATH ?? "");
+  const exts = platform === "win32" ? [".exe", ".cmd"] : [""];
+  for (const dir of String(raw).split(platform === "win32" ? ";" : ":")) {
+    const folder = dir.trim().replace(/^"(.*)"$/, "$1");
+    if (!folder || !lib.isAbsolute(folder) || (platform === "win32" && !/^[A-Za-z]:[\\/]|^\\\\/.test(folder))) continue;
+    if (root) {
+      const wide = samePlatformPath(lib.resolve(root), platform) === samePlatformPath(lib.resolve(home), platform)
+        || lib.resolve(root) === lib.parse(lib.resolve(root)).root;
+      if (wide ? samePlatformPath(lib.resolve(folder), platform) === samePlatformPath(lib.resolve(root), platform) : insideRootReal(root, folder, platform)) continue;
+    }
+    // The app's own package-manager wrappers (the install log's folder holds an `omnirush-pkg` file) look the
+    // real tool up on PATH again, relative entries included: skip them for the tool itself.
+    if (exists(lib.join(folder, "omnirush-pkg")) || exists(lib.join(folder, "omnirush-pkg.exe"))) continue;
+    for (const ext of exts) {
+      const file = lib.join(folder, `${runner}${ext}`);
+      if (exists(file) && (!accept || accept(file))) return file;
+    }
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------- paths
 
 function samePlatformPath(p, platform) {
@@ -511,6 +558,20 @@ export function evaluateMcp(mcpMap, policy, ctx = {}) {
     const npmPrefix = box ? BOX_NPM_PREFIX : ctx.npmPrefix || path.join(os.homedir(), ".cache", "omnirush-mcp-npx");
     const argv = [...launchCommand(entry, launch, version, npmPrefix), ...rest];
     if (launch.runner !== (entry.runtime === "npm" ? "npx" : "uvx")) notes.push(`runs with ${argv[0]}`);
+    if (!box) {
+      // By absolute path: the engine starts the server in the project folder, and on Windows a bare name
+      // is looked up there before PATH (a repo's own npx.cmd would run instead).
+      const exists = ctx.exists ?? existsSync;
+      // The first match on PATH that can be started directly (on Windows, an npx.cmd with npm's node.exe beside it).
+      const found = (ctx.resolveRunner ?? resolveRunner)(argv[0], { root, platform, accept: (file) => windowsDirect(file, platform, exists) !== null });
+      const program = found ? windowsDirect(found, platform, exists) : null;
+      if (!program) { decisions.push(blocked(name, "runner_missing", { ...base, version })); continue; }
+      if (platform === "win32" && argv.slice(1).some((a) => /["\r\n%]/.test(a))) {
+        decisions.push(blocked(name, "invalid", { ...base, version, reason: `${MCP_REASONS.invalid} (an argument holds a quote, % or a line break)` }));
+        continue;
+      }
+      argv.splice(0, 1, ...program);
+    }
     const next = { ...raw, type: "local" };
     if (box) {
       const envWords = Object.entries(environment).map(([k, v]) => `${k}=${shellQuote(v)}`);
@@ -640,6 +701,36 @@ export function readReport(dir, root) {
   }
 }
 
+/**
+ * What the engine left out of the project's own config because it runs code
+ * (`omnirush_ignored`, set by the engine with OMNIRUSH_PROJECT_CODE=0): its
+ * plugins, and lsp / formatter entries that name a command.
+ */
+export function projectCodeIgnored(cfg) {
+  const list = isRecord(cfg) && Array.isArray(cfg.omnirush_ignored) ? cfg.omnirush_ignored : [];
+  return list
+    .filter((x) => isRecord(x) && ["plugin", "lsp", "formatter", "provider"].includes(x.kind) && typeof x.name === "string")
+    .slice(0, 50)
+    .map((x) => ({ kind: x.kind, name: x.name.slice(0, 200), source: typeof x.source === "string" ? x.source.slice(0, 400) : null }));
+}
+
+/** One line for a notice: what of the project's own config did not load, and why; null when nothing. */
+export function describeIgnored(items) {
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) return null;
+  const what = (kind) => list.filter((x) => x.kind === kind).map((x) => (kind === "plugin" ? path.basename(String(x.name).replace(/^file:\/\//, "")) : x.name));
+  const parts = [];
+  const plugins = what("plugin");
+  const lsp = what("lsp");
+  const fmt = what("formatter");
+  const providers = what("provider");
+  if (plugins.length) parts.push(`plugins ${plugins.slice(0, 3).join(", ")}${plugins.length > 3 ? " ..." : ""}`);
+  if (lsp.length) parts.push(`language servers ${lsp.slice(0, 3).join(", ")}`);
+  if (fmt.length) parts.push(`formatters ${fmt.slice(0, 3).join(", ")}`);
+  if (providers.length) parts.push("model provider settings");
+  return `Not loaded from this project's config: ${parts.join("; ")}. A project's own plugins, tools, commands and providers could run code just by opening it; the built-in language servers and formatters still work (some use the project's own installed copy), and your own (user-level) settings apply as usual.`;
+}
+
 /** One line per decision, for a terminal or a notice. */
 export function describeDecision(d) {
   if (d.status === "allowed") {
@@ -677,7 +768,7 @@ export function createMcpPolicyHooks(options = {}) {
     if (!box) {
       try { mkdirSync(npmPrefix, { recursive: true }); } catch { /* npx makes it */ }
     }
-    const { mcp, decisions } = evaluateMcp(target.mcp, policy, { root, platform: options.platform, box, npmPrefix });
+    const { mcp, decisions } = evaluateMcp(target.mcp, policy, { root, platform: options.platform, box, npmPrefix, ...(options.resolveRunner ? { resolveRunner: options.resolveRunner } : {}) });
     target.mcp = mcp;
     const mode = typeof options.permissionMode === "function" ? options.permissionMode() : options.permissionMode ?? process.env.OMNIRUSH_PERMISSION_MODE;
     const rules = mcpPermissionRules(decisions, mode);
@@ -692,7 +783,7 @@ export function createMcpPolicyHooks(options = {}) {
         const file = reportPath(options.reportDir, root);
         mkdirSync(options.reportDir, { recursive: true });
         const tmp = `${file}.${process.pid}.tmp`;
-        writeFileSync(tmp, JSON.stringify({ v: MCP_POLICY_FILE_VERSION, root, at: (options.now ?? Date.now)(), enabled: Boolean(policy?.enabled), decisions }), { mode: 0o600 });
+        writeFileSync(tmp, JSON.stringify({ v: MCP_POLICY_FILE_VERSION, root, at: (options.now ?? Date.now)(), enabled: Boolean(policy?.enabled), decisions, ignored: projectCodeIgnored(target) }), { mode: 0o600 });
         renameSync(tmp, file);
       } catch { /* the report is for display only */ }
     }
