@@ -81,7 +81,7 @@ function memoryStorage() {
 
 describe("tier badge", () => {
   const labels: Record<QualityTier, string> = { new: "New", standard: "Standard", gold: "Gold", coaching: "Coaching", limited: "Limited" };
-  for (const [tier, label] of Object.entries(labels) as [QualityTier, string][]) {
+  for (const [tier, label] of (Object.entries(labels) as [QualityTier, string][]).filter(([tier]) => tier !== "new")) {
     test(`shows ${label} for ${tier}`, () => {
       const html = renderToStaticMarkup(<QualityTierBadge quality={{ ...quality, tier, preview: false }} />);
       expect(html).toContain(`data-tier="${tier}"`);
@@ -90,12 +90,17 @@ describe("tier badge", () => {
     });
   }
 
-  test("preview: dashed, and says Preview", () => {
+  test("new: no badge beside the name", () => {
+    expect(renderToStaticMarkup(<QualityTierBadge quality={{ ...quality, tier: "new", preview: true }} />)).toBe("");
+  });
+
+  test("preview: the tier alone, preview only in the tooltip", () => {
     const html = renderToStaticMarkup(<QualityTierBadge quality={{ ...quality, preview: true }} />);
-    expect(qualityBadgeText({ ...quality, preview: true })).toBe("Gold · Preview");
-    expect(html).toContain("Gold · Preview");
-    expect(html).toContain("data-preview");
-    expect(html).toContain("border-dashed");
+    expect(qualityBadgeText({ ...quality, preview: true })).toBe("Gold");
+    expect(html).toContain(">Gold</span>");
+    expect(html).not.toContain("Preview<");
+    expect(html).not.toContain("border-dashed");
+    expect(html).toContain("preview: spins pay 0 tokens");
   });
 
   test("renders nothing while quality is null (feature off)", () => {

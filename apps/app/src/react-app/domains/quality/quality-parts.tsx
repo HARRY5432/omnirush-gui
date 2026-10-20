@@ -4,12 +4,12 @@ import { cn } from "@/lib/utils";
 
 import { compactTokenCount } from "../../../app/lib/omnirush-usage";
 import { goodSessionWording } from "../../../app/lib/good-session";
-import { qualityBadgeText, qualityBadgeTitle, type AccountQuality } from "../../../app/lib/quality";
+import { qualityBadgeText, qualityBadgeTitle, showsQualityBadge, type AccountQuality } from "../../../app/lib/quality";
 
-/** The tier, as a small neutral badge. Dashed in preview (spins pay nothing). */
+/** The tier, as a small neutral badge; preview only in the tooltip. */
 export function QualityTierBadge({ quality, className }: { quality: AccountQuality | null; className?: string }) {
-  // Null: quality rewards are switched off, and nothing shows.
-  if (!quality) return null;
+  // Null: quality rewards are switched off. New: no tier earned yet. Nothing shows.
+  if (!showsQualityBadge(quality)) return null;
   return (
     <Badge
       variant="outline"
@@ -17,11 +17,7 @@ export function QualityTierBadge({ quality, className }: { quality: AccountQuali
       data-tier={quality.tier}
       data-preview={quality.preview ? "" : undefined}
       title={qualityBadgeTitle(quality)}
-      className={cn(
-        "h-4 px-1.5 text-[10px] font-normal text-muted-foreground",
-        quality.preview && "border-dashed",
-        className,
-      )}
+      className={cn("h-4 px-1.5 text-[10px] font-normal text-muted-foreground", className)}
     >
       {qualityBadgeText(quality)}
     </Badge>
