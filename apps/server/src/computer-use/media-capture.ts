@@ -27,10 +27,12 @@ export function usesComputer(message: unknown): boolean {
   return isRecord(message) && Array.isArray(message.parts) && message.parts.some((part) => isRecord(part) && part.type === "tool" && isComputerTool(part.tool));
 }
 
+/** Whether a message may hold tool-result images: an image attachment, or a tool part's metadata (raw MCP results). */
 function hasImageAttachment(message: unknown): boolean {
   if (!isRecord(message) || !Array.isArray(message.parts)) return false;
-  return message.parts.some((part) => isRecord(part) && part.type === "tool" && isRecord(part.state) && Array.isArray(part.state.attachments)
-    && part.state.attachments.some((a) => isRecord(a) && typeof a.url === "string" && a.url.startsWith("data:image/")));
+  return message.parts.some((part) => isRecord(part) && part.type === "tool" && isRecord(part.state)
+    && ((Array.isArray(part.state.attachments) && part.state.attachments.some((a) => isRecord(a) && typeof a.url === "string" && a.url.startsWith("data:image/")))
+      || (isRecord(part.state.metadata) && Object.keys(part.state.metadata).length > 0)));
 }
 
 export type MediaRewriter = (sessionId: string, message: unknown) => unknown;

@@ -198,6 +198,23 @@ describe("media references", () => {
     expect(spool.has(meta.sha256, "png")).toBe(true);
   });
 
+  test("raw MCP image results kept in a tool part's metadata become refs too (same frame, one file)", () => {
+    const dir = tmp();
+    const spool = createMediaSpool(path.join(dir, "spool"));
+    const png = encodePng(frame(40, 30, 21));
+    const part = toolPart("m", [dataUrl("image/png", png)]);
+    const withMeta = { ...part, state: { ...part.state, metadata: { omnirushMcpApp: { content: [{ type: "text", text: "{}" }, { type: "image", mimeType: "image/png", data: png.toString("base64") }] } } } };
+    const out = rewriteMessageMedia({ parts: [withMeta] }, { spool, index: createMediaIndex(path.join(dir, "i.json")), limits: {} });
+    const state = (out.message.parts[0] as typeof withMeta).state;
+    expect(JSON.stringify(state)).not.toContain(png.toString("base64"));
+    const content = state.metadata.omnirushMcpApp.content[1] as Record<string, unknown>;
+    expect(content).toEqual({ type: "image", mimeType: "image/png", url: `omnirush-media:${sha256(png)}.png`, sha256: sha256(png) });
+    expect(String((state.attachments[0] as Record<string, unknown>).thumb)).toStartWith("data:image/jpeg");
+    expect(out.files.length).toBe(1);
+    const untouched = { parts: [{ type: "tool", tool: "bash", state: { status: "completed", output: "ok", metadata: { exit: 0 } } }] };
+    expect(rewriteMessageMedia(untouched, { spool, index: createMediaIndex(path.join(dir, "j.json")), limits: {} }).message).toBe(untouched);
+  });
+
   test("data URL parsing", () => {
     expect(parseImageDataUrl("data:image/png;base64,AQID")).toEqual({ mime: "image/png", bytes: Buffer.from([1, 2, 3]) });
     expect(parseImageDataUrl("data:text/plain;base64,AQID")).toBeNull();

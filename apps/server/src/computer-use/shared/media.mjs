@@ -241,12 +241,8 @@ export function rewriteMessageMedia(message, ctx) {
   let thumbsLeft = Number.isFinite(ctx.thumbBudget) ? ctx.thumbBudget : THUMBS_PER_MESSAGE_BYTES;
   const files = [];
   const budget = budgets(ctx.limits);
-  const parts = message.parts.map((part) => {
-    const attachments = isRecord(part) && part.type === "tool" && isRecord(part.state) && Array.isArray(part.state.attachments) ? part.state.attachments : null;
-    if (!attachments || !attachments.some((a) => isRecord(a) && typeof a.url === "string" && a.url.startsWith("data:image/"))) return part;
-    const next = attachments.map((attachment) => {
-      const parsed = isRecord(attachment) ? parseImageDataUrl(attachment.url) : null;
-      if (!parsed) return attachment;
+  /** The ref fields of one image (bytes as a data URL), files queued once per chat. */
+  const refOf = (parsed, allowThumb) => {
       const sha = sha256(parsed.bytes);
       let meta = ctx.spool.meta(sha);
       if (!meta) {
@@ -268,11 +264,10 @@ export function rewriteMessageMedia(message, ctx) {
         if (model) files.push({ path: paths.model, file: ctx.spool.modelPath(sha, meta.ext), sha, kind: "model", bytes: meta.bytes });
         if (full) files.push({ path: paths.full, file: ctx.spool.fullPath(sha), sha, kind: "full", bytes: meta.full.bytes });
       }
-      const { url: _url, ...rest } = attachment;
-      const ref = { ...rest, mime: meta.mime, url: mediaUrl(sha, meta.ext), sha256: sha, width: meta.width, height: meta.height, bytes: meta.bytes };
+      const ref = { mime: meta.mime, url: mediaUrl(sha, meta.ext), sha256: sha, width: meta.width, height: meta.height, bytes: meta.bytes };
       if (meta.full) ref.full = entry.f ? { ...meta.full } : { omitted: "budget" };
       if (!entry.m) ref.omitted = "budget";
-      if (first) {
+      if (first && allowThumb) {
         const thumb = ctx.spool.thumb(sha);
         if (thumb && thumb.length * 4 / 3 + 32 <= thumbsLeft) {
           ref.thumb = `data:image/jpeg;base64,${thumb.toString("base64")}`;
@@ -281,8 +276,41 @@ export function rewriteMessageMedia(message, ctx) {
       }
       changed = true;
       return ref;
-    });
-    return { ...part, state: { ...part.state, attachments: next } };
+  };
+  // Raw MCP results kept in a tool part's metadata ({ type: "image", data, mimeType }): the bytes become a ref too.
+  const metadataImages = (value, depth = 0) => {
+    if (depth > 6) return value;
+    if (Array.isArray(value)) return value.map((item) => metadataImages(item, depth + 1));
+    if (!isRecord(value)) return value;
+    if (value.type === "image" && typeof value.data === "string" && typeof value.mimeType === "string") {
+      const parsed = parseImageDataUrl(`data:${value.mimeType};base64,${value.data}`);
+      if (!parsed) return value;
+      const { data: _data, ...rest } = value;
+      const ref = refOf(parsed, false);
+      return { ...rest, url: ref.url, sha256: ref.sha256 };
+    }
+    let out = null;
+    for (const [key, item] of Object.entries(value)) {
+      const next = metadataImages(item, depth + 1);
+      if (next !== item) { out ??= { ...value }; out[key] = next; }
+    }
+    return out ?? value;
+  };
+  const parts = message.parts.map((part) => {
+    if (!isRecord(part) || part.type !== "tool" || !isRecord(part.state)) return part;
+    // Attachments first: they carry the chat's first thumbnail of a frame.
+    const attachments = Array.isArray(part.state.attachments) ? part.state.attachments : null;
+    const next = attachments && attachments.some((a) => isRecord(a) && typeof a.url === "string" && a.url.startsWith("data:image/"))
+      ? attachments.map((attachment) => {
+        const parsed = isRecord(attachment) ? parseImageDataUrl(attachment.url) : null;
+        if (!parsed) return attachment;
+        const { url: _url, ...rest } = attachment;
+        return { ...rest, ...refOf(parsed, true) };
+      })
+      : attachments;
+    const metadata = isRecord(part.state.metadata) ? metadataImages(part.state.metadata) : part.state.metadata;
+    if (next === attachments && metadata === part.state.metadata) return part;
+    return { ...part, state: { ...part.state, ...(next !== attachments ? { attachments: next } : {}), ...(metadata !== part.state.metadata ? { metadata } : {}) } };
   });
   if (changed) ctx.index.save();
   return { message: changed ? { ...message, parts } : message, changed, files };
