@@ -18,9 +18,12 @@ export type HomeViewContext = {
   onOpenSearch?: () => void;
 };
 
+function isMacPlatform(): boolean {
+  return typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
+}
+
 function searchShortcut(): string {
-  const isMac = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
-  return isMac ? "⇧⌘F" : "Ctrl+Shift+F";
+  return isMacPlatform() ? "⇧⌘F" : "Ctrl+Shift+F";
 }
 
 /**
@@ -80,7 +83,7 @@ export function HomeContinue({ context }: { context: HomeViewContext }) {
               tabIndex={index < fits ? undefined : -1}
               data-testid="home-chat"
             >
-              <span className="max-w-[130px] truncate group-hover:text-foreground">{title}</span>
+              <span className="max-w-[112px] truncate group-hover:text-foreground">{title}</span>
               <span aria-hidden="true" className="shrink-0 opacity-50">·</span>
               <span className="shrink-0 opacity-70">{session.workspaceTitle}</span>
             </button>
@@ -90,14 +93,16 @@ export function HomeContinue({ context }: { context: HomeViewContext }) {
       {context.onOpenSearch ? (
         <button
           type="button"
-          className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md px-2 transition-colors hover:bg-accent hover:text-foreground focus-visible:bg-accent focus-visible:outline-none"
+          className="-mr-2 inline-flex h-6 shrink-0 items-center gap-1 rounded-md px-2 transition-colors hover:bg-accent hover:text-foreground focus-visible:bg-accent focus-visible:outline-none"
           onClick={context.onOpenSearch}
           aria-label={`Search chats (${searchShortcut()})`}
+          title={`Search chats (${searchShortcut()})`}
           data-testid="home-search"
         >
           <Search className="size-3" aria-hidden="true" />
           <span>Search</span>
-          <span className="ml-1.5 text-[11px] opacity-60">{searchShortcut()}</span>
+          {/* The short Mac hint only: Ctrl+Shift+F would take a pill's room (it shows on hover). */}
+          {isMacPlatform() ? <span className="ml-1.5 text-[11px] opacity-60">⇧⌘F</span> : null}
         </button>
       ) : null}
     </nav>
