@@ -37,6 +37,16 @@ type EditorSurfaceProps = {
   onHunks: (hunks: LineHunk[]) => void;
   /** Bumped to jump to the next / previous hunk. */
   navigate: { direction: 1 | -1; nonce: number } | null;
+  /** The editor's agent actions (right-click menu, Cmd/Ctrl+L): the editor they ran in. */
+  onAgentAction?: (action: AgentAction, editor: MonacoApi.editor.ICodeEditor) => void;
+  /** A handle to reveal a position in the visible editor and to read it. */
+  onReady?: (handle: SurfaceHandle | null) => void;
+};
+
+export type AgentAction = "ask" | "explain" | "refactor" | "tests";
+export type SurfaceHandle = {
+  reveal: (line: number, column: number, endColumn?: number) => void;
+  activeEditor: () => MonacoApi.editor.ICodeEditor | null;
 };
 
 const BASE_OPTIONS: MonacoApi.editor.IStandaloneEditorConstructionOptions = {
@@ -49,7 +59,8 @@ const BASE_OPTIONS: MonacoApi.editor.IStandaloneEditorConstructionOptions = {
   renderLineHighlight: "line",
   smoothScrolling: false,
   padding: { top: 6, bottom: 6 },
-  stickyScroll: { enabled: true, maxLineCount: 3 },
+  // Indentation, not the outline: the outline would ask the language servers for symbols as soon as a file opens.
+  stickyScroll: { enabled: true, maxLineCount: 3, defaultModel: "indentationModel" },
   // Large files stay responsive: no tokenisation past 20k chars per line, no word-based suggestions on huge files.
   maxTokenizationLineLength: 20_000,
   wordBasedSuggestions: "currentDocument",
@@ -92,7 +103,11 @@ function hunkBar(
 
 const VIEW_STATES = new Map<string, MonacoApi.editor.ICodeEditorViewState | MonacoApi.editor.IDiffEditorViewState | null>();
 
-export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navigate }: EditorSurfaceProps) {
+export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navigate, onAgentAction, onReady }: EditorSurfaceProps) {
+  const onAgentRef = useRef(onAgentAction);
+  onAgentRef.current = onAgentAction;
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
   const codeHostRef = useRef<HTMLDivElement | null>(null);
   const diffHostRef = useRef<HTMLDivElement | null>(null);
   const codeRef = useRef<MonacoApi.editor.IStandaloneCodeEditor | null>(null);
@@ -136,8 +151,34 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
       onCursorRef.current({ line: event.position.lineNumber, column: event.position.column });
     });
     const disposables = [cursor(code), cursor(diff.getModifiedEditor())];
+    // The agent in the editor: first in the right-click menu, and Cmd/Ctrl+L to ask. Monaco always sorts its
+    // "navigation" group first, so the agent items join it with orders below Go to Definition (1.1).
+    const agentActions = (editor: MonacoApi.editor.IStandaloneCodeEditor) => ([
+      { id: "omnirush.agent.ask", label: "Ask about selection", action: "ask" as const, keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyL], order: 1 },
+      { id: "omnirush.agent.explain", label: "Explain with agent", action: "explain" as const, keybindings: [], order: 2 },
+      { id: "omnirush.agent.refactor", label: "Refactor with agent…", action: "refactor" as const, keybindings: [], order: 3 },
+      { id: "omnirush.agent.tests", label: "Write tests with agent", action: "tests" as const, keybindings: [], order: 4 },
+    ]).map((item) => editor.addAction({
+      id: item.id,
+      label: item.label,
+      keybindings: item.keybindings,
+      contextMenuGroupId: "navigation",
+      contextMenuOrder: item.order / 10,
+      run: (target: MonacoApi.editor.ICodeEditor) => onAgentRef.current?.(item.action, target),
+    }));
+    disposables.push(...agentActions(code), ...agentActions(diff.getModifiedEditor() as MonacoApi.editor.IStandaloneCodeEditor));
     codeRef.current = code;
     diffRef.current = diff;
+    onReadyRef.current?.({
+      reveal: (line, column, endColumn) => {
+        const editor = modeRef.current === "diff" ? diff.getModifiedEditor() : code;
+        const selection = { startLineNumber: line, startColumn: column, endLineNumber: line, endColumn: endColumn ?? column };
+        editor.setSelection(selection);
+        editor.revealRangeInCenterIfOutsideViewport(selection);
+        editor.focus();
+      },
+      activeEditor: () => (modeRef.current === "diff" ? diff.getModifiedEditor() : modeRef.current === "file" ? code : null),
+    });
     // Follows the app theme: light/dark, presets and custom themes (app/theme.ts).
     const unsubscribeTheme = subscribeToTheme(() => {
       applyMonacoTheme();
@@ -149,6 +190,7 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
     return () => {
       const key = currentKey.current;
       if (key) VIEW_STATES.set(key, modeRef.current === "diff" ? diff.saveViewState() : code.saveViewState());
+      onReadyRef.current?.(null);
       unsubscribeTheme();
       for (const disposable of disposables) disposable.dispose();
       code.dispose();
@@ -321,8 +363,8 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
   return (
     <div className="relative min-h-0 flex-1" data-editor-surface={mode ?? "empty"}>
       {/* display:none, not visibility: Monaco's layers set their own visibility and would show through. */}
-      <div ref={codeHostRef} className="absolute inset-0" style={{ display: mode === "file" ? "block" : "none" }} />
-      <div ref={diffHostRef} className="absolute inset-0" style={{ display: mode === "diff" ? "block" : "none" }} />
+      <div ref={codeHostRef} className="monaco-component absolute inset-0" style={{ display: mode === "file" ? "block" : "none" }} />
+      <div ref={diffHostRef} className="monaco-component absolute inset-0" style={{ display: mode === "diff" ? "block" : "none" }} />
     </div>
   );
 }

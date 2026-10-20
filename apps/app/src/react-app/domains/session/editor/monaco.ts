@@ -39,6 +39,14 @@ import "monaco-editor/features/unicodeHighlighter/register.js";
 import "monaco-editor/features/wordHighlighter/register.js";
 import "monaco-editor/features/wordOperations/register.js";
 import "monaco-editor/features/readOnlyMessage/register.js";
+// Language features (providers in lsp.ts): go to definition and Cmd/Ctrl+click, peek references,
+// rename, the symbol picker (Cmd/Ctrl+Shift+O), quick fixes (the lightbulb), next problem (F8).
+import "monaco-editor/features/gotoSymbol/register.js";
+import "monaco-editor/features/referenceSearch/register.js";
+import "monaco-editor/features/rename/register.js";
+import "monaco-editor/features/quickOutline/register.js";
+import "monaco-editor/features/codeAction/register.js";
+import "monaco-editor/features/gotoError/register.js";
 // Syntax colouring only (Monarch grammars, each loaded on first use); not languages/register.all.js,
 // which also starts the CSS/HTML/JSON/TypeScript language-service workers.
 import "monaco-editor/languages/definitions/abap/register.js";

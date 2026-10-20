@@ -2926,6 +2926,7 @@ export function SessionRoute() {
     };
   }, [selectedSessionId]);
 
+  const editorLanguageFeatures = useEditorStore((state) => state.languageFeatures);
   const layoutModeName = useEditorStore((state) => (selectedWorkspaceId ? state.modeByWorkspace[selectedWorkspaceId] : undefined) ?? "chat");
   const layoutAvailable = isElectronRuntime() && Boolean(selectedWorkspace) && selectedWorkspace?.workspaceType !== "remote";
   const layoutPaletteItems = useMemo<PaletteItem[]>(() => layoutAvailable ? [
@@ -2940,7 +2941,34 @@ export function SessionRoute() {
         useEditorStore.getState().requestModeToggle();
       },
     },
+    ...(layoutModeName === "ide" ? ([
+      ["editor.search", "Search in files", "Find and replace across the project", "Cmd/Ctrl+Shift+F", "search"],
+      ["editor.problems", "Show problems", "Errors and warnings from the language servers", "Cmd+Shift+M (macOS)", "problems"],
+      ["editor.quick-open", "Go to file", "Open a project file by name", "Cmd/Ctrl+P", "quick-open"],
+      ["editor.symbol", "Go to symbol in file", "Jump to a function, class or variable", "Cmd/Ctrl+Shift+O", "symbol"],
+      ["editor.outline", "Show outline", "The active file's symbols, under Files", "", "outline"],
+    ] as const).map(([id, title, detail, meta, command]) => ({
+      id,
+      title,
+      detail,
+      meta,
+      searchText: `editor ide ${title} ${detail}`.toLowerCase(),
+      action: () => {
+        setCommandPaletteOpen(false);
+        window.dispatchEvent(new CustomEvent("omnirush:editor-command", { detail: command }));
+      },
+    })) : []),
     ...(layoutModeName === "ide" ? [{
+      id: "editor.language-features",
+      title: editorLanguageFeatures ? "Turn off language features in the editor" : "Turn on language features in the editor",
+      detail: "Problems, hover, go to definition, rename and outline from the project's language servers",
+      meta: "",
+      searchText: "editor ide language features lsp problems hover rename outline server off on",
+      action: () => {
+        setCommandPaletteOpen(false);
+        useEditorStore.getState().setLanguageFeatures(!editorLanguageFeatures);
+      },
+    }, {
       id: "layout.chat-panel",
       title: "Show or hide the chat",
       detail: "Fold the chat panel of the IDE layout away, or bring it back",

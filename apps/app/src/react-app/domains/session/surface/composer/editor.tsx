@@ -330,8 +330,10 @@ function $createComposerSkillNode(skillName: string, skillToken?: string) {
   return $applyNodeReplacement(new ComposerSkillNode(skillName, skillToken));
 }
 
-function pastedTextChipLabel(lines: number) {
-  return `Pasted · ${lines} line${lines === 1 ? "" : "s"}`;
+/** A paste shows "Pasted · N lines"; a chip from the code editor shows its own label ("orders.ts L4–6 · selection"). */
+function pastedTextChipLabel(label: string, lines: number) {
+  if (/^[a-z0-9]{1,8} · \d+ lines?$/.test(label)) return `Pasted · ${lines} line${lines === 1 ? "" : "s"}`;
+  return label;
 }
 
 function createPastedTextChipDom(label: string, lines: number) {
@@ -342,7 +344,7 @@ function createPastedTextChipDom(label: string, lines: number) {
   dom.title = `Pasted text · ${label}`;
 
   const text = document.createElement("span");
-  text.textContent = pastedTextChipLabel(lines);
+  text.textContent = pastedTextChipLabel(label, lines);
 
   const button = document.createElement("button");
   button.type = "button";
@@ -373,7 +375,7 @@ function createPastedTextChipDom(label: string, lines: number) {
 
 function updatePastedTextChipDom(dom: HTMLElement, label: string, lines: number) {
   const text = dom.firstElementChild;
-  if (text) text.textContent = pastedTextChipLabel(lines);
+  if (text) text.textContent = pastedTextChipLabel(label, lines);
   const button = dom.querySelector("button[data-pasted-expand-label]");
   if (button instanceof HTMLButtonElement) {
     button.title = "Expand";

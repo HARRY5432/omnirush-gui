@@ -2217,6 +2217,7 @@ export function SessionPage(props: SessionPageProps) {
                   workspaceRoot={props.selectedWorkspaceRoot}
                   sessionId={props.selectedSessionId}
                   sessionBusy={sessionTurnRunning(props.selectedSessionId)}
+                  agentBusy={runningTurns !== ""}
                   opencodeClient={props.opencodeClient ?? null}
                   terminalOpen={Boolean(props.terminalOpen)}
                   onToggleTerminal={() => props.onTerminalOpenChange?.(!props.terminalOpen)}

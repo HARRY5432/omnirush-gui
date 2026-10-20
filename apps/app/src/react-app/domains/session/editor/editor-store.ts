@@ -13,7 +13,7 @@ export type EditorTab =
   /** A file against git (HEAD or the index), from the git panel. */
   | { id: string; kind: "git"; path: string; ref: "HEAD" | "index" };
 
-export type EditorSideView = "files" | "changes" | "git";
+export type EditorSideView = "files" | "changes" | "git" | "search";
 /** The window layout: Chat (sessions sidebar + chat) or IDE (files, editor and terminal, chat docked right). */
 export type LayoutMode = "chat" | "ide";
 export type ReviewScope = "turn" | "chat";
@@ -43,6 +43,11 @@ type EditorStore = {
   /** One-shot requests from shortcuts: switch Chat/IDE (Cmd/Ctrl+Shift+Y), fold the chat (Cmd/Ctrl+Shift+H). */
   modeToggleRequest: number;
   chatToggleRequest: number;
+  /** The bottom panel: Problems shown, and which tab is in front (the terminal opens through its own switch). */
+  problemsOpen: boolean;
+  bottomTab: "problems" | "terminal";
+  /** Language features in the editor (problems, hover, go to, rename, outline) from the project's language servers. */
+  languageFeatures: boolean;
   openTab: (workspaceId: string, tab: EditorTab, options?: { preview?: boolean }) => void;
   closeTab: (workspaceId: string, id: string) => void;
   selectTab: (workspaceId: string, id: string) => void;
@@ -58,6 +63,9 @@ type EditorStore = {
   setIdeChatWidth: (width: number) => void;
   requestModeToggle: () => void;
   requestChatToggle: () => void;
+  setProblemsOpen: (open: boolean) => void;
+  setBottomTab: (tab: "problems" | "terminal") => void;
+  setLanguageFeatures: (on: boolean) => void;
 };
 
 export const DEFAULT_IDE_CHAT_WIDTH = 420;
@@ -88,6 +96,9 @@ export const useEditorStore = create<EditorStore>()(
       ideChatWidth: DEFAULT_IDE_CHAT_WIDTH,
       modeToggleRequest: 0,
       chatToggleRequest: 0,
+      problemsOpen: false,
+      bottomTab: "terminal",
+      languageFeatures: true,
       openTab: (workspaceId, tab) =>
         set((state) => {
           const current = state.byWorkspace[workspaceId] ?? EMPTY;
@@ -141,6 +152,9 @@ export const useEditorStore = create<EditorStore>()(
       setIdeChatWidth: (width) => set({ ideChatWidth: Math.round(Math.min(Math.max(width, 320), 1200)) }),
       requestModeToggle: () => set((state) => ({ modeToggleRequest: state.modeToggleRequest + 1 })),
       requestChatToggle: () => set((state) => ({ chatToggleRequest: state.chatToggleRequest + 1 })),
+      setProblemsOpen: (problemsOpen) => set(problemsOpen ? { problemsOpen, bottomTab: "problems" } : { problemsOpen }),
+      setBottomTab: (bottomTab) => set({ bottomTab }),
+      setLanguageFeatures: (languageFeatures) => set({ languageFeatures }),
     }),
     {
       name: "omnirush:editor:v1",
@@ -152,6 +166,7 @@ export const useEditorStore = create<EditorStore>()(
         modeByWorkspace: state.modeByWorkspace,
         ideChatCollapsed: state.ideChatCollapsed,
         ideChatWidth: state.ideChatWidth,
+        languageFeatures: state.languageFeatures,
       }),
     },
   ),

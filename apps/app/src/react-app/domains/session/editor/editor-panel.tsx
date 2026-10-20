@@ -24,6 +24,8 @@ import {
   Plus,
   RefreshCw,
   Search,
+  CircleX,
+  AlertTriangle,
   SquareTerminal,
   Undo2,
   X,
@@ -45,8 +47,32 @@ import { EditorSurface, type SurfaceDoc } from "./editor-surface";
 import { acceptHunk, hunkCounts, rejectHunk, type LineHunk } from "./hunk-ops";
 import { languageForPath, setupMonaco, type Monaco } from "./monaco";
 import { QuickOpen } from "./quick-open";
+import { SearchView } from "./search-view";
+import { ProblemsView } from "./problems-view";
+import { OutlineView } from "./outline-view";
+import { codeChipText, lineLabel, sendToChat } from "./chat-context";
+import {
+  activateLsp,
+  activateLspForModel,
+  clearLanguageFeatures,
+  documentSymbols,
+  installLanguageFeatures,
+  problemCounts,
+  refreshAllDiagnostics,
+  refreshFileDiagnostics,
+  setLanguageContext,
+  setLspSessionBusy,
+  symbolPath,
+  useIsLspActive,
+  useProblemsStore,
+  type LspDiagnostic,
+} from "./lsp";
+import type { AgentAction, SurfaceHandle } from "./editor-surface";
 import { baselinesForTurns, turnFileChange, type TurnFileChange } from "./review";
 import "./editor.css";
+
+/** How long a file stays the active one before its language features start. */
+const LSP_DWELL_MS = 2500;
 
 export type EditorPanelProps = {
   client: OmniRushServerClient;
@@ -54,6 +80,8 @@ export type EditorPanelProps = {
   workspaceRoot: string;
   sessionId: string | null;
   sessionBusy: boolean;
+  /** Some chat's agent is working (the language servers are shared by every chat): no unsaved text goes to them. */
+  agentBusy: boolean;
   opencodeClient: Client | null;
   terminal: ReactNode | null;
   terminalOpen: boolean;
@@ -502,7 +530,7 @@ function showConflict(path: string, input: { reload: () => void; overwrite: () =
 }
 
 export default function EditorPanel(props: EditorPanelProps) {
-  const { client, workspaceId, workspaceRoot, sessionId, sessionBusy, opencodeClient } = props;
+  const { client, workspaceId, workspaceRoot, sessionId, sessionBusy, agentBusy, opencodeClient } = props;
   const monaco = useMemo<Monaco>(() => setupMonaco(), []);
   const docs = useMemo(() => editorDocuments(monaco, client, workspaceId), [monaco, client, workspaceId]);
   const queryClient = useQueryClient();
@@ -513,6 +541,15 @@ export default function EditorPanel(props: EditorPanelProps) {
   const sideOpen = useEditorStore((store) => store.sideOpen);
   const activeTab = state.tabs.find((tab) => tab.id === state.activeId) ?? null;
   const [surface, setSurface] = useState<SurfaceDoc | null>(null);
+  const surfaceHandle = useRef<SurfaceHandle | null>(null);
+  const pendingReveal = useRef<{ path: string; line: number; column: number; endColumn?: number } | null>(null);
+  const [searchFocus, setSearchFocus] = useState(0);
+  const [problemsLoading, setProblemsLoading] = useState(false);
+  const [breadcrumbSymbols, setBreadcrumbSymbols] = useState<string[]>([]);
+  const problemsOpen = useEditorStore((store) => store.problemsOpen);
+  const bottomTab = useEditorStore((store) => store.bottomTab);
+  const problemFiles = useProblemsStore((store) => store.byWorkspace[workspaceId]);
+  const problemTotals = problemCounts(problemFiles ?? []);
   const [tabError, setTabError] = useState<string | null>(null);
   const [cursor, setCursor] = useState<{ line: number; column: number } | null>(null);
   const [hunks, setHunks] = useState<LineHunk[]>([]);
@@ -553,6 +590,7 @@ export default function EditorPanel(props: EditorPanelProps) {
   useEffect(() => {
     if (wasBusy.current && !sessionBusy) {
       void docs.refresh().then(() => setDocsTick((value) => value + 1));
+      void refreshAllDiagnostics();
       void queryClient.invalidateQueries({ queryKey: ["editor-tree", workspaceId] });
       void queryClient.invalidateQueries({ queryKey: ["editor-git", workspaceId] });
       void queryClient.invalidateQueries({ queryKey: ["editor-changes", workspaceId] });
@@ -747,6 +785,69 @@ export default function EditorPanel(props: EditorPanelProps) {
     useEditorStore.getState().openTab(workspaceId, { id: tabId({ kind: "file", path }), kind: "file", path });
     recentRef.current = [path, ...recentRef.current.filter((item) => item !== path)].slice(0, 30);
   }, [workspaceId]);
+  /** Opens a file and puts the cursor at a 1-based position (search results, problems, go to definition). */
+  const openAt = useCallback((path: string, line: number, column: number, endColumn?: number) => {
+    pendingReveal.current = { path, line, column, endColumn };
+    openFile(path);
+    const current = useEditorStore.getState().byWorkspace[workspaceId];
+    const active = current?.tabs.find((tab) => tab.id === current.activeId);
+    if (active?.path === path && surfaceHandle.current) {
+      surfaceHandle.current.reveal(line, column, endColumn);
+      pendingReveal.current = null;
+    }
+  }, [openFile, workspaceId]);
+
+  const handoff = useCallback((instruction: string, chips: { label: string; text: string }[]) => {
+    const result = sendToChat(sessionId, instruction, chips);
+    if (!result.ok) toast(result.reason);
+  }, [sessionId]);
+
+  const fixWithAgent = useCallback((path: string, diagnostic: LspDiagnostic) => {
+    const doc = docs.get(path);
+    const line = diagnostic.range.start.line + 1;
+    const from = Math.max(1, line - 3);
+    const to = doc ? Math.min(doc.model.getLineCount(), diagnostic.range.end.line + 4) : line;
+    const code = doc ? doc.model.getValueInRange({ startLineNumber: from, startColumn: 1, endLineNumber: to, endColumn: doc.model.getLineMaxColumn(to) }) : "";
+    const where = `L${line}:C${diagnostic.range.start.character + 1}`;
+    const source = diagnostic.source ? `${diagnostic.source}${diagnostic.code !== undefined ? ` ${typeof diagnostic.code === "object" ? diagnostic.code.value : diagnostic.code}` : ""}: ` : "";
+    handoff("Fix this problem:", [{
+      label: `${path.split("/").pop()} ${where} · ${diagnostic.message.split("\n")[0]!.slice(0, 50)}`,
+      text: `${path} ${where}: ${source}${diagnostic.message}${code ? `\n${codeChipText(path, from, to, doc ? languageForPath(path) : "", code)}` : ""}`,
+    }]);
+  }, [docs, handoff]);
+
+  const agentAction = useCallback((action: AgentAction, editor: import("monaco-editor/editor/editor.api.js").editor.ICodeEditor) => {
+    const model = editor.getModel();
+    const selection = editor.getSelection();
+    if (!model || !selection || model.uri.scheme !== "omnirush-file") return;
+    const path = model.uri.path.replace(/^\//, "");
+    let range = selection;
+    if (selection.isEmpty()) {
+      // No selection: the line under the cursor.
+      const line = selection.startLineNumber;
+      range = new monaco.Selection(line, 1, line, model.getLineMaxColumn(line));
+    }
+    const code = model.getValueInRange(range);
+    const chip = {
+      label: `${lineLabel(path, range.startLineNumber, range.endLineNumber)} · selection`,
+      text: codeChipText(path, range.startLineNumber, range.endLineNumber, model.getLanguageId(), code),
+    };
+    const instruction = action === "explain" ? "Explain what this code does and why."
+      : action === "refactor" ? "Refactor this code: "
+        : action === "tests" ? "Write tests for this code with the project's test setup, and run them."
+          : "";
+    handoff(instruction, [chip]);
+  }, [handoff, monaco]);
+
+  // The language features act on this workspace while the editor shows it.
+  useEffect(() => {
+    installLanguageFeatures(monaco);
+    setLanguageContext({ monaco, client, workspaceId, workspaceRoot, docs, openAt: (path, line, column) => openAt(path, line, column), fixWithAgent });
+    setProblemsLoading(true);
+    void refreshAllDiagnostics().finally(() => setProblemsLoading(false));
+    return () => setLanguageContext(null);
+  }, [client, docs, fixWithAgent, monaco, openAt, workspaceId, workspaceRoot]);
+
   const openReview = useCallback((file: ReviewFile) => {
     if (file.baseline === undefined) {
       openFile(file.path);
@@ -836,6 +937,76 @@ export default function EditorPanel(props: EditorPanelProps) {
     // reviewFiles changes identity per fetch; the key carries what matters.
   }, [activeTab, docs, client, workspaceId, reviewKey, changesQuery.isFetching, docsTick]);
 
+  useEffect(() => {
+    const reveal = pendingReveal.current;
+    if (!reveal || !surface || !activeTab || activeTab.path !== reveal.path) return;
+    pendingReveal.current = null;
+    requestAnimationFrame(() => surfaceHandle.current?.reveal(reveal.line, reveal.column, reveal.endColumn));
+  }, [activeTab, surface]);
+
+  // Language features start for a file once it has been the active file for a moment, or when it is edited
+  // (a file only glanced at from search, quick open or Problems starts no language server).
+  const languageFeatures = useEditorStore((state) => state.languageFeatures);
+  const activeFilePath = surface?.kind === "file" ? surface.doc.path : null;
+  const lspActive = useIsLspActive(activeFilePath);
+  useEffect(() => {
+    setLspSessionBusy(agentBusy);
+  }, [agentBusy]);
+  useEffect(() => {
+    if (!languageFeatures) clearLanguageFeatures();
+  }, [languageFeatures]);
+  useEffect(() => {
+    if (!surface || surface.kind !== "file" || !languageFeatures || lspActive) return;
+    const path = surface.doc.path;
+    const timer = window.setTimeout(() => activateLsp(path), LSP_DWELL_MS);
+    // A typed edit starts them at once; the text loading or reloading from disk does not (the document is clean
+    // again right after a reload, so the check waits a microtask).
+    const doc = surface.doc;
+    const subscription = doc.model.onDidChangeContent(() => {
+      queueMicrotask(() => {
+        if (docs.isDirty(doc)) activateLsp(path);
+      });
+    });
+    return () => {
+      window.clearTimeout(timer);
+      subscription.dispose();
+    };
+  }, [docs, surface, languageFeatures, lspActive]);
+
+  // The active file's problems: when its language features start and after edits (its unsaved text is checked).
+  useEffect(() => {
+    if (!surface || surface.kind !== "file" || !lspActive) return;
+    const doc = surface.doc;
+    void refreshFileDiagnostics(doc.path);
+    let timer = 0;
+    const subscription = doc.model.onDidChangeContent(() => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => void refreshFileDiagnostics(doc.path), 1200);
+    });
+    return () => {
+      window.clearTimeout(timer);
+      subscription.dispose();
+    };
+  }, [surface, lspActive, agentBusy]);
+
+  // Breadcrumbs: the symbols around the cursor.
+  useEffect(() => {
+    if (!surface || surface.kind !== "file" || !cursor) {
+      setBreadcrumbSymbols([]);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void documentSymbols(surface.doc.model).then((symbols) => {
+        if (!cancelled) setBreadcrumbSymbols(symbolPath(symbols ?? [], cursor.line, cursor.column).map((symbol) => symbol.name));
+      });
+    }, 300);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [cursor, surface, lspActive]);
+
   // ── save ───────────────────────────────────────────────────────────────
   const save = useCallback(async (options: { force?: boolean } = {}) => {
     if (!activeTab) return;
@@ -844,6 +1015,7 @@ export default function EditorPanel(props: EditorPanelProps) {
     if (!doc) return;
     const result = await docs.save(path, { sessionId, source: "editor", force: options.force });
     if (result.ok) {
+      void refreshFileDiagnostics(path);
       void queryClient.invalidateQueries({ queryKey: ["editor-git", workspaceId] });
       if (!files.includes(path)) void queryClient.invalidateQueries({ queryKey: ["editor-tree", workspaceId] });
       return;
@@ -882,6 +1054,32 @@ export default function EditorPanel(props: EditorPanelProps) {
     }
   }, [client, queryClient, workspaceId]);
 
+  // Commands from the app's shortcuts and palette (use-shell-shortcuts.ts, session-route.tsx).
+  useEffect(() => {
+    const onCommand = (event: Event) => {
+      const command = (event as CustomEvent<string>).detail;
+      if (command === "search") {
+        useEditorStore.getState().setView(workspaceId, "search");
+        setSearchFocus((value) => value + 1);
+      } else if (command === "problems") {
+        useEditorStore.getState().setProblemsOpen(true);
+        void refreshAllDiagnostics();
+      } else if (command === "quick-open") {
+        useEditorStore.getState().setQuickOpen(true);
+      } else if (command === "symbol") {
+        const editor = surfaceHandle.current?.activeEditor();
+        const model = editor?.getModel();
+        if (model) activateLspForModel(model);
+        editor?.focus();
+        editor?.trigger("palette", "editor.action.quickOutline", null);
+      } else if (command === "outline") {
+        useEditorStore.getState().setView(workspaceId, "files");
+      }
+    };
+    window.addEventListener("omnirush:editor-command", onCommand);
+    return () => window.removeEventListener("omnirush:editor-command", onCommand);
+  }, [workspaceId]);
+
   // ── keys ───────────────────────────────────────────────────────────────
   const panelRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -917,7 +1115,19 @@ export default function EditorPanel(props: EditorPanelProps) {
 
   const side = (
     <div className="flex h-full min-h-0 flex-col border-e border-border bg-muted/20">
-      {state.view === "files" ? (
+      {state.view === "search" ? (
+        <SearchView
+          client={client}
+          workspaceId={workspaceId}
+          docs={docs}
+          sessionId={sessionId}
+          focusNonce={searchFocus}
+          onOpen={openAt}
+          onSaved={() => void queryClient.invalidateQueries({ queryKey: ["editor-git", workspaceId] })}
+        />
+      ) : state.view === "files" ? (
+        <div className="flex h-full min-h-0 flex-col">
+        <div className="min-h-0 flex-1">
         <FilesView
           files={files}
           truncated={Boolean(treeQuery.data?.truncated)}
@@ -928,6 +1138,13 @@ export default function EditorPanel(props: EditorPanelProps) {
           onOpen={openFile}
           onRefresh={() => void treeQuery.refetch()}
         />
+        </div>
+        <OutlineView
+          model={surface?.kind === "file" ? surface.doc.model : null}
+          path={surface?.kind === "file" ? surface.doc.path : null}
+          onReveal={(line, column) => surfaceHandle.current?.reveal(line, column)}
+        />
+        </div>
       ) : state.view === "changes" ? (
         <ChangesView
           data={review}
@@ -1013,8 +1230,13 @@ export default function EditorPanel(props: EditorPanelProps) {
       ) : activePath ? (
         <div className="flex h-6 shrink-0 items-center gap-1 border-b border-border px-3 text-[11px] text-muted-foreground" data-editor-breadcrumb>
           {activePath.split("/").map((part, index, parts) => (
-            <span key={`${index}:${part}`} className={cn(index === parts.length - 1 && "text-foreground")}>
+            <span key={`${index}:${part}`} className={cn("shrink-0", index === parts.length - 1 && !breadcrumbSymbols.length && "text-foreground")}>
               {part}{index < parts.length - 1 ? <span className="mx-1 opacity-60">›</span> : null}
+            </span>
+          ))}
+          {breadcrumbSymbols.map((name, index) => (
+            <span key={`symbol:${index}:${name}`} className={cn("min-w-0 truncate", index === breadcrumbSymbols.length - 1 && "text-foreground")} data-editor-breadcrumb-symbol>
+              <span className="mx-1 opacity-60">›</span>{name}
             </span>
           ))}
           {activeDoc?.conflict ? (
@@ -1045,12 +1267,27 @@ export default function EditorPanel(props: EditorPanelProps) {
             onCursor={setCursor}
             onHunks={setHunks}
             navigate={navigate}
+            onAgentAction={agentAction}
+            onReady={(handle) => {
+              surfaceHandle.current = handle;
+            }}
           />
         </div>
       </div>
       <div className="flex h-6 shrink-0 items-center gap-3 overflow-hidden whitespace-nowrap border-t border-border px-3 text-[11px] text-muted-foreground" data-editor-status>
         {branch ? <span className="flex min-w-0 items-center gap-1 truncate"><GitBranch className="size-3 shrink-0" />{branch}</span> : null}
         {gitQuery.data?.repo ? <span className="shrink-0">{gitQuery.data.files.length} changed</span> : null}
+        <button
+          type="button"
+          className="flex shrink-0 items-center gap-1 rounded px-1 hover:bg-muted hover:text-foreground"
+          onClick={() => useEditorStore.getState().setProblemsOpen(!(problemsOpen && bottomTab === "problems"))}
+          aria-label={`Problems: ${problemTotals.errors} errors, ${problemTotals.warnings} warnings`}
+          title="Problems"
+          data-editor-problem-counts
+        >
+          <CircleX className="size-3" />{problemTotals.errors}
+          <AlertTriangle className="size-3" />{problemTotals.warnings}
+        </button>
         <span className="flex-1" />
         {cursor && activeTab ? <span className="shrink-0 max-[1100px]:hidden">Ln {cursor.line}, Col {cursor.column}</span> : null}
         {activePath ? <span className="shrink-0 max-[1250px]:hidden">{languageForPath(activePath)}</span> : null}
@@ -1098,21 +1335,7 @@ export default function EditorPanel(props: EditorPanelProps) {
         {railItem("files", "Files", <Files />, mac ? "⌘⇧E" : "Ctrl+Shift+E")}
         {railItem("changes", "Agent changes", <FileDiff />, null, pendingCount)}
         {railItem("git", "Git", <GitBranch />, null, gitQuery.data?.repo ? gitQuery.data.files.length : undefined)}
-        <Tooltip>
-          <TooltipTrigger
-            render={(
-              <button
-                type="button"
-                aria-label="Go to file"
-                onClick={() => useEditorStore.getState().setQuickOpen(true)}
-                className="flex size-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground [&_svg]:size-[18px]"
-              >
-                <Search />
-              </button>
-            )}
-          />
-          <TooltipContent side="right">Go to file ({mac ? "⌘P" : "Ctrl+P"})</TooltipContent>
-        </Tooltip>
+        {railItem("search", "Search in files", <Search />, mac ? "⌘⇧F" : "Ctrl+Shift+F")}
         <span className="flex-1" />
         {props.railFoot}
       </nav>
@@ -1120,6 +1343,16 @@ export default function EditorPanel(props: EditorPanelProps) {
       <div className="flex h-9 shrink-0 items-center gap-1.5 border-b border-border px-2 max-lg:h-12 mac:titlebar-drag mac:ps-6 [&_button]:mac:titlebar-no-drag" data-editor-header>
         {props.headerStart}
         <span className="flex-1" />
+        <Tooltip>
+          <TooltipTrigger
+            render={(
+              <Button variant="ghost" size="icon-sm" aria-label="Go to file" onClick={() => useEditorStore.getState().setQuickOpen(true)}>
+                <FileCode2 />
+              </Button>
+            )}
+          />
+          <TooltipContent>Go to file ({mac ? "⌘P" : "Ctrl+P"})</TooltipContent>
+        </Tooltip>
         <Tooltip>
           <TooltipTrigger
             render={(
@@ -1165,11 +1398,66 @@ export default function EditorPanel(props: EditorPanelProps) {
             </ResizablePanel>
           </ResizablePanelGroup>
         </ResizablePanel>
-        {props.terminalOpen && props.terminal ? (
+        {(props.terminalOpen && props.terminal) || problemsOpen ? (
+          // The bottom panel: Problems and the terminal, as tabs.
           <>
             <ResizableHandle />
-            <ResizablePanel defaultSize="220px" minSize="120px" maxSize="70%" className="min-h-0" data-editor-terminal>
-              {props.terminal}
+            <ResizablePanel defaultSize="220px" minSize="120px" maxSize="70%" className="min-h-0" data-editor-bottom-panel>
+              <div className="flex h-full min-h-0 flex-col">
+                <div className="flex h-7 shrink-0 items-center gap-1 border-b border-border px-2 text-xs" role="tablist">
+                  {[
+                    { id: "problems" as const, label: `Problems${problemTotals.errors + problemTotals.warnings ? ` ${problemTotals.errors + problemTotals.warnings}` : ""}` },
+                    { id: "terminal" as const, label: "Terminal" },
+                  ].map((item) => {
+                    const front = item.id === "problems" ? problemsOpen && (bottomTab === "problems" || !props.terminalOpen) : props.terminalOpen && (bottomTab === "terminal" || !problemsOpen);
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        role="tab"
+                        aria-selected={front}
+                        data-editor-bottom-tab={item.id}
+                        onClick={() => {
+                          if (item.id === "problems") useEditorStore.getState().setProblemsOpen(true);
+                          else {
+                            if (!props.terminalOpen) props.onToggleTerminal();
+                            useEditorStore.getState().setBottomTab("terminal");
+                          }
+                        }}
+                        className={cn("rounded-md px-2 py-0.5", front ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground")}
+                      >
+                        {item.label}
+                      </button>
+                    );
+                  })}
+                  <span className="flex-1" />
+                  <Button
+                    variant="ghost"
+                    size="icon-xs"
+                    aria-label="Close panel"
+                    onClick={() => {
+                      useEditorStore.getState().setProblemsOpen(false);
+                      if (props.terminalOpen) props.onToggleTerminal();
+                    }}
+                  >
+                    <X />
+                  </Button>
+                </div>
+                <div className="min-h-0 flex-1">
+                  {problemsOpen && (bottomTab === "problems" || !props.terminalOpen) ? (
+                    <ProblemsView
+                      workspaceId={workspaceId}
+                      loading={problemsLoading}
+                      onOpen={(path, line, column) => openAt(path, line, column)}
+                      onFix={fixWithAgent}
+                      onRefresh={() => {
+                        setProblemsLoading(true);
+                        void refreshAllDiagnostics().finally(() => setProblemsLoading(false));
+                      }}
+                    />
+                  ) : props.terminal}
+                </div>
+              </div>
             </ResizablePanel>
           </>
         ) : null}

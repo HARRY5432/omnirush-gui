@@ -1664,6 +1664,14 @@ async function fetchWithTimeout(
   }
 }
 
+export type OmniRushEditorSearchMatch = { line: number; text: string; start: number; end: number; textOffset: number };
+export type OmniRushEditorSearchResult = {
+  engine: "ripgrep" | "git" | "none";
+  files: Array<{ path: string; matches: OmniRushEditorSearchMatch[] }>;
+  matchCount: number;
+  truncated: boolean;
+  timedOut: boolean;
+};
 export type OmniRushEditorTree = { git: boolean; files: string[]; truncated: boolean; generatedAt: number };
 export type OmniRushEditorFile = {
   path: string;
@@ -2807,6 +2815,36 @@ export function createOmniRushServerClient(options: { baseUrl: string; token?: s
       payload: { sessionId: string; path: string; decision: "accept" | "reject"; added: number; removed: number; scope: "hunk" | "file" },
     ) =>
       requestJson<{ ok: true }>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/editor/review`, { token, hostToken, method: "POST", body: payload }),
+
+    editorSearch: (
+      workspaceId: string,
+      payload: { query: string; regex?: boolean; caseSensitive?: boolean; wholeWord?: boolean; include?: string[]; exclude?: string[]; maxMatches?: number },
+      signal?: AbortSignal,
+    ) =>
+      requestJson<OmniRushEditorSearchResult>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/editor/search`, {
+        token,
+        hostToken,
+        method: "POST",
+        body: payload,
+        timeoutMs: 30_000,
+        signal,
+      }),
+
+    /** The engine's language features for the editor (the project's own language servers); see the engine's /editor routes. */
+    editorLsp: <T = unknown>(
+      workspaceId: string,
+      op: "diagnostics" | "hover" | "definition" | "references" | "symbols" | "rename",
+      payload: { path?: string; line?: number; character?: number; newName?: string; text?: string },
+      signal?: AbortSignal,
+    ) =>
+      requestJson<T>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/opencode/editor/lsp/${op}`, {
+        token,
+        hostToken,
+        method: "POST",
+        body: payload,
+        timeoutMs: op === "diagnostics" ? 45_000 : 20_000,
+        signal,
+      }),
 
     editorGitStatus: (workspaceId: string) =>
       requestJson<OmniRushEditorGitStatus>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/editor/git/status`, { token, hostToken, timeoutMs: 30_000 }),
