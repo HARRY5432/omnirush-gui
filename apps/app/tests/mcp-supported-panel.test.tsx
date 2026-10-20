@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import type { OmniRushMcpPolicyView, OmniRushMcpPreset } from "../src/app/lib/omnirush-server";
+import { projectCodeNotice } from "../src/lib/capability-call";
 import type { McpServerEntry } from "../src/app/types";
 import {
   MCP_BLOCKED_HINTS,
@@ -108,6 +109,22 @@ describe("Settings > MCP: supported servers", () => {
     expect(html).toContain("<code");
     expect(html).toContain(">now</code>");
     expect(html).not.toContain("`");
+  });
+
+  test("what the project's own config could not load is said once, in the panel and as a notice", () => {
+    const line = "Not loaded from this project's config: plugins evil.ts.";
+    expect(render({ policy: policy({ ignoredNotice: line }) })).toContain(line);
+    expect(render({ policy: policy({ enabled: false, ignoredNotice: line }) })).toContain(line);
+    expect(render()).not.toContain("mcp-project-code-ignored");
+    expect(projectCodeNotice("ws_1", line)).toEqual({ id: "project-code-ignored:ws_1", text: line });
+    expect(projectCodeNotice("ws_1", line)).toBeNull();
+    expect(projectCodeNotice("ws_2", line)).not.toBeNull();
+    expect(projectCodeNotice("ws_3", null)).toBeNull();
+  });
+
+  test("a missing runner says how to fix it", () => {
+    expect(mcpServerState(server("x"), { name: "x", status: "blocked", code: "runner_missing", reason: "npx or uvx was not found on this computer outside the project folder, so the server does not start." }))
+      .toMatchObject({ hint: "Install Node.js (for npx) or uv (for uvx), then restart the app." });
   });
 
   test("helpers", () => {

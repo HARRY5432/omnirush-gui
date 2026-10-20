@@ -146,7 +146,7 @@ import {
   type ChatMcpReconnectScope,
 } from "./mcp-chat-reconnect";
 import { OpenTargetProvider, type OpenTargetOptions } from "@/lib/target-provider";
-import { registerMcpServerTitles } from "@/lib/capability-call";
+import { projectCodeNotice, registerMcpServerTitles } from "@/lib/capability-call";
 import type { ThreadStatus } from "@/lib/messages";
 import {
   EnvironmentVariableProvider,
@@ -2849,7 +2849,11 @@ export function SessionSurface(props: SessionSurfaceProps) {
   useEffect(() => {
     let current = true;
     void props.client.listMcp(props.workspaceId).then((response) => {
-      if (current && response.mcpPolicy) registerMcpServerTitles([...response.mcpPolicy.supported, ...response.mcpPolicy.decisions]);
+      if (!current || !response.mcpPolicy) return;
+      registerMcpServerTitles([...response.mcpPolicy.supported, ...response.mcpPolicy.decisions]);
+      // Once per project and app run: what of the project's own config did not load.
+      const notice = projectCodeNotice(props.workspaceId, response.mcpPolicy.ignoredNotice);
+      if (notice) toast.info(notice.text, { id: notice.id });
     }).catch(() => undefined);
     return () => { current = false; };
   }, [props.client, props.workspaceId]);
