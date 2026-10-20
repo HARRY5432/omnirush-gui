@@ -87,7 +87,7 @@ function CheckMark({ check }: { check: GoodSessionCheck }) {
       className={cn(
         "inline-flex items-center gap-1 whitespace-nowrap",
         check.state === "pass" && "text-foreground",
-        (check.state === "fail" || check.state === "warn") && "text-amber-11",
+        (check.state === "fail" || check.state === "warn") && "text-warning",
       )}
     >
       {check.label}
@@ -271,7 +271,7 @@ export function GoodSessionLine({ result, announce = true }: { result: OmniRushG
       ) : copy.state === "pending" ? (
         <span className="text-muted-foreground">{copy.text}</span>
       ) : (
-        <span className="text-amber-11">
+        <span className="text-warning">
           {copy.text}{" "}
           <button
             type="button"
@@ -298,9 +298,9 @@ function sentence(text: string): string {
   return /[.!?…★]$/.test(trimmed) ? trimmed : `${trimmed}.`;
 }
 
-const TONE_TEXT: Record<GoodSessionTone, string> = { amber: "text-amber-11", red: "text-red-11" };
+const TONE_TEXT: Record<GoodSessionTone, string> = { amber: "text-warning", red: "text-red-11" };
 const TONE_BOX: Record<GoodSessionTone, string> = {
-  amber: "border-amber-7/40 bg-amber-2/30 text-amber-11",
+  amber: "border-amber-7/40 bg-amber-2/30 text-warning",
   red: "border-red-7/40 bg-red-2/30 text-red-11",
 };
 
@@ -571,7 +571,7 @@ export function GoodSessionChecklistBar(props: GoodSessionChecklistBarProps) {
               aria-hidden="true"
             />
             <span className="truncate font-medium text-foreground">{checklistHeading(verdict)}</span>
-            <span className={cn("shrink-0 tabular-nums", passedChecks < checklist.checks.length && "text-amber-11")} data-testid="good-session-count">
+            <span className={cn("shrink-0 tabular-nums", passedChecks < checklist.checks.length && "text-warning")} data-testid="good-session-count">
               {passedChecks}/{checklist.checks.length}
             </span>
             <ChevronDown className={cn("size-3 shrink-0 transition-transform", checklistOpen && "rotate-180")} aria-hidden="true" />
@@ -589,7 +589,7 @@ export function GoodSessionChecklistBar(props: GoodSessionChecklistBarProps) {
             {showMessage && checklist.message ? (
               <p className={cn("font-medium", checklist.messageTone ? TONE_TEXT[checklist.messageTone] : "text-foreground")}>{checklist.message}</p>
             ) : null}
-            {checklist.reasons.map((reason) => <p key={reason} className="text-amber-11">{reason}</p>)}
+            {checklist.reasons.map((reason) => <p key={reason} className="text-warning">{reason}</p>)}
             {checklist.delivery ? <p data-testid="good-session-delivery">{checklist.delivery}</p> : null}
             {/* The chip's own status already announces it. */}
             {showVerdict ? <GoodSessionLine result={goodSession} announce={false} /> : null}
@@ -622,7 +622,7 @@ export function FinishGuardDialog(props: { kind: FinishGuardKind | null; onFinis
     <AlertDialog open={props.kind !== null} onOpenChange={(open) => { if (!open) props.onFinish(); }}>
       <AlertDialogContent data-testid="finish-guard-dialog">
         <AlertDialogHeader>
-          <AlertDialogMedia className="bg-amber-3/50 text-amber-11">
+          <AlertDialogMedia className="bg-amber-3/50 text-warning">
             <AlertTriangle />
           </AlertDialogMedia>
           <AlertDialogTitle>{FINISH_GUARD_TITLE}</AlertDialogTitle>
@@ -647,7 +647,7 @@ export function TurnGuardDialog(props: { open: boolean; onWait: () => void; onQu
     <AlertDialog open={props.open} onOpenChange={(open) => { if (!open) props.onWait(); }}>
       <AlertDialogContent data-testid="turn-guard-dialog">
         <AlertDialogHeader>
-          <AlertDialogMedia className="bg-amber-3/50 text-amber-11">
+          <AlertDialogMedia className="bg-amber-3/50 text-warning">
             <AlertTriangle />
           </AlertDialogMedia>
           <AlertDialogTitle>{TURN_GUARD_TITLE}</AlertDialogTitle>

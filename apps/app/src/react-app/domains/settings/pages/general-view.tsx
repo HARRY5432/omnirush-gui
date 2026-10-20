@@ -212,7 +212,7 @@ export function ApprovalsCard(props: {
                   className={`rounded-md px-3 py-1 text-[12px] font-medium transition-colors disabled:cursor-not-allowed ${
                     selected
                       ? mode === "full"
-                        ? "bg-dls-surface text-orange-11 shadow-sm"
+                        ? "bg-dls-surface text-[color:var(--omnirush-warn,var(--orange-11))] shadow-sm"
                         : "bg-dls-surface text-dls-text shadow-sm"
                       : "text-dls-secondary hover:text-dls-text disabled:hover:text-dls-secondary"
                   } ${disabled && !selected ? "opacity-60" : ""}`}
@@ -483,7 +483,7 @@ export function GeneralSettingsView(props: GeneralSettingsViewProps) {
               {usage ? (
                 <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-dls-hover" aria-label={`${Math.round(usage.percent)}% used`}>
                   <div
-                    className="h-full rounded-full bg-[#b9f45a]"
+                    className="h-full rounded-full bg-highlight"
                     style={{ width: `${usage.percent}%` }}
                   />
                 </div>

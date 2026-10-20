@@ -8,6 +8,7 @@
 import { useEffect, useRef, useState } from "react";
 import type * as MonacoApi from "monaco-editor/editor/editor.api.js";
 
+import { subscribeToTheme } from "@/app/theme";
 import { applyMonacoTheme, monacoThemeName, type Monaco } from "./monaco";
 import type { FileDoc } from "./editor-models";
 import { hunkCounts, type LineHunk } from "./hunk-ops";
@@ -115,10 +116,11 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
   // The editors, once.
   useEffect(() => {
     if (!codeHostRef.current || !diffHostRef.current) return;
-    const code = monaco.editor.create(codeHostRef.current, { ...BASE_OPTIONS, model: null, theme: monacoThemeName() });
+    const themeName = monacoThemeName();
+    const code = monaco.editor.create(codeHostRef.current, { ...BASE_OPTIONS, model: null, theme: themeName });
     const diff = monaco.editor.createDiffEditor(diffHostRef.current, {
       ...BASE_OPTIONS,
-      theme: monacoThemeName(),
+      theme: themeName,
       renderSideBySide: false,
       useInlineViewWhenSpaceIsLimited: true,
       renderMarginRevertIcon: false,
@@ -136,19 +138,18 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
     const disposables = [cursor(code), cursor(diff.getModifiedEditor())];
     codeRef.current = code;
     diffRef.current = diff;
-    // Light/dark follows the app (`data-theme` on <html>).
-    const observer = new MutationObserver(() => {
+    // Follows the app theme: light/dark, presets and custom themes (app/theme.ts).
+    const unsubscribeTheme = subscribeToTheme(() => {
       applyMonacoTheme();
       // Repaint now: a composited editor layer can otherwise keep the old background until it scrolls.
       code.render(true);
       diff.getModifiedEditor().render(true);
       diff.getOriginalEditor().render(true);
     });
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class", "data-theme"] });
     return () => {
       const key = currentKey.current;
       if (key) VIEW_STATES.set(key, modeRef.current === "diff" ? diff.saveViewState() : code.saveViewState());
-      observer.disconnect();
+      unsubscribeTheme();
       for (const disposable of disposables) disposable.dispose();
       code.dispose();
       diff.dispose();

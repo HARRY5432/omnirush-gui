@@ -1630,7 +1630,7 @@ export function SessionPage(props: SessionPageProps) {
                       size="icon-sm"
                       className={cn(
                         "hidden rounded-xl text-gray-10 transition-colors hover:bg-muted hover:text-foreground @min-[40rem]/titlebar:inline-flex",
-                        sidePanelOpen && "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary",
+                        sidePanelOpen && "bg-primary/10 text-link hover:bg-primary/15 hover:text-link",
                       )}
                       aria-label={sidePanelOpen ? "Close side panel" : "Open side panel"}
                       aria-pressed={sidePanelOpen}
@@ -2343,7 +2343,7 @@ export function SessionPage(props: SessionPageProps) {
                 size="icon-sm"
                 className={cn(
                   "rounded-xl transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-muted-foreground",
-                  panelRailActive && hasBrowserTabs && "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary",
+                  panelRailActive && hasBrowserTabs && "bg-primary/10 text-link hover:bg-primary/15 hover:text-link",
                 )}
                 onClick={openBrowserRailPane}
                 title={hasBrowserTabs ? "Browser" : "Browser opens when a page is available"}
@@ -2359,7 +2359,7 @@ export function SessionPage(props: SessionPageProps) {
               size="icon-sm"
               className={cn(
                 "rounded-xl transition-colors hover:bg-muted hover:text-foreground",
-                panelRailActive && "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary",
+                panelRailActive && "bg-primary/10 text-link hover:bg-primary/15 hover:text-link",
               )}
               onClick={panelRailActive ? closeRightPane : openArtifactRailPane}
               title={`Files (${artifactTargetCount})`}

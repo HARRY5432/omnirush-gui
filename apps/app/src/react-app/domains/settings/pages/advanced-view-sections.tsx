@@ -69,7 +69,7 @@ function sourceBadgeClass(source: DenEndpointSource): string {
     case "custom":
       return "border-blue-7/40 bg-blue-3 text-blue-11";
     case "bootstrap":
-      return "border-amber-7/40 bg-amber-3 text-amber-11";
+      return "border-amber-7/40 bg-amber-3 text-warning";
     case "default":
       return "border-gray-7/50 bg-gray-3 text-gray-11";
   }
@@ -85,7 +85,7 @@ function EndpointSourceBadge(props: { source: DenEndpointSource }) {
 
 function EndpointWarningBadge(props: { children: ReactNode }) {
   return (
-    <Badge variant="outline" className="border-amber-7/40 bg-amber-3 text-amber-11">
+    <Badge variant="outline" className="border-amber-7/40 bg-amber-3 text-warning">
       {props.children}
     </Badge>
   );
@@ -164,7 +164,7 @@ function ServerEndpointsCard(props: { cloudMcpUrl: string | null }) {
       </div>
 
       {hasBootstrapSource ? (
-        <div className="text-[11px] text-amber-11">
+        <div className="text-[11px] text-warning">
           {t("settings.server_endpoints_bootstrap_hint", { path: DESKTOP_BOOTSTRAP_PATH_HINT })}
         </div>
       ) : null}

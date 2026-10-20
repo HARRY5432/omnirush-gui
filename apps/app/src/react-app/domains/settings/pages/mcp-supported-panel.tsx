@@ -164,7 +164,7 @@ export function McpSupportedPanel(props: {
                       </p>
                     ) : state.kind === "blocked" ? (
                       <p className="mt-0.5 text-xs text-dls-secondary">
-                        <span className="font-medium text-amber-11">Blocked</span>{` · ${state.reason}${state.hint ? ` ${state.hint}` : ""}`}
+                        <span className="font-medium text-warning">Blocked</span>{` · ${state.reason}${state.hint ? ` ${state.hint}` : ""}`}
                       </p>
                     ) : state.kind === "off" ? (
                       <p className="mt-0.5 text-xs text-dls-secondary">Off</p>

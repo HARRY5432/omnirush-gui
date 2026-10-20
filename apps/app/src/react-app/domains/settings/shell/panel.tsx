@@ -119,5 +119,5 @@ type SettingsPanelToolbarMessageProps = {
 };
 
 export function SettingsPanelToolbarMessage(props: SettingsPanelToolbarMessageProps) {
-  return <div className="text-xs leading-relaxed text-amber-11/90 md:max-w-sm">{props.children}</div>;
+  return <div className="text-xs leading-relaxed text-warning/90 md:max-w-sm">{props.children}</div>;
 }

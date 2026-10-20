@@ -67,7 +67,7 @@ export function TabsTrigger(props: TabsTriggerProps) {
       <span className="flex min-w-0 items-center gap-2">
         <span>{props.children}</span>
         {props.beta ? (
-          <span className="shrink-0 rounded-full border border-amber-6/40 bg-amber-3/60 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-amber-11">
+          <span className="shrink-0 rounded-full border border-amber-6/40 bg-amber-3/60 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-warning">
             {t("common.beta")}
           </span>
         ) : null}

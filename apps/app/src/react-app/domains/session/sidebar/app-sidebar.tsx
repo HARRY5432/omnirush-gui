@@ -802,7 +802,7 @@ function RemoteConnectionIssueCard(props: {
           <div
             className={cn(
               "mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-red-3/60 text-red-11",
-              isOffline && "bg-amber-3/60 text-amber-11",
+              isOffline && "bg-amber-3/60 text-warning",
             )}
           >
             <AlertCircle size={14} />
@@ -817,7 +817,7 @@ function RemoteConnectionIssueCard(props: {
             <div
               className={cn(
                 "mt-2 rounded-lg border border-red-7/25 bg-red-1/40 px-2 py-1.5 text-[11px] leading-4 text-red-11 whitespace-pre-wrap wrap-anywhere",
-                isOffline && "border-amber-7/25 bg-amber-1/40 text-amber-11",
+                isOffline && "border-amber-7/25 bg-amber-1/40 text-warning",
               )}
               title={props.message}
             >
@@ -988,7 +988,7 @@ type NativeAccountStatus = Awaited<ReturnType<typeof omnirushAccountStatus>>;
 function OmniRushWordmark({ className }: { className?: string }) {
   return (
     <span className={className} aria-label="omnirush.ai">
-      <span>omnirush</span><span className="text-[#b9f45a]">.ai</span>
+      <span>omnirush</span><span className="text-highlight">.ai</span>
     </span>
   );
 }
@@ -1113,7 +1113,7 @@ function NativeAccountFooter({ onOpenAccountSettings }: { onOpenAccountSettings:
               <span
                 className={cn(
                   "absolute -bottom-0.5 -right-0.5 size-2 rounded-full border border-sidebar",
-                  connected ? "bg-[#b9f45a]" : "bg-muted-foreground/50",
+                  connected ? "bg-highlight" : "bg-muted-foreground/50",
                 )}
               />
             </span>
@@ -1127,7 +1127,7 @@ function NativeAccountFooter({ onOpenAccountSettings }: { onOpenAccountSettings:
               </span>
               {usage ? (
                 <span className="mt-1 block h-0.5 overflow-hidden rounded-full bg-sidebar-border" aria-hidden="true">
-                  <span className="block h-full rounded-full bg-[#b9f45a]" style={{ width: `${usage.percent}%` }} />
+                  <span className="block h-full rounded-full bg-highlight" style={{ width: `${usage.percent}%` }} />
                 </span>
               ) : null}
             </span>

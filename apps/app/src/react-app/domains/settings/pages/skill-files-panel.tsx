@@ -186,10 +186,10 @@ export function SkillFilesPanel(props: SkillFilesPanelProps) {
               const isSkillMd = file.path === "SKILL.md";
               return (
                 <div key={file.path} className="group flex items-center gap-2 border-b border-border px-4 py-1.5" data-testid="skill-file-row">
-                  {file.kind === "symlink" ? <Link2 size={12} className="text-amber-11" /> : file.executable ? <Terminal size={12} className="text-muted-foreground" /> : <FileText size={12} className="text-muted-foreground" />}
+                  {file.kind === "symlink" ? <Link2 size={12} className="text-warning" /> : file.executable ? <Terminal size={12} className="text-muted-foreground" /> : <FileText size={12} className="text-muted-foreground" />}
                   <span className={`min-w-0 flex-1 truncate font-mono text-xs ${group.folder ? "pl-3" : ""}`} title={file.path}>
                     {file.path.slice(group.folder ? group.folder.length + 1 : 0)}
-                    {file.kind === "symlink" ? <span className="ml-2 text-[10px] text-amber-11">link (not uploaded by the desktop)</span> : null}
+                    {file.kind === "symlink" ? <span className="ml-2 text-[10px] text-warning">link (not uploaded by the desktop)</span> : null}
                   </span>
                   <span className="text-[11px] tabular-nums text-muted-foreground">{formatUploadBytes(file.size)}</span>
                   {isSkillMd ? (

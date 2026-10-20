@@ -374,7 +374,7 @@ function LinkedText(props: { text: string }) {
           <button
             key={index}
             type="button"
-            className="break-all text-primary hover:underline"
+            className="break-all text-link hover:underline"
             onClick={() => void openDesktopUrl(part).catch(() => undefined)}
           >
             {part}
@@ -430,7 +430,7 @@ function UpdatesSection(props: { announcements: BuildathonAnnouncement[]; unread
                   {announcement.url ? (
                     <button
                       type="button"
-                      className="mt-1 inline-flex items-center gap-1 text-primary hover:underline"
+                      className="mt-1 inline-flex items-center gap-1 text-link hover:underline"
                       onClick={() => void openDesktopUrl(announcement.url!).catch(() => undefined)}
                     >
                       Open link <ExternalLink className="size-3" />
@@ -575,7 +575,7 @@ export function BuildathonPanel(props: { status: BuildathonStatus; onClose: () =
               ))}
             </ul>
             {event.pageUrl ? (
-              <button type="button" className="inline-flex items-center gap-1 text-xs text-primary hover:underline" onClick={() => void openDesktopUrl(event.pageUrl!).catch(() => undefined)}>
+              <button type="button" className="inline-flex items-center gap-1 text-xs text-link hover:underline" onClick={() => void openDesktopUrl(event.pageUrl!).catch(() => undefined)}>
                 Event page <ExternalLink className="size-3" />
               </button>
             ) : null}

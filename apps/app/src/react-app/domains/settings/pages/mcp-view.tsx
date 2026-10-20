@@ -310,7 +310,7 @@ const statusBadgeStyle = (status: ReactMcpStatus) => {
     case "needs_auth":
     case "reconnect_required":
     case "needs_client_registration":
-      return "bg-amber-3 text-amber-11";
+      return "bg-amber-3 text-warning";
     case "disabled":
     case "disconnected":
       return "bg-gray-3 text-gray-11";
@@ -342,7 +342,7 @@ const serviceColor = (name: string) => {
   if (lower.includes("stripe")) return "text-blue-11";
   if (lower.includes("context")) return "text-green-11";
   if (lower.includes("devtools")) {
-    return "text-amber-11";
+    return "text-warning";
   }
   if (lower.includes("omnirush")) return "text-gray-12";
   return "text-dls-secondary";
@@ -1434,7 +1434,7 @@ export function McpView(props: McpViewProps) {
   return (
     <section className="w-full max-w-3xl animate-in fade-in duration-300">
       {props.builtInExtensionsDisabled && props.allowManageExtensions ? (
-        <div className="mb-5 rounded-xl border border-amber-6 bg-amber-2 px-4 py-3 text-xs text-amber-11">
+        <div className="mb-5 rounded-xl border border-amber-6 bg-amber-2 px-4 py-3 text-xs text-warning">
           Built-in omnirush.ai extensions are disabled by your organization. Use Show hidden to review blocked built-ins.
         </div>
       ) : null}
@@ -1861,7 +1861,7 @@ export function ExtensionStateTabs(props: {
       state: "needs_signin",
       label: t("extensions.state_needs_signin"),
       count: props.needsSigninCount,
-      countClassName: "bg-amber-3 text-amber-11",
+      countClassName: "bg-amber-3 text-warning",
     },
     {
       state: "needs_admin_setup",
@@ -2309,7 +2309,7 @@ function McpConfiguredServersSection(props: {
       {props.managedOAuthUnavailable ? (
         <div
           data-testid="mcp-managed-oauth-unavailable"
-          className="rounded-lg border border-amber-6 bg-amber-2 px-3 py-2 text-xs text-amber-11"
+          className="rounded-lg border border-amber-6 bg-amber-2 px-3 py-2 text-xs text-warning"
         >
           {t("mcp.managed_oauth_unavailable")}
         </div>
@@ -2420,7 +2420,7 @@ function McpConfiguredServerDetails(props: Parameters<typeof McpConfiguredServer
       {props.entry.managedOAuth?.status === "reconnect_required" && props.entry.managedOAuth.lastError ? (
         <div
           data-testid="mcp-managed-reconnect-reason"
-          className="rounded-lg border border-amber-6 bg-amber-2 px-3 py-2 text-xs text-amber-11"
+          className="rounded-lg border border-amber-6 bg-amber-2 px-3 py-2 text-xs text-warning"
         >
           {props.entry.managedOAuth.lastError}
         </div>

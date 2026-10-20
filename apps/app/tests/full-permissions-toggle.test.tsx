@@ -137,19 +137,19 @@ test("shows the current mode on load; Auto reads as a warning", async () => {
   expect(normal.getAttribute("aria-label")).toBe("Permissions: Normal");
   expect(normal.textContent).toContain("Normal");
   expect(normal.dataset.lockReason).toBeUndefined();
-  expect(normal.className).not.toContain("text-orange-11");
+  expect(normal.className).not.toContain("--omnirush-warn");
 
   const full = fakeClient("http://full.test", { mode: "full", source: "settings", setting: "full" });
   const active = await mount(<FullPermissionsToggle client={full.client} workspaceId="ws_1" />);
   await waitFor(() => toggleIn(active).dataset.state === "full", "the auto mode to load");
   expect(toggleIn(active).textContent).toContain("Auto");
-  expect(toggleIn(active).className).toContain("text-orange-11");
+  expect(toggleIn(active).className).toContain("--omnirush-warn");
 
   const careful = fakeClient("http://careful.test", { mode: "careful", source: "settings", setting: "careful" });
   const asking = await mount(<FullPermissionsToggle client={careful.client} workspaceId="ws_1" />);
   await waitFor(() => toggleIn(asking).dataset.state === "careful", "the careful mode to load");
   expect(toggleIn(asking).textContent).toContain("Careful");
-  expect(toggleIn(asking).className).not.toContain("text-orange-11");
+  expect(toggleIn(asking).className).not.toContain("--omnirush-warn");
 
   // Nothing renders without a server client.
   const none = await mount(<FullPermissionsToggle client={null} workspaceId="ws_1" />);

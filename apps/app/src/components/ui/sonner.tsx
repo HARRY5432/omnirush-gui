@@ -86,7 +86,7 @@ const toastTile = cva(
         default: "text-sky-11",
         success: "text-emerald-11",
         info: "text-sky-11",
-        warning: "text-amber-11",
+        warning: "text-warning",
         error: "text-red-11",
       },
       size: {

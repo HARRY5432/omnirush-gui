@@ -17,7 +17,7 @@ const buttonVariants = cva(
           "hover:text-foreground aria-expanded:text-foreground",
         destructive:
           "border-border text-destructive hover:bg-destructive/10 hover:border-destructive/40 focus-visible:border-destructive/40 focus-visible:ring-destructive/20 dark:border-border dark:hover:bg-destructive/10 dark:border-destructive/40 dark:focus-visible:ring-destructive/40 bg-clip-padding shadow-xs/5 before:pointer-events-none before:absolute before:inset-0 before:rounded-[calc(var(--radius-xl)-1px)] before:shadow-[0_1px_--theme(--color-black/4%)] dark:before:shadow-[0_-1px_--theme(--color-white/6%)] active:not-aria-[haspopup]:translate-y-px",
-        link: "text-primary underline-offset-4 hover:underline",
+        link: "text-link underline-offset-4 hover:underline",
       },
       size: {
         default:

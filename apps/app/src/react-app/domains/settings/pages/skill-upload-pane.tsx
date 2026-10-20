@@ -269,7 +269,7 @@ export function SkillUploadPane(props: SkillUploadPaneProps) {
         {conflict ? (
           <div className="flex flex-col gap-2 rounded-xl border border-amber-7/40 bg-amber-3/30 px-4 py-3" data-testid="skill-upload-conflict">
             <p className="flex items-center gap-1.5 text-sm font-medium text-dls-text">
-              <AlertTriangle size={14} className="text-amber-11" />
+              <AlertTriangle size={14} className="text-warning" />
               {conflict.replaceable
                 ? `A skill named “${conflict.name}” already exists in this workspace.`
                 : `A skill named “${conflict.name}” is already installed ${conflict.scope === "global" ? "globally" : "in another skills folder"}.`}

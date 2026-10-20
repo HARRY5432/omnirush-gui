@@ -103,7 +103,7 @@ export function VoicePermissionCard(props: { voice: VoiceDictation }) {
   const url = props.voice.settingsUrl;
   return (
     <div
-      className="mx-4 mt-3 flex items-center gap-3 rounded-xl border border-amber-7/40 bg-amber-2/40 px-3 py-2 text-xs text-amber-11"
+      className="mx-4 mt-3 flex items-center gap-3 rounded-xl border border-amber-7/40 bg-amber-2/40 px-3 py-2 text-xs text-warning"
       data-testid="voice-permission-card"
       role="alert"
     >

@@ -179,7 +179,7 @@ function StatusPopover(props: SessionCommandControlsProps) {
                 <Button
                   variant="ghost"
                   size="icon-sm"
-                  className={cn(iconButton, open && "bg-primary/10 text-primary")}
+                  className={cn(iconButton, open && "bg-primary/10 text-link")}
                   aria-label="Status"
                   data-testid="session-status"
                 >
@@ -205,7 +205,7 @@ function StatusRow({ row }: { row: Row }) {
     <div className="flex items-start gap-3 px-4 py-2" data-status-row={row.label}>
       <span className="w-24 shrink-0 text-[12px] text-muted-foreground">{row.label}</span>
       <span className="min-w-0 flex-1">
-        <span className={cn("block text-[12.5px] text-foreground", row.tone === "warning" && "font-medium text-amber-11")}>{row.value}</span>
+        <span className={cn("block text-[12.5px] text-foreground", row.tone === "warning" && "font-medium text-warning")}>{row.value}</span>
         {row.detail ? <span className="block text-[11.5px] text-muted-foreground">{row.detail}</span> : null}
       </span>
     </div>

@@ -182,7 +182,8 @@ body {
 }
 
 html {
-  font-size: var(--omnirush-font-size, 16px);
+  /* --omnirush-theme-font-scale: custom theme text size (app/themes/palette.ts). */
+  font-size: calc(var(--omnirush-font-size, 16px) * var(--omnirush-theme-font-scale, 1));
 }
 
 body {
@@ -230,6 +231,55 @@ body {
    dual-theme variables as the markdown code blocks above. */
 :is(.dark, [data-theme="dark"]) [data-shell-command-highlighted] span {
   color: var(--shiki-dark) !important;
+}
+
+/* Theme presets and custom themes (html[data-omnirush-palette], set by app/theme.ts):
+   chat code blocks use the theme's code background and syntax colours. Shiki
+   writes GitHub colours inline; each one maps to its syntax role. */
+html[data-omnirush-palette] .markdown-content [data-omnirush-code-block] {
+  background-color: var(--omnirush-code-bg);
+  color: var(--omnirush-code-fg);
+}
+
+html[data-omnirush-palette] :is(.markdown-content [data-omnirush-code-block] .shiki, [data-shell-command-highlighted]) span[style*="color:#6A737D;" i] {
+  color: var(--omnirush-syntax-comment) !important;
+}
+
+html[data-omnirush-palette] :is(.markdown-content [data-omnirush-code-block] .shiki, [data-shell-command-highlighted]) span[style*="color:#D73A49;" i] {
+  color: var(--omnirush-syntax-keyword) !important;
+}
+
+html[data-omnirush-palette] :is(.markdown-content [data-omnirush-code-block] .shiki, [data-shell-command-highlighted]) span[style*="color:#032F62;" i] {
+  color: var(--omnirush-syntax-string) !important;
+}
+
+html[data-omnirush-palette] :is(.markdown-content [data-omnirush-code-block] .shiki, [data-shell-command-highlighted]) span[style*="color:#005CC5;" i] {
+  color: var(--omnirush-syntax-number) !important;
+}
+
+html[data-omnirush-palette] :is(.markdown-content [data-omnirush-code-block] .shiki, [data-shell-command-highlighted]) span[style*="color:#6F42C1;" i] {
+  color: var(--omnirush-syntax-function) !important;
+}
+
+html[data-omnirush-palette] :is(.markdown-content [data-omnirush-code-block] .shiki, [data-shell-command-highlighted]) span[style*="color:#22863A;" i] {
+  color: var(--omnirush-syntax-type) !important;
+}
+
+html[data-omnirush-palette] :is(.markdown-content [data-omnirush-code-block] .shiki, [data-shell-command-highlighted]) span[style*="color:#E36209;" i] {
+  color: var(--omnirush-syntax-variable) !important;
+}
+
+html[data-omnirush-palette] :is(.markdown-content [data-omnirush-code-block] .shiki, [data-shell-command-highlighted]) span[style*="color:#24292E;" i] {
+  color: var(--omnirush-code-fg) !important;
+}
+
+html[data-omnirush-palette] :is(.markdown-content [data-omnirush-code-block] .shiki, [data-shell-command-highlighted]) span[style*="color:#B31D28;" i] {
+  color: var(--destructive) !important;
+}
+
+/* xterm 6 paints its viewport black under the rows; with a theme it takes the terminal background. */
+html[data-omnirush-palette] .xterm .xterm-viewport {
+  background-color: var(--omnirush-terminal-bg) !important;
 }
 
 /* KaTeX sets its own absolute font-size; keep formulas at the surrounding text size
@@ -782,6 +832,12 @@ select:disabled {
   --color-card: var(--card);
   --color-foreground: var(--foreground);
   --color-background: var(--background);
+  /* Theme tokens for colours that used to be fixed hex values. */
+  --color-highlight: var(--omnirush-highlight, #b9f45a);
+  --color-link: var(--omnirush-link, var(--primary));
+  --color-terminal: var(--omnirush-terminal-bg, #0b0d12);
+  --color-terminal-foreground: var(--omnirush-terminal-fg, #ffffff);
+  --color-gate: var(--omnirush-gate-bg, #05070c);
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);

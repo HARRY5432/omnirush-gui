@@ -225,7 +225,7 @@ const Tool = ({
                   : reconnectAction && reconnectState === "failed"
                     ? "border-destructive/30 bg-destructive/5 text-destructive"
                     : reconnectAction
-                      ? "border-amber-7/30 bg-amber-3/50 text-amber-11"
+                      ? "border-amber-7/30 bg-amber-3/50 text-warning"
                       : "border-border/70 text-muted-foreground",
               )}
               title={`${errorAttribution.confidence}: ${errorAttribution.description}`}
@@ -246,7 +246,7 @@ const Tool = ({
                 ? "border-green-7/40 bg-green-3/60 text-green-11 hover:border-green-7/60 hover:bg-green-4/70"
                 : reconnectState === "failed"
                   ? "border-destructive/30 bg-destructive/5 text-destructive hover:border-destructive/50 hover:bg-destructive/10"
-                  : "border-amber-7/40 bg-amber-3/60 text-amber-11 hover:border-amber-7/60 hover:bg-amber-4/70",
+                  : "border-amber-7/40 bg-amber-3/60 text-warning hover:border-amber-7/60 hover:bg-amber-4/70",
             )}
             data-testid="chat-mcp-reconnect-action"
             disabled={reconnectPresentation?.disabled}

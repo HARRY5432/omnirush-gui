@@ -197,7 +197,7 @@ function StatusChip(props: {
       className={cn(
         "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold",
         props.status === "passed" && "border-green-7/30 bg-green-2 text-green-11",
-        props.status === "warning" && "border-amber-7/30 bg-amber-2 text-amber-11",
+        props.status === "warning" && "border-amber-7/30 bg-amber-2 text-warning",
         props.status === "failed" && "border-red-7/30 bg-red-2 text-red-11",
         props.status === "skipped" && "border-gray-7/30 bg-gray-2 text-gray-11",
       )}
@@ -439,7 +439,7 @@ function McpInventory(props: {
                   "rounded-full px-2 py-1 text-xs font-medium",
                   state === "enabled" && engineConfigRow && "bg-green-3 text-green-11",
                   state === "enabled" && !engineConfigRow && "bg-blue-3 text-blue-11",
-                  state === "tool-policy" && "bg-amber-3 text-amber-11",
+                  state === "tool-policy" && "bg-amber-3 text-warning",
                   state === "disabled" && "bg-gray-3 text-gray-11",
                 )}>
                   {state === "tool-policy"
@@ -720,7 +720,7 @@ export function AgentContextDiagnosticsReportView(props: {
           </div>
         </div>
 
-        <div className="grid gap-2 rounded-xl border border-amber-7/20 bg-amber-2 p-3 text-xs text-amber-11 sm:grid-cols-2">
+        <div className="grid gap-2 rounded-xl border border-amber-7/20 bg-amber-2 p-3 text-xs text-warning sm:grid-cols-2">
           <div>{t("connect.diagnostics_safety_workspace_runtime_read_only")}: {booleanLabel(props.report.safety.diagnosticsWorkspaceRuntimeConfigurationReadOnly)}</div>
           <div>{t("connect.diagnostics_safety_tools_list")}: {booleanLabel(props.report.safety.cloudCatalogToolsListPerformed)}</div>
           <div>{t("connect.diagnostics_safety_non_cloud_fetch")}: {booleanLabel(!props.report.safety.directNonCloudMcpFetchPerformed)}</div>

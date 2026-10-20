@@ -840,7 +840,7 @@ function SessionRunStatus(props: SessionRunStatusProps) {
     detail = t("session.run_status_acceptance_detail");
     tone = "border-amber-7/50 bg-amber-2/30";
     Icon = CircleAlert;
-    iconClass = "text-amber-11";
+    iconClass = "text-warning";
   } else if (props.preparing || props.sending) {
     title = t("session.run_status_preparing");
     detail = t("session.run_status_preparing_detail");
@@ -848,7 +848,7 @@ function SessionRunStatus(props: SessionRunStatusProps) {
     title = t("session.run_status_waiting");
     detail = t("session.run_status_waiting_detail");
     Icon = Info;
-    iconClass = "text-amber-11";
+    iconClass = "text-warning";
     tone = "border-amber-7/50 bg-amber-2/30";
   } else if (props.activityStatus === "compacting") {
     title = t("session.run_status_compacting");
@@ -861,7 +861,7 @@ function SessionRunStatus(props: SessionRunStatusProps) {
     detail = props.retryMessage;
     tone = "border-amber-7/50 bg-amber-2/30";
     Icon = CircleAlert;
-    iconClass = "text-amber-11";
+    iconClass = "text-warning";
   }
 
   return (
@@ -972,7 +972,7 @@ function TodoPanel(props: { todos: TodoItem[] }) {
                         done
                           ? "border-green-6 bg-green-2 text-green-11"
                           : active
-                            ? "border-amber-6 bg-amber-2 text-amber-11"
+                            ? "border-amber-6 bg-amber-2 text-warning"
                             : cancelled
                               ? "border-gray-6 bg-gray-2 text-gray-8"
                               : "border-gray-6 bg-gray-1 text-gray-8"
@@ -1098,7 +1098,7 @@ function SessionErrorCard({ error, developerMode, onDismiss, onChangeModel, onOp
 function RevertedMessagesBanner(props: { hiddenCount: number; restoring: boolean; onRestore: () => void }) {
   return (
     <div
-      className="mb-3 flex items-center gap-3 rounded-2xl border border-amber-7/40 bg-amber-2/30 px-4 py-3 text-sm text-amber-11"
+      className="mb-3 flex items-center gap-3 rounded-2xl border border-amber-7/40 bg-amber-2/30 px-4 py-3 text-sm text-warning"
       data-testid="reverted-messages-banner"
       role="status"
     >
@@ -3467,11 +3467,11 @@ export function SessionSurface(props: SessionSurfaceProps) {
         {(props.providerConnectedCount ?? 0) === 0 ? (
           <button
             type="button"
-            className="mx-3 mb-2 flex w-[calc(100%-1.5rem)] items-center gap-2 rounded-lg border border-amber-7/40 bg-amber-2/30 px-3 py-2 text-left text-xs text-amber-11 transition-colors hover:bg-amber-3/40"
+            className="mx-3 mb-2 flex w-[calc(100%-1.5rem)] items-center gap-2 rounded-lg border border-amber-7/40 bg-amber-2/30 px-3 py-2 text-left text-xs text-warning transition-colors hover:bg-amber-3/40"
             onClick={() => props.onOpenSettingsSection?.("providers")}
           >
             <span className="font-medium">No AI model connected.</span>
-            <span className="text-amber-11/70">Add a provider to run tasks.</span>
+            <span className="text-warning/70">Add a provider to run tasks.</span>
           </button>
         ) : null}
         {props.cloudMcpSubmissionState.status === "failed" ? (

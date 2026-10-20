@@ -5,6 +5,8 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { create } from "zustand";
+import { getActiveTheme, subscribeToTheme } from "@/app/theme";
+import { xtermThemeFor } from "@/app/themes/editor-themes";
 import { useTerminalTabsStore } from "./terminal-tabs-store";
 
 export type TerminalBridge = {
@@ -43,6 +45,19 @@ function setStatus(tabId: string, status: TerminalTabStatus | null) {
 }
 
 const live = new Map<string, Live>();
+
+// Open terminals recolour live when the theme (mode, preset or custom theme) changes.
+let themeSubscribed = false;
+function followAppTheme() {
+  if (themeSubscribed || typeof window === "undefined") return;
+  themeSubscribed = true;
+  subscribeToTheme(() => {
+    const theme = xtermThemeFor(getActiveTheme());
+    for (const entry of live.values()) {
+      if (!entry.disposed) entry.term.options.theme = theme;
+    }
+  });
+}
 const byTerminalId = new Map<string, string>();
 let bridgeListeners: { onData: TerminalBridge["onData"]; off: () => void } | null = null;
 
@@ -67,6 +82,7 @@ function listen(bridge: TerminalBridge) {
 }
 
 function makeLive(tabId: string, bridge: TerminalBridge, options: Live["options"]): Live {
+  followAppTheme();
   const host = document.createElement("div");
   host.className = "h-full w-full";
   host.dataset.terminalTab = tabId;
@@ -76,12 +92,7 @@ function makeLive(tabId: string, bridge: TerminalBridge, options: Live["options"
     scrollback: 5000,
     fontFamily: "'SFMono-Regular', 'Cascadia Code', 'Liberation Mono', Menlo, monospace",
     fontSize: 12,
-    theme: {
-      background: "#0b0d12",
-      foreground: "#d7dde8",
-      cursor: "#ffffff",
-      selectionBackground: "#334155",
-    },
+    theme: xtermThemeFor(getActiveTheme()),
   });
   const fit = new FitAddon();
   term.loadAddon(fit);

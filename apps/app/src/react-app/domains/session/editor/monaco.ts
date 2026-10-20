@@ -10,6 +10,8 @@
  */
 import * as monaco from "monaco-editor/editor/editor.api.js";
 import EditorWorker from "monaco-editor/editor/editor.worker.js?worker";
+import { getActiveTheme } from "@/app/theme";
+import { legacyMonacoTheme, monacoThemeFor } from "@/app/themes/editor-themes";
 
 import "monaco-editor/features/codicon/register.js";
 import "monaco-editor/features/codeEditor/register.js";
@@ -130,48 +132,50 @@ export function appIsDark(): boolean {
 }
 
 let configured = false;
+// Two fixed theme names used in turn: a change always switches name (so Monaco repaints)
+// without defining a new theme per change (a colour picker drag sends many).
+let currentThemeName = "";
+let currentThemeKey = "";
 
-/** The editor's themes, from the app's design tokens (index.css): light and dark follow the app. */
-function defineThemes(): void {
-  const css = getComputedStyle(document.documentElement);
-  const token = (name: string, fallback: string) => {
-    const value = css.getPropertyValue(name).trim();
-    return /^#[0-9a-f]{3,8}$/i.test(value) ? value : fallback;
-  };
-  const dark = appIsDark();
-  const name = dark ? "omnirush-dark" : "omnirush-light";
-  monaco.editor.defineTheme(name, {
-    base: dark ? "vs-dark" : "vs",
-    inherit: true,
-    rules: [],
-    colors: {
-      "editor.background": token("--background", dark ? "#111113" : "#fcfcfd"),
-      "editor.foreground": token("--foreground", dark ? "#edeef0" : "#1c2024"),
-      "editorLineNumber.foreground": dark ? "#5a6169" : "#a0a5ad",
-      "editorLineNumber.activeForeground": dark ? "#b0b4ba" : "#60646c",
-      "editor.lineHighlightBackground": dark ? "#18191b" : "#f5f5f7",
-      "editor.lineHighlightBorder": "#00000000",
-      "editorGutter.background": token("--background", dark ? "#111113" : "#fcfcfd"),
-      "editorWidget.background": dark ? "#18191b" : "#ffffff",
-      "editorWidget.border": dark ? "#2e3135" : "#e0e1e6",
-      "diffEditor.insertedLineBackground": dark ? "#3dd68c1f" : "#30a46c1c",
-      "diffEditor.removedLineBackground": dark ? "#ff95921f" : "#e5484d1a",
-      "diffEditor.insertedTextBackground": dark ? "#3dd68c33" : "#30a46c33",
-      "diffEditor.removedTextBackground": dark ? "#ff959233" : "#e5484d33",
-      "scrollbarSlider.background": dark ? "#ffffff1a" : "#0000001a",
-      "scrollbarSlider.hoverBackground": dark ? "#ffffff29" : "#00000029",
-    },
-  });
+/**
+ * The editor theme from the active app theme: a preset or custom theme's code
+ * colours, or (Default preset) today's look from the app's design tokens.
+ */
+function defineThemes(): string {
+  const active = getActiveTheme();
+  let data;
+  if (active.legacy) {
+    const css = getComputedStyle(document.documentElement);
+    const token = (name: string, fallback: string) => {
+      const value = css.getPropertyValue(name).trim();
+      return /^#[0-9a-f]{3,8}$/i.test(value) ? value : fallback;
+    };
+    const dark = appIsDark();
+    data = legacyMonacoTheme(
+      dark,
+      token("--background", dark ? "#111113" : "#fcfcfd"),
+      token("--foreground", dark ? "#edeef0" : "#1c2024"),
+    );
+  } else {
+    data = monacoThemeFor(active);
+  }
+  const key = JSON.stringify(data);
+  if (currentThemeName && key === currentThemeKey) return currentThemeName;
+  const name = currentThemeName === "omnirush-a" ? "omnirush-b" : "omnirush-a";
+  monaco.editor.defineTheme(name, data);
+  currentThemeName = name;
+  currentThemeKey = key;
+  return name;
 }
 
+/** Defines the editor theme from the current app theme (an editor created later must not reuse a stale one). */
 export function monacoThemeName(): string {
-  return appIsDark() ? "omnirush-dark" : "omnirush-light";
+  return defineThemes();
 }
 
-/** Re-reads the app's tokens and switches the editor theme (light/dark changed). */
+/** Re-reads the active theme and switches the editor theme (mode, preset or custom theme changed). */
 export function applyMonacoTheme(): void {
-  defineThemes();
-  monaco.editor.setTheme(monacoThemeName());
+  monaco.editor.setTheme(defineThemes());
 }
 
 export function setupMonaco(): Monaco {

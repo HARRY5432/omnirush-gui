@@ -297,7 +297,7 @@ export function ToolAggregateGroup({ parts, thoughts = [], className }: ToolAggr
           ) : null}
         </div>
         {status === "waiting" ? (
-          <div className="mt-1 flex items-center gap-1.5 text-xs text-amber-11" role="status">
+          <div className="mt-1 flex items-center gap-1.5 text-xs text-warning" role="status">
             <CirclePause aria-hidden="true" className="size-3.5 shrink-0" />
             <span>Choose an option or approve the request to continue.</span>
           </div>
@@ -346,7 +346,7 @@ export function ToolAggregateGroup({ parts, thoughts = [], className }: ToolAggr
       </button>
 
       {aggregateLifecycle === "waiting" ? (
-        <div className="mt-1 flex items-center gap-1.5 text-xs text-amber-11" role="status">
+        <div className="mt-1 flex items-center gap-1.5 text-xs text-warning" role="status">
           <CirclePause aria-hidden="true" className="size-3.5 shrink-0" />
           <span>Choose an option or approve the request to continue.</span>
         </div>
@@ -417,7 +417,7 @@ export function ToolAggregateGroup({ parts, thoughts = [], className }: ToolAggr
                 {!singleCommand ? (
                   <div className="flex min-w-0 items-center gap-2 text-sm text-muted-foreground">
                   {status === "waiting" ? (
-                    <CirclePause aria-label="Waiting" className="size-3.5 shrink-0 text-amber-11" />
+                    <CirclePause aria-label="Waiting" className="size-3.5 shrink-0 text-warning" />
                   ) : null}
                   {status === "unknown" ? (
                     <CircleHelp aria-label="Status unknown" className="size-3.5 shrink-0" />

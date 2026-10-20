@@ -34,7 +34,7 @@ export function ConfirmModal(props: ConfirmModalProps) {
   const confirmVariant = props.confirmButtonVariant ?? (variant === "danger" ? "destructive" : undefined);
   const cancelVariant = props.cancelButtonVariant ?? "outline";
 
-  let iconTileClass = "bg-amber-3/50 text-amber-11";
+  let iconTileClass = "bg-amber-3/50 text-warning";
   if (variant === "danger") iconTileClass = "bg-red-3/50 text-red-11";
 
   return (

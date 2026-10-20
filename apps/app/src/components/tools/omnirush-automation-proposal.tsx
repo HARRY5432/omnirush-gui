@@ -200,13 +200,13 @@ export function OmniRushAutomationProposalTool({ part }: { part: DynamicToolUIPa
       </div>
 
       {blocker && !created ? (
-        <div className="flex items-center gap-2 border-t border-dls-border px-4 py-2 text-xs text-amber-11">
+        <div className="flex items-center gap-2 border-t border-dls-border px-4 py-2 text-xs text-warning">
           <AlertTriangle className="size-3.5 shrink-0" />
           <span className="min-w-0 flex-1">{blocker}</span>
         </div>
       ) : null}
       {resolved?.resolution === "fallback" && !created ? (
-        <div className="flex items-center gap-2 border-t border-dls-border px-4 py-2 text-xs text-amber-11">
+        <div className="flex items-center gap-2 border-t border-dls-border px-4 py-2 text-xs text-warning">
           <AlertTriangle className="size-3.5 shrink-0" />
           <span className="min-w-0 flex-1">
             The proposed model isn't available for Automations, so runs use the free starter model. You can change the model after creating.

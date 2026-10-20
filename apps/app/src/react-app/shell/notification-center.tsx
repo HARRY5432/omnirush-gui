@@ -37,7 +37,7 @@ const SEVERITY_ICONS: Record<NotificationSeverity, LucideIcon> = {
 const SEVERITY_CLASSES: Record<NotificationSeverity, string> = {
   info: "text-sky-11",
   success: "text-emerald-11",
-  warning: "text-amber-11",
+  warning: "text-warning",
   error: "text-red-11",
 };
 

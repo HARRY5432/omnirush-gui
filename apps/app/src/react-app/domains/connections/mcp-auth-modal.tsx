@@ -666,7 +666,7 @@ export function McpAuthModal(props: McpAuthModalProps) {
           {!isBusy && isPreparingReload ? (
             <div className="space-y-4 rounded-xl border border-amber-6/60 bg-amber-2/40 px-5 py-6 text-center">
               <div className="flex items-center justify-center">
-                <Loader2 size={32} className="animate-spin text-amber-11" />
+                <Loader2 size={32} className="animate-spin text-warning" />
               </div>
               <div className="space-y-2">
                 <p className="text-sm font-medium text-gray-12">
@@ -692,7 +692,7 @@ export function McpAuthModal(props: McpAuthModalProps) {
                       </span>
                       <button
                         type="button"
-                        className="text-xs text-amber-11 underline underline-offset-2 transition-colors hover:text-amber-12 disabled:no-underline disabled:opacity-60"
+                        className="text-xs text-warning underline underline-offset-2 transition-colors hover:text-amber-12 disabled:no-underline disabled:opacity-60"
                         onClick={() => void handleForceStopSession(session.id)}
                         disabled={forceStopBusySessionID === session.id}
                       >
