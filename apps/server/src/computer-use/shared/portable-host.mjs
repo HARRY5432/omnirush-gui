@@ -312,9 +312,20 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
   }
 
   /** The on-screen text at (or within 24 px of) the action's point, and whether it is in a secure field. Unknown text: undefined. */
-  async function targetAt(observed, action, current) {
+  /** Whether the control the last click focused (this window) is a secure field: { secure: true } or {}. */
+  async function focusedTarget(observed, current, s) {
+    const f = s?.focusPoint;
+    if (!f || f.window !== String(current.id)) return {};
+    const mx = ((f.screen.x - current.bounds.x) * observed.model.width) / current.bounds.width, my = ((f.screen.y - current.bounds.y) * observed.model.height) / current.bounds.height;
+    if ((observed.secureFields ?? []).some((r) => mx >= r.x && mx <= r.x + r.width && my >= r.y && my <= r.y + r.height)) return { secure: true };
+    const answer = await native.call("target", { points: [f.screen] }).catch(() => null);
+    return Array.isArray(answer?.targets) && answer.targets[0]?.protected ? { secure: true } : {};
+  }
+
+  async function targetAt(observed, action, current, s) {
     const p = action.type === "drag" ? action.path.at(-1) : action.x !== undefined ? { x: action.x, y: action.y } : null;
-    if (!p) return {};
+    // Typing has no point: it goes to the control the last click in this window focused.
+    if (!p) return action.type === "type" ? focusedTarget(observed, current, s) : {};
     const inside = (r, pad) => p.x >= r.x - pad && p.x <= r.x + r.width + pad && p.y >= r.y - pad && p.y <= r.y + r.height + pad;
     let secure = (observed.secureFields ?? []).some((r) => inside(r, 0));
     if (!observed.texts) {
@@ -371,7 +382,7 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
       if (compare.stale) return finish({ ...common, ok: false, code: "stale_observation", message: "The window changed since the observation. Observe again.", next: "computer_observe" });
     }
     // Per-action approval by permission mode (host channel, never the engine's).
-    const decision = actApproval({ mode: settings()?.mode, action, intent: args.intent, target: await targetAt(observed, action, current), window: { id: String(current.id), app_id: current.appId, app_name: current.appName, title: current.title }, approved: s.approved, after_takeover: s.afterTakeover, typed_before: s.typedIn === String(current.id) });
+    const decision = actApproval({ mode: settings()?.mode, action, intent: args.intent, target: await targetAt(observed, action, current, s), window: { id: String(current.id), app_id: current.appId, app_name: current.appName, title: current.title }, approved: s.approved, after_takeover: s.afterTakeover, typed_before: s.typedIn === String(current.id) });
     let approval = { asked: false };
     if (decision.ask) {
       // The same action with the same intent, allowed a moment ago (a retry after a fresh observation), is not asked again.
@@ -414,6 +425,7 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     }
     s.lastOperation = Date.now();
     // "Submit after typing" (Normal, when the host reads no text): typing arms it, a click or Enter after it asks.
+    if (["click", "double_click"].includes(action.type) && mapped.length === 1) s.focusPoint = { window: String(current.id), screen: mapped[0].screen };
     if (action.type === "type") s.typedIn = String(current.id);
     else if (["click", "double_click"].includes(action.type) || (action.type === "key" && String(action.key).toLowerCase() === "enter")) s.typedIn = null;
     const cursorAfter = await native.call("cursor").catch(() => null);

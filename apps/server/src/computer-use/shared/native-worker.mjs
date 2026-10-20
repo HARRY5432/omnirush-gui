@@ -298,8 +298,11 @@ function windows() {
   function targetAt(p) {
     const m = initMsaa();
     if (!m) return null;
-    const acc = [null], child = {};
+    const acc = [null];
+    let child = {};
     try { if (m.fromPoint({ x: Math.round(p.x), y: Math.round(p.y) }, acc, child) < 0 || !acc[0]) return null; } catch { return null; }
+    // Some servers (Chromium) leave the child VT_EMPTY: that is the object itself (VT_I4 CHILDID_SELF).
+    if (child.vt !== 3) child = { vt: 3, r1: 0, r2: 0, r3: 0, lo: 0, hi: 0 };
     // IAccessible vtable: IUnknown (0-2), IDispatch (3-6), get_accParent 7, ChildCount 8, Child 9, Name 10, Value 11, Description 12, Role 13, State 14.
     const methods = koffi.decode(koffi.decode(acc[0], "void *"), "void *", 15);
     try {
