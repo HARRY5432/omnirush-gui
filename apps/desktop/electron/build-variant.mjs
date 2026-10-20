@@ -31,7 +31,8 @@ export function readDesktopBuild({
   if (!packaged) return { variant: "dev", engineSha256: null, packaged: false };
   try {
     const value = JSON.parse(read(path.join(resourcesPath, "app.asar", "server", DESKTOP_BUILD_FILE)));
-    const engineSha256 = typeof value?.engineSha256 === "string" && /^[0-9a-f]{64}$/.test(value.engineSha256) ? value.engineSha256 : null;
+    // One hash per bundled architecture, comma-separated (scripts/stamp-build-variant.mjs).
+    const engineSha256 = typeof value?.engineSha256 === "string" && /^[0-9a-f]{64}(?:,[0-9a-f]{64})*$/.test(value.engineSha256) ? value.engineSha256 : null;
     return { variant: value?.variant === "dev" ? "dev" : "release", engineSha256, packaged: true };
   } catch {
     return { variant: "release", engineSha256: null, packaged: true };
@@ -72,6 +73,6 @@ export function releaseEngineBinary({ build = desktopBuild, resourcesPath = proc
   const directory = resourcesPath ? path.join(resourcesPath, "sidecars") : null;
   const candidate = directory ? fileNames.map((name) => path.join(directory, name)).find((file) => exists(file)) : null;
   if (!candidate || !build.engineSha256) throw new Error(`${RELEASE_ENGINE_ERROR} No bundled engine was found. Reinstall OmniRush.ai.`);
-  if (hash(candidate) !== build.engineSha256) throw new Error(`${RELEASE_ENGINE_ERROR} The bundled engine was changed. Reinstall OmniRush.ai.`);
+  if (!build.engineSha256.split(",").includes(hash(candidate))) throw new Error(`${RELEASE_ENGINE_ERROR} The bundled engine was changed. Reinstall OmniRush.ai.`);
   return { path: candidate, source: "bundled" };
 }

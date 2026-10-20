@@ -12,12 +12,16 @@ export function desktopVariant(env = process.env) {
   return asked === "dev" ? "dev" : "release";
 }
 
-/** The sha256 of the bundled engine; every opencode binary in the sidecar folder must be the same file. */
+/**
+ * The sha256 of each bundled engine binary, comma-separated in sorted order.
+ * A macOS build bundles one engine per architecture (arm64 and x64): each is
+ * recorded, and a release runs only a binary with one of these hashes.
+ */
 export function bundledEngineSha256(sidecarDir) {
   const names = existsSync(sidecarDir) ? readdirSync(sidecarDir).filter((name) => /^opencode(?:-[a-z0-9_-]+)?(?:\.exe)?$/.test(name)) : [];
-  const hashes = [...new Set(names.map((name) => createHash("sha256").update(readFileSync(join(sidecarDir, name))).digest("hex")))];
-  if (hashes.length !== 1) throw new Error(`Expected one bundled engine in ${sidecarDir}, found ${names.length} file(s) with ${hashes.length} different content(s)`);
-  return hashes[0];
+  const hashes = [...new Set(names.map((name) => createHash("sha256").update(readFileSync(join(sidecarDir, name))).digest("hex")))].sort();
+  if (hashes.length < 1 || hashes.length > 4) throw new Error(`Expected one engine per architecture in ${sidecarDir}, found ${names.length} file(s) with ${hashes.length} different content(s)`);
+  return hashes.join(",");
 }
 
 /** Stamps the packaged server copy's build-variant.js (two lines, checked). */
@@ -25,7 +29,7 @@ export function stampServerVariant(serverDistDir, variant, engineSha256) {
   const file = join(serverDistDir, "build-variant.js");
   const source = readFileSync(file, "utf8");
   const variantLine = /^export const BUILD_VARIANT = "(?:dev|release)";$/m;
-  const hashLine = /^export const RELEASE_ENGINE_SHA256 = (?:null|"[0-9a-f]{64}");$/m;
+  const hashLine = /^export const RELEASE_ENGINE_SHA256 = (?:null|"[0-9a-f]{64}(?:,[0-9a-f]{64})*");$/m;
   if (!variantLine.test(source) || !hashLine.test(source)) throw new Error(`${file} does not have the expected build variant lines`);
   const stamped = source
     .replace(variantLine, `export const BUILD_VARIANT = "${variant}";`)
