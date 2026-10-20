@@ -359,7 +359,7 @@ export function AccountStatusMenu(props: AccountStatusMenuProps) {
                 : runtimeStatus?.label}
           >
               {signedIn ? (
-                <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/15 text-[10px] font-semibold text-primary">
+                <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/15 text-[10px] font-semibold text-link">
                   {accountInitials(user.name, user.email)}
                 </span>
               ) : (

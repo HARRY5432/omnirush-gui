@@ -179,7 +179,7 @@ function StatusPopover(props: SessionCommandControlsProps) {
                 <Button
                   variant="ghost"
                   size="icon-sm"
-                  className={cn(iconButton, open && "bg-primary/10 text-primary")}
+                  className={cn(iconButton, open && "bg-primary/10 text-link")}
                   aria-label="Status"
                   data-testid="session-status"
                 >

@@ -57,7 +57,7 @@ export function SourceTrigger({
 
   return (
     <HoverCardTrigger render={<a href={href} target="_blank" rel="noopener noreferrer" className={cn(
-                "bg-muted text-muted-foreground hover:bg-muted-foreground/30 hover:text-primary inline-flex h-5 max-w-32 items-center gap-1 overflow-hidden rounded-full py-0 text-xs no-underline transition-colors duration-150",
+                "bg-muted text-muted-foreground hover:bg-muted-foreground/30 hover:text-link inline-flex h-5 max-w-32 items-center gap-1 overflow-hidden rounded-full py-0 text-xs no-underline transition-colors duration-150",
                 showFavicon ? "pe-2 ps-1" : "px-1",
                 className
               )} />}>{showFavicon && (
@@ -110,7 +110,7 @@ export function SourceContent({
               height={16}
             />
           )}
-          <div className="text-primary truncate text-sm">
+          <div className="text-link truncate text-sm">
             {domain.replace("www.", "")}
           </div>
         </div>

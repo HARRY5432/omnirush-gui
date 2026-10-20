@@ -483,7 +483,7 @@ export function GeneralSettingsView(props: GeneralSettingsViewProps) {
               {usage ? (
                 <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-dls-hover" aria-label={`${Math.round(usage.percent)}% used`}>
                   <div
-                    className="h-full rounded-full bg-[#b9f45a]"
+                    className="h-full rounded-full bg-highlight"
                     style={{ width: `${usage.percent}%` }}
                   />
                 </div>

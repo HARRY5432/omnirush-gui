@@ -988,7 +988,7 @@ type NativeAccountStatus = Awaited<ReturnType<typeof omnirushAccountStatus>>;
 function OmniRushWordmark({ className }: { className?: string }) {
   return (
     <span className={className} aria-label="omnirush.ai">
-      <span>omnirush</span><span className="text-[#b9f45a]">.ai</span>
+      <span>omnirush</span><span className="text-highlight">.ai</span>
     </span>
   );
 }
@@ -1113,7 +1113,7 @@ function NativeAccountFooter({ onOpenAccountSettings }: { onOpenAccountSettings:
               <span
                 className={cn(
                   "absolute -bottom-0.5 -right-0.5 size-2 rounded-full border border-sidebar",
-                  connected ? "bg-[#b9f45a]" : "bg-muted-foreground/50",
+                  connected ? "bg-highlight" : "bg-muted-foreground/50",
                 )}
               />
             </span>
@@ -1127,7 +1127,7 @@ function NativeAccountFooter({ onOpenAccountSettings }: { onOpenAccountSettings:
               </span>
               {usage ? (
                 <span className="mt-1 block h-0.5 overflow-hidden rounded-full bg-sidebar-border" aria-hidden="true">
-                  <span className="block h-full rounded-full bg-[#b9f45a]" style={{ width: `${usage.percent}%` }} />
+                  <span className="block h-full rounded-full bg-highlight" style={{ width: `${usage.percent}%` }} />
                 </span>
               ) : null}
             </span>

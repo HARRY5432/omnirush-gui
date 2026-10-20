@@ -103,13 +103,13 @@ export function TerminalDock({ workspaceId, workspaceRoot, isRemoteWorkspace, on
 
   return (
     <section
-      className="flex h-full min-h-0 flex-col border-t border-border bg-[#0b0d12] text-white"
+      className="flex h-full min-h-0 flex-col border-t border-border bg-terminal text-terminal-foreground"
       aria-label="Terminal"
       onKeyDownCapture={onKeyDown}
     >
-      <header className="flex h-9 shrink-0 items-center gap-1 border-b border-white/10 bg-black/35 px-2 text-xs">
+      <header className="flex h-9 shrink-0 items-center gap-1 border-b border-terminal-foreground/10 bg-[var(--omnirush-terminal-header,rgb(0_0_0/0.35))] px-2 text-xs">
         {unavailable ? (
-          <div className="min-w-0 flex-1 truncate px-1 text-white/75">Terminal · {unavailable}</div>
+          <div className="min-w-0 flex-1 truncate px-1 text-terminal-foreground/75">Terminal · {unavailable}</div>
         ) : (
           <>
             <div role="tablist" aria-label="Terminal tabs" className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
@@ -133,7 +133,7 @@ export function TerminalDock({ workspaceId, workspaceRoot, isRemoteWorkspace, on
               <Button
                 variant="ghost"
                 size="icon-sm"
-                className="shrink-0 text-white/70 hover:bg-white/10 hover:text-white"
+                className="shrink-0 text-terminal-foreground/70 hover:bg-terminal-foreground/10 hover:text-terminal-foreground"
                 onClick={() => addTab()}
                 title={NEW_TAB_HINT}
                 aria-label="New terminal"
@@ -147,7 +147,7 @@ export function TerminalDock({ workspaceId, workspaceRoot, isRemoteWorkspace, on
                       <Button
                         variant="ghost"
                         size="icon-sm"
-                        className="-ml-1 shrink-0 text-white/70 hover:bg-white/10 hover:text-white"
+                        className="-ml-1 shrink-0 text-terminal-foreground/70 hover:bg-terminal-foreground/10 hover:text-terminal-foreground"
                         aria-label="New terminal with a shell"
                         title="New terminal with…"
                       >
@@ -165,12 +165,12 @@ export function TerminalDock({ workspaceId, workspaceRoot, isRemoteWorkspace, on
                 </DropdownMenu>
               ) : null}
             </div>
-            <div className="hidden max-w-[40%] shrink truncate px-2 text-white/45 md:block" title={status?.text}>
+            <div className="hidden max-w-[40%] shrink truncate px-2 text-terminal-foreground/45 md:block" title={status?.text}>
               {status?.text}
             </div>
           </>
         )}
-        <Button variant="ghost" size="icon-sm" className="shrink-0 text-white/70 hover:bg-white/10 hover:text-white" onClick={onClose}>
+        <Button variant="ghost" size="icon-sm" className="shrink-0 text-terminal-foreground/70 hover:bg-terminal-foreground/10 hover:text-terminal-foreground" onClick={onClose}>
           <X className="size-4" />
           <span className="sr-only">Hide terminal</span>
         </Button>
@@ -201,7 +201,7 @@ function TerminalTabButton(props: {
       <input
         autoFocus
         aria-label="Terminal name"
-        className="h-6 w-32 shrink-0 rounded border border-white/30 bg-black/60 px-1.5 text-xs text-white outline-none"
+        className="h-6 w-32 shrink-0 rounded border border-terminal-foreground/30 bg-[var(--omnirush-terminal-input,rgb(0_0_0/0.6))] px-1.5 text-xs text-terminal-foreground outline-none"
         value={draft}
         onChange={(event) => setDraft(event.target.value)}
         onFocus={(event) => event.target.select()}
@@ -220,7 +220,7 @@ function TerminalTabButton(props: {
       aria-selected={props.active}
       tabIndex={0}
       title={`${props.tab.name} (double-click to rename)`}
-      className={`group flex h-6 max-w-44 shrink-0 cursor-default items-center gap-1 rounded pl-2 pr-1 ${props.active ? "bg-white/15 text-white" : "text-white/60 hover:bg-white/10 hover:text-white"}`}
+      className={`group flex h-6 max-w-44 shrink-0 cursor-default items-center gap-1 rounded pl-2 pr-1 ${props.active ? "bg-terminal-foreground/15 text-terminal-foreground" : "text-terminal-foreground/60 hover:bg-terminal-foreground/10 hover:text-terminal-foreground"}`}
       onClick={props.onSelect}
       onDoubleClick={props.onStartRename}
       onAuxClick={(event) => {
@@ -235,7 +235,7 @@ function TerminalTabButton(props: {
       <button
         type="button"
         aria-label={`Close ${props.tab.name}`}
-        className={`flex size-4 items-center justify-center rounded hover:bg-white/20 ${props.active ? "opacity-80" : "opacity-0 group-hover:opacity-80"}`}
+        className={`flex size-4 items-center justify-center rounded hover:bg-terminal-foreground/20 ${props.active ? "opacity-80" : "opacity-0 group-hover:opacity-80"}`}
         onClick={(event) => {
           event.stopPropagation();
           props.onClose();

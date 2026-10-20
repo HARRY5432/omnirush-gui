@@ -110,7 +110,7 @@ export function SelectMenu(props: SelectMenuProps) {
               {opt.value === props.value ? (
                 <Check
                   size={16}
-                  className="shrink-0 text-[var(--dls-accent)]"
+                  className="shrink-0 text-[var(--omnirush-link,var(--dls-accent))]"
                   aria-hidden
                 />
               ) : null}

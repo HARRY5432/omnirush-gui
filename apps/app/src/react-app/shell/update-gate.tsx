@@ -240,7 +240,7 @@ export function UpdateRequiredView(props: { gate: UpdateGateState; appName: stri
       aria-modal="true"
       aria-labelledby="update-required-title"
       data-testid="update-required-view"
-      className="fixed inset-0 z-[80] flex items-center justify-center overflow-y-auto bg-[#05070c] px-6 py-12 text-white mac:titlebar-drag"
+      className="fixed inset-0 z-[80] flex items-center justify-center overflow-y-auto bg-gate px-6 py-12 text-white mac:titlebar-drag"
     >
       <section className="w-full max-w-xl rounded-[28px] border border-white/10 bg-white/[0.04] p-8 shadow-2xl shadow-black/40 sm:p-10">
         <div className="inline-flex rounded-full border border-amber-300/30 bg-amber-300/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.24em] text-amber-100">

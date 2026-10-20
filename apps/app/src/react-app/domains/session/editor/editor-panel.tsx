@@ -358,7 +358,7 @@ function ChangesView(props: {
                   )}
                   title={file.baseline === undefined ? "Changed again since the agent's turn: shown without a review diff" : file.path}
                 >
-                  {isPending ? <CircleDot className="size-3 shrink-0 text-primary" /> : <Check className="size-3 shrink-0 text-muted-foreground" />}
+                  {isPending ? <CircleDot className="size-3 shrink-0 text-link" /> : <Check className="size-3 shrink-0 text-muted-foreground" />}
                   <span className={cn("min-w-0 flex-1 truncate", !isPending && "text-muted-foreground")}>
                     {file.path.split("/").pop()}
                     <span className="ms-1.5 text-[10.5px] text-muted-foreground">{file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/")) : ""}</span>
@@ -985,7 +985,7 @@ export default function EditorPanel(props: EditorPanelProps) {
               )}
               onClick={() => useEditorStore.getState().selectTab(workspaceId, tab.id)}
             >
-              {tab.kind === "review" ? <CircleDot className="size-3 shrink-0 text-primary" /> : tab.kind === "git" ? <GitBranch className="size-3 shrink-0" /> : null}
+              {tab.kind === "review" ? <CircleDot className="size-3 shrink-0 text-link" /> : tab.kind === "git" ? <GitBranch className="size-3 shrink-0" /> : null}
               <span className="truncate">{name}{tab.kind === "git" ? ` (${tab.ref === "HEAD" ? "staged" : "working"})` : ""}</span>
               <button
                 type="button"
@@ -1074,7 +1074,7 @@ export default function EditorPanel(props: EditorPanelProps) {
               aria-pressed={active}
               className={cn(
                 "relative flex size-9 items-center justify-center rounded-lg transition-colors [&_svg]:size-[18px]",
-                active ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                active ? "bg-primary/10 text-link" : "text-muted-foreground hover:bg-muted hover:text-foreground",
               )}
             >
               {icon}

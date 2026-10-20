@@ -403,7 +403,7 @@ export function CloudWorkspaceBootTakeover(props: { decision: CloudWorkspaceMain
                 "flex size-12 shrink-0 items-center justify-center rounded-2xl border",
                 attention
                   ? "border-amber-7/35 bg-amber-3/60 text-amber-11"
-                  : "border-dls-border bg-dls-hover text-dls-accent",
+                  : "border-dls-border bg-dls-hover text-[var(--omnirush-link,var(--dls-accent))]",
               )}
             >
               {attention ? (
