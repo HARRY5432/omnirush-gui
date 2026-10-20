@@ -222,7 +222,8 @@ async function call<T>(op: Parameters<OmniRushServerClient["editorLsp"]>[1], pat
     return current === ctx && useEditorStore.getState().languageFeatures ? result : null;
   } catch (error) {
     // An engine without the editor routes (older build): language features stay off quietly.
-    if ((error as { status?: number }).status === 404) {
+    const failure = error as { status?: number; code?: string };
+    if (failure.status === 404 && failure.code !== "workspace_not_found") {
       unavailable = true;
       useProblemsStore.getState().setAvailable(false);
     }
@@ -384,7 +385,7 @@ export async function refreshFileDiagnostics(path: string): Promise<void> {
       // An edit since the request: its result is already stale; the run after it applies.
       if (!raw || current !== ctx || (doc.model.getVersionId() !== version && run.pending)) continue;
       // Sent without its unsaved text (an agent started meanwhile): the disk's diagnostics do not fit the buffer.
-      if (request.state.withoutText) return;
+      if (request.state.withoutText) continue;
       const file = raw.find((item) => item.path === path) ?? { path, diagnostics: [] };
       applyMarkers(path, file.diagnostics);
       useProblemsStore.getState().merge(ctx.workspaceId, file);
