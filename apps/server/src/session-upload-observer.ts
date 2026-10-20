@@ -16,6 +16,7 @@ import { turnWriters, type WriterSessionMessages } from "./session-archive/turn-
 import { watchToolStarts } from "./session-archive/tool-start.js";
 import { watchToolEvents } from "./context/tool-events.js";
 import { closeOpenToolParts } from "./context/open-tools.js";
+import { progressEvents, TurnProgress, turnProgressIntervalMs, type TurnProgressReason } from "./session-archive/turn-progress.js";
 import type { ContextCapture } from "./context/index.js";
 
 /** The engine a captured request went to: base URL, request headers (the engine's auth), query and API generation. */
@@ -260,6 +261,8 @@ const CUT_PROMPT_WAIT_MS = 15_000;
 const CHILD_IDS_INTERVAL_MS = 60_000;
 /** A settled turn whose messages the engine did not answer for (a timeout, a dropped connection) is read again after these waits. */
 const HISTORY_RETRY_DELAYS_MS = [2_000, 5_000];
+/** How long a settled turn's context may still collect before what it found is flushed. */
+const TURN_CONTEXT_WAIT_MS = 30_000;
 
 /** The observer's clock and timeouts; tests pass their own so that hours of a turn pass without real waiting. */
 export type ObserverTiming = {
@@ -271,6 +274,8 @@ export type ObserverTiming = {
   readTimeoutMs: number;
   /** How long one turn is followed at most. */
   maxTurnMs: number;
+  /** A running turn's settled messages go out this often (session-archive/turn-progress.ts); 0: only at its end. */
+  progressMs: number;
 };
 
 type EngineFetch = (path: string, query?: Record<string, string>) => Promise<Response>;
@@ -335,6 +340,15 @@ async function captureChildSessions(input: {
    * only those of answers that ended; `closed` counts what was closed.
    */
   toolsClosed?: { engineIdle: boolean; closed: number };
+  /**
+   * The turn's progress (session-archive/turn-progress.ts). With `ahead`
+   * the turn still runs: each child's settled messages not sent yet go out
+   * and no checkpoint moves (a child over the read budget is left to the
+   * turn's end). Without it (the turn's end), a child's messages sent ahead
+   * and unchanged are not sent again.
+   */
+  progress?: TurnProgress | null;
+  ahead?: boolean;
 }): Promise<void> {
   if (input.depth > MAX_UPLOAD_CHILD_SESSION_DEPTH) return;
   const children = await readEngineJson(input.fetchEngine, `/session/${encodeURIComponent(input.parentSessionId)}/children`, 1024 * 1024)
@@ -346,6 +360,27 @@ async function captureChildSessions(input: {
     input.visited.add(childId);
     const history = await readEngineHistory(engineMessages(input.fetchEngine, `/session/${encodeURIComponent(childId)}/message`, true), input.checkpoints[childId])
       .catch(nullOnErrorStatus);
+    if (input.ahead) {
+      if (history && input.progress && history.omitted === 0 && !history.checkpointMissing) {
+        const sending = input.progress.ahead(history.delta, history.sizes, childId);
+        if (sending.messages.length > 0 || !input.known.has(childId)) {
+          input.beforeRecord(sum(sending.sizes));
+          input.sessionUploader.recordChildSession(input.rootSessionId, {
+            childSessionId: childId,
+            parentSessionId: input.parentSessionId,
+            depth: input.depth,
+            title: isRecord(child) ? optionalTraceString(child.title) : null,
+            agent: turnModelFromMessages(history.outline)?.agent ?? null,
+            messages: sending.messages,
+            lastMessageId: null,
+          });
+          input.progress.markSent(sending.messages, sending.sizes, childId);
+          if (sending.messages.length > 0) input.onChild?.(childId, input.depth, sending.messages);
+        }
+      }
+      await captureChildSessions({ ...input, parentSessionId: childId, depth: input.depth + 1 });
+      continue;
+    }
     // A sub-agent may still run: unless the engine no longer does, only the calls of its answers that ended are closed.
     const closing = history ? closeOpenToolParts(history.delta, { engineIdle: input.toolsClosed?.engineIdle ?? false }) : null;
     if (closing && input.toolsClosed) input.toolsClosed.closed += closing.closed;
@@ -355,14 +390,16 @@ async function captureChildSessions(input: {
       input.sessionUploader.recordTrace(input.rootSessionId, "session.messages_omitted", { child_session_id: childId, count: history.omitted });
     }
     if (newMessages.length > 0 || !input.known.has(childId)) {
-      input.beforeRecord(history ? sum(history.sizes) : 0);
+      // Sent ahead while the turn ran and unchanged: not again.
+      const sending = input.progress ? input.progress.unsent(newMessages, history?.sizes ?? [], childId) : { messages: newMessages, sizes: history?.sizes ?? [] };
+      input.beforeRecord(sum(sending.sizes));
       input.sessionUploader.recordChildSession(input.rootSessionId, {
         childSessionId: childId,
         parentSessionId: input.parentSessionId,
         depth: input.depth,
         title: isRecord(child) ? optionalTraceString(child.title) : null,
         agent: turnModelFromMessages(history?.outline ?? [])?.agent ?? null,
-        messages: newMessages,
+        messages: sending.messages,
         lastMessageId: traceMessageId(history?.outline.at(-1)),
       });
     }
@@ -996,6 +1033,7 @@ export function observeUploadedSession(input: {
     statusTimeoutMs: 10_000,
     readTimeoutMs: 20_000,
     maxTurnMs: MAX_OBSERVED_TURN_MS,
+    progressMs: turnProgressIntervalMs(process.env.OMNIRUSH_TURN_PROGRESS_MS),
     ...input.timing,
   };
   const stopped = observer.controller.signal;
@@ -1024,9 +1062,12 @@ export function observeUploadedSession(input: {
     else sessionUploader.captureSnapshot(sessionId, "turn_completed");
   };
 
+  // Every session's status at the last read: a running turn's progress sees its sub-agents end there.
+  let lastStatuses: unknown = null;
   /** The session's status ("idle" when the engine does not list it); throws when the engine does not answer. */
   const readStatus = async (): Promise<string> => {
     const statuses = enginePayload(await readEngineJson(fetchStatus, v2 ? "/api/session/active" : "/session/status", 1024 * 1024));
+    lastStatuses = statuses;
     const status = isRecord(statuses) ? statuses[sessionId] : undefined;
     return isRecord(status) && typeof status.type === "string" ? status.type : "idle";
   };
@@ -1086,6 +1127,81 @@ export function observeUploadedSession(input: {
     return false;
   };
 
+  // The followed turn's progress (session-archive/turn-progress.ts).
+  let progress: TurnProgress | null = null;
+  let progressStartedAt = timing.now();
+  /**
+   * What the turn's context collects once it ended (its files outside the
+   * folder, its network, its installs) goes out as soon as it is in, not with
+   * the next prompt.
+   */
+  const flushTurnContext = (): void => {
+    const context = (sessionUploader as Partial<Pick<SessionUploader, "context">>).context;
+    if (!context) return;
+    void context.settled(sessionId, TURN_CONTEXT_WAIT_MS).then(() => {
+      if (!stopped.aborted) sessionUploader.flushTrace(sessionId);
+    }, () => undefined);
+  };
+  /**
+   * The running turn's settled messages so far: the root's as `turn.messages`
+   * (progress), the sub-agents' as `session.child`, then a flush. The turn's
+   * checkpoint stays where it started.
+   */
+  const sendProgress = async (current: TurnProgress, reason: TurnProgressReason): Promise<void> => {
+    let rootMessages = 0;
+    let childMessages = 0;
+    let pending = 0;
+    const room = (bytes: number) => {
+      if (pending > 0 && pending + bytes > MAX_TURN_MESSAGE_BYTES) {
+        sessionUploader.flushTrace(sessionId);
+        pending = 0;
+      }
+      pending += bytes;
+    };
+    try {
+      const history = await readEngineHistory(messages(), observer.lastMessageIds.get(sessionId), MAX_BACKLOG_MESSAGE_BYTES);
+      if (history.omitted === 0 && !history.checkpointMissing) {
+        const ahead = current.ahead(history.delta, history.sizes);
+        const pieces = ahead.messages.length > 0 ? messageParts(ahead.messages, ahead.sizes) : [];
+        for (const [index, data] of progressEvents(pieces, (piece) => piece.messages).entries()) {
+          room(pieces[index]!.bytes);
+          sessionUploader.recordTrace(sessionId, "turn.messages", data);
+        }
+        current.markSent(ahead.messages, ahead.sizes);
+        rootMessages = ahead.messages.length;
+      }
+    } catch (error) {
+      if (stopped.aborted) throw error;
+    }
+    if (!v2) {
+      try {
+        await captureChildSessions({
+          onChild: (_childId, _depth, sent) => {
+            childMessages += sent.length;
+          },
+          sessionUploader,
+          rootSessionId: sessionId,
+          parentSessionId: sessionId,
+          depth: 1,
+          fetchEngine,
+          checkpoints: await sessionUploader.childCheckpoints(sessionId),
+          known: new Set(await sessionUploader.childSessionIds(sessionId)),
+          visited: new Set([sessionId]),
+          beforeRecord: room,
+          progress: current,
+          ahead: true,
+        });
+      } catch (error) {
+        if (stopped.aborted) throw error;
+      }
+    }
+    if (rootMessages + childMessages > 0) {
+      sessionUploader.recordTrace(sessionId, "turn.progress", { reason, elapsed_ms: Math.max(0, timing.now() - progressStartedAt), messages: rootMessages, sub_agent_messages: childMessages });
+    }
+    // Whatever else the turn recorded so far (its context, its sub-agents) goes with it.
+    sessionUploader.flushTrace(sessionId);
+  };
+
   let recovering = input.recovered === true;
   const settle = async (status: string, read?: EngineHistory): Promise<void> => {
     // Once per turn: an app quit may settle it while the follow loop is about to.
@@ -1136,7 +1252,9 @@ export function observeUploadedSession(input: {
       const model = turnModelFromMessages(history.delta);
       if (model) sessionUploader.recordSessionModel(sessionId, model);
       // More messages than one flush holds: the older ones go ahead, a flush per part.
-      parts = messageParts(history.delta, history.sizes);
+      // Messages sent ahead while the turn ran (turn-progress.ts) are not sent again, unless they changed since.
+      const unsent = progress ? progress.unsent(history.delta, history.sizes) : { messages: history.delta, sizes: history.sizes };
+      parts = messageParts(unsent.messages, unsent.sizes);
       for (const [index, part] of parts.slice(0, -1).entries()) {
         sessionUploader.recordTrace(sessionId, "turn.messages", { messages: part.messages, part: index + 1, parts: parts.length });
         sessionUploader.flushTrace(sessionId);
@@ -1171,6 +1289,7 @@ export function observeUploadedSession(input: {
           visited: new Set([sessionId]),
           beforeRecord: room,
           toolsClosed: childTools,
+          progress,
         });
       } catch (error) {
         if (stopped.aborted) throw error;
@@ -1200,6 +1319,7 @@ export function observeUploadedSession(input: {
       ...(recovered ? { recovered: true } : {}),
       ...(status === "quit" ? { reason: "app_quit" } : {}),
     });
+    if (status !== "quit") flushTurnContext();
     // The delta's turn number is the engine's completed-turn count, which
     // survives app restarts; without the messages the archiver numbers it
     // right after the last archived turn. It also arms the idle final archive.
@@ -1220,6 +1340,9 @@ export function observeUploadedSession(input: {
     // A turn is running: the previous turn's idle final archive, if armed, is off.
     input.archive.turnFollowed(sessionId);
     const startedAt = timing.now();
+    progressStartedAt = startedAt;
+    const current = new TurnProgress(startedAt, timing.progressMs);
+    progress = current;
     let observedBusy = false;
     let reads = 0;
     let idleReads = 0;
@@ -1297,6 +1420,15 @@ export function observeUploadedSession(input: {
         observedBusy = true;
         idleReads = 0;
         turnState().idleAt = null;
+        // A long turn: what is final so far goes out now (turn-progress.ts).
+        if (current.enabled) {
+          current.noteStatuses(lastStatuses, sessionId);
+          const reason = current.due(timing.now());
+          if (reason) {
+            await sendProgress(current, reason);
+            current.flushed(timing.now());
+          }
+        }
         // The v2 daemon has no children route: nothing to list there.
         if (!v2 && timing.now() - childIdsAt >= CHILD_IDS_INTERVAL_MS) {
           childIdsAt = timing.now();
