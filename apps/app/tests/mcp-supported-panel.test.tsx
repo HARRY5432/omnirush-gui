@@ -121,6 +121,9 @@ describe("Settings > MCP: supported servers", () => {
     expect(projectCodeNotice("ws_1", line)).toBeNull();
     expect(projectCodeNotice("ws_2", line)).not.toBeNull();
     expect(projectCodeNotice("ws_3", null)).toBeNull();
+    const providers = "Not loaded from this project's config: model provider settings. A project's own plugins, tools, commands and providers could run code just by opening it; the built-in language servers and formatters still work, and your own (user-level) settings apply as usual.";
+    expect(render({ policy: policy({ ignored: [{ kind: "provider", name: "provider", source: "/repo/opencode.json" }], ignoredNotice: providers }) })).toContain("model provider settings");
+    expect(projectCodeNotice("ws_4", providers)?.text).toBe(providers);
   });
 
   test("a missing runner says how to fix it", () => {

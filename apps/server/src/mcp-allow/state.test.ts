@@ -160,11 +160,13 @@ describe("the engine plugin (omnirush-mcp-policy)", () => {
   test("the report lists what the engine left out of the project's config", async () => {
     const { state, root } = setup();
     const hooks = await omnirushMcpPolicy({ directory: root });
-    const ignored = [{ kind: "plugin", name: "file:///repo/.opencode/plugins/evil.ts", source: "/repo/.opencode/plugins" }, { kind: "lsp", name: "custom", source: "/repo/opencode.json" }];
+    const ignored = [{ kind: "plugin", name: "file:///repo/.opencode/plugins/evil.ts", source: "/repo/.opencode/plugins" }, { kind: "lsp", name: "custom", source: "/repo/opencode.json" }, { kind: "provider", name: "provider", source: "/repo/opencode.json" }];
     await hooks.config({}, { mcp: {}, omnirush_ignored: ignored });
     const report = workspaceMcpReport(state, root);
-    expect(report?.ignored?.map((item) => item.kind)).toEqual(["plugin", "lsp"]);
-    expect(describeIgnored(report?.ignored)).toContain("Not loaded from this project's config: plugins evil.ts; language servers custom.");
+    expect(report?.ignored?.map((item) => item.kind)).toEqual(["plugin", "lsp", "provider"]);
+    expect(describeIgnored(report?.ignored)).toContain("Not loaded from this project's config: plugins evil.ts; language servers custom; model provider settings.");
+    // The desktop shows this line as it is (GET /workspace/:id/mcp ignoredNotice): no path that only fits the CLI.
+    expect(describeIgnored(report?.ignored)).toContain("your own (user-level) settings");
   });
 
   test("a project whose sandbox is on runs its servers through the box shell", async () => {

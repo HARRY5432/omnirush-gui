@@ -105,11 +105,26 @@ To remove a server added in the app, choose Remove (`DELETE /workspace/:id/mcp/:
 - The server gives the engine `OMNIRUSH_MCP_POLICY_FILE`, `OMNIRUSH_MCP_REPORT_DIR` and `OMNIRUSH_MCP_WORKSPACE_DIR`. The engine plugin `omnirush-mcp-policy` (always loaded, last in the plugin list) adds the project's app-added servers to its config, then replaces `mcp` with the allowed servers only, keyed by id, pinned, paths checked, and run through the sandbox shell when the project's sandbox is on. It writes a report per project (`<server state>/mcp/reports/`) with one decision per entry; `GET /workspace/:id/mcp` returns it.
 - Nothing is pushed into a running engine: an added server starts when the project's engine instance reloads. The engine's own routes that would add a server at runtime or run its OAuth flow are refused; listing and connect/disconnect pass.
 - Playwright opens pages on this machine only (localhost); other pages are refused before the tool runs.
-- `npx` and `uvx` are run from their full path on `PATH`, never from a folder inside the project; when neither is found outside the project the server is blocked (`runner_missing`).
-- The engine runs with `OMNIRUSH_PROJECT_CODE=0`: a project's own config (its `opencode.json` and `.opencode` folders) brings no plugins and no language server or formatter commands, since those would run code just by opening the project. What was left out is in the report and shown once as a notice and in Settings > MCP. The app's own plugins and language servers come from its runtime config and still load; `OMNIRUSH_PROJECT_CODE=1` in the app's own environment turns this off.
+- Allowed servers are always started by the app itself, from the package registry, with `npx` or `uvx` found by full path in the PATH folders (relative entries and folders inside the project are skipped; on Windows, npm's `node.exe` runs `npx-cli.js` directly instead of the `npx.cmd` batch file). The entry's own program path and runner flags are not used; npx runs with its own empty `--prefix` folder, so a project's `.npmrc` and `node_modules` copy are not read, and uvx runs with `--no-config`, so a project's `uv.toml` is not. If no `npx`/`uvx` is found, the server does not start (`runner_missing`).
+- Only the server package is pinned: the packages it depends on are resolved by npm/uv when it starts, so they can differ over time. Environment variables in an entry are dropped, except the file settings a server needs (the memory server's file).
 - MCP tools reach the model as `<id>_<tool>` and are asked about like other tools (no allow rules are added for them).
 - The preview engine (v2) cannot apply the list: MCP stays off there (its servers are removed before each request, and a prompt in a project with MCP servers is refused with a message).
 - Uploads: a session in a project with at least one server on gets `environment.mcp_servers: [{id, package, version, runtime, sandbox}]`; other sessions upload exactly as before.
+
+### A project's own plugins, tools and providers
+
+A folder you open (a repository you cloned, say) should not run its own code just by being opened. So the app starts the engine with `OMNIRUSH_PROJECT_CODE=0`, and the engine does not load, from a project's own config (`opencode.json`/`.jsonc` in the folder or above it up to the repository root, `tui.json`, and the project's `.opencode/` folders):
+
+- plugins (`plugin` entries, `.opencode/plugin(s)/*.js|ts` files, and plugins in a project `tui.json`); the project's `.opencode/` folders get no package install either;
+- custom tools (`.opencode/tool(s)/*.js|ts`);
+- `lsp` and `formatter` entries that name a command or set its environment (the engine's built-in language servers and formatters still run, and settings without a command, such as `disabled`, still apply);
+- model provider settings (`provider`, `enabled_providers`, `disabled_providers`), which could name a package to install or send requests elsewhere.
+
+The engine also looks up the programs it starts itself (language servers, formatters) only in absolute PATH folders outside the project, never in the project folder first.
+
+What was left out is shown once as a notice when a chat in that project opens, and in Settings > MCP. Your own user-level config and the app's own plugins and language servers (its runtime config file) are not affected. To load a project's plugins and settings anyway, start the app with `OMNIRUSH_PROJECT_CODE=1` in its own environment (a project cannot set it).
+
+What this does not cover: once the agent works in the project, it runs the project's own code by design, for example when it runs the tests or a build. The built-in TypeScript, ESLint and Biome servers and the Prettier formatter also use the project's own installed copy and config files when the agent edits a file of theirs. Agent and command files in `.opencode/` (Markdown prompts) and `instructions` still apply; they change what the agent is told, not what runs on their own. Turn on the project's Linux sandbox to keep that work off your machine.
 
 ### Coexistence with the omnirush.ai provider
 

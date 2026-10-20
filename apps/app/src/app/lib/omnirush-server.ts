@@ -688,7 +688,7 @@ export type OmniRushMcpPolicyView = {
   decisions: OmniRushMcpDecision[];
   reportAt: number | null;
   /** What of the project's own config the engine left out (plugins, language server and formatter commands). */
-  ignored?: Array<{ kind: "plugin" | "lsp" | "formatter"; name: string; source: string | null }>;
+  ignored?: Array<{ kind: "plugin" | "lsp" | "formatter" | "provider"; name: string; source: string | null }>;
   /** One line about it, or null. */
   ignoredNotice?: string | null;
 };
