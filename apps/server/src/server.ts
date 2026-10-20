@@ -6424,7 +6424,9 @@ function assertEngineMcpRouteAllowed(config: ServerConfig, method: string, route
   if (auth) {
     // The one account sign-in the list allows: a remote server on it that signs in with OAuth (Figma's), by
     // its id (the engine plugin keys it so); the engine keeps the tokens in its own store, not in a config.
-    if (mcpSignInAllowed(config, decodeURIComponent(auth[1] ?? ""))) return;
+    let name = "";
+    try { name = decodeURIComponent(auth[1] ?? ""); } catch { refuseAccountLinkedMcp(); }
+    if (mcpSignInAllowed(config, name)) return;
     refuseAccountLinkedMcp();
   }
   throw new ApiError(403, "engine_mcp_managed", "Add MCP servers in Settings > MCP: only the supported servers run.");

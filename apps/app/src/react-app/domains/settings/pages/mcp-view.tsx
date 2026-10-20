@@ -567,9 +567,12 @@ export function McpView(props: McpViewProps) {
       });
     return result.ok ? { ok: true } : { ok: false, error: result.error };
   };
+  // The engine knows the server by the list's id (its plugin renames the entry), whatever the config calls it.
   const signInSupportedMcp = (name: string) => {
     const server = props.mcpServers.find((entry) => entry.name === name);
-    if (server) props.authorizeMcp(server);
+    const decision = mcpPolicy?.decisions.find((entry) => entry.name === name);
+    const engineName = decision?.renamed_to ?? decision?.id ?? name;
+    if (server) props.authorizeMcp({ ...server, name: engineName });
   };
   const libraryDetailLists = {
     quickConnect: quickConnectList,

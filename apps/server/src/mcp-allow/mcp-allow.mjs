@@ -166,16 +166,27 @@ function normalizeRules(value) {
 }
 
 /** A remote server's address as compared: scheme, host and path, lower-case host, no trailing slash. */
+// The same check as the backend's mcp_policy.remote_url (test/fixtures/mcp-remote-urls.json, both sides): plain
+// host names only (no escapes, IP shortcuts or trailing dot), a port without leading zeros, a path without
+// escapes or dot segments, no user, query or fragment.
+const REMOTE_URL = /^(https?):\/\/((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*|\[::1\])(?::([1-9][0-9]{0,4}))?(\/[A-Za-z0-9._~/-]*)?$/i;
+
 export function normalizeRemoteUrl(value) {
-  let u;
-  try { u = new URL(String(value ?? "")); } catch { return null; }
-  if (u.protocol !== "https:" && u.protocol !== "http:") return null;
-  if (u.username || u.password || u.search || u.hash) return null;
+  if (typeof value !== "string" || value.length > 300) return null;
+  const m = REMOTE_URL.exec(value);
+  if (!m) return null;
+  const scheme = m[1].toLowerCase();
+  let host = m[2].toLowerCase();
+  let port = m[3] ?? null;
+  const path = m[4] ?? "";
+  if (port !== null && Number(port) > 65535) return null;
+  if (path.split("/").some((part) => part === "." || part === "..")) return null;
   // Plain http only to this computer (the Figma desktop app's server); anything else must be https.
-  if (u.protocol === "http:" && !["127.0.0.1", "localhost", "[::1]"].includes(u.hostname)) return null;
+  if (scheme === "http" && !["127.0.0.1", "localhost", "[::1]"].includes(host)) return null;
   // localhost and 127.0.0.1 name the same server here.
-  const host = u.hostname.toLowerCase() === "localhost" ? `127.0.0.1${u.port ? `:${u.port}` : ""}` : u.host.toLowerCase();
-  return `${u.protocol}//${host}${u.pathname.replace(/\/+$/, "") || "/"}`;
+  if (host === "localhost") host = "127.0.0.1";
+  if ((scheme === "https" && port === "443") || (scheme === "http" && port === "80")) port = null;
+  return `${scheme}://${host}${port ? `:${port}` : ""}${path.replace(/\/+$/, "") || "/"}`;
 }
 
 function normalizeRemoteEntry(value, id) {
@@ -570,8 +581,18 @@ export function evaluateMcp(mcpMap, policy, ctx = {}) {
     if (ignored.length) notes.push(`ignores ${ignored.slice(0, 4).join(", ")}${ignored.length > 4 ? " ..." : ""}`);
     let refusal = null;
     const userEnv = ctx.env ?? process.env;
+    if (!refusal && rules.secret_env) {
+      // A key server takes its flags only: a bare argument could be the key itself (in the config, and in
+      // the process list). A path flag's value is the one argument allowed.
+      for (let i = 0; i < rest.length; i += 1) {
+        const arg = String(rest[i]);
+        if (arg.startsWith("-")) { if (!arg.includes("=") && (rules.path_flags ?? []).includes(arg)) i += 1; continue; }
+        refusal = blocked(name, "flag", { ...base, version, reason: MCP_REASONS.secret_flag });
+        break;
+      }
+    }
     const secretNames = (rules.secret_env ?? []).filter((k) => typeof userEnv[k] === "string" && userEnv[k] !== "");
-    if (rules.secret_env && !secretNames.length) {
+    if (!refusal && rules.secret_env && !secretNames.length) {
       refusal = blocked(name, "secret_missing", { ...base, version, reason: `${MCP_REASONS.secret_missing} Set ${rules.secret_env.join(" or ")} before starting the app.` });
     }
     // A server that needs the person's key runs on this computer, where the engine's own environment holds it
@@ -655,7 +676,9 @@ export function evaluateMcp(mcpMap, policy, ctx = {}) {
       }
       argv.splice(0, 1, ...program);
     }
-    const next = { ...raw, type: "local" };
+    // Only the keys the engine uses for a local server: anything else in the entry (headers, a token under
+    // another name) never reaches the engine's config.
+    const next = { type: "local", ...Object.fromEntries(["command", "environment", "enabled", "timeout", "cwd"].filter((k) => Object.hasOwn(raw, k)).map((k) => [k, raw[k]])) };
     if (boxHere) {
       const envWords = Object.entries(environment).map(([k, v]) => `${k}=${shellQuote(v)}`);
       next.command = [box.shell, "-c", `${entry.runtime === "npm" ? `mkdir -p ${BOX_NPM_PREFIX} && ` : ""}exec ${envWords.length ? `env ${envWords.join(" ")} ` : ""}${argv.map(shellQuote).join(" ")}`];
