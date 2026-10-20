@@ -169,6 +169,10 @@ function normalizeEntry(value) {
     pin,
     title: text(value.title, 80) ?? id,
     why: text(value.why, 400),
+    // The server's tools that change something (files, a database, the
+    // repository, the memory file): Normal permission mode asks before them.
+    // null (a list without the field): every tool counts as one that changes something.
+    write_tools: Array.isArray(value.write_tools) ? strings(value.write_tools, 64).filter((t) => /^[\w-]{1,64}$/.test(t)) : null,
     rules: normalizeRules(value.rules),
   };
 }
@@ -518,7 +522,7 @@ export function evaluateMcp(mcpMap, policy, ctx = {}) {
       if (Object.keys(environment).length) next.environment = environment; else delete next.environment;
     }
     out[entry.id] = next;
-    decisions.push({ name, status: "allowed", code: "allowed", ...base, version, sandbox: Boolean(box), enabled: raw.enabled !== false, ...(name !== entry.id ? { renamed_to: entry.id } : {}), notes });
+    decisions.push({ name, status: "allowed", code: "allowed", ...base, version, sandbox: Boolean(box), enabled: raw.enabled !== false, write_tools: entry.write_tools, ...(name !== entry.id ? { renamed_to: entry.id } : {}), notes });
   }
   return { mcp: out, decisions };
 }
@@ -564,6 +568,39 @@ export function toolRefusal(state, tool, args) {
     }
   }
   return null;
+}
+
+// ------------------------------------------------------------- permissions
+
+/**
+ * The engine `permission` rules the MCP servers add in a permission mode
+ * (the safety modes, OMNIRUSH_PERMISSION_MODE): Normal lets an allowed
+ * server's tools run (`<id>_*: allow`) and asks before the ones that change
+ * something (`<id>_<tool>: ask`, its entry's `write_tools`); Careful asks
+ * for every tool already and Auto for none, so they add nothing. The
+ * engine takes the last rule that matches, so these go after the mode's own.
+ */
+export function mcpPermissionRules(decisions, mode) {
+  if (String(mode ?? "").trim().toLowerCase() !== "normal") return {};
+  const rules = {};
+  for (const d of decisions ?? []) {
+    if (!d || d.status !== "allowed" || !d.id) continue;
+    if (!Array.isArray(d.write_tools)) {
+      rules[`${toolPrefix(d.id)}*`] = "ask";
+      continue;
+    }
+    rules[`${toolPrefix(d.id)}*`] = "allow";
+    for (const tool of d.write_tools) rules[`${toolPrefix(d.id)}${String(tool).replace(/[^a-zA-Z0-9_-]/g, "_")}`] = "ask";
+  }
+  return rules;
+}
+
+/** `permission` with `rules` after its own (a string value becomes its "*" rule). */
+function withRules(permission, rules) {
+  if (!Object.keys(rules).length) return permission;
+  const base = typeof permission === "string" ? { "*": permission } : isRecord(permission) ? { ...permission } : {};
+  for (const key of Object.keys(rules)) delete base[key];
+  return { ...base, ...rules };
 }
 
 // --------------------------------------------------------- the plugin's hooks
@@ -621,7 +658,9 @@ function configTarget(input, output) {
 /**
  * The engine plugin's hooks. `options`: `{directory, policyFile, reportDir,
  * box (null or a function of the root returning {shell, key, croot} or
- * null), npmPrefix (default: <reportDir>/../npx-prefix), platform, now}`. The `config` hook replaces `mcp` with the allowed
+ * null), npmPrefix (default: <reportDir>/../npx-prefix), permissionMode
+ * (default: OMNIRUSH_PERMISSION_MODE; see mcpPermissionRules), platform,
+ * now}`. The `config` hook replaces `mcp` with the allowed
  * servers (none without a readable policy); `tool.execute.before` refuses
  * non-local pages for `local_urls` servers and paths outside the project
  * for `path_inputs` servers.
@@ -640,6 +679,9 @@ export function createMcpPolicyHooks(options = {}) {
     }
     const { mcp, decisions } = evaluateMcp(target.mcp, policy, { root, platform: options.platform, box, npmPrefix });
     target.mcp = mcp;
+    const mode = typeof options.permissionMode === "function" ? options.permissionMode() : options.permissionMode ?? process.env.OMNIRUSH_PERMISSION_MODE;
+    const rules = mcpPermissionRules(decisions, mode);
+    if (Object.keys(rules).length) target.permission = withRules(target.permission, rules);
     const on = policy ? policy.allow.filter((e) => Object.hasOwn(mcp, e.id)) : [];
     state.localOnly = on.filter((e) => e.rules.local_urls).map((e) => e.id);
     state.pathInputs = on.filter((e) => e.rules.path_inputs).map((e) => ({ id: e.id, keys: e.rules.path_inputs }));

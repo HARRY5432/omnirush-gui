@@ -36,6 +36,8 @@ export type McpAllowEntry = {
   pin: string | null;
   title: string;
   why: string | null;
+  /** null: not listed, every tool counts as one that changes something. */
+  write_tools: string[] | null;
   rules: McpRules;
 };
 
@@ -61,6 +63,7 @@ export type McpDecision = {
   enabled?: boolean;
   renamed_to?: string;
   url_host?: string | null;
+  write_tools?: string[] | null;
   notes?: string[];
 };
 
@@ -96,6 +99,7 @@ export function evaluateMcp(
   ctx?: { root?: string; platform?: string; box?: McpBox | null; npmPrefix?: string },
 ): { mcp: Record<string, Record<string, unknown>>; decisions: McpDecision[] };
 export function toolPrefix(name: string): string;
+export function mcpPermissionRules(decisions: McpDecision[] | null | undefined, mode: unknown): Record<string, "allow" | "ask">;
 export function toolRefusal(
   state: { localOnly?: string[]; pathInputs?: Array<{ id: string; keys: string[] }>; roots?: Array<{ root: string; platform: string }> },
   tool: unknown,
@@ -112,6 +116,7 @@ export function createMcpPolicyHooks(options?: {
   reportDir?: string | null;
   box?: McpBox | null | ((root: string) => McpBox | null);
   npmPrefix?: string;
+  permissionMode?: string | null | (() => string | null | undefined);
   platform?: string;
   now?: () => number;
 }): {
