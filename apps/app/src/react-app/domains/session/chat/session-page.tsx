@@ -503,7 +503,8 @@ export function SessionPage(props: SessionPageProps) {
     && props.selectedWorkspaceDisplay.workspaceType !== "remote";
   // The layout: Chat (sessions sidebar + chat) or IDE (files, editor, terminal; chat docked right), per workspace.
   const storedLayoutMode = useEditorStore((state) => state.modeByWorkspace[props.selectedWorkspaceId] ?? "chat");
-  const ideMode = editorAvailable && !isMobile && storedLayoutMode === "ide";
+  // Full-page views (parallel tasks, library, dashboard, automations) always show in the Chat layout.
+  const ideMode = editorAvailable && !isMobile && storedLayoutMode === "ide" && !props.primarySlot && !props.mainContentTakeover;
   const layoutMode: LayoutMode = ideMode ? "ide" : "chat";
   const ideChatCollapsed = useEditorStore((state) => state.ideChatCollapsed);
   const setLayoutMode = useCallback((mode: LayoutMode) => {
@@ -831,12 +832,10 @@ export function SessionPage(props: SessionPageProps) {
       useEditorStore.getState().setIdeChatCollapsed(!useEditorStore.getState().ideChatCollapsed);
     }
   }, [chatToggleRequest, editorAvailable, editorShowRequest, editorToggleRequest, ideMode, modeToggleRequest, props.runtimeWorkspaceId, setLayoutMode]);
-  // The editor used to open as a side panel; a chat that still has it set opens IDE mode instead.
+  // The editor no longer opens as a side panel (it is the IDE layout): a stale "editor" panel just closes.
   useEffect(() => {
-    if (activeSidePanel !== "editor") return;
-    setCurrentSidePanel(null);
-    if (editorAvailable) setLayoutMode("ide");
-  }, [activeSidePanel, editorAvailable, setCurrentSidePanel, setLayoutMode]);
+    if (activeSidePanel === "editor") setCurrentSidePanel(null);
+  }, [activeSidePanel, setCurrentSidePanel]);
   // An approval must never wait in a hidden chat: it brings the chat panel back.
   useEffect(() => {
     if (ideMode && props.activePermission && useEditorStore.getState().ideChatCollapsed) useEditorStore.getState().setIdeChatCollapsed(false);
@@ -1501,7 +1500,7 @@ export function SessionPage(props: SessionPageProps) {
     ...(props.sidebar.onOpenAutomations ? [{ id: "automations", label: "Automations", icon: <Zap className="size-4" />, badge: props.sidebar.automationsNeedAttention ? 1 : undefined, onSelect: props.sidebar.onOpenAutomations }] : []),
     ...(props.sidebar.onOpenDashboard ? [{ id: "dashboard", label: "Dashboard", icon: <LayoutGrid className="size-4" />, onSelect: props.sidebar.onOpenDashboard }] : []),
     { id: "library", label: "Library", icon: <Library className="size-4" />, onSelect: props.onOpenExtensions },
-    { id: "chat-layout", label: "Audit trail, workflows: Chat layout", icon: <PanelLeft className="size-4" />, onSelect: () => setLayoutMode("chat") },
+    { id: "chat-layout", label: "Audit trail and workflows (Chat layout)", icon: <PanelLeft className="size-4" />, onSelect: () => setLayoutMode("chat") },
   ];
 
   // The chat itself: beside the sessions sidebar in Chat mode, docked on the right in IDE mode.
@@ -2184,8 +2183,10 @@ export function SessionPage(props: SessionPageProps) {
         />
         <SidebarInset
           className={cn(
-            "min-h-0 overflow-hidden bg-sidebar mac:bg-transparent mac:[&_header]:transition-[padding-left] mac:[&_header]:duration-200 mac:[&_header]:ease-linear mac:peer-data-[state=collapsed]:[&_header]:pl-34 mac:max-md:[&_header]:pl-34",
-            !shellConfig.sidebar && "mac:[&_header]:pl-34",
+            "min-h-0 overflow-hidden bg-sidebar mac:bg-transparent",
+            // The traffic lights over a collapsed sidebar: room in the chat header. The IDE layout pads its own rail.
+            !ideMode && "mac:[&_header]:transition-[padding-left] mac:[&_header]:duration-200 mac:[&_header]:ease-linear mac:peer-data-[state=collapsed]:[&_header]:pl-34 mac:max-md:[&_header]:pl-34",
+            !shellConfig.sidebar && !ideMode && "mac:[&_header]:pl-34",
           )}
         >
           <div className={cn(
@@ -2257,7 +2258,10 @@ export function SessionPage(props: SessionPageProps) {
                   title={`Show chat (${shortcutLabel("H")})`}
                   data-chat-strip
                   onClick={() => useEditorStore.getState().setIdeChatCollapsed(false)}
-                  className="w-2 shrink-0 cursor-pointer border-s border-border bg-muted/40 transition-colors hover:bg-primary/20"
+                  className={cn(
+                    "w-2 shrink-0 cursor-pointer border-s border-border transition-colors hover:bg-primary/20",
+                    props.activePermission ? "bg-amber-9/60" : "bg-muted/40",
+                  )}
                 />
               ) : (
                 <>
@@ -2280,6 +2284,17 @@ export function SessionPage(props: SessionPageProps) {
                   </ResizablePanel>
                 </>
               )}
+              {sidePanelOpen ? (
+                // Browser tabs and files the agent opens: beside the chat, as in the Chat layout.
+                <>
+                  <ResizableHandle />
+                  <ResizablePanel defaultSize="420px" minSize="320px" maxSize="50%" className="min-h-0 min-w-0" data-ide-side-panel>
+                    <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden border-s border-border bg-dls-surface">
+                      {sidePanelContent}
+                    </div>
+                  </ResizablePanel>
+                </>
+              ) : null}
             </ResizablePanelGroup>
           ) : (
           <>
@@ -2363,7 +2378,7 @@ export function SessionPage(props: SessionPageProps) {
           )}
           </div>
         </SidebarInset>
-        {shellConfig.sidebar ? <SidebarTrigger className="hidden mac:absolute mac:left-[88px] mac:size-8! top-[3px] z-50 mac:flex titlebar-no-drag" /> : null}
+        {shellConfig.sidebar && !ideMode ? <SidebarTrigger className="hidden mac:absolute mac:left-[88px] mac:size-8! top-[3px] z-50 mac:flex titlebar-no-drag" /> : null}
       </SidebarProvider>
 
       {props.providerAuthModal ? <ProviderAuthModal {...props.providerAuthModal} /> : null}

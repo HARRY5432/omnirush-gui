@@ -2923,7 +2923,8 @@ export function SessionRoute() {
   }, [selectedSessionId]);
 
   const layoutModeName = useEditorStore((state) => (selectedWorkspaceId ? state.modeByWorkspace[selectedWorkspaceId] : undefined) ?? "chat");
-  const layoutPaletteItems = useMemo<PaletteItem[]>(() => isElectronRuntime() ? [
+  const layoutAvailable = isElectronRuntime() && Boolean(selectedWorkspace) && selectedWorkspace?.workspaceType !== "remote";
+  const layoutPaletteItems = useMemo<PaletteItem[]>(() => layoutAvailable ? [
     {
       id: "layout.toggle",
       title: layoutModeName === "ide" ? "Switch to Chat layout" : "Switch to IDE layout",
@@ -2946,7 +2947,7 @@ export function SessionRoute() {
         useEditorStore.getState().requestChatToggle();
       },
     }] : []),
-  ] : [], [layoutModeName]);
+  ] : [], [layoutAvailable, layoutModeName]);
 
   const terminalPaletteItems = useMemo<PaletteItem[]>(() => platform.capabilities.terminal ? [
     {

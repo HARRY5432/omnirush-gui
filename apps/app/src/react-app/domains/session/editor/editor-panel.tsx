@@ -1117,7 +1117,7 @@ export default function EditorPanel(props: EditorPanelProps) {
         {props.railFoot}
       </nav>
       <div className="flex min-w-0 flex-1 flex-col">
-      <div className="flex h-10 shrink-0 items-center gap-1.5 border-b border-border px-2 mac:titlebar-drag mac:ps-6 [&_button]:mac:titlebar-no-drag" data-editor-header>
+      <div className="flex h-9 shrink-0 items-center gap-1.5 border-b border-border px-2 max-lg:h-12 mac:titlebar-drag mac:ps-6 [&_button]:mac:titlebar-no-drag" data-editor-header>
         {props.headerStart}
         <span className="flex-1" />
         <Tooltip>

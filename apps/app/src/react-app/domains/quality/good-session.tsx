@@ -524,7 +524,8 @@ export function GoodSessionChecklistBar(props: GoodSessionChecklistBarProps) {
       {props.client ? <GoodSessionLine result={goodSession} /> : null}
       {/* At every width: a compact summary ("On track ★ 4/6") that opens to the full checklist,
           and the guide link on its own line under it (never cut off at the right edge). */}
-      <div className="mx-auto flex max-w-[800px] flex-col items-start gap-1 pb-1.5" role="status" data-testid="good-session-row" data-expanded={checklistOpen ? "" : undefined}>
+      <div className="mx-auto flex max-w-[800px] flex-col items-start gap-1 pb-1.5" data-testid="good-session-row" data-expanded={checklistOpen ? "" : undefined}>
+        <span role="status" className="sr-only">{checklist.text}</span>
         <button
           type="button"
           onClick={() => {
