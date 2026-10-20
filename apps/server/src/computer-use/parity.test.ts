@@ -25,7 +25,7 @@ describe("CLI/desktop parity: computer use", () => {
       const source = readFileSync(path.join(dir, name), "utf8");
       for (const match of source.matchAll(/^\s*import\s[^"']*["']([^"']+)["']/gm)) {
         const spec = match[1] ?? "";
-        expect(spec.startsWith("node:") || spec.startsWith("./") || (name === "native-worker.mjs" && spec === "koffi")).toBe(true);
+        expect(spec.startsWith("node:") || spec.startsWith("./") || false).toBe(true);
       }
       expect(source).not.toMatch(/from\s+["']electron["']/);
     }
