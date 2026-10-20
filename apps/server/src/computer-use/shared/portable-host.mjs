@@ -202,12 +202,12 @@ export async function createPortableHost({ native, spool = null, settings, conte
     const l = limits();
     let frame = await native.call("capture", { window: w }, 15_000);
     let grid = luminanceGrid(fitLongSide(frame, l.model_long_side));
-    // Wait (briefly) for the window to settle; small changes (caret, spinner) are tolerated.
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      await sleep(60);
+    // Wait (briefly) for the window to settle: until two frames match (a blinking caret may never let it; then the last frame).
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await sleep(attempt === 0 ? 60 : 90);
       const next = await native.call("capture", { window: w }, 15_000);
       const nextGrid = luminanceGrid(fitLongSide(next, l.model_long_side));
-      const same = !compareGrids(grid, nextGrid).stale;
+      const same = compareGrids(grid, nextGrid).changed === 0;
       frame = next; grid = nextGrid;
       if (same) break;
     }
