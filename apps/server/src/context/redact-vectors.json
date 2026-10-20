@@ -490,9 +490,226 @@
    "same": true
   },
   {
+   "name": "password flag with =",
+   "input": "pg_dump --password=Tr0ub4dor --host db.internal",
+   "expect": "pg_dump --password=[REDACTED] --host db.internal"
+  },
+  {
+   "name": "password flag with a space",
+   "input": "myapp migrate --password Hunter22 --user admin",
+   "expect": "myapp migrate --password [REDACTED] --user admin"
+  },
+  {
+   "name": "password flag quoted",
+   "input": "myapp --password \"correct horse battery\"",
+   "expect": "myapp --password \"[REDACTED]\""
+  },
+  {
+   "name": "named password flag",
+   "input": "helm install db --db-password=s3cr3tValue",
+   "expect": "helm install db --db-password=[REDACTED]"
+  },
+  {
+   "name": "mysql -p attached",
+   "input": "mysql -u root -pS3cretPass shop < dump.sql",
+   "expect": "mysql -u root -p[REDACTED] shop < dump.sql"
+  },
+  {
+   "name": "mysql -p inside docker exec",
+   "input": "docker exec db mysql -uroot -prootpw -e 'select 1'",
+   "expect": "docker exec db mysql -uroot -p[REDACTED] -e 'select 1'"
+  },
+  {
+   "name": "mysqldump -p",
+   "input": "mysqldump -u app -pApp_2024! appdb > out.sql",
+   "expect": "mysqldump -u app -p[REDACTED] appdb > out.sql"
+  },
+  {
+   "name": "curl -u user:pass",
+   "input": "curl -u admin:Sup3rS3cret https://api.example.com/v1/items",
+   "expect": "curl -u admin:[REDACTED] https://api.example.com/v1/items"
+  },
+  {
+   "name": "curl --user user:pass",
+   "input": "curl -s --user deploy:hunter22 https://ci.example.com/job",
+   "expect": "curl -s --user deploy:[REDACTED] https://ci.example.com/job"
+  },
+  {
+   "name": "curl -uuser:pass attached",
+   "input": "curl -uadmin:Pa55word https://example.com",
+   "expect": "curl -uadmin:[REDACTED] https://example.com"
+  },
+  {
+   "name": "curl -u quoted",
+   "input": "curl -u 'svc:Zx9pLm2q' https://example.com",
+   "expect": "curl -u 'svc:[REDACTED]' https://example.com"
+  },
+  {
+   "name": "authorization token header",
+   "input": "curl -H \"Authorization: Token 9944b0919⟨+⟩9c62bcf9418ad846dd0e4bbdfc6ee4b\" https://api.example.com",
+   "expect": "curl -H \"Authorization: Token [REDACTED]\" https://api.example.com"
+  },
+  {
+   "name": "authorization basic header, short",
+   "input": "Authorization: Basic dXNlcjpwYXNz",
+   "expect": "Authorization: Basic [REDACTED]"
+  },
+  {
+   "name": "authorization token in a JSON header map",
+   "input": "{\"Authorization\": \"Token abcd1234efgh5678\"}",
+   "expect": "{\"Authorization\": \"Token [REDACTED]\"}",
+   "mode": "source"
+  },
+  {
+   "name": "anthropic oauth access token",
+   "input": "export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-⟨+⟩a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8s9T0u1V2w3X4y5Z6-_AbCd",
+   "expect": "export CLAUDE_CODE_OAUTH_TOKEN=[REDACTED]"
+  },
+  {
+   "name": "anthropic oauth token in text",
+   "input": "token sk-ant-oat01-⟨+⟩a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8s9T0u1V2w3X4y5Z6-_AbCd here",
+   "expect": "token [REDACTED] here"
+  },
+  {
+   "name": "openrouter key",
+   "input": "use sk-or-v1-⟨+⟩0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef now",
+   "expect": "use [REDACTED] now"
+  },
+  {
+   "name": "npm token in text",
+   "input": "npm config set //registry.npmjs.org/:_authToken npm_⟨+⟩a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8",
+   "expect": "npm config set //registry.npmjs.org/:_authToken [REDACTED]"
+  },
+  {
+   "name": "gitlab token on a command line",
+   "input": "glab auth login --hostname gitlab.com --token glpat-⟨+⟩a1B2c3D4e5F6g7H8i9J0",
+   "expect": "glab auth login --hostname gitlab.com --token [REDACTED]"
+  },
+  {
+   "name": "huggingface token",
+   "input": "huggingface-cli login --token hf_⟨+⟩a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7",
+   "expect": "huggingface-cli login --token [REDACTED]"
+  },
+  {
+   "name": "pypi token",
+   "input": "twine upload -u __token__ dist/* # pypi-AgEIcHlwaS5vcmc⟨+⟩a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8s9T0u1V2w3X4",
+   "expect": "twine upload -u __token__ dist/* # [REDACTED]"
+  },
+  {
+   "name": "password-stdin kept",
+   "input": "echo \"$PW\" | docker login --password-stdin -u me ghcr.io",
+   "expect": null,
+   "same": true
+  },
+  {
+   "name": "password-file kept",
+   "input": "restic --password-file=/run/secrets/restic backup .",
+   "expect": null,
+   "same": true
+  },
+  {
+   "name": "password flag in prose kept",
+   "input": "Use the --password option to set it.",
+   "expect": null,
+   "same": true
+  },
+  {
+   "name": "postgres --password without a value kept",
+   "input": "pg_dump --password mydb > out.sql",
+   "expect": null,
+   "same": true
+  },
+  {
+   "name": "password flag reference kept",
+   "input": "deploy --password \"$DB_PASSWORD\" --password=${PASS}",
+   "expect": null,
+   "same": true
+  },
+  {
+   "name": "password flag placeholder kept",
+   "input": "deploy --password <password> --password=YOUR_PASSWORD",
+   "expect": null,
+   "same": true
+  },
+  {
+   "name": "password flag in code kept",
+   "input": "parser.add_argument(\"--password\", help=\"the password\")\ncmd = \"--password=\" + pw + \" --user=\" + user\nargs = f\"--password={pw}\"",
+   "expect": null,
+   "mode": "source",
+   "same": true
+  },
+  {
+   "name": "mysql -p prompt kept",
+   "input": "mysql -u root -p shop",
+   "expect": null,
+   "same": true
+  },
+  {
+   "name": "-p of other programs kept",
+   "input": "mkdir -p build && gcc -pthread -o app main.c && docker run -p3306:3306 mysql:8 && ssh -p 2222 host && pytest -pno:cacheprovider",
+   "expect": null,
+   "same": true
+  },
+  {
+   "name": "curl -u reference kept",
+   "input": "curl -u \"$USER:$TOKEN\" https://example.com && curl -u user: https://example.com",
+   "expect": null,
+   "same": true
+  },
+  {
+   "name": "curl user-agent kept",
+   "input": "curl --user-agent 'Mozilla/5.0 (X11; Linux)' -u $CREDS https://example.com",
+   "expect": null,
+   "same": true
+  },
+  {
+   "name": "authorization template kept",
+   "input": "Authorization: Token {{ api_token }}\nAuthorization: Basic ${CREDS}",
+   "expect": null,
+   "same": true
+  },
+  {
+   "name": "authorization in code kept",
+   "input": "headers = {\"Authorization\": f\"Token {api_key}\"}\nreq.set(\"Authorization: Token \" + token)",
+   "expect": null,
+   "mode": "source",
+   "same": true
+  },
+  {
+   "name": "short token prefixes kept",
+   "input": "sk-ant-oat01-short npm_install hf_hub_download glpat-x pypi-simple sk-or-v1-abc",
+   "expect": null,
+   "same": true
+  },
+  {
    "name": "figma tokens",
    "input": "personal fig⟨+⟩d_Q3x9Lm2Pz7Kd4Vt8Rb1Nw6Hy0Cs5Fj-AbCdEfGh oauth fig⟨+⟩u_Z8y7X6w5V4u3T2s1R0q9P8o7N6m5L4k and fig⟨+⟩ur_K4j3H2g1F0e9D8c7B6a5Z4y3X2w1V0u kept: configd_abcdefghijklmnopqrstuvwxyz figd_short",
    "expect": "personal [REDACTED] oauth [REDACTED] and [REDACTED] kept: configd_abcdefghijklmnopqrstuvwxyz figd_short"
+  },
+  {
+   "name": "figma token markdown-escaped",
+   "input": "text=\"Continue. fig⟨+⟩d\\_CUCHECK\\_Q3x9Lm2Pz7Kd4Vt8Rb1Nw6Hy0Cs5Fj4AbCdEfGh\" and fig⟨+⟩u\\_Q3x9Lm2Pz7Kd4Vt8Rb1Nw6Hy0Cs5Fj",
+   "expect": "text=\"Continue. [REDACTED]\" and [REDACTED]"
+  },
+  {
+   "name": "figma token escaped inside a JSON string",
+   "input": "{\"output\":\"name fig⟨+⟩d\\\\_CUCHECK\\\\_Q3x9Lm2Pz7Kd4Vt8Rb1Nw6Hy0Cs5Fj4AbCdEfGh\\\\nnext\"}",
+   "expect": "{\"output\":\"name [REDACTED]\\\\nnext\"}"
+  },
+  {
+   "name": "bearer header with an escaped figma token",
+   "input": "authorization: Bearer fig⟨+⟩d\\_CUCHECK\\_Q3x9Lm2Pz7Kd4Vt8Rb1Nw6Hy0Cs5Fj4AbCdEfGh)",
+   "expect": "authorization: Bearer [REDACTED])"
+  },
+  {
+   "name": "bearer value with escaped underscores",
+   "input": "curl -H \"X-Auth: Bearer ab12\\_Cd34\\_Ef56Gh78Ij90Kl\" https://api.example.com",
+   "expect": "curl -H \"X-Auth: Bearer [REDACTED]\" https://api.example.com"
+  },
+  {
+   "name": "escaped placeholders and short figma names kept",
+   "input": "Bearer YOUR\\_ACCESS\\_TOKEN\\_HERE and figd\\_short and my\\_figd\\_abcdefghijklmnopqrstuvwxyz and plain\\_snake\\_case\\_words",
+   "same": true
   }
  ]
 }

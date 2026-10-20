@@ -293,14 +293,18 @@ const TOKEN_RULES: TokenRule[] = [
   { name: "github_pat", gate: "github_pat_", pattern: token(String.raw`github_pat_[A-Za-z0-9_]{60,}`) },
   { name: "gitlab_token", gate: "glpat-", pattern: token(String.raw`glpat-[A-Za-z0-9_-]{20,}`) },
   // Figma: personal access tokens (figd_), OAuth tokens (figu_, figur_).
-  { name: "figma_token", gate: /fig(?:d|u|ur)_/, pattern: token(String.raw`fig(?:d|u|ur)_[A-Za-z0-9_-]{20,}`) },
+  // Also markdown-escaped (`figd\_...\_...`, as Figma tool output writes them) and that again inside a JSON
+  // string (`figd\\_`): the escapes before `_` and `-` go with the token.
+  { name: "figma_token", gate: /fig(?:d|u|ur)\\*_/, pattern: token(String.raw`fig(?:d|u|ur)\\*_(?:[A-Za-z0-9]|\\*[_-]){20,}`) },
   { name: "slack_token", gate: /xox[abprs]-/, pattern: token(String.raw`xox[abprs]-[A-Za-z0-9-]{10,}`) },
   { name: "slack_webhook", gate: "hooks.slack.com", pattern: /(https:\/\/hooks\.slack\.com\/services\/T[A-Z0-9]+\/B[A-Z0-9]+\/)([A-Za-z0-9]{20,})/g, keep: 1 },
   { name: "discord_webhook", gate: "/api/webhooks/", pattern: /(https:\/\/(?:canary\.|ptb\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/)([A-Za-z0-9_-]{50,})/g, keep: 1 },
   { name: "google_api_key", gate: "AIza", pattern: token(String.raw`AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])`) },
   { name: "stripe_key", gate: /[sr]k_live_/, pattern: token(String.raw`[sr]k_live_[A-Za-z0-9]{16,}`) },
   { name: "stripe_webhook", gate: "whsec_", pattern: token(String.raw`whsec_[A-Za-z0-9+/=]{24,}`) },
-  { name: "anthropic_key", gate: "sk-ant-", pattern: token(String.raw`sk-ant-(?:api|admin)\d\d-[A-Za-z0-9_-]{32,}`) },
+  // Console keys (api, admin) and Claude subscription OAuth tokens (oat: access, ort: refresh).
+  { name: "anthropic_key", gate: "sk-ant-", pattern: token(String.raw`sk-ant-(?:api|admin|oat|ort)\d\d-[A-Za-z0-9_-]{32,}`) },
+  { name: "openrouter_key", gate: "sk-or-v1-", pattern: token(String.raw`sk-or-v1-[0-9a-f]{64}(?![0-9A-Za-z])`) },
   { name: "openai_key", gate: "sk-", pattern: token(String.raw`sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{40,}|sk-[A-Za-z0-9]{48}(?![A-Za-z0-9])`), check: (m) => shannonEntropy(m) >= 3.5 },
   { name: "npm_token", gate: "npm_", pattern: token(String.raw`npm_[A-Za-z0-9]{36}(?![A-Za-z0-9])`) },
   { name: "pypi_token", gate: "pypi-AgE", pattern: token(String.raw`pypi-AgE[A-Za-z0-9_-]{50,}`) },
@@ -491,8 +495,8 @@ function redactAwsSecrets(text: string, hidden: string, tally: Tally, nearContex
   return changed ? lines.join("\n") : text;
 }
 
-function redactTokens(text: string, hidden: string, tally: Tally, spans: Array<[number, number]>): string {
-  for (const rule of TOKEN_RULES) {
+function redactTokens(text: string, hidden: string, tally: Tally, spans: Array<[number, number]>, rules: TokenRule[] = TOKEN_RULES): string {
+  for (const rule of rules) {
     if (!gateOpen(rule.gate, text)) continue;
     rule.pattern.lastIndex = 0;
     text = text.replace(rule.pattern, (...args: unknown[]) => {
@@ -508,9 +512,128 @@ function redactTokens(text: string, hidden: string, tally: Tally, spans: Array<[
   return text;
 }
 
-const AUTH_HEADER = /(?<![A-Za-z0-9_])((?:Bearer|Basic)[ \t]+)([A-Za-z0-9_.~+/=-]{16,})/gi;
+// --- command lines and headers -------------------------------------------
 
-function authSecret(token: string): boolean {
+// A flag's value: quoted, or one word (no quote, shell operator, bracket,
+// brace, backtick or backslash: `${...}`, `{pw}`, `$(...)` and escapes are
+// never a literal).
+const FLAG_VALUE = String.raw`(?:"([^"\r\n\\]{1,256})"|'([^'\r\n\\]{1,256})'|([^\s"'\x60;|&<>(){}\\]{1,256}))`;
+// `--password X`, `--password=X`, `--db-password=X`, `--passwd X`: the value of a flag named for a
+// password. Never `--password-stdin` or `--password-file` (the name goes on), nor a flag after it.
+const PASSWORD_FLAG = new RegExp(String.raw`(?<![\w-])(--(?:[A-Za-z0-9]+-)*pass(?:wd|word))(=|[ \t]+)` + FLAG_VALUE, "gi");
+// A MySQL or MariaDB client on the line: there `-pX` (attached) is the password (`-p X` asks for it, X the database).
+const MYSQL_CLIENT = /(?<![\w.-])(?:mysql(?:dump|admin|import|check|show|pump|sh)?|mariadb(?:-?dump|-?admin|-?import|-?check)?)(?:\.exe)?(?=["'\s])/gi;
+const MYSQL_PASSWORD = /(?<=[\s"'])-p([^\s"'\x60;|&<>(){}\\-][^\s"'\x60;|&<>(){}\\]{0,255})/g;
+// curl's `-u user:pass`, `-uuser:pass`, `--user user:pass` (the user kept).
+const CURL_COMMAND = /(?<![\w.-])curl(?:\.exe)?(?=["'\s])/gi;
+const CURL_USER = /(?<=[\s"'])(-u[ \t]*|--user(?:=|[ \t]+))(["']?)([^\s:"'\x60;|&<>(){}\\$]*):([^\s"'\x60;|&<>(){}\\]{1,256})\2/g;
+// The end of one command on a line (the next one may be any other program).
+const COMMAND_END = /[\r\n;|&]|\\n/;
+
+/** A flag or header value that is no literal: a reference, a placeholder, a template, another flag, a constant's name. */
+function commandPlaceholder(value: string): boolean {
+  return value.length < 3 || value !== value.trim() || value.startsWith("-") || value.startsWith("[REDACTED") || /[{}$\x60]/.test(value)
+    || isReference(value) || isPlaceholder(value) || CONSTANT_NAME.test(value) || urlPasswordPlaceholder(value) || /^<[^>]*>$/.test(value);
+}
+
+/** Replaces `pattern`'s value group in the part of each line that follows a `command` word (up to the command's end). */
+function afterCommand(text: string, command: RegExp, rewrite: (segment: string) => string): string {
+  command.lastIndex = 0;
+  let out = "";
+  let at = 0;
+  for (let match = command.exec(text); match; match = command.exec(text)) {
+    const start = match.index + match[0].length;
+    if (start < at) continue;
+    const rest = text.slice(start);
+    const end = COMMAND_END.exec(rest);
+    const stop = start + (end ? end.index : rest.length);
+    out += text.slice(at, start) + rewrite(text.slice(start, stop));
+    at = stop;
+    command.lastIndex = Math.max(command.lastIndex, stop);
+  }
+  return at === 0 ? text : out + text.slice(at);
+}
+
+/**
+ * Passwords on a command line: `--password X` / `--password=X` (any
+ * program), `-pX` after a MySQL or MariaDB client, the password of curl's
+ * `-u user:pass`. The flag and the user stay.
+ */
+export function redactCommandSecrets(text: string, hidden: string, tally: { count: number; rules?: Record<string, number> }, spans: Array<[number, number]> = opaqueSpans(text)): string {
+  const mark = (rule: string) => {
+    tally.count += 1;
+    if (tally.rules) tally.rules[rule] = (tally.rules[rule] ?? 0) + 1;
+  };
+  if (/pass(?:wd|word)/i.test(text)) {
+    PASSWORD_FLAG.lastIndex = 0;
+    text = text.replace(PASSWORD_FLAG, (match: string, flag: string, sep: string, dq: string | undefined, sq: string | undefined, bare: string | undefined, offset: number) => {
+      const value = dq ?? sq ?? bare ?? "";
+      if (commandPlaceholder(value) || insideOpaque(spans, offset, offset + match.length)) return match;
+      // `--password mydb` (Postgres tools: a flag without a value), `the --password option`: a plain
+      // lower-case word after a space is no password; after `=`, or quoted, any literal is.
+      if (sep !== "=" && bare !== undefined && /^[a-z]+$/.test(value)) return match;
+      mark("password_flag");
+      const quote = dq !== undefined ? '"' : sq !== undefined ? "'" : "";
+      return `${flag}${sep}${quote}${hidden}${quote}`;
+    });
+  }
+  if (/mysql|mariadb/i.test(text)) {
+    text = afterCommand(text, MYSQL_CLIENT, (segment) => segment.replace(MYSQL_PASSWORD, (match: string, value: string) => {
+      if (commandPlaceholder(value)) return match;
+      mark("mysql_password");
+      return `-p${hidden}`;
+    }));
+  }
+  if (/curl/i.test(text)) {
+    text = afterCommand(text, CURL_COMMAND, (segment) => segment.replace(CURL_USER, (match: string, flag: string, quote: string, user: string, password: string) => {
+      if (commandPlaceholder(password) || isReference(user)) return match;
+      mark("curl_user_password");
+      return `${flag}${quote}${user}:${hidden}${quote}`;
+    }));
+  }
+  return text;
+}
+
+// `Authorization: Token|Basic|Bearer <value>` (a header, a JSON key, an `-H` argument): the
+// header names a credential, so a shorter or plainer value counts than on its own.
+// A value may hold markdown-escaped `_` / `-` (`abc\_def`, `abc\\_def` inside a JSON string): the escapes go with it.
+const AUTHORIZATION_HEADER = /(?<![A-Za-z0-9_-])((?:proxy-)?authorization["']?[ \t]*[:=][ \t]*["']?[ \t]*(?:Token|Basic|Bearer)[ \t]+)((?:[A-Za-z0-9.~+/=:]|\\*[_-]){8,})(?![A-Za-z0-9_.~+/=:-]|\\+[_-])/gi;
+
+/** The value of an `Authorization: Token|Basic|Bearer` header (the scheme kept). */
+export function redactAuthorizationHeaders(text: string, hidden: string, tally: { count: number; rules?: Record<string, number> }, spans: Array<[number, number]> = opaqueSpans(text)): string {
+  if (!/authorization/i.test(text)) return text;
+  AUTHORIZATION_HEADER.lastIndex = 0;
+  return text.replace(AUTHORIZATION_HEADER, (match: string, prefix: string, value: string, offset: number) => {
+    const bare = value.replace(/\\/g, "");
+    if (commandPlaceholder(bare) || shannonEntropy(bare) < 2.5 || insideOpaque(spans, offset, offset + match.length)) return match;
+    tally.count += 1;
+    if (tally.rules) tally.rules.authorization_header = (tally.rules.authorization_header ?? 0) + 1;
+    return `${prefix}${hidden}`;
+  });
+}
+
+/** Token shapes the uploader's old rules lack (they run there too: redactClientGaps). */
+const GAP_TOKEN_RULES = ["gitlab_token", "npm_token", "pypi_token", "huggingface_token", "anthropic_key", "openrouter_key", "figma_token"];
+
+/**
+ * What the old rules (workspace-sync.ts, before the server turns v3 on)
+ * add from these: command-line passwords, `Authorization` header values
+ * and the token shapes in GAP_TOKEN_RULES.
+ */
+export function redactClientGaps(input: string, hidden = REDACTED): { text: string; count: number } {
+  const tally: Tally = { count: 0, rules: {} };
+  if (!input) return { text: input, count: 0 };
+  let text = redactCommandSecrets(input, hidden, tally);
+  text = redactAuthorizationHeaders(text, hidden, tally);
+  text = redactTokens(text, hidden, tally, opaqueSpans(text), TOKEN_RULES.filter((rule) => GAP_TOKEN_RULES.includes(rule.name)));
+  return { text, count: tally.count };
+}
+
+// A value may hold markdown-escaped `_` / `-`: the escapes go with it.
+const AUTH_HEADER = /(?<![A-Za-z0-9_])((?:Bearer|Basic)[ \t]+)((?:[A-Za-z0-9.~+/=]|\\*[_-]){16,})/gi;
+
+function authSecret(value: string): boolean {
+  const token = value.replace(/\\/g, "");
   if (shannonEntropy(token) < 3.0 || isPlaceholder(token)) return false;
   if (/\d/.test(token)) return true;
   return token.length >= 20 && /[a-z]/.test(token) && /[A-Z]/.test(token) && !IDENTIFIER_VALUE.test(token);
@@ -529,8 +652,10 @@ function redactAuthHeaders(text: string, hidden: string, tally: Tally, spans: Ar
  * Removes credentials from free text (a trace string, a file, a diff), the
  * name always kept: private key bodies, URL passwords, secret-named values
  * that look generated (any value in a credential file), AWS secrets beside
- * their key id, known token shapes and `Bearer`/`Basic` values. Nothing
- * inside a `data:` URI or a base64 blob is touched.
+ * their key id, known token shapes, command-line passwords (`--password X`,
+ * MySQL's `-pX`, curl's `-u user:pass`), `Authorization: Token|Basic|Bearer`
+ * header values and `Bearer`/`Basic` values. Nothing inside a `data:` URI or
+ * a base64 blob is touched.
  */
 export function redactCredentials(input: string, options: CredentialOptions = {}): { text: string; count: number; rules: Record<string, number> } {
   const tally: Tally = { count: 0, rules: {} };
@@ -546,6 +671,8 @@ export function redactCredentials(input: string, options: CredentialOptions = {}
   const nearAws = options.awsContext === true || (options.context !== undefined && AWS_CONTEXT.test(options.context));
   text = redactAwsSecrets(text, hidden, tally, nearAws, opaqueSpans(text));
   text = redactTokens(text, hidden, tally, opaqueSpans(text));
+  text = redactCommandSecrets(text, hidden, tally, opaqueSpans(text));
+  text = redactAuthorizationHeaders(text, hidden, tally, opaqueSpans(text));
   if (/bearer|basic/i.test(text)) text = redactAuthHeaders(text, hidden, tally, opaqueSpans(text));
   return { text, count: tally.count, rules: tally.rules };
 }
