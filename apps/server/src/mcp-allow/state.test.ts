@@ -5,7 +5,7 @@ import path from "node:path";
 
 import omnirushMcpPolicy from "../opencode-plugins/omnirush-mcp-policy.js";
 import { keyOf } from "../box/plugin-lib.js";
-import { describeIgnored, evaluateMcp, mcpServerEnvironment, normalizePolicy, readPolicyFile } from "./mcp-allow.mjs";
+import { describeIgnored, evaluateMcp, MCP_ENV_ONLY_MARK, MCP_REASONS, mcpServerEnvironment, normalizePolicy, readPolicyFile } from "./mcp-allow.mjs";
 import {
   decideMcpEntry,
   mcpEngineEnv,
@@ -29,7 +29,8 @@ function temp(prefix: string): string {
 
 afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-  for (const key of ["OMNIRUSH_MCP_POLICY_FILE", "OMNIRUSH_MCP_REPORT_DIR", "OMNIRUSH_MCP_WORKSPACE_DIR", "OMNIRUSH_BOX_HOME", "PATH"]) {
+  delete (globalThis as Record<symbol, unknown>)[MCP_ENV_ONLY_MARK];
+  for (const key of ["OMNIRUSH_MCP_POLICY_FILE", "OMNIRUSH_MCP_REPORT_DIR", "OMNIRUSH_MCP_WORKSPACE_DIR", "OMNIRUSH_BOX_HOME", "OMNIRUSH_MCP_FILTER", "PATH"]) {
     if (saved[key] === undefined) delete process.env[key];
     else process.env[key] = saved[key];
   }
@@ -90,6 +91,8 @@ describe("the engine plugin (omnirush-mcp-policy)", () => {
     const root = temp("mcp-root-");
     const env = mcpEngineEnv(state);
     Object.assign(process.env, env);
+    // Not the engine's process: no filter mode and no env-only mark unless a test sets them.
+    delete process.env.OMNIRUSH_MCP_FILTER;
     process.env.OMNIRUSH_BOX_HOME = path.join(state, "box-home");
     // The runners resolve to absolute paths on PATH, outside the project.
     const bin = temp("mcp-bin-");
@@ -205,6 +208,46 @@ describe("the engine plugin (omnirush-mcp-policy)", () => {
     await hooks["tool.execute.before"]({ tool: "bash" }, { args: { command: "curl https://example.com" } });
     const reports = mcpEngineEnv(state).OMNIRUSH_MCP_REPORT_DIR;
     expect(readFileSync(path.join(reports, readdirSync(reports)[0] ?? ""), "utf8")).toContain("playwright");
+  });
+
+  test("an engine that requires the filter but does not start servers env-only starts no local server; remote ones still start", async () => {
+    const { state, root } = setup();
+    rememberMcpPolicy(state, { mcp: policyFixture });
+    process.env.OMNIRUSH_MCP_FILTER = "required";
+    delete (globalThis as Record<symbol, unknown>)[MCP_ENV_ONLY_MARK];
+    const config = () => ({ mcp: {
+      files: { type: "local", command: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "{file:../outside.txt}"] },
+      figma: { type: "remote", url: "http://127.0.0.1:3845/mcp" },
+    } }) as Record<string, unknown>;
+    const older = config();
+    await (await omnirushMcpPolicy({ directory: root })).config({}, older);
+    expect(Object.keys(older.mcp as object)).toEqual(["figma"]);
+    let report = workspaceMcpReport(state, root);
+    expect(report?.decisions[0]).toMatchObject({ name: "files", status: "blocked", code: "engine_update", reason: "This MCP server needs a newer engine; update OmniRush to use it." });
+    expect(report?.decisions[1]).toMatchObject({ name: "figma", status: "allowed" });
+    expect(report).toMatchObject({ filter_required: true, env_only: false });
+    // The add route says the same while the last engine run was an older one.
+    expect(decideMcpEntry(state, root, "filesystem", FILESYSTEM)).toMatchObject({ status: "blocked", code: "engine_update", reason: MCP_REASONS.engine_update });
+
+    (globalThis as Record<symbol, unknown>)[MCP_ENV_ONLY_MARK] = true;
+    const newer = config();
+    newer.mcp = { files: FILESYSTEM, figma: (newer.mcp as Record<string, unknown>).figma };
+    await (await omnirushMcpPolicy({ directory: root })).config({}, newer);
+    expect(Object.keys(newer.mcp as object).sort()).toEqual(["figma", "filesystem"]);
+    report = workspaceMcpReport(state, root);
+    expect(report?.decisions.map((d) => d.status)).toEqual(["allowed", "allowed"]);
+    expect(decideMcpEntry(state, root, "filesystem", FILESYSTEM)).toMatchObject({ status: "allowed" });
+  });
+
+  test("the filter not required: local servers start whatever the engine", async () => {
+    const { state, root } = setup();
+    rememberMcpPolicy(state, { mcp: policyFixture });
+    delete process.env.OMNIRUSH_MCP_FILTER;
+    delete (globalThis as Record<symbol, unknown>)[MCP_ENV_ONLY_MARK];
+    const output = { mcp: { files: FILESYSTEM, figma: { type: "remote", url: "http://127.0.0.1:3845/mcp" } } } as Record<string, unknown>;
+    await (await omnirushMcpPolicy({ directory: root })).config({}, output);
+    expect(Object.keys(output.mcp as object).sort()).toEqual(["figma", "filesystem"]);
+    expect(workspaceMcpReport(state, root)).toMatchObject({ filter_required: false, env_only: false });
   });
 
   test("a missing or empty MCP plugin file is reported (the engine then starts no MCP server)", () => {
