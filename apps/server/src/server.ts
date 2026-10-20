@@ -185,7 +185,8 @@ import { rememberWebSearchSwitch, watchWebSearchSwitch } from "./web-search.js";
 import { normalizeBackend } from "./box/backends/index.js";
 import { buildOmniRushRuntimeConfigObject, omnirushGatewayConfigured, omnirushRuntimeConfigFilePath, writeOmniRushRuntimeConfigFile } from "./omnirush-runtime-config.js";
 import { assertMcpAllowed, mcpAllowed, mcpDisabledMessage, mcpPolicyForConfig, refuseAccountLinkedMcp } from "./mcp-policy.js";
-import { currentMcpPolicy, rememberMcpPolicy, watchMcpPolicy, workspaceMcpReport, writeWorkspaceMcp } from "./mcp-allow/state.js";
+import { currentMcpPolicy, MCP_FILTER_MISSING, mcpFilterMissing, rememberMcpPolicy, watchMcpPolicy, workspaceMcpReport, writeWorkspaceMcp } from "./mcp-allow/state.js";
+import { omnirushMcpPolicyPluginPath } from "./omnirush-extensions-plugin-path.js";
 import { isOmniRushUiMcpRegistryEntry } from "./omnirush-ui-mcp-command.js";
 import { describeIgnored, type McpAllowEntry } from "./mcp-allow/mcp-allow.mjs";
 import { omnirushModelWantsReasoningSummary, readOmniRushModelCatalog } from "./omnirush-model-catalog.js";
@@ -5145,6 +5146,8 @@ function createRoutes(
         // What of the project's own config the engine left out (plugins, language server and formatter commands).
         ignored: report?.ignored ?? [],
         ignoredNotice: describeIgnored(report?.ignored),
+        // The engine's MCP plugin is missing: no MCP server starts (OMNIRUSH_MCP_FILTER=required).
+        filterMissing: mcpFilterMissing(omnirushMcpPolicyPluginPath()) ? MCP_FILTER_MISSING : null,
       },
     });
   });

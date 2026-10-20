@@ -6,7 +6,7 @@
 //
 // The engine gets the three paths in its environment; its plugin
 // (opencode-plugins/omnirush-mcp-policy.ts) reads them at each project's start.
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import {
@@ -50,7 +50,22 @@ export function mcpEngineEnv(stateDir: string, env: Record<string, string | unde
     OMNIRUSH_MCP_REPORT_DIR: mcpReportDir(stateDir),
     OMNIRUSH_MCP_WORKSPACE_DIR: mcpWorkspaceDir(stateDir),
     OMNIRUSH_PROJECT_CODE: env.OMNIRUSH_PROJECT_CODE?.trim() === "1" ? "1" : "0",
+    // The engine starts no MCP server unless the MCP plugin marked its config: a missing or broken plugin
+    // fails closed (engine 1.18.32-ux4 and later).
+    OMNIRUSH_MCP_FILTER: "required",
   };
+}
+
+export const MCP_FILTER_MISSING =
+  "The MCP filter did not load, so no MCP servers start in this app (none run unfiltered). Reinstall OmniRush.ai if this keeps happening.";
+
+/** Whether the MCP plugin file the engine loads is missing or cannot be read (then the engine starts no MCP server). */
+export function mcpFilterMissing(pluginPath: string): boolean {
+  try {
+    return !statSync(pluginPath).isFile() || readFileSync(pluginPath, "utf8").length === 0;
+  } catch {
+    return true;
+  }
 }
 
 /** The policy as last seen; null: MCP off (never seen, or unreadable). */

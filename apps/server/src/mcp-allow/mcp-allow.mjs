@@ -859,6 +859,20 @@ export function describeDecision(d) {
   return `MCP ${d.name}: blocked. ${d.reason}`;
 }
 
+/**
+ * The mark the engine looks for (OMNIRUSH_MCP_FILTER=required): this filter ran on its config. Without it the
+ * engine starts no MCP server, so a missing or broken filter fails closed. Not enumerable: never in a config.
+ */
+export const MCP_FILTERED_MARK = Symbol.for("omnirush.mcp.filtered");
+
+function markFiltered(...configs) {
+  for (const config of configs) {
+    if (isRecord(config)) {
+      try { Object.defineProperty(config, MCP_FILTERED_MARK, { value: true, enumerable: false, configurable: true }); } catch { /* frozen */ }
+    }
+  }
+}
+
 function configTarget(input, output) {
   if (isRecord(output) && (Object.hasOwn(output, "mcp") || !isRecord(input))) return output;
   return isRecord(input) ? input : isRecord(output) ? output : null;
@@ -910,12 +924,14 @@ export function createMcpPolicyHooks(options = {}) {
     config: async (input, output) => {
       try {
         apply(input, output);
+        markFiltered(input, output);
       } catch {
         // Never leave the engine's own list in place: no servers at all.
         const target = configTarget(input, output);
         if (target) target.mcp = {};
         state.localOnly = [];
         state.pathInputs = [];
+        markFiltered(input, output);
       }
     },
     "tool.execute.before": async (input, output) => {

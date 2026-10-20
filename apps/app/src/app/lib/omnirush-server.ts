@@ -701,6 +701,8 @@ export type OmniRushMcpPolicyView = {
   ignored?: Array<{ kind: "plugin" | "lsp" | "formatter" | "provider"; name: string; source: string | null }>;
   /** One line about it, or null. */
   ignoredNotice?: string | null;
+  /** The engine's MCP filter is missing, so no MCP server starts (fails closed); the warning, or null. */
+  filterMissing?: string | null;
 };
 
 export type OmniRushMcpAppResource = {
