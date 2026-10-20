@@ -126,3 +126,5 @@ export function mcpResult(state: Record<string, unknown>, image?: { data: Uint8A
 export function parseResultText(text: unknown): Record<string, unknown> | null;
 export function isComputerTool(name: unknown): boolean;
 export function osName(platform?: string): string;
+export function keyFromKeysymName(name: unknown): string | null;
+export function keyFromVirtualKey(vk: unknown): string | null;

@@ -272,11 +272,15 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
       try { spool.put({ bytes, mime, width: model.width, height: model.height, full, thumb: encodeJpeg(fitLongSide(model, 320), { quality: 70 }), ocr, masked }); } catch { /* the archive copy is best effort */ }
     }
     const ratio = model.width / raw.width;
-    const caret = raw.caret ? { x: raw.caret.x * ratio, y: raw.caret.y * ratio, width: raw.caret.width * ratio, height: raw.caret.height * ratio } : null;
+    const scaled = (r) => ({ x: r.x * ratio, y: r.y * ratio, width: r.width * ratio, height: r.height * ratio });
+    const caret = raw.caret ? scaled(raw.caret) : null;
+    // What the host can read on screen (macOS: AX / text recognition), for the per-act rules only: never sent to the model.
+    const texts = Array.isArray(raw.texts) ? raw.texts.filter((t) => t && typeof t.text === "string" && [t.x, t.y, t.width, t.height].every(Number.isFinite)).slice(0, 2000).map((t) => ({ ...scaled(t), text: t.text.slice(0, 200) })) : null;
+    const secureFields = (Array.isArray(raw.secure_fields) ? raw.secure_fields : raw.secure ?? []).filter((r) => r && [r.x, r.y, r.width, r.height].every(Number.isFinite)).map(scaled);
     const id = randomUUID();
     const value = {
       id, at: Date.now(), window: w, sha, mime, bytes,
-      model: { width: model.width, height: model.height }, grid: luminanceGrid(model), caret,
+      model: { width: model.width, height: model.height }, grid: luminanceGrid(model), caret, texts, secureFields,
       ref: { id, width: model.width, height: model.height, sha256: sha, mime, ...(full ? { full: { width: full.width, height: full.height, sha256: full.sha256 } } : {}), ocr, masked },
     };
     s.lastFrame = { sha, width: model.width, height: model.height, mime, data_url: `data:${mime};base64,${bytes.toString("base64")}`, at: now() };
@@ -305,6 +309,17 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     update();
     const l = limits();
     return mcpResult(observeResult({ session_id: s.id, observation: obs.ref, window: windowRef(w), screen: s.screen, scale: w.bounds.width / obs.model.width, dpi: w.dpi, monitor_id: w.monitor, cursor: await native.call("cursor").catch(() => null), os, expires_in_ms: l.observation_ttl_seconds * 1000, actions_left: Math.max(0, l.actions_per_session - s.actions), seconds_left: Math.max(0, Math.ceil((s.expiresAt - Date.now()) / 1000)) }), includeImage ? { data: obs.bytes, mime: obs.mime } : null);
+  }
+
+  /** The on-screen text at (or within 24 px of) the action's point, and whether it is in a secure field. Unknown text: undefined. */
+  function targetAt(observed, action) {
+    const p = action.type === "drag" ? action.path.at(-1) : action.x !== undefined ? { x: action.x, y: action.y } : null;
+    if (!p) return {};
+    const inside = (r, pad) => p.x >= r.x - pad && p.x <= r.x + r.width + pad && p.y >= r.y - pad && p.y <= r.y + r.height + pad;
+    const secure = (observed.secureFields ?? []).some((r) => inside(r, 0));
+    if (!observed.texts) return secure ? { secure } : {};
+    const near = observed.texts.filter((t) => inside(t, 24)).sort((a, b) => (inside(a, 0) ? 0 : 1) - (inside(b, 0) ? 0 : 1)).slice(0, 4);
+    return { text: near.map((t) => t.text).join(" "), ...(secure ? { secure } : {}) };
   }
 
   async function actTool(s, args) {
@@ -349,11 +364,12 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
       if (compare.stale) return finish({ ...common, ok: false, code: "stale_observation", message: "The window changed since the observation. Observe again.", next: "computer_observe" });
     }
     // Per-action approval by permission mode (host channel, never the engine's).
-    const decision = actApproval({ mode: settings()?.mode, action, intent: args.intent, target: {}, window: { id: String(current.id), app_id: current.appId, app_name: current.appName, title: current.title }, approved: s.approved, after_takeover: s.afterTakeover });
+    const decision = actApproval({ mode: settings()?.mode, action, intent: args.intent, target: targetAt(observed, action), window: { id: String(current.id), app_id: current.appId, app_name: current.appName, title: current.title }, approved: s.approved, after_takeover: s.afterTakeover, typed_before: s.typedIn === String(current.id) });
     let approval = { asked: false };
     if (decision.ask) {
       // The same action with the same intent, allowed a moment ago (a retry after a fresh observation), is not asked again.
-      const key = JSON.stringify([action, args.intent]);
+      // Keyed to the image too: the same screen, the same action, the same reason.
+      const key = JSON.stringify([action, args.intent, observed.sha]);
       const remembered = s.allowed.get(key);
       if (remembered && remembered > Date.now()) {
         approval = { asked: false, reasons: decision.reasons.map((r) => r.code), by: "person" };
@@ -390,6 +406,9 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
       return finish({ ...common, approval, point, path, cursor_before: cursorBefore, ok: false, code, message: error.message, may_have_acted: action.type !== "wait", next: "computer_session_status" });
     }
     s.lastOperation = Date.now();
+    // "Submit after typing" (Normal, when the host reads no text): typing arms it, a click or Enter after it asks.
+    if (action.type === "type") s.typedIn = String(current.id);
+    else if (["click", "double_click"].includes(action.type) || (action.type === "key" && action.key === "Enter")) s.typedIn = null;
     const cursorAfter = await native.call("cursor").catch(() => null);
     const done = { ...common, approval, point, path, cursor_before: cursorBefore, cursor_after: cursorAfter, ok: true, may_have_acted: action.type !== "wait" };
     if (!args.observe_after) return finish({ ...done, next: "computer_observe" });
@@ -626,6 +645,17 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
   }
 
   /** Whether the latest press (key or button) within `withinMs` was synthetic (injected by a program). */
+  /**
+   * Whether a physical key or button press (not injected by a program, not a remote-debugging
+   * click that makes no OS input) came within `withinMs`: the person's own answer.
+   */
+  async function physicalInput(withinMs = 5000, { foregroundPid = null } = {}) {
+    const value = await native.call("input-source").catch(() => null);
+    if (!value || !value.at || value.synthetic || Date.now() - value.at >= withinMs) return false;
+    // In the answering app's window (when the worker knows which app was in front).
+    return !(foregroundPid && Number.isInteger(value.foreground_pid) && value.foreground_pid !== foregroundPid);
+  }
+
   async function syntheticInput(withinMs = 5000) {
     const value = await native.call("input-source").catch(() => null);
     return Boolean(value && value.synthetic && Date.now() - value.at < withinMs);
@@ -642,5 +672,5 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
   }
 
   update();
-  return { get availability() { return availability; }, os, connect, listen, control, stopAll, syntheticInput, watchInput, state: publicState, close };
+  return { get availability() { return availability; }, os, connect, listen, control, stopAll, syntheticInput, physicalInput, watchInput, state: publicState, close };
 }

@@ -8,6 +8,8 @@ import {
   INSTRUCTIONS,
   isComputerTool,
   isFailure,
+  keyFromKeysymName,
+  keyFromVirtualKey,
   mapPoint,
   mcpResult,
   modelSize,
@@ -59,6 +61,13 @@ describe("contract v2: tools", () => {
     expect(l.screenshots_per_chat).toBe(50);
     expect(DEFAULT_LIMITS.model_long_side).toBe(1280);
     expect(DEFAULT_LIMITS.media_full_bytes).toBe(300 * 1024 * 1024);
+  });
+});
+
+describe("contract v2: pressed keys as a terminal sees them", () => {
+  test("X11 keysym names and Windows virtual keys", () => {
+    expect(["a", "Y", "1", "Return", "Escape", "space", "F5", "Shift_L", "BackSpace"].map(keyFromKeysymName)).toEqual(["a", "y", "1", "Enter", "Escape", "Space", "F5", null, "Backspace"]);
+    expect([0x41, 0x5a, 0x30, 0x0d, 0x1b, 0x74, 0x10, 0x63].map(keyFromVirtualKey)).toEqual(["a", "z", "0", "Enter", "Escape", "F5", null, "3"]);
   });
 });
 
@@ -239,6 +248,15 @@ describe("policy: approvals per permission mode", () => {
     expect(actApproval({ ...plain, window: { ...window, url_host: "bank.example" }, approved: { ...approved, url_host: "shop.example" } }).reasons[0]?.code).toBe("document_changed");
     expect(actApproval({ ...plain, after_takeover: true }).reasons).toEqual([{ code: "after_takeover" }]);
     expect(documentOf("● main.ts - Code", "Code")).toBe("main.ts");
+  });
+
+  test("Normal, no readable text at the target: a click or Enter right after typing asks", () => {
+    expect(actApproval({ ...plain, target: {}, typed_before: true }).reasons).toEqual([{ code: "submit_after_typing" }]);
+    expect(actApproval({ ...plain, action: { type: "key", key: "Enter" }, target: {}, typed_before: true }).ask).toBe(true);
+    expect(actApproval({ ...plain, target: {}, typed_before: false }).ask).toBe(false);
+    // With text the host read there, the target rules decide instead.
+    expect(actApproval({ ...plain, target: { text: "Bold" }, typed_before: true }).ask).toBe(false);
+    expect(actApproval({ ...plain, mode: "auto", target: {}, typed_before: true }).ask).toBe(false);
   });
 
   test("shell screen capture asks; sub-agents get no computer tools", () => {

@@ -408,6 +408,32 @@ export function isComputerTool(name) {
   return typeof name === "string" && name.startsWith(TOOL_PREFIX) && TOOLS.includes(name.slice(TOOL_PREFIX.length));
 }
 
+const KEYSYM_NAMES = { Return: "Enter", KP_Enter: "Enter", Escape: "Escape", BackSpace: "Backspace", Tab: "Tab", ISO_Left_Tab: "Tab", space: "Space", Delete: "Delete", Insert: "Insert", Left: "Left", Up: "Up", Right: "Right", Down: "Down", Home: "Home", End: "End", Prior: "PageUp", Next: "PageDown" };
+const VK_NAMES = { 13: "Enter", 27: "Escape", 8: "Backspace", 9: "Tab", 32: "Space", 46: "Delete", 45: "Insert", 37: "Left", 38: "Up", 39: "Right", 40: "Down", 36: "Home", 35: "End", 33: "PageUp", 34: "PageDown" };
+
+/**
+ * A pressed key as a terminal sees it, from an X11 keysym name: one lower-case
+ * letter or digit for printable keys ("a", "y", "1"), else the canonical name
+ * ("Enter", "Escape", "F5" ...); null for modifiers and the rest.
+ */
+export function keyFromKeysymName(name) {
+  if (typeof name !== "string" || !name) return null;
+  if (/^[A-Za-z0-9]$/.test(name)) return name.toLowerCase();
+  if (KEYSYM_NAMES[name]) return KEYSYM_NAMES[name];
+  const fn = /^F([1-9]|1[0-9]|2[0-4])$/.exec(name);
+  return fn ? name : null;
+}
+
+/** The same from a Windows virtual-key code (0x41-0x5A letters, 0x30-0x39 digits, 0x70- F keys). */
+export function keyFromVirtualKey(vk) {
+  if (!Number.isInteger(vk)) return null;
+  if (vk >= 0x41 && vk <= 0x5a) return String.fromCharCode(vk + 32);
+  if (vk >= 0x30 && vk <= 0x39) return String.fromCharCode(vk);
+  if (vk >= 0x60 && vk <= 0x69) return String.fromCharCode(vk - 0x30);
+  if (vk >= 0x70 && vk <= 0x87) return `F${vk - 0x6f}`;
+  return VK_NAMES[vk] ?? null;
+}
+
 /** The OS name used in results and events. */
 export function osName(platform = process.platform) {
   return platform === "darwin" ? "macos" : platform === "win32" ? "windows" : platform === "linux" ? "linux" : platform;

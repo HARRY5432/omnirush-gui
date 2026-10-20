@@ -13,6 +13,9 @@ import {
   computerUseDir,
   computerUseSettingFor,
   type createChatTracker,
+  expectedHostCommand,
+  hostSecretMatches,
+  sameHostCommand,
   mediaSpoolDir,
   permissionModeName,
   readHostFile,
@@ -69,18 +72,27 @@ export function registerComputerUseRoutes(deps: ComputerUseRouteDeps): void {
     return jsonResponse(await state());
   });
 
+  // Host and event: only Electron main (its per-launch secret, held in this process); the client token is
+  // readable by the agent's shell, so it is not enough to replace the server's command or forge events.
+  const fromMain = (request: Request) => hostSecretMatches(request.headers.get("x-omnirush-computer-use-secret"));
+
   addRoute(routes, "POST", "/computer-use/host", "client", async (ctx) => {
+    if (!fromMain(ctx.request)) return jsonResponse({ ok: false, error: "forbidden" }, 403);
     const body = await deps.readJsonBody(ctx.request);
     const command = Array.isArray(body.command) && body.command.every((part) => typeof part === "string") ? (body.command as string[]) : null;
     const environment = typeof body.environment === "object" && body.environment !== null && !Array.isArray(body.environment)
       ? Object.fromEntries(Object.entries(body.environment as Record<string, unknown>).filter((entry): entry is [string, string] => typeof entry[1] === "string"))
       : {};
-    const changed = writeHostFile(computerUseDir(deps.stateDir()), command && command.length ? { command, environment } : null);
+    const host = command && command.length ? { command, environment } : null;
+    // Only the app's own relay command (expectedHostCommand), or none.
+    if (host && !sameHostCommand(host, expectedHostCommand())) return jsonResponse({ ok: false, error: "unexpected_command" }, 400);
+    const changed = writeHostFile(computerUseDir(deps.stateDir()), host);
     if (changed) void deps.applyEngine().catch(() => undefined);
     return jsonResponse({ ok: true, changed });
   });
 
   addRoute(routes, "POST", "/computer-use/event", "client", async (ctx) => {
+    if (!fromMain(ctx.request)) return jsonResponse({ ok: false, error: "forbidden" }, 403);
     const body = await deps.readJsonBody(ctx.request);
     const event = sessionEventOf(body.event);
     if (!event) return jsonResponse({ ok: false, error: "invalid_event" }, 400);

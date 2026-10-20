@@ -147,7 +147,9 @@ export function createMacNativeWorker({ executable, args = ["worker"], captureLo
       // Painted here on every capture (the host paints the same boxes again, which changes nothing), so
       // the host's stale check compares a masked observation with a masked fresh capture.
       paintBoxes?.(frame, secure);
-      return { width: frame.width, height: frame.height, data: frame.data, secure, caret: frame.caret ?? null, ocr: frame.ocr === "client" ? "client" : "none", credential_boxes: text.length, source: frame.source };
+      // The recognized lines (boxes + text) for the host's per-act rules (risky targets); never sent to the model.
+      const texts = Array.isArray(frame.text_boxes) ? frame.text_boxes.filter((l) => record(l) && typeof l.text === "string" && record(l.box)).map((l) => ({ x: l.box.x, y: l.box.y, width: l.box.width, height: l.box.height, text: l.text })) : null;
+      return { width: frame.width, height: frame.height, data: frame.data, secure, secure_fields: Array.isArray(frame.secure) ? frame.secure : [], ...(frame.ocr === "client" && texts ? { texts } : {}), caret: frame.caret ?? null, ocr: frame.ocr === "client" ? "client" : "none", credential_boxes: text.length, source: frame.source };
     },
     kill() { child.kill(); },
     async close() { if (closed) return; await raw("shutdown", {}, 3000).catch(() => {}); closed = true; if (child.exitCode === null) child.kill(); },

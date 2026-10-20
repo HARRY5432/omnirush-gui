@@ -347,7 +347,9 @@ export function documentOf(title, appName) {
  *   indicator and Stop still apply).
  * `input`: { mode, action, intent, target: { text, secure, url_host },
  * window: { id, app_id, title, app_name, url_host }, approved: { window_id,
- * app_id, title, url_host }, after_takeover }.
+ * app_id, title, url_host }, after_takeover, typed_before } (target.text
+ * undefined: the host reads no text there; typed_before: the last act in this
+ * window was `type`).
  * Returns { ask, reasons: [{ code, detail? }] }.
  */
 export function actApproval(input = {}) {
@@ -363,6 +365,9 @@ export function actApproval(input = {}) {
     const targetWords = riskyWords(target.text);
     if (targetWords.length) reasons.push({ code: "risky_target", detail: targetWords.join(", ") });
   }
+  // No text the host could read at the target: a click or Enter right after typing in this window
+  // may submit what was typed (a login, a message, a payment), so it asks.
+  if (typeof target.text !== "string" && input.typed_before === true && (["click", "double_click"].includes(action.type) || (action.type === "key" && String(action.key).toLowerCase() === "enter"))) reasons.push({ code: "submit_after_typing" });
   if (action.type === "type") {
     if (target.secure === true) reasons.push({ code: "secure_field" });
     if (looksLikeCredential(action.text)) reasons.push({ code: "credential_text" });
@@ -391,6 +396,7 @@ export const ASK_REASONS = Object.freeze({
   other_window: "It would act in another window.",
   document_changed: "The window now shows a different page or document",
   after_takeover: "First action after you took over.",
+  submit_after_typing: "It would click or press Enter right after typing, which may send what was typed.",
 });
 
 /**

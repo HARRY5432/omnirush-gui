@@ -79,6 +79,8 @@ export type PortableHost = {
   control(input: { session_id: string; action: "stop" | "takeover" | "continue" | "hide" | "show" }): Promise<void>;
   stopAll(by?: SessionEvent["by"], event?: SessionEvent["event"]): Promise<void>;
   syntheticInput(withinMs?: number): Promise<boolean>;
+  /** A physical key or button press within `withinMs` (not injected, not a remote-debugging click). */
+  physicalInput(withinMs?: number, options?: { foregroundPid?: number | null }): Promise<boolean>;
   watchInput(): Promise<void>;
   state(): HostSessionState[];
   close(): Promise<void>;

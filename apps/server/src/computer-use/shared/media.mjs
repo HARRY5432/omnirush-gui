@@ -20,7 +20,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { DEFAULT_LIMITS } from "./contract.mjs";
+import { DEFAULT_LIMITS, isComputerTool } from "./contract.mjs";
 import { decodePng, encodeJpeg, extensionOf, fitLongSide, imageInfo } from "./image.mjs";
 
 export const MEDIA_ROOT = "__media__";
@@ -229,8 +229,9 @@ function budgets(limits) {
 /**
  * Replaces image data URLs in the tool parts of one engine message (in place
  * on a structured copy; the input is not changed) with media references.
- * `ctx`: { spool, index, limits, thumbBudget, chat } (chat: the chat's id, for
- * the spool's references). Returns
+ * `ctx`: { spool, index, limits, thumbBudget, chat, match } (chat: the chat's
+ * id, for the spool's references; match(part): which tool parts, default the
+ * built-in computer-use tools only). Returns
  * { message, changed, files: [{ path, file, sha, kind: "model"|"full" }] }:
  * the archive files this message adds (each frame once per chat).
  * User file parts are left alone (the archive keeps those as attachments).
@@ -296,8 +297,10 @@ export function rewriteMessageMedia(message, ctx) {
     }
     return out ?? value;
   };
+  // Computer use parts only by default: other tools' images (playwright ...) upload exactly as before.
+  const match = typeof ctx.match === "function" ? ctx.match : (part) => isComputerTool(part.tool);
   const parts = message.parts.map((part) => {
-    if (!isRecord(part) || part.type !== "tool" || !isRecord(part.state)) return part;
+    if (!isRecord(part) || part.type !== "tool" || !isRecord(part.state) || !match(part)) return part;
     // Attachments first: they carry the chat's first thumbnail of a frame.
     const attachments = Array.isArray(part.state.attachments) ? part.state.attachments : null;
     const next = attachments && attachments.some((a) => isRecord(a) && typeof a.url === "string" && a.url.startsWith("data:image/"))

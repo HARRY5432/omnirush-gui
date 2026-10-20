@@ -14,8 +14,10 @@
  * On, in this order: OMNIRUSH_COMPUTER_USE=1/0 in the environment, then the
  * server's block, else off (policy.mjs computerUseSetting).
  */
+import { timingSafeEqual } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { SERVER_ID } from "./shared/contract.mjs";
 import { computerUseSetting, type ComputerUseSetting } from "./shared/policy.mjs";
@@ -56,8 +58,39 @@ export function mediaIndexDir(stateDir: string): string {
 }
 
 /** The engine's environment for its plugins. */
-export function computerUseEngineEnv(stateDir: string): Record<string, string> {
-  return { [COMPUTER_USE_DIR_ENV]: computerUseDir(stateDir) };
+export const COMPUTER_USE_COMMAND_ENV = "OMNIRUSH_COMPUTER_USE_COMMAND";
+
+/**
+ * The only command the built-in server may run: this app's own binary, the
+ * bundled relay and the host's discovery file in the app's profile. Fixed by
+ * the app (the engine gets it in its environment); never read from a file or
+ * a request. Null outside the desktop app (no profile folder known).
+ */
+export function expectedHostCommand(env: Record<string, string | undefined> = process.env): ComputerUseHostFile | null {
+  const profile = env.OMNIRUSH_DESKTOP_USER_DATA_DIR?.trim();
+  if (!profile) return null;
+  const resources = (process as { resourcesPath?: string }).resourcesPath;
+  const packaged = resources ? join(resources, "computer-use", "relay.mjs") : null;
+  const relay = packaged && existsSync(packaged) ? packaged : fileURLToPath(new URL("../../../desktop/electron/computer-use-relay.mjs", import.meta.url));
+  return { command: [process.execPath, relay, join(profile, "computer-use", "connection.json")], environment: { ELECTRON_RUN_AS_NODE: "1" } };
+}
+
+export function computerUseEngineEnv(stateDir: string, env: Record<string, string | undefined> = process.env): Record<string, string> {
+  const command = expectedHostCommand(env);
+  return { [COMPUTER_USE_DIR_ENV]: computerUseDir(stateDir), ...(command ? { [COMPUTER_USE_COMMAND_ENV]: JSON.stringify(command) } : {}) };
+}
+
+/** The per-launch secret Electron main holds (in this process only: never on disk, never in an environment). */
+export const HOST_SECRET_KEY = Symbol.for("omnirush.computer-use.host-secret");
+export function hostSecretMatches(given: string | null | undefined): boolean {
+  const held: unknown = (globalThis as Record<symbol, unknown>)[HOST_SECRET_KEY];
+  if (typeof held !== "string" || held.length < 32 || typeof given !== "string") return false;
+  const a = Buffer.from(held), b = Buffer.from(given);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+export function sameHostCommand(a: ComputerUseHostFile | null, b: ComputerUseHostFile | null): boolean {
+  return Boolean(a && b) && JSON.stringify(a?.command) === JSON.stringify(b?.command) && JSON.stringify(a?.environment) === JSON.stringify(b?.environment);
 }
 
 /** The block as last seen (null: never seen). */
@@ -113,9 +146,12 @@ export function writeHostFile(dir: string, host: ComputerUseHostFile | null): bo
 export function computerUseBuiltins(dir: string | null | undefined, env: Record<string, string | undefined> = process.env): Record<string, Record<string, unknown> | null> {
   if (!dir) return { [SERVER_ID]: null };
   const setting = computerUseSettingFor(dir, env);
+  // The command comes from the app (the engine's environment); host.json only says the host runs, and must agree.
+  let expected: ComputerUseHostFile | null = null;
+  try { expected = JSON.parse(env[COMPUTER_USE_COMMAND_ENV] ?? "null") as ComputerUseHostFile | null; } catch { expected = null; }
   const host = setting.enabled && setting.real_screen ? readHostFile(dir) : null;
-  if (!host || !existsSync(host.command[0] ?? "")) return { [SERVER_ID]: null };
-  return { [SERVER_ID]: { type: "local", command: host.command, environment: host.environment, enabled: true, timeout: COMPUTER_USE_MCP_TIMEOUT_MS, title: "Computer use" } };
+  if (!host || !expected || !sameHostCommand(host, expected) || !existsSync(expected.command[0] ?? "")) return { [SERVER_ID]: null };
+  return { [SERVER_ID]: { type: "local", command: expected.command, environment: expected.environment, enabled: true, timeout: COMPUTER_USE_MCP_TIMEOUT_MS, title: "Computer use" } };
 }
 
 /** The desktop's approval mode as the shared rules name it. */

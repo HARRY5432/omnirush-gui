@@ -16,6 +16,8 @@ import { readFileSync, readlinkSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 
+import { keyFromKeysymName, keyFromVirtualKey } from "./contract.mjs";
+
 const require = createRequire(import.meta.url);
 const koffi = require(process.env.OMNIRUSH_KOFFI || "koffi");
 
@@ -24,6 +26,19 @@ let generation = 0;
 let backend;
 let held = { keys: [], buttons: [] };
 const lastInput = { synthetic: false, at: 0, kind: "" };
+// The latest physical presses (not injected): what was pressed and which app was in front, for the
+// hosts' "the person answered" checks. A short ring, so presses during an open question are kept.
+const presses = [];
+function notePress(entry) {
+  Object.assign(lastInput, { synthetic: entry.synthetic, at: entry.at, kind: entry.kind });
+  if (entry.synthetic) return;
+  presses.push({ at: entry.at, kind: entry.kind, key: entry.key ?? null, foreground_pid: entry.foreground_pid ?? null });
+  if (presses.length > 16) presses.shift();
+}
+function inputSource() {
+  const physical = presses.at(-1) ?? null;
+  return { ...lastInput, key: physical?.key ?? null, foreground_pid: physical?.foreground_pid ?? null, physical_at: physical?.at ?? 0, presses: presses.slice() };
+}
 const changed = () => { generation += 1; post({ event: "person-input", generation }); };
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -151,7 +166,11 @@ function windows() {
         const value = koffi.decode(lParam, type);
         if (Number(value.dwExtraInfo) !== marker) {
           const down = [0x100, 0x104, 0x201, 0x204, 0x207].includes(Number(wParam));
-          if (down) Object.assign(lastInput, { synthetic: (value.flags & injectedFlag) !== 0, at: Date.now(), kind: type === hookKey ? "key" : "pointer" });
+          if (down) {
+            const fg = [0];
+            try { pidOf(foreground(), fg); } catch { /* unknown */ }
+            notePress({ synthetic: (value.flags & injectedFlag) !== 0, at: Date.now(), kind: type === hookKey ? "key" : "pointer", key: type === hookKey ? keyFromVirtualKey(Number(value.vkCode)) : null, foreground_pid: fg[0] || null });
+          }
           if (interrupting) { changed(); release(); }
         }
       }
@@ -479,6 +498,9 @@ function x11() {
   const selectEvents = xi.func("int XISelectEvents(void *display, ulong window, CU2_XIEventMask *masks, int count)");
   const major = [2], minor = [0];
   if (xi.func("int XIQueryVersion(void *display, _Inout_ int *major, _Inout_ int *minor)")(display, major, minor) !== 0) fail("input_unavailable", "XInput2 is required to notice your input.");
+  const keycodeKeysym = x.func("ulong XkbKeycodeToKeysym(void *display, uint8_t keycode, int group, int level)");
+  const keysymString = x.func("str XKeysymToString(ulong keysym)");
+  const keysymName = (sym) => (sym ? keysymString(sym) : null);
   const testDevices = new Set();
   const refreshDevices = () => { const count = [0], ptr = queryDevices(display, 0, count); testDevices.clear(); if (ptr) { for (const d of koffi.decode(ptr, deviceType, count[0])) if (d.name.includes("XTEST")) testDevices.add(d.deviceid); freeDevices(ptr); } };
   refreshDevices();
@@ -499,7 +521,15 @@ function x11() {
           const raw = koffi.decode(cookie.data, rawType);
           const ours = injecting && testDevices.has(raw.sourceid);
           if (ours) continue;
-          if (cookie.evtype === 13 || cookie.evtype === 15) Object.assign(lastInput, { synthetic: testDevices.has(raw.sourceid), at: Date.now(), kind: cookie.evtype === 13 ? "key" : "pointer" });
+          if (cookie.evtype === 13 || cookie.evtype === 15) {
+            const synthetic = testDevices.has(raw.sourceid);
+            let key = null, fg = null;
+            if (!synthetic) {
+              try { if (cookie.evtype === 13) key = keyFromKeysymName(keysymName(keycodeKeysym(display, raw.detail, 0, 0))); } catch { /* unknown */ }
+              try { fg = Number(prop(activeWindow(), "_NET_WM_PID")[0] ?? 0) || null; } catch { /* unknown */ }
+            }
+            notePress({ synthetic, at: Date.now(), kind: cookie.evtype === 13 ? "key" : "pointer", key, foreground_pid: fg });
+          }
           if (interrupting) changed();
         }
       } finally { freeEventData(display, cookie); }
@@ -859,7 +889,7 @@ process.on("message", async (message) => {
       post({ id, result: {} });
       return;
     }
-    if (method === "input-source") { backend.poll(); post({ id, result: { ...lastInput } }); return; }
+    if (method === "input-source") { backend.poll(); post({ id, result: inputSource() }); return; }
     if (busy) fail("busy", "Desktop operations must be sequential.");
     busy = true; ownsBusy = true;
     backend.poll();

@@ -229,6 +229,19 @@ describe("media references", () => {
     expect(rewriteMessageMedia(untouched, { spool, index: createMediaIndex(path.join(dir, "j.json")), limits: {} }).message).toBe(untouched);
   });
 
+  test("only computer use parts by default: a playwright screenshot stays exactly as it was", () => {
+    const dir = tmp();
+    const spool = createMediaSpool(path.join(dir, "spool"));
+    const png = encodePng(frame(30, 20, 31));
+    const part = { ...toolPart("pw", [dataUrl("image/png", png)]), tool: "playwright_browser_take_screenshot" };
+    const message = { parts: [part] };
+    const out = rewriteMessageMedia(message, { spool, index: createMediaIndex(path.join(dir, "i.json")), limits: {} });
+    expect(out.message).toBe(message);
+    expect(out.files).toEqual([]);
+    const all = rewriteMessageMedia(message, { spool, index: createMediaIndex(path.join(dir, "j.json")), limits: {}, match: () => true });
+    expect(all.files.length).toBe(1);
+  });
+
   test("data URL parsing", () => {
     expect(parseImageDataUrl("data:image/png;base64,AQID")).toEqual({ mime: "image/png", bytes: Buffer.from([1, 2, 3]) });
     expect(parseImageDataUrl("data:text/plain;base64,AQID")).toBeNull();

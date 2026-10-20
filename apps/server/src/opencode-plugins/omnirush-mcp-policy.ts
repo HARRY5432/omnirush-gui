@@ -65,14 +65,14 @@ function withScreenBashRules(permission: Record<string, unknown>): Record<string
 }
 
 /** Adds the left-out `computer-use` entry to the project's MCP report (Settings > MCP). */
-function reportReserved(root: string): void {
+function reportReserved(root: string, names: string[]): void {
   const dir = process.env.OMNIRUSH_MCP_REPORT_DIR;
   if (!dir) return;
   try {
     const file = reportPath(dir, root);
     const report: unknown = JSON.parse(readFileSync(file, "utf8"));
     if (!isRecord(report) || !Array.isArray(report.decisions)) return;
-    report.decisions = [...report.decisions.filter((d) => !(isRecord(d) && d.name === SERVER_ID)), { name: SERVER_ID, status: "blocked", code: "reserved", reason: "This name belongs to the app's built-in computer use; this entry is left out." }];
+    report.decisions = [...report.decisions.filter((d) => !(isRecord(d) && names.includes(String(d.name)))), ...names.map((name) => ({ name, status: "blocked", code: "reserved", reason: "This name belongs to the app's built-in computer use; this entry is left out." }))];
     const temp = `${file}.${process.pid}.cu.tmp`;
     writeFileSync(temp, JSON.stringify(report), { mode: 0o600 });
     renameSync(temp, file);
@@ -93,7 +93,24 @@ function withoutSubagentComputerTools(target: Record<string, unknown>): void {
   target.agent = agents;
 }
 
-export default async function omnirushMcpPolicy(input?: { directory?: string }) {
+/** Config names that are, or would make tool names of, the built-in server (`computer-use`, `computer-use_x` → `computer-use_x_act`). */
+function reservedNames(mcp: Record<string, unknown>): string[] {
+  return Object.keys(mcp).filter((name) => name.toLowerCase().startsWith(SERVER_ID));
+}
+
+type SessionClient = { session?: { get?: (options: { path: { id: string } }) => Promise<{ data?: { parentID?: unknown } } | undefined> } };
+
+export default async function omnirushMcpPolicy(input?: { directory?: string; client?: SessionClient }) {
+  // Sub-agents (sessions with a parent) never use computer use (one host lease per app).
+  const parents = new Map<string, boolean>();
+  const isSubagent = async (sessionID: unknown): Promise<boolean> => {
+    if (typeof sessionID !== "string" || !sessionID || !input?.client?.session?.get) return false;
+    if (!parents.has(sessionID)) {
+      const found = await input.client.session.get({ path: { id: sessionID } }).catch(() => undefined);
+      parents.set(sessionID, Boolean(found?.data?.parentID));
+    }
+    return parents.get(sessionID) === true;
+  };
   const root = path.resolve(input?.directory || process.cwd());
   const hooks = createMcpPolicyHooks({
     directory: root,
@@ -113,14 +130,14 @@ export default async function omnirushMcpPolicy(input?: { directory?: string }) 
         }
       }
       // The id `computer-use` belongs to the app's built-in server: a config entry with it is left out (and reported).
-      const reserved = target && isRecord(target.mcp) && Object.hasOwn(target.mcp, SERVER_ID);
-      if (target && reserved && isRecord(target.mcp)) {
-        const { [SERVER_ID]: _dropped, ...rest } = target.mcp;
-        target.mcp = rest;
+      const reserved = target && isRecord(target.mcp) ? reservedNames(target.mcp) : [];
+      if (target && reserved.length && isRecord(target.mcp)) {
+        const mcp = target.mcp;
+        target.mcp = Object.fromEntries(Object.entries(mcp).filter(([name]) => !reserved.includes(name)));
       }
       // Fails closed: an error while applying the list leaves no servers at all.
       await hooks.config(configInput, output);
-      if (reserved) reportReserved(root);
+      if (reserved.length) reportReserved(root, reserved);
       const builtin = target ? computerUseBuiltins(process.env[COMPUTER_USE_DIR_ENV])[SERVER_ID] : null;
       if (target && builtin) {
         target.mcp = { ...(isRecord(target.mcp) ? target.mcp : {}), [SERVER_ID]: builtin };
@@ -139,6 +156,11 @@ export default async function omnirushMcpPolicy(input?: { directory?: string }) 
     "experimental.chat.messages.transform": async (_input: unknown, output: { messages?: unknown[] }) => {
       if (Array.isArray(output?.messages)) pruneImages(output.messages, { match: (part: Record<string, unknown>) => isComputerTool(part.tool) });
     },
-    "tool.execute.before": hooks["tool.execute.before"],
+    "tool.execute.before": async (toolInput: { tool?: unknown; args?: unknown; sessionID?: unknown }, toolOutput?: { args?: unknown }) => {
+      if (typeof toolInput?.tool === "string" && toolInput.tool.startsWith(`${SERVER_ID}_`) && (await isSubagent(toolInput.sessionID))) {
+        throw new Error("Computer use is not available to sub-agents. Ask the main agent to use it.");
+      }
+      await hooks["tool.execute.before"](toolInput, toolOutput);
+    },
   };
 }

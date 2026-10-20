@@ -12,6 +12,7 @@
 // chat's permission mode, are answered in the main window (desktop IPC from
 // its main frame, input checked for synthetic events), never by the agent.
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -24,7 +25,22 @@ import { createComputerPreview } from "./computer-use-preview.mjs";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 const STATUS_CHANNEL = "omnirush:computer-use:status";
+// A per-launch secret, held in this process only (the local server runs in this process and reads it here):
+// the host and event routes take it, so a client token read from disk cannot replace the host or forge events.
+const HOST_SECRET = randomBytes(32).toString("hex");
+globalThis[Symbol.for("omnirush.computer-use.host-secret")] = HOST_SECRET;
+const secretHeaders = { "x-omnirush-computer-use-secret": HOST_SECRET };
+// The profile folder the local server expects the host in (computer-use/desktop.ts expectedHostCommand).
+const profileDir = () => process.env.OMNIRUSH_DESKTOP_USER_DATA_DIR?.trim() || app.getPath("userData");
 const SYNTHETIC_MESSAGE = "Use your own mouse or keyboard to approve.";
+// Answers need a physical press in this app's window. OMNIRUSH_COMPUTER_USE_TEST_ANSWERS=1 (rigs only: the
+// app's own environment, which the agent cannot set for a running app) accepts remote-debugging clicks.
+const testAnswers = process.env.OMNIRUSH_COMPUTER_USE_TEST_ANSWERS === "1";
+async function personAnswered() {
+  if (!host) return false;
+  if (await host.syntheticInput()) return false;
+  return testAnswers || host.physicalInput(5000, { foregroundPid: process.pid });
+}
 
 let deps = null;
 let server = null; // the last /computer-use/state answer
@@ -148,7 +164,7 @@ async function hostContext() {
 
 async function reportEvent(event) {
   const session = host?.state().find((s) => s.id === event.session_id);
-  await serverFetch("/computer-use/event", { method: "POST", body: JSON.stringify({ event, ...(session?.chat ? { chat: session.chat } : {}) }) }).catch(() => {});
+  await serverFetch("/computer-use/event", { method: "POST", headers: secretHeaders, body: JSON.stringify({ event, ...(session?.chat ? { chat: session.chat } : {}) }) }).catch(() => {});
 }
 
 async function startHost() {
@@ -174,11 +190,11 @@ async function startHost() {
       preview.bind(created);
     }
     host = created;
-    listener = await created.listen(path.join(app.getPath("userData"), "computer-use"));
+    listener = await created.listen(path.join(profileDir(), "computer-use"));
     const relay = app.isPackaged ? path.join(process.resourcesPath, "computer-use", "relay.mjs") : path.join(__dirname, "computer-use-relay.mjs");
     const command = [process.execPath, relay, listener.discoveryPath];
     const environment = { ELECTRON_RUN_AS_NODE: "1" };
-    await serverFetch("/computer-use/host", { method: "POST", body: JSON.stringify({ command, environment }) });
+    await serverFetch("/computer-use/host", { method: "POST", headers: secretHeaders, body: JSON.stringify({ command, environment }) });
     pushStatus();
     return created;
   })().catch((error) => { hostPromise = null; host = null; throw error; });
@@ -187,7 +203,7 @@ async function startHost() {
 
 async function stopHost(by = "server") {
   const current = host;
-  await serverFetch("/computer-use/host", { method: "POST", body: JSON.stringify({ host: null }) }).catch(() => {});
+  await serverFetch("/computer-use/host", { method: "POST", headers: secretHeaders, body: JSON.stringify({ host: null }) }).catch(() => {});
   if (!current) return;
   await current.stopAll(by).catch(() => {});
   for (const entry of pending.values()) entry.resolve({ decision: "deny" });
@@ -241,14 +257,14 @@ async function computerUseAnswer(answer) {
   const entry = pending.get(answer?.request_id);
   if (!entry) throw new Error("This request has ended.");
   const allowing = answer.decision !== "deny";
-  if (allowing && host && await host.syntheticInput()) throw new Error(SYNTHETIC_MESSAGE);
+  if (allowing && !(await personAnswered())) throw new Error(SYNTHETIC_MESSAGE);
   const decision = entry.request.kind === "open" ? (["chat", "once", "deny"].includes(answer.decision) ? answer.decision : "deny") : (answer.decision === "allow" ? "allow" : "deny");
   entry.resolve({ decision, ...(typeof answer.window_id === "string" ? { window_id: answer.window_id } : {}) });
 }
 
 async function computerUseControl(value) {
   if (!host) throw new Error("Computer use is not running.");
-  if (value?.action === "continue" && await host.syntheticInput()) throw new Error(SYNTHETIC_MESSAGE);
+  if (value?.action === "continue" && !(await personAnswered())) throw new Error(SYNTHETIC_MESSAGE);
   await host.control({ session_id: value?.session_id, action: value?.action });
   pushStatus();
 }

@@ -7,6 +7,9 @@ import path from "node:path";
 
 import omnirushMcpPolicy from "../opencode-plugins/omnirush-mcp-policy.js";
 import { MediaStore } from "../session-archive/media-store.js";
+import type { Route } from "../routes/registry.js";
+import { registerComputerUseRoutes } from "./routes.js";
+import { expectedHostCommand, HOST_SECRET_KEY } from "./desktop.js";
 import { computerUseBuiltins, computerUseDir, computerUseSettingFor, createChatTracker, permissionModeName, rememberComputerUseSwitch, sessionEventOf, writeHostFile } from "./desktop.js";
 import { createMediaRewriter, usesComputer } from "./media-capture.js";
 import { encodePng } from "./shared/image.mjs";
@@ -37,10 +40,16 @@ describe("switch and built-in entry", () => {
     expect(computerUseSettingFor(dir, { OMNIRUSH_COMPUTER_USE: "0" }).enabled).toBe(false);
     expect(computerUseBuiltins(dir, {})).toEqual({ "computer-use": null });
     expect(writeHostFile(dir, { command: [process.execPath, "/x/relay.mjs", "/x/connection.json"], environment: { ELECTRON_RUN_AS_NODE: "1" } })).toBe(true);
-    expect(computerUseBuiltins(dir, {})["computer-use"]).toMatchObject({ type: "local", command: [process.execPath, "/x/relay.mjs", "/x/connection.json"], environment: { ELECTRON_RUN_AS_NODE: "1" }, enabled: true, timeout: 300_000 });
+    const pinned = { OMNIRUSH_COMPUTER_USE_COMMAND: JSON.stringify({ command: [process.execPath, "/x/relay.mjs", "/x/connection.json"], environment: { ELECTRON_RUN_AS_NODE: "1" } }) };
+    // The command comes only from the app's environment; host.json must agree with it.
+    expect(computerUseBuiltins(dir, {})).toEqual({ "computer-use": null });
+    expect(computerUseBuiltins(dir, pinned)["computer-use"]).toMatchObject({ type: "local", command: [process.execPath, "/x/relay.mjs", "/x/connection.json"], environment: { ELECTRON_RUN_AS_NODE: "1" }, enabled: true, timeout: 300_000 });
+    writeHostFile(dir, { command: [process.execPath, "/tmp/evil.mjs"], environment: {} });
+    expect(computerUseBuiltins(dir, pinned)).toEqual({ "computer-use": null });
+    writeHostFile(dir, { command: [process.execPath, "/x/relay.mjs", "/x/connection.json"], environment: { ELECTRON_RUN_AS_NODE: "1" } });
     expect(rememberComputerUseSwitch(state, {})).toBe(true);
     expect(computerUseBuiltins(dir, {})).toEqual({ "computer-use": null });
-    expect(computerUseBuiltins(dir, { OMNIRUSH_COMPUTER_USE: "1" })["computer-use"]).not.toBeNull();
+    expect(computerUseBuiltins(dir, { ...pinned, OMNIRUSH_COMPUTER_USE: "1" })["computer-use"]).not.toBeNull();
     expect(writeHostFile(dir, null)).toBe(true);
     expect(computerUseBuiltins(undefined, {})).toEqual({ "computer-use": null });
   });
@@ -75,8 +84,9 @@ describe("engine MCP plugin", () => {
     const dir = computerUseDir(state);
     const reports = path.join(state, "reports");
     writeHostFile(dir, { command: [process.execPath, "/x/relay.mjs", "/x/c.json"], environment: {} });
-    const { config } = await run({ OMNIRUSH_COMPUTER_USE_DIR: dir, OMNIRUSH_COMPUTER_USE: "1", OMNIRUSH_MCP_REPORT_DIR: reports }, {
-      mcp: { "computer-use": { type: "local", command: ["npx", "-y", "evil"] } },
+    const pinnedEnv = { OMNIRUSH_COMPUTER_USE_COMMAND: JSON.stringify({ command: [process.execPath, "/x/relay.mjs", "/x/c.json"], environment: {} }) };
+    const { config } = await run({ ...pinnedEnv, OMNIRUSH_COMPUTER_USE_DIR: dir, OMNIRUSH_COMPUTER_USE: "1", OMNIRUSH_MCP_REPORT_DIR: reports }, {
+      mcp: { "computer-use": { type: "local", command: ["npx", "-y", "evil"] }, "computer-use_computer": { type: "local", command: ["npx", "-y", "evil2"] } },
       permission: { "*": "ask", bash: { "*": "allow", "rm -r*": "ask" } },
       agent: { custom: { mode: "subagent" } },
     });
@@ -89,6 +99,7 @@ describe("engine MCP plugin", () => {
     for (const name of ["general", "explore", "custom"]) expect(agents[name]?.permission["computer-use_*"]).toBe("deny");
     const report = JSON.parse(readFileSync(path.join(reports, readdirName(reports)), "utf8")) as { decisions: Array<{ name: string; code: string }> };
     expect(report.decisions.find((d) => d.name === "computer-use")).toMatchObject({ code: "reserved" });
+    expect(report.decisions.find((d) => d.name === "computer-use_computer")).toMatchObject({ code: "reserved" });
   });
 
   test("off: nothing is added and the config is as before", async () => {
@@ -101,7 +112,8 @@ describe("engine MCP plugin", () => {
     const state = tmp();
     const dir = computerUseDir(state);
     writeHostFile(dir, { command: [process.execPath, "/x/relay.mjs", "/x/c.json"], environment: {} });
-    const { config } = await run({ OMNIRUSH_COMPUTER_USE_DIR: dir, OMNIRUSH_COMPUTER_USE: "1" }, { permission: { bash: { "*": "allow" } } });
+    const pinnedEnv = { OMNIRUSH_COMPUTER_USE_COMMAND: JSON.stringify({ command: [process.execPath, "/x/relay.mjs", "/x/c.json"], environment: {} }) };
+    const { config } = await run({ ...pinnedEnv, OMNIRUSH_COMPUTER_USE_DIR: dir, OMNIRUSH_COMPUTER_USE: "1" }, { permission: { bash: { "*": "allow" } } });
     expect((config.permission as { bash: Record<string, string> }).bash).toEqual({ "*": "allow" });
   });
 
@@ -115,6 +127,42 @@ describe("engine MCP plugin", () => {
     await plugin["experimental.chat.messages.transform"]({}, output);
     expect(computer.filter((p) => p.state.attachments.length).length).toBe(5);
     expect(playwright.filter((p) => p.state.attachments.length).length).toBe(13);
+  });
+});
+
+describe("sub-agents and the routes only Electron main may call", () => {
+  test("a computer tool call from a sub-agent session is refused", async () => {
+    const client = { session: { get: async ({ path: p }: { path: { id: string } }) => ({ data: p.id === "ses_child" ? { parentID: "ses_main" } : {} }) } };
+    const plugin = await omnirushMcpPolicy({ directory: tmp(), client });
+    await expect(plugin["tool.execute.before"]({ tool: "computer-use_computer_act", sessionID: "ses_child", args: {} }, { args: {} })).rejects.toThrow(/sub-agents/);
+    await plugin["tool.execute.before"]({ tool: "computer-use_computer_act", sessionID: "ses_main", args: {} }, { args: {} });
+  });
+
+  test("host and event routes need the per-launch secret and accept only the app's own command", async () => {
+    const routes: Route[] = [];
+    const state = tmp();
+    const recorded: unknown[] = [];
+    registerComputerUseRoutes({ routes, stateDir: () => state, jsonResponse: (d, status = 200) => new Response(JSON.stringify(d), { status }), readJsonBody: async (r) => r.json(), approvalMode: async () => "guarded", readCapabilities: async () => ({}), applyEngine: async () => undefined, chats: createChatTracker(), runningSessions: async () => null, recordTrace: (...args) => recorded.push(args) });
+    const hit = (method: string, p: string, body: unknown, headers: Record<string, string> = {}) => {
+      const route = routes.find((r) => r.method === method && r.regex.test(p));
+      if (!route) throw new Error("no route");
+      return route.handler({ request: new Request(`http://x${p}`, { method, body: JSON.stringify(body), headers }), url: new URL(`http://x${p}`), params: {} } as never);
+    };
+    const saved = process.env.OMNIRUSH_DESKTOP_USER_DATA_DIR;
+    process.env.OMNIRUSH_DESKTOP_USER_DATA_DIR = "/profile";
+    (globalThis as Record<symbol, unknown>)[HOST_SECRET_KEY] = "s".repeat(64);
+    try {
+      const expected = expectedHostCommand();
+      expect((await hit("POST", "/computer-use/host", expected)).status).toBe(403);
+      expect((await hit("POST", "/computer-use/host", { command: [process.execPath, "/tmp/evil.mjs"], environment: {} }, { "x-omnirush-computer-use-secret": "s".repeat(64) })).status).toBe(400);
+      expect((await hit("POST", "/computer-use/host", expected, { "x-omnirush-computer-use-secret": "s".repeat(64) })).status).toBe(200);
+      expect((await hit("POST", "/computer-use/event", { event: { event: "opened", by: "agent" }, chat: "ses_abc" })).status).toBe(403);
+      expect((await hit("POST", "/computer-use/event", { event: { event: "opened", by: "agent" }, chat: "ses_abc" }, { "x-omnirush-computer-use-secret": "s".repeat(64) })).status).toBe(200);
+      expect(recorded.length).toBe(1);
+    } finally {
+      delete (globalThis as Record<symbol, unknown>)[HOST_SECRET_KEY];
+      if (saved === undefined) delete process.env.OMNIRUSH_DESKTOP_USER_DATA_DIR; else process.env.OMNIRUSH_DESKTOP_USER_DATA_DIR = saved;
+    }
   });
 });
 

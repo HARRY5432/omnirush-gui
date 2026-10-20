@@ -24,12 +24,12 @@ function fakeNative() {
   const listeners = new Set<(v: Record<string, unknown>) => void>();
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   let generation = 0;
-  const state: { occluded: boolean; synthetic: boolean; retitle: ((title: string) => string) | null } = { occluded: false, synthetic: false, retitle: null };
+  const state: { occluded: boolean; synthetic: boolean; retitle: ((title: string) => string) | null; texts: Array<{ x: number; y: number; width: number; height: number; text: string }> | null } = { occluded: false, synthetic: false, retitle: null, texts: null };
   const frame = (w: Window): Frame => {
     const width = Math.min(w.bounds.width, 640), height = Math.round((width * w.bounds.height) / w.bounds.width);
     const data = new Uint8Array(width * height * 4).fill(shade);
     for (let i = 3; i < data.length; i += 4) data[i] = 255;
-    return { width, height, data, secure: [{ x: 10, y: 10, width: 40, height: 10 }], caret: null };
+    return { width, height, data, secure: [{ x: 10, y: 10, width: 40, height: 10 }], caret: null, ...(state.texts ? { texts: state.texts } : {}) };
   };
   const native = {
     ready: Promise.resolve({ supported: true }),
@@ -220,14 +220,18 @@ describe("portable host: observe and act", () => {
     const first = await call(c, "computer_act", { session_id: session, observation_id: obs.state.observation?.id, request_id: "a", intent: "Type the greeting", action: { type: "type", text: "hi" } });
     expect(first.state).toMatchObject({ ok: true, approval: { asked: true } });
     expect(r.acts.length).toBe(1);
-    // The model retries the same act on a fresh observation: no second question within 30 s.
+    // The screen changed meanwhile (shade 90), so the same act on the new image asks again ...
     const again = await call(c, "computer_act", { session_id: session, observation_id: (first.state.observation as { id: string }).id, request_id: "b", intent: "Type the greeting", action: { type: "type", text: "hi" } });
-    expect(again.state).toMatchObject({ ok: true, approval: { asked: false } });
-    expect(r.acts.length).toBe(1);
-    // Another act asks.
-    const other = await call(c, "computer_act", { session_id: session, observation_id: (again.state.observation as { id: string }).id, request_id: "c", intent: "Type more", action: { type: "type", text: "there" } });
-    expect(other.state).toMatchObject({ ok: true, approval: { asked: true } });
+    expect(again.state).toMatchObject({ ok: true, approval: { asked: true } });
     expect(r.acts.length).toBe(2);
+    // ... and a retry on the same image within 30 s does not.
+    const same = await call(c, "computer_act", { session_id: session, observation_id: (again.state.observation as { id: string }).id, request_id: "c", intent: "Type the greeting", action: { type: "type", text: "hi" } });
+    expect(same.state).toMatchObject({ ok: true, approval: { asked: false } });
+    expect(r.acts.length).toBe(2);
+    // Another act asks.
+    const other = await call(c, "computer_act", { session_id: session, observation_id: (same.state.observation as { id: string }).id, request_id: "d", intent: "Type more", action: { type: "type", text: "there" } });
+    expect(other.state).toMatchObject({ ok: true, approval: { asked: true } });
+    expect(r.acts.length).toBe(3);
     await host.close();
   });
 
@@ -243,6 +247,31 @@ describe("portable host: observe and act", () => {
     native.personInput();
     expect(host.state()[0]?.phase).toBe("paused");
     await host.close();
+  });
+
+  test("Normal: the text the host read at the point decides (risky target, secure field); without text, a click after typing asks", async () => {
+    const r = rig("normal");
+    // A host that reads text (macOS): a "Sign in" button at 300,200 (native pixels; the image is 640 wide, window 2560).
+    r.native.state.texts = [{ x: 300, y: 200, width: 80, height: 30, text: "Sign in" }];
+    const { host, c, session, obs } = await opened(r);
+    const sign = await call(c, "computer_act", { session_id: session, observation_id: obs.state.observation?.id, request_id: "a", intent: "Press the button", action: { type: "click", x: 300, y: 200 } });
+    expect(sign.state).toMatchObject({ ok: true, approval: { asked: true, reasons: ["risky_target"] } });
+    const secure = await call(c, "computer_act", { session_id: session, observation_id: (sign.state.observation as { id: string }).id, request_id: "b", intent: "Fill in the field", action: { type: "type", text: "abc" } });
+    expect(secure.state).toMatchObject({ ok: true, approval: { asked: false } });
+    await host.close();
+    // A host that reads no text (X11, Windows): type, then a click asks.
+    const x = rig("normal");
+    const o = await opened(x);
+    const typed = await call(o.c, "computer_act", { session_id: o.session, observation_id: o.obs.state.observation?.id, request_id: "t", intent: "Type the name", action: { type: "type", text: "Ada" } });
+    expect(typed.state).toMatchObject({ ok: true, approval: { asked: false } });
+    const click = await call(o.c, "computer_act", { session_id: o.session, observation_id: (typed.state.observation as { id: string }).id, request_id: "k", intent: "Go to the next field", action: { type: "click", x: 400, y: 300 } });
+    expect(click.state).toMatchObject({ ok: true, approval: { asked: true, reasons: ["submit_after_typing"] } });
+    const again = await call(o.c, "computer_act", { session_id: o.session, observation_id: (click.state.observation as { id: string }).id, request_id: "k2", intent: "Click again", action: { type: "click", x: 400, y: 300 } });
+    expect(again.state).toMatchObject({ ok: true, approval: { asked: false } });
+    expect(await o.host.physicalInput()).toBe(true);
+    x.native.state.synthetic = true;
+    expect(await o.host.physicalInput()).toBe(false);
+    await o.host.close();
   });
 
   test("person input pauses; only Continue resumes; first act after takeover asks in Normal", async () => {
