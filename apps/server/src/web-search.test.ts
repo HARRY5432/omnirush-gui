@@ -119,8 +119,8 @@ describe("engine config", () => {
     const off = buildOmniRushRuntimeConfigObjectFromSnapshot({}, gateway, {}, catalog) as { provider: { omnirush: { models: Record<string, Record<string, unknown>> } } };
     const on = buildOmniRushRuntimeConfigObjectFromSnapshot({}, gateway, {}, catalog, undefined, undefined, setting) as typeof off;
     const models = on.provider.omnirush.models;
-    for (const id of serverBlock.models) expect(models[id]!.options).toEqual({ reasoningEffort: "xhigh", hostedWebSearch: { searchContextSize: "low" } });
-    for (const id of ["meta-muse-spark", "muse-spark-1.1", "muse-spark-1.3"]) expect(models[id]!.options).toEqual({ reasoningEffort: "xhigh" });
+    for (const id of serverBlock.models) expect(models[id]!.options).toEqual({ reasoningEffort: "high", hostedWebSearch: { searchContextSize: "low" } });
+    for (const id of ["meta-muse-spark", "muse-spark-1.1", "muse-spark-1.3"]) expect(models[id]!.options).toEqual({ reasoningEffort: "high" });
     for (const [id, model] of Object.entries(models)) {
       // Only hostedWebSearch is added; the default effort and the rest stay as they were.
       const { hostedWebSearch: _search, ...options } = model.options as Record<string, unknown>;

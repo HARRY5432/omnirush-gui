@@ -25,8 +25,8 @@ import { modelHasWebSearch, type WebSearchSwitch } from "./web-search.js";
 /** Every effort a catalog model may list, lowest first. */
 export const OMNIRUSH_MODEL_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type OmniRushModelEffort = (typeof OMNIRUSH_MODEL_EFFORTS)[number];
-/** The CLI's default effort (omnirush-cli DEFAULT_ENGINE_EFFORT). */
-export const OMNIRUSH_DEFAULT_EFFORT: OmniRushModelEffort = "xhigh";
+/** The default effort: High, what the desktop picker has always shown for Astra and Sol. */
+export const OMNIRUSH_DEFAULT_EFFORT: OmniRushModelEffort = "high";
 
 const MODEL_STATUSES = ["active", "beta", "deprecated"] as const;
 export type OmniRushModelStatus = (typeof MODEL_STATUSES)[number];
@@ -213,8 +213,8 @@ export async function clearOmniRushModelCatalog(config: ServerConfig): Promise<v
 }
 
 /**
- * The effort a catalog model runs at when the chat picked none: xhigh where the
- * model offers it (the CLI's default), otherwise the level closest to medium
+ * The effort a catalog model runs at when the chat picked none: high where the
+ * model offers it, otherwise the level closest to medium
  * (the higher one on a tie). Null for a model without effort control.
  *
  * PARITY: apps/app/src/app/lib/model-behavior.ts (getModelBehaviorSummary's

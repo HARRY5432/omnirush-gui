@@ -282,24 +282,24 @@ describe("omnirush engine models from the catalog", () => {
     }
   });
 
-  test("every model with efforts gets a model-level default: xhigh where offered, else the level nearest medium", () => {
+  test("every model with efforts gets a model-level default: high where offered, else the level nearest medium", () => {
     const catalog = sanitizeOmniRushModelCatalog({
       data: [
         { id: "gpt-6-astra", reasoning_levels: ["low", "high", "xhigh", "max"] },
         { id: "muse", reasoning_levels: ["minimal", "low", "medium", "high", "xhigh"] },
         { id: "nova", reasoning_levels: ["low", "high"] },
-        { id: "tiny", reasoning_levels: ["minimal", "low"] },
+        { id: "tiny", reasoning_levels: ["minimal", "low", "xhigh"] },
         { id: "mid", reasoning_levels: ["none", "medium", "max"] },
         { id: "plain", reasoning_levels: [], capabilities: { reasoning: false } },
       ],
     })!;
     const models = engineModelsFromCatalog(catalog);
     const defaults: Record<string, string | null> = Object.fromEntries(Object.entries(models).map(([id, model]) => [id, (model.options as { reasoningEffort?: string } | undefined)?.reasoningEffort ?? null]));
-    expect(defaults).toEqual({ "gpt-6-astra": "xhigh", muse: "xhigh", nova: "high", tiny: "low", mid: "medium", plain: null });
+    expect(defaults).toEqual({ "gpt-6-astra": "high", muse: "high", nova: "high", tiny: "low", mid: "medium", plain: null });
     expect(models.plain!.options).toBeUndefined();
     expect(models.nova!.options).not.toHaveProperty("reasoning_effort");
     for (const model of catalog) expect<string | null>(omnirushDefaultEffort(model.reasoning_levels)).toBe(defaults[model.id] ?? null);
-    expect(OMNIRUSH_DEFAULT_EFFORT).toBe("xhigh");
+    expect(OMNIRUSH_DEFAULT_EFFORT).toBe("high");
   });
 
   test("labels Muse by family, keeps 1.3 beta and text-only, and never sets attachment", () => {

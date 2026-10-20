@@ -249,7 +249,7 @@ export const getModelBehaviorSummary = (
 ) => {
   const options = getModelBehaviorOptions(providerID, model, providerName);
   const sanitized = sanitizeModelBehaviorValue(providerID, model, value, providerName);
-  // omnirush.ai models default to the CLI's effort where they offer it, else
+  // omnirush.ai models default to High where they offer it, else
   // the level nearest medium: the same default the server gives the engine
   // (omnirush-model-catalog.ts omnirushDefaultEffort), so a chat that never
   // picked an effort shows the one it runs at.

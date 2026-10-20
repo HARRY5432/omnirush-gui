@@ -106,10 +106,10 @@ describe("OmniRushReasoningEffort", () => {
     const result = await run(
       hooks,
       { agent: "explore", model: astra, message: { id: "msg_8", model: {} } },
-      { reasoningEffort: "xhigh" },
+      { reasoningEffort: "high" },
     );
-    expect(result.options).toEqual({ reasoningEffort: "xhigh" });
-    expect(result.headers).toEqual({ "x-omnirush-reasoning-effort": "xhigh" });
+    expect(result.options).toEqual({ reasoningEffort: "high" });
+    expect(result.headers).toEqual({ "x-omnirush-reasoning-effort": "high" });
   });
 
   test("a chosen variant wins over the model-level default", async () => {
@@ -118,7 +118,7 @@ describe("OmniRushReasoningEffort", () => {
     const result = await run(
       hooks,
       { agent: "omnirush", model: astra, message: { id: "msg_9", model: { variant: "low" } } },
-      { ...{ reasoningEffort: "xhigh" }, ...{ reasoningEffort: "low" } },
+      { ...{ reasoningEffort: "high" }, ...{ reasoningEffort: "low" } },
     );
     expect(result.options.reasoningEffort).toBe("low");
     expect(result.headers["x-omnirush-reasoning-effort"]).toBe("low");
@@ -129,7 +129,7 @@ describe("OmniRushReasoningEffort", () => {
     // As the engine reports a model's variants: its own OpenAI defaults merged with the config's.
     const variants = { low: { reasoningEffort: "low", reasoningSummary: "auto" }, high: { reasoningEffort: "high" }, xhigh: { reasoningEffort: "xhigh" } };
     // smallOptions(first variant) merged with the model options (the default).
-    const small = { store: false, reasoningEffort: "xhigh", reasoningSummary: "auto" };
+    const small = { store: false, reasoningEffort: "high", reasoningSummary: "auto" };
     const title = await run(
       hooks,
       { agent: "title", model: { ...astra, variants }, message: { id: "msg_10", model: { variant: "max" } } },
@@ -146,7 +146,7 @@ describe("OmniRushReasoningEffort", () => {
     expect(copyName.options).toEqual({ store: false, reasoningEffort: "low", reasoningSummary: "auto" });
     expect(copyName.headers).toEqual({ "x-omnirush-reasoning-effort": "low" });
     // A model without variants: no effort at all on its side requests.
-    const bare = await run(hooks, { agent: "title", model: astra, message: { id: "msg_12", model: {} } }, { reasoningEffort: "xhigh" });
+    const bare = await run(hooks, { agent: "title", model: astra, message: { id: "msg_12", model: {} } }, { reasoningEffort: "high" });
     expect(bare.options).toEqual({});
     // Another provider's title request is not touched.
     const external = await run(

@@ -58,10 +58,11 @@ export const OMNIRUSH_REASONING_EFFORTS = ["none", "minimal", "low", "medium", "
 
 /**
  * The effort an omnirush.ai model runs at when the chat picked none, where the
- * model offers it (the CLI's default). PARITY: apps/server/src/omnirush-model-catalog.ts
- * OMNIRUSH_DEFAULT_EFFORT, the engine's model-level default.
+ * model offers it (High, what the picker has always shown for Astra and Sol).
+ * PARITY: apps/server/src/omnirush-model-catalog.ts OMNIRUSH_DEFAULT_EFFORT,
+ * the engine's model-level default.
  */
-export const OMNIRUSH_DEFAULT_REASONING_EFFORT = "xhigh";
+export const OMNIRUSH_DEFAULT_REASONING_EFFORT = "high";
 
 export const SUGGESTED_PLUGINS: SuggestedPlugin[] = [];
 

@@ -31,12 +31,13 @@ const omnirushModel = (id: string, levels: string[]): ProviderModel => ({
 
 const astra = omnirushModel("gpt-6-astra", ["low", "high", "xhigh", "max"]);
 const nova = omnirushModel("nova-9", ["low", "high"]);
-const catalog = { omnirush: { "gpt-6-astra": astra, "nova-9": nova } };
+const tiny = omnirushModel("tiny-1", ["minimal", "low", "xhigh"]);
+const catalog = { omnirush: { "gpt-6-astra": astra, "nova-9": nova, "tiny-1": tiny } };
 const astraRef = { providerID: "omnirush", modelID: "gpt-6-astra" };
 
 describe("the effort a send carries is the one the picker shows", () => {
   test("resolver and picker agree for every stored choice", () => {
-    for (const model of [astra, nova]) {
+    for (const model of [astra, nova, tiny]) {
       for (const stored of [null, "", "default", ...OMNIRUSH_REASONING_EFFORTS, "ultra", "turbo", "High"]) {
         const shown = getModelBehaviorSummary("omnirush", model, stored).value;
         expect(shown).not.toBeNull();
@@ -46,15 +47,18 @@ describe("the effort a send carries is the one the picker shows", () => {
   });
 
   test("no choice (a new chat, or one copied from a chat that had none) sends the default", () => {
-    expect(resolveModelBehaviorValue("omnirush", astra, null)).toBe("xhigh");
-    // A model without xhigh: the level nearest medium, as the server's engine default.
+    // High, what the picker has always shown for Astra and Sol.
+    expect(resolveModelBehaviorValue("omnirush", astra, null)).toBe("high");
     expect(resolveModelBehaviorValue("omnirush", nova, null)).toBe("high");
+    // A model without high: the level nearest medium, as the server's engine default.
+    expect(resolveModelBehaviorValue("omnirush", tiny, null)).toBe("low");
   });
 
   test("a user choice is kept, an effort the model lacks falls back to the default", () => {
     expect(resolveModelBehaviorValue("omnirush", astra, "low")).toBe("low");
     expect(resolveModelBehaviorValue("omnirush", astra, "max")).toBe("max");
-    expect(resolveModelBehaviorValue("omnirush", astra, "medium")).toBe("xhigh");
+    expect(resolveModelBehaviorValue("omnirush", astra, "xhigh")).toBe("xhigh");
+    expect(resolveModelBehaviorValue("omnirush", astra, "medium")).toBe("high");
     expect(resolveModelBehaviorValue("omnirush", nova, "xhigh")).toBe("high");
   });
 
@@ -70,7 +74,7 @@ describe("send paths", () => {
     const { rememberProviderCatalog, resolveSendVariant } = await import("../src/react-app/domains/session/surface/session-model-store");
     expect(resolveSendVariant(astraRef, null, {})).toBeNull();
     rememberProviderCatalog(catalog);
-    expect(resolveSendVariant(astraRef, null)).toBe("xhigh");
+    expect(resolveSendVariant(astraRef, null)).toBe("high");
     expect(resolveSendVariant(astraRef, "low")).toBe("low");
     expect(resolveSendVariant({ providerID: "omnirush", modelID: "nova-9" }, undefined)).toBe("high");
     expect(resolveSendVariant(null, "low")).toBe("low");
@@ -144,7 +148,7 @@ describe("queued message drain", () => {
     restore.push(stop);
     const deadline = Date.now() + 3_000;
     while (calls.length < 1 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(calls[0]).toMatchObject({ kind: "prompt", input: { variant: "xhigh", model: astraRef } });
+    expect(calls[0]).toMatchObject({ kind: "prompt", input: { variant: "high", model: astraRef } });
     // The stored choice stays the user's (none); only the send resolves it.
     expect(getSessionModelSelection(sessionId)?.variant).toBeNull();
 

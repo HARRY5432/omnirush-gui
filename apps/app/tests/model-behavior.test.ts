@@ -117,7 +117,7 @@ describe("model behavior options", () => {
       const summary = getModelBehaviorSummary("omnirush", internal, "max", "omnirush.ai");
       expect(summary.value).toBe("max");
       expect(summary.label).toBe("Max");
-      expect(getModelBehaviorSummary("omnirush", internal, null, "omnirush.ai").value).toBe("xhigh");
+      expect(getModelBehaviorSummary("omnirush", internal, null, "omnirush.ai").value).toBe("high");
     }
   });
 
@@ -140,18 +140,18 @@ describe("model behavior options", () => {
     };
     const options = getModelBehaviorOptions("omnirush", museSpark, "omnirush.ai");
     expect(options.map((option) => option.value)).toEqual(["minimal", "low", "medium", "high", "xhigh"]);
-    // The CLI's default (xhigh) wherever the model offers it.
-    expect(getModelBehaviorSummary("omnirush", museSpark, null, "omnirush.ai").value).toBe("xhigh");
+    // High wherever the model offers it.
+    expect(getModelBehaviorSummary("omnirush", museSpark, null, "omnirush.ai").value).toBe("high");
     expect(getModelBehaviorSummary("omnirush", museSpark, "low", "omnirush.ai").value).toBe("low");
     // An effort Muse does not offer (Astra's max) falls back to its default.
-    expect(getModelBehaviorSummary("omnirush", museSpark, "max", "omnirush.ai").value).toBe("xhigh");
-    expect(getModelBehaviorSummary("omnirush", museSpark, "ultra", "omnirush.ai").value).toBe("xhigh");
+    expect(getModelBehaviorSummary("omnirush", museSpark, "max", "omnirush.ai").value).toBe("high");
+    expect(getModelBehaviorSummary("omnirush", museSpark, "ultra", "omnirush.ai").value).toBe("high");
 
-    // Astra and Sol keep their v1.0.9 levels; their default is the CLI's xhigh.
+    // Astra and Sol keep their v1.0.9 levels and default (High).
     for (const internal of OMNIRUSH_MODELS) {
       expect(getModelBehaviorOptions("omnirush", internal, "omnirush.ai").map((option) => option.value)).toEqual(["low", "high", "xhigh", "max"]);
-      expect(getModelBehaviorSummary("omnirush", internal, null, "omnirush.ai").value).toBe("xhigh");
-      expect(getModelBehaviorSummary("omnirush", internal, "medium", "omnirush.ai").value).toBe("xhigh");
+      expect(getModelBehaviorSummary("omnirush", internal, null, "omnirush.ai").value).toBe("high");
+      expect(getModelBehaviorSummary("omnirush", internal, "medium", "omnirush.ai").value).toBe("high");
     }
   });
 
