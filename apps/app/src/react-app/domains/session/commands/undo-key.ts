@@ -8,6 +8,8 @@ export function chatUndoKey(event: Pick<KeyboardEvent, "key" | "metaKey" | "ctrl
   const target = event.target as HTMLElement | null;
   if (target && typeof target === "object" && "tagName" in target) {
     if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT") return null;
+    // Code editors and terminals keep their own undo, whatever element holds their focus.
+    if (typeof target.closest === "function" && target.closest(".monaco-editor, .xterm, .cm-editor")) return null;
     if (target.isContentEditable && (target.textContent ?? "").replace(/[\u200B\uFEFF]/g, "").trim().length > 0) return null;
   }
   return event.shiftKey ? "redo" : "undo";

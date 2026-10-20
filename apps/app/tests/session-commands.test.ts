@@ -168,5 +168,7 @@ describe("chatUndoKey", () => {
     expect(chatUndoKey(key({ metaKey: true, target: { tagName: "TEXTAREA", isContentEditable: false, textContent: "" } }), true)).toBeNull();
     expect(chatUndoKey(key({ metaKey: true, target: { tagName: "DIV", isContentEditable: true, textContent: "draft" } }), true)).toBeNull();
     expect(chatUndoKey(key({ metaKey: true, target: { tagName: "DIV", isContentEditable: true, textContent: "  " } }), true)).toBe("undo");
+    const inEditor = { tagName: "DIV", isContentEditable: false, textContent: "", closest: (selector: string) => (selector.includes(".monaco-editor") ? {} : null) };
+    expect(chatUndoKey(key({ ctrlKey: true, target: inEditor }), false)).toBeNull();
   });
 });
