@@ -496,6 +496,8 @@ export default function EditorPanel(props: EditorPanelProps) {
   const [navigate, setNavigate] = useState<{ direction: 1 | -1; nonce: number } | null>(null);
   const [gitBusy, setGitBusy] = useState(false);
   const [reviewTick, setReviewTick] = useState(0);
+  // Bumped after open documents were read again (a file may have been deleted under its tab).
+  const [docsTick, setDocsTick] = useState(0);
   const recentRef = useRef<string[]>([]);
 
   // ── data ───────────────────────────────────────────────────────────────
@@ -527,7 +529,7 @@ export default function EditorPanel(props: EditorPanelProps) {
   const wasBusy = useRef(sessionBusy);
   useEffect(() => {
     if (wasBusy.current && !sessionBusy) {
-      void docs.refresh();
+      void docs.refresh().then(() => setDocsTick((value) => value + 1));
       void queryClient.invalidateQueries({ queryKey: ["editor-tree", workspaceId] });
       void queryClient.invalidateQueries({ queryKey: ["editor-git", workspaceId] });
       void queryClient.invalidateQueries({ queryKey: ["editor-changes", workspaceId] });
@@ -542,7 +544,7 @@ export default function EditorPanel(props: EditorPanelProps) {
       // At most every 5 s: switching windows quickly must not re-read every open file each time.
       if (Date.now() - last < 5_000) return;
       last = Date.now();
-      void docs.refresh();
+      void docs.refresh().then(() => setDocsTick((value) => value + 1));
     };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
@@ -781,7 +783,7 @@ export default function EditorPanel(props: EditorPanelProps) {
       cancelled = true;
     };
     // reviewFiles changes identity per fetch; the key carries what matters.
-  }, [activeTab, docs, client, workspaceId, reviewKey, changesQuery.isFetching]);
+  }, [activeTab, docs, client, workspaceId, reviewKey, changesQuery.isFetching, docsTick]);
 
   // ── save ───────────────────────────────────────────────────────────────
   const save = useCallback(async (options: { force?: boolean } = {}) => {

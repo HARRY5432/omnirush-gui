@@ -218,8 +218,9 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
     const review = surface.review
       ? { onAccept: decide(surface.review.onAccept), onReject: decide(surface.review.onReject) }
       : null;
-    const render = () => {
-      setLocked(false);
+    const render = (fromDiff: boolean) => {
+      // Only a recomputed diff makes the bars' line numbers current again.
+      if (fromDiff) setLocked(false);
       const changes = (diff.getLineChanges() ?? []).map((change) => ({
         originalStartLineNumber: change.originalStartLineNumber,
         originalEndLineNumber: change.originalEndLineNumber,
@@ -252,6 +253,7 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
             getDomNode: () => bar,
             getPosition: () => null,
           };
+          if (locked) bar.classList.add("omnirush-hunk-bar-busy");
           modifiedEditor.addOverlayWidget(widget);
           overlays.current.push(widget);
           const spacer = document.createElement("div");
@@ -271,13 +273,13 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
         });
       });
     };
-    const subscription = diff.onDidUpdateDiff(render);
+    const subscription = diff.onDidUpdateDiff(() => render(true));
     // A bar whose zone scrolled out of view is hidden until the zone is drawn again.
     const scroll = modifiedEditor.onDidScrollChange(() => {
       for (const widget of overlays.current) widget.getDomNode().style.visibility = "hidden";
     });
-    const layout = modifiedEditor.onDidLayoutChange(() => render());
-    render();
+    const layout = modifiedEditor.onDidLayoutChange(() => render(false));
+    render(true);
     return () => {
       if (unlockTimer) clearTimeout(unlockTimer);
       subscription.dispose();
