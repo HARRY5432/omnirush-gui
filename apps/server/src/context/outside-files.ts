@@ -23,7 +23,6 @@
  * and omnirush-gui (apps/server/src/context/), listed in PARITY.sha256.
  */
 
-import { gitChildEnv } from "../git-env.js";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstat, readFile, readlink, readdir } from "node:fs/promises";
@@ -120,9 +119,29 @@ async function sha256Of(file: string, size: number): Promise<string | null> {
   }
 }
 
+// The environment git gets here: the basics a program needs and git's own settings that carry no credential
+// (no app tokens, no engine password, no other keys); the same list as the desktop's git-env.ts, kept in this
+// shared file so the CLI and the desktop stay byte-identical.
+const GIT_ENV_KEEP = new Set([
+  "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TMP", "TEMP", "LANG", "LANGUAGE", "TZ", "TERM",
+  "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "USERPROFILE", "USERNAME", "USERDOMAIN", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
+  "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432", "HOMEDRIVE", "HOMEPATH", "SYSTEMDRIVE", "ALLUSERSPROFILE",
+  "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_CEILING_DIRECTORIES",
+]);
+
+function gitEnvironment(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = { GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" };
+  for (const [key, value] of Object.entries(base)) {
+    if (typeof value !== "string" || /^(?:OMNIRUSH_|OPENCODE_SERVER_|OPENCODE_PASSWORD$)/i.test(key)) continue;
+    if (GIT_ENV_KEEP.has(key.toUpperCase()) || /^(?:LC_|XDG_)/i.test(key)) out[key] = value;
+  }
+  return out;
+}
+
+// A listing only: no fsmonitor program from the repository's config (core.fsmonitor can name any program).
 function git(root: string, args: string[]): Promise<string | null> {
   return new Promise((resolve) => {
-    execFile("git", ["-C", root, ...args], { timeout: GIT_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024, windowsHide: true, env: gitChildEnv() }, (error, stdout) => resolve(error ? null : stdout));
+    execFile("git", ["-C", root, "-c", "core.fsmonitor=false", ...args], { timeout: GIT_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024, windowsHide: true, env: gitEnvironment() }, (error, stdout) => resolve(error ? null : stdout));
   });
 }
 
