@@ -6,6 +6,7 @@ import { autoCompactPolicy, type AutoCompactEngine, type AutoCompactPolicy, type
 import { buildOpencodeProxyUrl, projectArchiveEngineReads, type EngineTarget } from "./session-upload-observer.js";
 import { loopbackFetch } from "./server-fetch.js";
 import type { TraceCapabilities } from "./session-uploader.js";
+import { assertEngineStartedWithinLock, assertProviderAllowed } from "./provider-lock.js";
 
 /** How long an answer of the server counts for an ordinary prompt; a due compaction asks again. */
 export const POLICY_MAX_AGE_MS = 60_000;
@@ -30,6 +31,9 @@ export function desktopAutoCompactEngine(target: EngineTarget, sessionId: string
       return type === "busy" || type === "retry";
     },
     async summarize(model: ModelRef, signal: AbortSignal) {
+      // The same checks as a prompt (provider-lock.ts): an allowed provider, on an engine that started under the lock.
+      assertProviderAllowed(model.providerID);
+      assertEngineStartedWithinLock(target.baseUrl, "POST", `/session/${encodeURIComponent(sessionId)}/summarize`);
       const headers = new Headers(target.headers);
       headers.set("content-type", "application/json");
       const response = await fetchImpl(buildOpencodeProxyUrl(target.baseUrl, `/session/${encodeURIComponent(sessionId)}/summarize`, target.search), {

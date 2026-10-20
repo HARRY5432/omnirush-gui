@@ -321,3 +321,33 @@ describe("provider lock: the app's own provider and engines started unlocked", (
     expect(() => assertEngineStartedWithinLock("http://127.0.0.1:4001", "POST", "/session")).not.toThrow();
   });
 });
+
+describe("provider lock: engine route paths", () => {
+  const send = (path: string, body: Record<string, unknown>, method = "POST") =>
+    assertProxiedEngineRequestWithinProviderLock(new Request(`http://x${path.startsWith("/") ? "" : "/"}${path}`, { method, body: JSON.stringify(body) }), path).then(() => "ok", (error: { status?: number; code?: string }) => `${error.status} ${error.code}`);
+  test("dot segments, encoded slashes or dots, backslashes, `;` and NUL are refused; repeated slashes still match", async () => {
+    const plugin = { plugin: ["opencode-wakatime"] };
+    const provider = { provider: { openai: { options: { apiKey: "sk-fake" } } } };
+    expect(await send("/opencode/x/../config", plugin)).toBe("400 invalid_engine_path");
+    expect(await send("/opencode/x/%2e%2e/config", plugin)).toBe("400 invalid_engine_path");
+    expect(await send("/opencode/x/../auth/openai", { type: "api", key: "sk-fake" }, "PUT")).toBe("400 invalid_engine_path");
+    expect(await send("/opencode/auth%2fopenai", { type: "api", key: "sk-fake" }, "PUT")).toBe("400 invalid_engine_path");
+    expect(await send("/opencode/config;x", provider, "PATCH")).toBe("400 invalid_engine_path");
+    expect(await send("/opencode/global//config", provider, "PATCH")).toBe("403 provider_locked");
+    expect(await send("/opencode/config//", provider, "PATCH")).toBe("403 provider_locked");
+    expect(await send("/opencode//global//config", provider, "PATCH")).toBe("403 provider_locked");
+    expect(await send("/opencode/api//global//config", provider, "PATCH")).toBe("403 provider_locked");
+    expect(await send("/opencode/provider//openai/oauth/authorize", { method: 0 })).toBe("403 provider_locked");
+    expect(await send("/opencode/global//config", { plugin: ["x"] }, "PATCH")).toBe("403 plugins_locked");
+    expect(await send("/opencode/session/ses_1/prompt_async", { model: { providerID: "omnirush", modelID: "m" } })).toBe("ok");
+  });
+
+  test("provider ids compare in lower case; an engine started unlocked is found behind an odd path too", () => {
+    expect(providerAllowed("OmniRush")).toBe(true);
+    applyProviderLockAnswer(UNLOCKED);
+    noteEngineStarted("http://127.0.0.1:4010");
+    resetProviderLock();
+    expect(() => assertEngineStartedWithinLock("http://127.0.0.1:4010", "POST", "/opencode//session/ses_1//prompt_async")).toThrow("Restart the app to continue.");
+    expect(() => assertEngineStartedWithinLock("http://127.0.0.1:4010", "POST", "/opencode/x/../session")).toThrow("This engine route is not accepted.");
+  });
+});

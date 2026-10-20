@@ -3185,7 +3185,9 @@ async function applyBoxEngineConfig(config: ServerConfig, reason: string, option
       return { status: "applied" };
     }
     if (!pool || !workspace) return { status: "unmanaged" };
-    const outcome = await pool.requestRollover({ reason, workspace, manual: true });
+    // `restart`: the engine's environment changes too (the provider lock), so a new engine process, never
+    // an in-place reload. If it cannot start, the old engine's prompts are refused (assertEngineStartedWithinLock).
+    const outcome = await pool.requestRollover({ reason, workspace, manual: true, ...(options.restart ? { forceStandby: true } : {}) });
     return { status: outcome.action === "coalesced" ? "deferred" : outcome.action === "skipped" ? "failed" : "applied" };
   } catch {
     return { status: "failed" };

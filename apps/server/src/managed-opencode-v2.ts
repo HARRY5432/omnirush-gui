@@ -11,7 +11,7 @@ export { installOpencodeV2Binary } from "./opencode-v2-binary.js";
 
 import { loopbackFetch } from "./server-fetch.js";
 import { writeFileAtomic } from "./atomic-write.js";
-import { currentProviderLockPolicy, providerAllowed } from "./provider-lock.js";
+import { currentProviderLockPolicy, noteEngineStarted, providerAllowed } from "./provider-lock.js";
 import { providerLockEnv } from "./provider-lock/provider-lock.mjs";
 import { isReleaseBuild, RELEASE_ENGINE_ERROR } from "./release-guard.js";
 
@@ -302,6 +302,8 @@ export async function createManagedOpencodeV2Server(
           throw new Error("OmniRush v2 announced an unexpected listener");
         }
         url = endpoint.origin;
+        // Model providers (provider-lock.ts): whether this engine started locked.
+        noteEngineStarted(url, providerLock);
       }
     }
     try {

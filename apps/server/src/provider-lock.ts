@@ -74,10 +74,33 @@ export function resetProviderLock(): void {
   current = lockedProviderPolicy("default");
 }
 
-/** Whether `providerId` may be used under `policy`. */
+/** Whether `providerId` may be used under `policy` (ids compare in lower case). */
 export function providerAllowed(providerId: unknown, policy: ProviderLockPolicy = current): boolean {
   if (!policy.locked) return true;
-  return typeof providerId === "string" && policy.allow.includes(providerId);
+  return typeof providerId === "string" && policy.allow.includes(providerId.trim().toLowerCase());
+}
+
+export const INVALID_ENGINE_PATH_CODE = "invalid_engine_path";
+
+/**
+ * The engine route an app request names, as the checks here match it: dot
+ * segments, encoded slashes, backslashes, `;` and NUL are refused (400),
+ * repeated slashes are collapsed, and the result is a plain URL path. The
+ * same rules as the CLI's route fence.
+ */
+export function engineRoutePath(raw: string): string {
+  const refuse = () => new ApiError(400, INVALID_ENGINE_PATH_CODE, "This engine route is not accepted.");
+  const path = raw.split("?")[0] ?? "";
+  if (/[\\;\u0000]/.test(path) || /%(?:2e|2f|5c|3b|00)/i.test(path)) throw refuse();
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(path);
+  } catch {
+    throw refuse();
+  }
+  if (/[\\;\u0000]/.test(decoded) || decoded.split("/").some((segment) => segment === "." || segment === "..")) throw refuse();
+  const collapsed = decoded.replace(/\/{2,}/g, "/");
+  return new URL(collapsed.startsWith("/") ? collapsed : `/${collapsed}`, "http://x").pathname;
 }
 
 export function providerLockedError(policy: ProviderLockPolicy = current): ApiError {
@@ -240,14 +263,11 @@ export function assertEngineRequestWithinProviderLock(method: string, enginePath
  * body that is not a JSON object carries no model and passes here.
  */
 export async function assertProxiedEngineRequestWithinProviderLock(request: Request, path: string, policy: ProviderLockPolicy = current): Promise<void> {
-  if (!policy.locked || ["GET", "HEAD", "OPTIONS", "DELETE"].includes(request.method)) return;
-  let decoded = path;
-  try {
-    decoded = decodeURIComponent(path);
-  } catch {
-    /* the raw path */
-  }
-  const enginePath = decoded.replace(/^\/opencode2?(?=\/|$)/, "");
+  // Reads change nothing; every write with an odd path is refused whatever the lock says (engineRoutePath).
+  if (["GET", "HEAD", "OPTIONS"].includes(request.method)) return;
+  const clean = engineRoutePath(path);
+  if (!policy.locked || request.method === "DELETE") return;
+  const enginePath = clean.replace(/^\/opencode2?(?=\/|$)/, "");
   let body: Record<string, unknown> = {};
   if (request.body) {
     const text = await request.clone().text().catch(() => "");
@@ -319,7 +339,7 @@ export function isModelWorkRequest(method: string, enginePath: string): boolean 
  * did not start, and every other request, pass.
  */
 export function assertEngineStartedWithinLock(engineUrl: string | null | undefined, method: string, enginePath: string, policy: ProviderLockPolicy = current): void {
-  if (!policy.locked || !engineUrl || !isModelWorkRequest(method, enginePath)) return;
+  if (!policy.locked || !engineUrl || !isModelWorkRequest(method, engineRoutePath(enginePath))) return;
   if (engineStarts.get(originOf(engineUrl)) === false) throw new ApiError(403, PROVIDER_LOCKED_CODE, `${policy.message} Restart the app to continue.`);
 }
 
