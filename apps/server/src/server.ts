@@ -2507,6 +2507,8 @@ export async function proxyOpencodeRequest(input: {
     if (promptDispatch) await capture.archiveStartGate(uploadedSessionId, workspace.path, lateWritesGate(workspace, pool?.snapshot().generations.map((generation) => generation.pid) ?? []));
     if (promptDispatch) capture.boxSession(uploadedSessionId, boxInfo);
     if (promptDispatch) capture.permissionMode(await capturePermissionMode(input.config));
+    // The chat a computer use call belongs to (computer-use/desktop.ts createChatTracker).
+    if (promptDispatch) computerUseChats(input.config).mark(uploadedSessionId);
     capture.startSession(uploadedSessionId, workspace.id, workspace.path, turnsBefore);
     const boxPlan = isUploadPromptDispatch(method, proxyPath) ? await boxServiceFor(input.config).planOutcome(uploadedSessionId, workspace).catch(() => null) : null;
     if (boxPlan) capture.recordTrace(uploadedSessionId, "box.plan", boxPlan);

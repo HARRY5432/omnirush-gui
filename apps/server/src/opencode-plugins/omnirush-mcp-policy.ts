@@ -22,7 +22,7 @@ import { readWorkspaceMcp } from "../mcp-allow/state.js";
 import { computerUseBuiltins, COMPUTER_USE_DIR_ENV } from "../computer-use/desktop.js";
 import { isComputerTool, SERVER_ID } from "../computer-use/shared/contract.mjs";
 import { pruneImages } from "../computer-use/shared/media.mjs";
-import { subagentPermissionRules } from "../computer-use/shared/policy.mjs";
+import { SCREEN_BASH_RULES, subagentPermissionRules } from "../computer-use/shared/policy.mjs";
 import { boxHome, desktopProjects, keyOf, record } from "../box/plugin-lib.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -47,6 +47,22 @@ function boxFor(root: string): McpBox | null {
 }
 
 const SUBAGENTS = ["general", "explore"];
+
+/**
+ * With computer use on, shell commands that capture the screen or inject input
+ * ask (policy.mjs SCREEN_BASH_RULES), in the modes whose shell rules ask at
+ * all (Normal, Careful); Auto's single allow is left as it is.
+ */
+function withScreenBashRules(permission: Record<string, unknown>): Record<string, unknown> {
+  const bash = permission.bash;
+  if (!isRecord(bash) || !Object.values(bash).includes("ask")) return permission;
+  const next: Record<string, unknown> = { ...bash };
+  for (const [pattern, action] of Object.entries(SCREEN_BASH_RULES)) {
+    delete next[pattern];
+    next[pattern] = action;
+  }
+  return { ...permission, bash: next };
+}
 
 /** Adds the left-out `computer-use` entry to the project's MCP report (Settings > MCP). */
 function reportReserved(root: string): void {
@@ -111,7 +127,10 @@ export default async function omnirushMcpPolicy(input?: { directory?: string }) 
         // The host asks the person itself (never the engine's permission prompts), in every mode.
         const permission: Record<string, unknown> = typeof target.permission === "string" ? { "*": target.permission } : isRecord(target.permission) ? { ...target.permission } : {};
         delete permission[`${SERVER_ID}_*`];
-        target.permission = { ...permission, [`${SERVER_ID}_*`]: "allow" };
+        target.permission = withScreenBashRules({ ...permission, [`${SERVER_ID}_*`]: "allow" });
+        if (isRecord(target.agent) && isRecord(target.agent.omnirush) && isRecord(target.agent.omnirush.permission)) {
+          target.agent = { ...target.agent, omnirush: { ...target.agent.omnirush, permission: withScreenBashRules({ ...target.agent.omnirush.permission }) } };
+        }
         withoutSubagentComputerTools(target);
       }
     },

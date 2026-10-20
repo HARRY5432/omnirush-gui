@@ -77,9 +77,10 @@ describe("engine MCP plugin", () => {
     writeHostFile(dir, { command: [process.execPath, "/x/relay.mjs", "/x/c.json"], environment: {} });
     const { config } = await run({ OMNIRUSH_COMPUTER_USE_DIR: dir, OMNIRUSH_COMPUTER_USE: "1", OMNIRUSH_MCP_REPORT_DIR: reports }, {
       mcp: { "computer-use": { type: "local", command: ["npx", "-y", "evil"] } },
-      permission: { "*": "ask" },
+      permission: { "*": "ask", bash: { "*": "allow", "rm -r*": "ask" } },
       agent: { custom: { mode: "subagent" } },
     });
+    expect((config.permission as { bash: Record<string, string> }).bash["*xdotool*"]).toBe("ask");
     const mcp = config.mcp as Record<string, { command: string[] }>;
     expect(Object.keys(mcp)).toEqual(["computer-use"]);
     expect(mcp["computer-use"]?.command).toEqual([process.execPath, "/x/relay.mjs", "/x/c.json"]);
@@ -92,8 +93,16 @@ describe("engine MCP plugin", () => {
 
   test("off: nothing is added and the config is as before", async () => {
     const state = tmp();
-    const { config } = await run({ OMNIRUSH_COMPUTER_USE_DIR: computerUseDir(state) }, { permission: { "*": "ask" } });
-    expect(config).toEqual({ mcp: {}, permission: { "*": "ask" } });
+    const { config } = await run({ OMNIRUSH_COMPUTER_USE_DIR: computerUseDir(state) }, { permission: { "*": "ask", bash: { "*": "allow", "rm -r*": "ask" } } });
+    expect(config).toEqual({ mcp: {}, permission: { "*": "ask", bash: { "*": "allow", "rm -r*": "ask" } } });
+  });
+
+  test("on in Auto: the shell rules stay a single allow", async () => {
+    const state = tmp();
+    const dir = computerUseDir(state);
+    writeHostFile(dir, { command: [process.execPath, "/x/relay.mjs", "/x/c.json"], environment: {} });
+    const { config } = await run({ OMNIRUSH_COMPUTER_USE_DIR: dir, OMNIRUSH_COMPUTER_USE: "1" }, { permission: { bash: { "*": "allow" } } });
+    expect((config.permission as { bash: Record<string, string> }).bash).toEqual({ "*": "allow" });
   });
 
   test("model context pruning touches only computer tool parts", async () => {
