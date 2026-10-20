@@ -82,28 +82,28 @@ describe("format on save asks before running project code", () => {
     const store = new FormatTrustStore(join(root, "..", `trust-${Date.now()}.json`));
     roots.push(join(root, "..", "trust-placeholder"));
     const text = "export   const   messy={a:1}\n";
-    const ask = await formatRequest({ root, path: "src/a.ts", text, trust: null, hash: null, store });
+    const ask = await formatRequest({ root, path: "src/a.ts", text, trust: null, hash: null, store, sandboxOn: false });
     expect(ask).toMatchObject({ formatter: "Prettier", trust: "ask" });
     if (!("trust" in ask) || ask.trust !== "ask") throw new Error("expected a prompt");
-    expect(ask.command).toBe("node node_modules/prettier/bin/prettier.cjs --stdin-filepath <file>");
+    expect(ask.command).toBe("node node_modules/prettier/bin/prettier.cjs --stdin-filepath=<file>");
     // Once: runs, remembers nothing.
-    expect(await formatRequest({ root, path: "src/a.ts", text, trust: "once", hash: ask.hash, store })).toMatchObject({ text: "export const messy = { a: 1 };\n" });
-    expect((await formatRequest({ root, path: "src/a.ts", text, trust: null, hash: null, store })).formatter).toBe("Prettier");
-    expect(await formatRequest({ root, path: "src/a.ts", text, trust: null, hash: null, store })).toMatchObject({ trust: "ask" });
+    expect(await formatRequest({ root, path: "src/a.ts", text, trust: "once", hash: ask.hash, store, sandboxOn: false })).toMatchObject({ text: "export const messy = { a: 1 };\n" });
+    expect((await formatRequest({ root, path: "src/a.ts", text, trust: null, hash: null, store, sandboxOn: false })).formatter).toBe("Prettier");
+    expect(await formatRequest({ root, path: "src/a.ts", text, trust: null, hash: null, store, sandboxOn: false })).toMatchObject({ trust: "ask" });
     // Always: remembered for this project and configuration.
-    await formatRequest({ root, path: "src/a.ts", text, trust: "always", hash: ask.hash, store });
-    expect(await formatRequest({ root, path: "src/a.ts", text, trust: null, hash: null, store })).toMatchObject({ text: "export const messy = { a: 1 };\n" });
+    await formatRequest({ root, path: "src/a.ts", text, trust: "always", hash: ask.hash, store, sandboxOn: false });
+    expect(await formatRequest({ root, path: "src/a.ts", text, trust: null, hash: null, store, sandboxOn: false })).toMatchObject({ text: "export const messy = { a: 1 };\n" });
     // A changed configuration asks again.
     await writeFile(join(root, ".prettierrc"), JSON.stringify({ semi: false }));
-    const again = await formatRequest({ root, path: "src/a.ts", text, trust: null, hash: null, store });
+    const again = await formatRequest({ root, path: "src/a.ts", text, trust: null, hash: null, store, sandboxOn: false });
     expect(again).toMatchObject({ trust: "ask" });
     if (!("trust" in again) || again.trust !== "ask") throw new Error("expected a prompt");
     expect(again.hash).not.toBe(ask.hash);
     // An answer for an older configuration does not run.
-    expect(await formatRequest({ root, path: "src/a.ts", text, trust: "once", hash: ask.hash, store })).toMatchObject({ trust: "ask" });
+    expect(await formatRequest({ root, path: "src/a.ts", text, trust: "once", hash: ask.hash, store, sandboxOn: false })).toMatchObject({ trust: "ask" });
     // Never: remembered, nothing runs.
-    expect(await formatRequest({ root, path: "src/a.ts", text, trust: "never", hash: again.hash, store })).toMatchObject({ trust: "denied" });
-    expect(await formatRequest({ root, path: "src/a.ts", text, trust: null, hash: null, store })).toMatchObject({ trust: "denied" });
+    expect(await formatRequest({ root, path: "src/a.ts", text, trust: "never", hash: again.hash, store, sandboxOn: false })).toMatchObject({ trust: "denied" });
+    expect(await formatRequest({ root, path: "src/a.ts", text, trust: null, hash: null, store, sandboxOn: false })).toMatchObject({ trust: "denied" });
   });
 
   test("the formatter's environment has no app tokens, engine password or other keys", () => {
@@ -122,9 +122,64 @@ describe("format on save asks before running project code", () => {
     await writeFile(recordFile(home, key), JSON.stringify(record));
     const store = new FormatTrustStore(join(home, "trust.json"));
     const env = { ...process.env, OMNIRUSH_BOX_HOME: home };
-    const ask = await formatRequest({ root, path: "src/a.ts", text: "const a=1\n", trust: null, hash: null, store, env });
+    const ask = await formatRequest({ root, path: "src/a.ts", text: "const a=1\n", trust: null, hash: null, store, env, sandboxOn: true });
     expect(ask).toMatchObject({ trust: "ask", sandbox: true });
     if (!("trust" in ask) || ask.trust !== "ask") throw new Error("expected a prompt");
-    await expect(formatRequest({ root, path: "src/a.ts", text: "const a=1\n", trust: "once", hash: ask.hash, store, env })).rejects.toThrow(/sandbox is not running/);
+    await expect(formatRequest({ root, path: "src/a.ts", text: "const a=1\n", trust: "once", hash: ask.hash, store, env, sandboxOn: true })).rejects.toThrow(/sandbox is not running/);
+  });
+});
+
+describe("format on save: arguments, configuration and the sandbox switch", () => {
+  async function trustedPrettier() {
+    const prettier = repoPrettier();
+    if (!prettier) return null;
+    const root = await project(true);
+    await mkdir(join(root, "node_modules"), { recursive: true });
+    await symlink(prettier, join(root, "node_modules", "prettier"), "dir");
+    if (!formatterFor(root, join(root, "src/a.ts"))) return null;
+    const store = new FormatTrustStore(join(root, "..", `trust-${Math.random().toString(36).slice(2)}.json`));
+    return { root, store };
+  }
+
+  test("a file named like a flag stays a file name (no plugin is loaded)", async () => {
+    const setup = await trustedPrettier();
+    if (!setup) return;
+    const { root, store } = setup;
+    await writeFile(join(root, "..cjs"), "require('fs').writeFileSync(__dirname + '/PWNED', 'x'); module.exports = {};\n");
+    await writeFile(join(root, "--plugin=..cjs"), "const a=1\n");
+    const ask = await formatRequest({ root, path: "--plugin=..cjs", text: "const a=1\n", trust: null, hash: null, store, sandboxOn: false });
+    if (!("trust" in ask) || ask.trust !== "ask") return; // not a Prettier file type here
+    await formatRequest({ root, path: "--plugin=..cjs", text: "const a=1\n", trust: "once", hash: ask.hash, store, sandboxOn: false }).catch(() => null);
+    expect(existsSync(join(root, "PWNED"))).toBe(false);
+  });
+
+  test("a Prettier config added in a subfolder asks again", async () => {
+    const setup = await trustedPrettier();
+    if (!setup) return;
+    const { root, store } = setup;
+    const text = "const a=1\n";
+    const ask = await formatRequest({ root, path: "src/a.ts", text, trust: null, hash: null, store, sandboxOn: false });
+    if (!("trust" in ask) || ask.trust !== "ask") throw new Error("expected a prompt");
+    await formatRequest({ root, path: "src/a.ts", text, trust: "always", hash: ask.hash, store, sandboxOn: false });
+    await writeFile(join(root, "src", ".prettierrc"), JSON.stringify({ plugins: ["./x.cjs"] }));
+    expect(await formatRequest({ root, path: "src/a.ts", text, trust: null, hash: null, store, sandboxOn: false })).toMatchObject({ trust: "ask" });
+  });
+
+  test("with the sandbox on and no box at all, nothing runs; switching the sandbox asks again", async () => {
+    const setup = await trustedPrettier();
+    if (!setup) return;
+    const { root, store } = setup;
+    const home = await mkdtemp(join(tmpdir(), "omnirush-nobox-"));
+    roots.push(home);
+    const env = { ...process.env, OMNIRUSH_BOX_HOME: home };
+    const text = "const a=1\n";
+    const host = await formatRequest({ root, path: "src/a.ts", text, trust: null, hash: null, store, sandboxOn: false, env });
+    if (!("trust" in host) || host.trust !== "ask") throw new Error("expected a prompt");
+    await formatRequest({ root, path: "src/a.ts", text, trust: "always", hash: host.hash, store, sandboxOn: false, env });
+    // Trusted to run here; with the sandbox switched on it is asked again, and without a box it never runs here.
+    const boxed = await formatRequest({ root, path: "src/a.ts", text, trust: null, hash: null, store, sandboxOn: true, env });
+    expect(boxed).toMatchObject({ trust: "ask", sandbox: true });
+    if (!("trust" in boxed) || boxed.trust !== "ask") throw new Error("expected a prompt");
+    await expect(formatRequest({ root, path: "src/a.ts", text, trust: "once", hash: boxed.hash, store, sandboxOn: true, env })).rejects.toThrow(/sandbox is not running/);
   });
 });

@@ -58,6 +58,8 @@ type RegisterOptions = {
   resolveWorkspace: (config: ServerConfig, id: string) => Promise<WorkspaceInfo>;
   ensureWritable: (config: ServerConfig) => void;
   requireClientScope: (ctx: RequestContext, required: TokenScope) => void;
+  /** The project's sandbox switch (the box service's decision). */
+  sandboxOn: (workspace: WorkspaceInfo) => Promise<boolean>;
 };
 
 function readText(path: string): string | null {
@@ -75,6 +77,16 @@ function configFilesIn(dir: string, pattern: RegExp): string[] {
   } catch {
     return [];
   }
+}
+
+/** The folders from the file's own up to the project root. */
+function configFoldersUp(root: string, file: string): string[] {
+  const folders: string[] = [];
+  for (let dir = dirname(file); dir === root || dir.startsWith(root + sep); dir = dirname(dir)) {
+    folders.push(dir);
+    if (dir === root) break;
+  }
+  return folders;
 }
 
 /** The nearest package.json from the file up to the project root that names Prettier, and its folder. */
@@ -117,14 +129,16 @@ export function formatterFor(root: string, file: string, env: NodeJS.ProcessEnv 
     const script = dir ? prettierScript(dir, root) : null;
     const node = findOnPath("node", env);
     if (!dir || !script || !node) return null;
-    const pattern = /^(?:\.prettierrc(?:\..+)?|prettier\.config\..+|\.prettierignore|\.editorconfig|package\.json)$/;
+    const pattern = /^(?:\.prettierrc(?:\..+)?|prettier\.config\..+|\.prettierignore|\.editorconfig|package\.json|package\.ya?ml)$/;
     return {
       name: "Prettier",
       command: node,
-      args: [script, "--stdin-filepath", rel],
-      boxArgv: ["node", script, "--stdin-filepath", rel],
-      display: `node ${show(script)} --stdin-filepath <file>`,
-      configFiles: [...new Set([...configFilesIn(dir, pattern), ...configFilesIn(root, pattern), join(dirname(dirname(script)), "package.json")])],
+      // One argument (`--stdin-filepath=…`): a file named like a flag (`--plugin=x.cjs`) stays a file name.
+      args: [script, `--stdin-filepath=${rel}`],
+      boxArgv: ["node", script, `--stdin-filepath=${rel}`],
+      display: `node ${show(script)} --stdin-filepath=<file>`,
+      // Prettier looks for its configuration from the file's folder up: every folder on the way counts.
+      configFiles: [...new Set([...configFoldersUp(root, file).flatMap((folder) => configFilesIn(folder, pattern)), join(dirname(dirname(script)), "package.json")])],
     };
   }
   if (ext === ".go") {
@@ -136,13 +150,13 @@ export function formatterFor(root: string, file: string, env: NodeJS.ProcessEnv 
     const files = configFilesIn(root, /^(?:pyproject\.toml|\.?ruff\.toml)$/);
     const ruff = /\[tool\.ruff/.test(pyproject) || /["']ruff[>=<~\s"']/.test(pyproject) ? findOnPath("ruff", env) : null;
     if (ruff) {
-      const args = ["format", "--stdin-filename", rel, "-"];
-      return { name: "Ruff", command: ruff, args, boxArgv: ["ruff", ...args], display: "ruff format --stdin-filename <file> -", configFiles: files };
+      const args = ["format", `--stdin-filename=${rel}`, "-"];
+      return { name: "Ruff", command: ruff, args, boxArgv: ["ruff", ...args], display: "ruff format --stdin-filename=<file> -", configFiles: files };
     }
     const black = /\[tool\.black/.test(pyproject) ? findOnPath("black", env) : null;
     if (black) {
-      const args = ["-q", "--stdin-filename", rel, "-"];
-      return { name: "Black", command: black, args, boxArgv: ["black", ...args], display: "black -q --stdin-filename <file> -", configFiles: files };
+      const args = ["-q", `--stdin-filename=${rel}`, "-"];
+      return { name: "Black", command: black, args, boxArgv: ["black", ...args], display: "black -q --stdin-filename=<file> -", configFiles: files };
     }
     return null;
   }
@@ -152,15 +166,16 @@ export function formatterFor(root: string, file: string, env: NodeJS.ProcessEnv 
     if (!rustfmt) return null;
     const edition = /edition\s*=\s*"(\d{4})"/.exec(cargo ?? "")?.[1] ?? "2021";
     const args = ["--emit", "stdout", "--edition", edition];
-    return { name: "rustfmt", command: rustfmt, args, boxArgv: ["rustfmt", ...args], display: `rustfmt ${args.join(" ")}`, configFiles: configFilesIn(root, /^(?:Cargo\.toml|\.?rustfmt\.toml)$/) };
+    return { name: "rustfmt", command: rustfmt, args, boxArgv: ["rustfmt", ...args], display: `rustfmt ${args.join(" ")}`, configFiles: configFilesIn(root, /^(?:Cargo\.toml|\.?rustfmt\.toml|rust-toolchain(?:\.toml)?)$/) };
   }
   return null;
 }
 
 /** The trust hash: what runs and every configuration file's content (a change asks again). */
-export function formatterHash(formatter: Formatter): string {
+export function formatterHash(formatter: Formatter, sandbox = false): string {
   const hash = createHash("sha256");
-  hash.update(`${formatter.name}\0${formatter.command}\0${formatter.args.slice(0, 1).join(" ")}\0`);
+  // Where it runs is part of what was allowed: turning the sandbox off asks again.
+  hash.update(`${formatter.name}\0${formatter.command}\0${formatter.args.slice(0, 1).join(" ")}\0${sandbox ? "box" : "host"}\0`);
   for (const file of formatter.configFiles) {
     hash.update(`${basename(file)}\0`);
     hash.update(readText(file) ?? "\u0000missing");
@@ -297,6 +312,8 @@ export async function formatRequest(options: {
   trust: "once" | "always" | "never" | null;
   hash: string | null;
   store: FormatTrustStore;
+  /** The project's sandbox switch (BoxService.sandboxOn): on, the formatter runs in its box or not at all. */
+  sandboxOn: boolean;
   env?: NodeJS.ProcessEnv;
   now?: () => number;
 }): Promise<FormatOutcome> {
@@ -306,26 +323,34 @@ export async function formatRequest(options: {
   if (file === root || !file.startsWith(root + sep)) throw new ApiError(400, "invalid_path", "The file is outside the project");
   const formatter = formatterFor(root, file, env);
   if (!formatter) return { formatter: null, text: null };
-  const hash = formatterHash(formatter);
-  const record = projectBox(root, env);
+  const sandbox = options.sandboxOn;
+  const hash = formatterHash(formatter, sandbox);
   const stored = options.store.get(root);
   const current = stored && stored.hash === hash ? stored : null;
   if (options.trust) {
     // An answer to a prompt about another configuration (it changed meanwhile) asks again.
-    if (options.hash !== hash) return { formatter: formatter.name, trust: "ask", command: formatter.display, hash, sandbox: Boolean(record) };
+    if (options.hash !== hash) return { formatter: formatter.name, trust: "ask", command: formatter.display, hash, sandbox };
     if (options.trust !== "once") options.store.set(root, { decision: options.trust, hash, command: formatter.display, at: (options.now ?? Date.now)() });
     if (options.trust === "never") return { formatter: formatter.name, trust: "denied" };
   } else if (!current) {
-    return { formatter: formatter.name, trust: "ask", command: formatter.display, hash, sandbox: Boolean(record) };
+    return { formatter: formatter.name, trust: "ask", command: formatter.display, hash, sandbox };
   } else if (current.decision === "never") {
     return { formatter: formatter.name, trust: "denied" };
   }
-  const text = record ? await runFormatterInBox(formatter, root, record, options.text, env) : await runFormatter(formatter, root, options.text, FORMAT_TIMEOUT_MS, formatterEnvironment(env));
-  return { formatter: formatter.name, text, sandbox: Boolean(record) };
+  let text: string;
+  if (sandbox) {
+    // On: in the box only. A box that is missing (reset, cleaned up, still downloading) or not running: nothing runs.
+    const record = projectBox(root, env);
+    if (!record) throw new ApiError(409, "sandbox_not_running", "The project's sandbox is not running, so the formatter did not run");
+    text = await runFormatterInBox(formatter, root, record, options.text, env);
+  } else {
+    text = await runFormatter(formatter, root, options.text, FORMAT_TIMEOUT_MS, formatterEnvironment(env));
+  }
+  return { formatter: formatter.name, text, sandbox };
 }
 
 export function registerEditorFormatRoutes(options: RegisterOptions): void {
-  const { routes, config, jsonResponse, readJsonBody, resolveWorkspace, ensureWritable, requireClientScope } = options;
+  const { routes, config, jsonResponse, readJsonBody, resolveWorkspace, ensureWritable, requireClientScope, sandboxOn } = options;
   const store = new FormatTrustStore(formatTrustFile(config));
   addRoute(routes, "GET", "/workspace/:id/editor/formatters", "client", async (ctx) => {
     const workspace = await resolveWorkspace(config, ctx.params.id);
@@ -342,6 +367,8 @@ export function registerEditorFormatRoutes(options: RegisterOptions): void {
     if (!path || text === null || text.length > MAX_TEXT) throw new ApiError(400, "invalid_payload", "A path and the text to format are required");
     const trust = body.trust === "once" || body.trust === "always" || body.trust === "never" ? body.trust : null;
     const hash = typeof body.hash === "string" ? body.hash : null;
-    return jsonResponse(await formatRequest({ root: resolve(workspace.path), path, text, trust, hash, store }));
+    // The sandbox decision fails closed: if it cannot be read, the formatter is treated as sandboxed (and needs a box).
+    const inBox = await sandboxOn(workspace).catch(() => true);
+    return jsonResponse(await formatRequest({ root: resolve(workspace.path), path, text, trust, hash, store, sandboxOn: inBox }));
   });
 }
