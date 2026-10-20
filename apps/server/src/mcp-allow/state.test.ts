@@ -9,6 +9,7 @@ import { describeIgnored, readPolicyFile } from "./mcp-allow.mjs";
 import {
   decideMcpEntry,
   mcpEngineEnv,
+  mcpFilterMissing,
   mcpPolicyEnabled,
   mcpServersInUse,
   readWorkspaceMcp,
@@ -56,6 +57,8 @@ describe("the remembered MCP list", () => {
   test("the engine never takes plugins or commands from a project's config, unless the app itself says so", () => {
     const state = temp("mcp-state-");
     expect(mcpEngineEnv(state, {}).OMNIRUSH_PROJECT_CODE).toBe("0");
+    // The engine starts no MCP server unless the plugin marked its config (a missing plugin fails closed).
+    expect(mcpEngineEnv(state, {}).OMNIRUSH_MCP_FILTER).toBe("required");
     expect(mcpEngineEnv(state, { OMNIRUSH_PROJECT_CODE: "true" }).OMNIRUSH_PROJECT_CODE).toBe("0");
     expect(mcpEngineEnv(state, { OMNIRUSH_PROJECT_CODE: "1" }).OMNIRUSH_PROJECT_CODE).toBe("1");
   });
@@ -201,5 +204,17 @@ describe("the engine plugin (omnirush-mcp-policy)", () => {
     const reports = mcpEngineEnv(state).OMNIRUSH_MCP_REPORT_DIR;
     expect(readFileSync(path.join(reports, readdirSync(reports)[0] ?? ""), "utf8")).toContain("playwright");
   });
-});
 
+  test("a missing or empty MCP plugin file is reported (the engine then starts no MCP server)", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "mcp-filter-"));
+    try {
+      expect(mcpFilterMissing(path.join(dir, "omnirush-mcp-policy.js"))).toBe(true);
+      writeFileSync(path.join(dir, "empty.js"), "");
+      expect(mcpFilterMissing(path.join(dir, "empty.js"))).toBe(true);
+      writeFileSync(path.join(dir, "ok.js"), "export default {}");
+      expect(mcpFilterMissing(path.join(dir, "ok.js"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

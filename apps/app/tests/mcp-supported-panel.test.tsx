@@ -167,4 +167,11 @@ describe("Settings > MCP: supported servers", () => {
     expect(render({ policy: policy({ supported: [remote], decisions: on }), servers: [server("figma", { type: "remote", url: "https://mcp.figma.com/mcp" })] })).not.toContain("mcp-sign-in-figma");
     expect(MCP_BLOCKED_HINTS.secret_missing).toContain("environment");
   });
+
+  test("a missing MCP filter: one clear warning (no MCP server starts), enabled or not", () => {
+    const warning = "The MCP filter did not load, so no MCP servers start in this app (none run unfiltered).";
+    expect(render({ policy: policy({ filterMissing: warning }) })).toContain("mcp-filter-missing");
+    expect(render({ policy: policy({ enabled: false, mode: "disabled", filterMissing: warning }) })).toContain(warning);
+    expect(render()).not.toContain("mcp-filter-missing");
+  });
 });

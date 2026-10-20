@@ -103,6 +103,7 @@ export function splitSpec(spec: string, runtime: McpRuntime): { name: string; ve
 export function parseLaunch(command: unknown): McpLaunch | null;
 export function launchCommand(entry: McpAllowEntry, launch: McpLaunch, version: string, npmPrefix: string): string[];
 export function windowsDirect(found: string, platform?: string, exists?: (file: string) => boolean): string[] | null;
+export const MCP_FILTERED_MARK: unique symbol;
 export function normalizeRemoteUrl(value: unknown): string | null;
 export function resolveRunner(runner: string, options?: { root?: string | null; platform?: string; env?: Record<string, string | undefined>; exists?: (file: string) => boolean; home?: string; accept?: ((file: string) => boolean) | null }): string | null;
 export function projectCodeIgnored(cfg: unknown): McpIgnored[];

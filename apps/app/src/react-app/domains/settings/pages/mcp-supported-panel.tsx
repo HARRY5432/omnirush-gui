@@ -107,6 +107,9 @@ export function McpSupportedPanel(props: {
   const [addError, setAddError] = useState<{ id: string; message: string } | null>(null);
   const decisionFor = (name: string) => props.policy.decisions.find((decision) => decision.name === name) ?? null;
 
+  const filterMissing = props.policy.filterMissing?.trim() ? (
+    <p data-testid="mcp-filter-missing" className="text-sm font-medium text-amber-11">{props.policy.filterMissing.trim()}</p>
+  ) : null;
   const ignoredNotice = props.policy.ignoredNotice?.trim() ? (
     <p data-testid="mcp-project-code-ignored" className="text-xs text-dls-secondary">{props.policy.ignoredNotice.trim()}</p>
   ) : null;
@@ -117,6 +120,7 @@ export function McpSupportedPanel(props: {
         <p data-testid="mcp-policy-off" className="text-sm text-dls-secondary">
           {props.policy.message?.trim() || "MCP servers are turned off for this account."}
         </p>
+        {filterMissing}
         {ignoredNotice}
       </div>
     );
@@ -137,6 +141,7 @@ export function McpSupportedPanel(props: {
 
   return (
     <div data-testid="mcp-supported-panel" className="mb-6 flex flex-col gap-5">
+      {filterMissing}
       {ignoredNotice}
       {props.policy.engineV2 ? (
         <p data-testid="mcp-engine-v2-note" className="text-sm text-dls-secondary">{MCP_ENGINE_V2_NOTE}</p>
