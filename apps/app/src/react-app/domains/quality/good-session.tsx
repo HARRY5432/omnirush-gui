@@ -262,10 +262,10 @@ function useGoodSession(
 }
 
 /** "Good session ★", "Checking session quality…" (muted) or why not, with the rewards guide. */
-export function GoodSessionLine({ result }: { result: OmniRushGoodSession | null }) {
+export function GoodSessionLine({ result, announce = true }: { result: OmniRushGoodSession | null; announce?: boolean }) {
   const copy = goodSessionCopy(result);
   return (
-    <p role="status" data-testid="good-session-confirmed" data-state={copy.state} className="text-[11px] leading-4">
+    <p role={announce ? "status" : undefined} data-testid="good-session-confirmed" data-state={copy.state} className="text-[11px] leading-4">
       {copy.state === "good" ? (
         <span className="font-medium text-foreground">{copy.text}</span>
       ) : copy.state === "pending" ? (
@@ -591,7 +591,8 @@ export function GoodSessionChecklistBar(props: GoodSessionChecklistBarProps) {
             ) : null}
             {checklist.reasons.map((reason) => <p key={reason} className="text-amber-11">{reason}</p>)}
             {checklist.delivery ? <p data-testid="good-session-delivery">{checklist.delivery}</p> : null}
-            {showVerdict ? <GoodSessionLine result={goodSession} /> : null}
+            {/* The chip's own status already announces it. */}
+            {showVerdict ? <GoodSessionLine result={goodSession} announce={false} /> : null}
           </div>
         ) : null}
         <Popover>
