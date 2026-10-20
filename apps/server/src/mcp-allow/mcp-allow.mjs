@@ -169,6 +169,8 @@ function normalizeRules(value) {
 // The same check as the backend's mcp_policy.remote_url (test/fixtures/mcp-remote-urls.json, both sides): plain
 // host names only (no escapes, IP shortcuts or trailing dot), a port without leading zeros, a path without
 // escapes or dot segments, no user, query or fragment.
+// Token shapes a key server's arguments must not hold (Figma's personal and OAuth tokens).
+const TOKEN_SHAPE = /(?:^|[^A-Za-z0-9_])fig(?:d|u|ur)_[A-Za-z0-9_-]{20,}/;
 const REMOTE_URL = /^(https?):\/\/((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*|\[::1\])(?::([1-9][0-9]{0,4}))?(\/[A-Za-z0-9._~/-]*)?$/i;
 
 export function normalizeRemoteUrl(value) {
@@ -586,7 +588,9 @@ export function evaluateMcp(mcpMap, policy, ctx = {}) {
       // the process list). A path flag's value is the one argument allowed.
       for (let i = 0; i < rest.length; i += 1) {
         const arg = String(rest[i]);
-        if (arg.startsWith("-")) { if (!arg.includes("=") && (rules.path_flags ?? []).includes(arg)) i += 1; continue; }
+        // A path flag's value that looks like a token is refused too (a key typed in the wrong place).
+        const value = arg.startsWith("-") ? (arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : !arg.includes("=") && (rules.path_flags ?? []).includes(arg) ? String(rest[i + 1] ?? "") : "") : null;
+        if (value !== null && !TOKEN_SHAPE.test(value)) { if (!arg.includes("=") && (rules.path_flags ?? []).includes(arg)) i += 1; continue; }
         refusal = blocked(name, "flag", { ...base, version, reason: MCP_REASONS.secret_flag });
         break;
       }
