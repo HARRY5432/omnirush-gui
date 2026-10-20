@@ -307,6 +307,9 @@ export function resolveRunner(runner, { root = null, platform = process.platform
     const folder = dir.trim().replace(/^"(.*)"$/, "$1");
     if (!folder || !lib.isAbsolute(folder) || (platform === "win32" && !/^[A-Za-z]:[\\/]|^\\\\/.test(folder))) continue;
     if (root && insideRootReal(root, folder, platform)) continue;
+    // The app's own package-manager wrappers (the install log's folder holds an `omnirush-pkg` file) look the
+    // real tool up on PATH again, relative entries included: skip them for the tool itself.
+    if (exists(lib.join(folder, "omnirush-pkg")) || exists(lib.join(folder, "omnirush-pkg.exe"))) continue;
     for (const ext of exts) {
       const file = lib.join(folder, `${runner}${ext}`);
       if (exists(file)) return file;
