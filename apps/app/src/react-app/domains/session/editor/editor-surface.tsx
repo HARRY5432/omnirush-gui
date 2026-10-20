@@ -150,7 +150,8 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
       onCursorRef.current({ line: event.position.lineNumber, column: event.position.column });
     });
     const disposables = [cursor(code), cursor(diff.getModifiedEditor())];
-    // The agent in the editor: the right-click menu's first group, and Cmd/Ctrl+L to ask.
+    // The agent in the editor: first in the right-click menu, and Cmd/Ctrl+L to ask. Monaco always sorts its
+    // "navigation" group first, so the agent items join it with orders below Go to Definition (1.1).
     const agentActions = (editor: MonacoApi.editor.IStandaloneCodeEditor) => ([
       { id: "omnirush.agent.ask", label: "Ask about selection", action: "ask" as const, keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyL], order: 1 },
       { id: "omnirush.agent.explain", label: "Explain with agent", action: "explain" as const, keybindings: [], order: 2 },
@@ -160,8 +161,8 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
       id: item.id,
       label: item.label,
       keybindings: item.keybindings,
-      contextMenuGroupId: "0_agent",
-      contextMenuOrder: item.order,
+      contextMenuGroupId: "navigation",
+      contextMenuOrder: item.order / 10,
       run: (target: MonacoApi.editor.ICodeEditor) => onAgentRef.current?.(item.action, target),
     }));
     disposables.push(...agentActions(code), ...agentActions(diff.getModifiedEditor() as MonacoApi.editor.IStandaloneCodeEditor));
