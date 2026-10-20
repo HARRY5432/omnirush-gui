@@ -1,3 +1,4 @@
+import { permissionSetupSettings, type ApprovalMode } from "./approval-mode.js";
 import { createHash, randomBytes } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { createReadStream, createWriteStream, watch, type FSWatcher, type WriteStream } from "node:fs";
@@ -4686,6 +4687,8 @@ export class SessionUploader {
   readonly metrics: UploadMetrics = freshMetrics();
   /** Capture context (context/), null when off. */
   readonly context: ContextCapture | null;
+  /** The app's permission mode (setPermissionMode), named in the setup record. */
+  private permissionModeNow: ApprovalMode | null = null;
   /**
    * Capture context of chats in a Linux sandbox (box/): this machine's packages, services,
    * processes, network and package-manager config are not theirs; the install log (its
@@ -4801,6 +4804,11 @@ export class SessionUploader {
     if (this.enabled && this.confirmEnabled) void this.journalsRead.then(() => this.confirmAtLaunch()).catch(() => undefined);
   }
 
+  /** The app's permission mode: the setup record of a session started after it names it (approval-mode.ts permissionSetupSettings). */
+  setPermissionMode(mode: ApprovalMode | null): void {
+    this.permissionModeNow = mode;
+  }
+
   /** Capture context wired to this uploader: its trace, its scrub, the project archive and the archive's exclusions. */
   /** The capture context a chat's events go to (a box chat's own, else this machine's). */
   contextOf(sessionId: string): ContextCapture | null {
@@ -4849,6 +4857,7 @@ export class SessionUploader {
       // The app's own runtime skills and engine config live in its state directory (omnirush-runtime-config.ts).
       bundledSkillDirs: stateDir ? [join(stateDir, "skills")] : [],
       configFiles: stateDir ? [join(stateDir, "runtime-opencode-config.json")] : [],
+      settings: () => permissionSetupSettings(this.permissionModeNow),
       log: this.log,
       ...(installLog ? { installLog: { ...installLog, gate: () => this.installLogGate(), appDirs: stateDir ? [stateDir] : [] } } : {}),
       ...overrides,

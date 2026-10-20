@@ -8,6 +8,7 @@
  * same behaviour. Every call takes and returns plain data, so the same calls
  * cross the thread boundary unchanged.
  */
+import type { ApprovalMode } from "./approval-mode.js";
 import type { ContextOptions } from "./context/index.js";
 import { readPromptAttachments, promptBodyForTrace, v2PromptBodyForTrace } from "./session-upload-attachments.js";
 import {
@@ -222,6 +223,11 @@ export class CaptureHost {
   startSession(sessionId: string, workspaceId: string, root: string, turnsBefore = 0): void {
     this.sessionRoots.set(sessionId, root);
     this.sessionUploader.startSession(sessionId, workspaceId, root, { turnsBefore });
+  }
+
+  /** The app's permission mode, named in the setup record of the sessions started after it (sent before each startSession). */
+  permissionMode(mode: ApprovalMode | null): void {
+    this.sessionUploader.setPermissionMode(mode);
   }
 
   /** The chat's prompts run in its project's box (or no longer: null); sent before its startSession. */

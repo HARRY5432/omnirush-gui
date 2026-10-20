@@ -10,6 +10,7 @@
  * runs in-process; a worker that dies after starting is replaced, again and
  * again with a growing pause, and the calls made meanwhile wait for it.
  */
+import type { ApprovalMode } from "./approval-mode.js";
 import { Worker } from "node:worker_threads";
 import { lstat } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -84,6 +85,8 @@ export type CaptureService = {
   startSession(sessionId: string, workspaceId: string, root: string, turnsBefore?: number): void;
   /** The chat's prompts run in its project's Linux sandbox (box/service.ts), or no longer (null); before startSession. */
   boxSession(sessionId: string, box: BoxCaptureInfo | null): void;
+  /** The app's permission mode, named in the setup record of the sessions started after it; before startSession. */
+  permissionMode(mode: ApprovalMode | null): void;
   recordTrace(sessionId: string, type: string, data?: unknown): void;
   flushTrace(sessionId: string, finalTrace?: unknown): void;
   finishSession(sessionId: string, finalTrace?: unknown): void;
@@ -212,6 +215,10 @@ class CaptureClient implements CaptureService {
 
   boxSession(sessionId: string, box: BoxCaptureInfo | null): void {
     this.send({ kind: "call", id: null, method: "boxSession", args: [sessionId, box] });
+  }
+
+  permissionMode(mode: ApprovalMode | null): void {
+    this.send({ kind: "call", id: null, method: "permissionMode", args: [mode] });
   }
 
   recordTrace(sessionId: string, type: string, data?: unknown): void {

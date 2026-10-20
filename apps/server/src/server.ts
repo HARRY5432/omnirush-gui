@@ -1,5 +1,5 @@
 import { managedDesktopPolicy } from "./managed-desktop-policy.js";
-import { parseApprovalMode, resolveApprovalMode } from "./approval-mode.js";
+import { parseApprovalMode, resolveApprovalMode, type ApprovalMode } from "./approval-mode.js";
 import { createTaskRecovery, requeueTaskRecoveryAfterEngineLoss, setTaskRecovery } from "./task-recovery.js";
 import {
   directoryMatchKey,
@@ -256,6 +256,16 @@ function editorSavesFor(config: ServerConfig): EditorSaveLog {
   }
   return log;
 }
+
+/** The approval mode a captured session's setup record names (null when it cannot be read). */
+async function capturePermissionMode(config: ServerConfig): Promise<ApprovalMode | null> {
+  try {
+    return resolveApprovalMode(await readGlobalRuntimeOpencodeConfig(config)).mode;
+  } catch {
+    return null;
+  }
+}
+
 /** Automatic compaction (session-archive/auto-compact.ts), one per server: its counts live as long as the app. */
 const autoCompactorsByServer = new WeakMap<ServerConfig, AutoCompactor>();
 /**
@@ -2026,6 +2036,7 @@ export async function proxyOpencodeV2Request(input: {
     // capture v2's session-start manifest is taken before the prompt reaches the engine (at most about 3 s).
     await capture.archiveStartGate(uploadedSessionId, input.workspace.path, lateWritesGate(input.workspace));
     capture.boxSession(uploadedSessionId, boxInfo);
+    capture.permissionMode(await capturePermissionMode(input.config));
     capture.startSession(uploadedSessionId, input.workspace.id, input.workspace.path, turnsBefore);
     const boxPlan = await boxServiceFor(input.config).planOutcome(uploadedSessionId, input.workspace).catch(() => null);
     if (boxPlan) capture.recordTrace(uploadedSessionId, "box.plan", boxPlan);
@@ -2457,6 +2468,7 @@ export async function proxyOpencodeRequest(input: {
     // capture v2's session-start manifest is taken before the prompt reaches the engine (at most about 3 s).
     if (promptDispatch) await capture.archiveStartGate(uploadedSessionId, workspace.path, lateWritesGate(workspace, pool?.snapshot().generations.map((generation) => generation.pid) ?? []));
     if (promptDispatch) capture.boxSession(uploadedSessionId, boxInfo);
+    if (promptDispatch) capture.permissionMode(await capturePermissionMode(input.config));
     capture.startSession(uploadedSessionId, workspace.id, workspace.path, turnsBefore);
     const boxPlan = isUploadPromptDispatch(method, proxyPath) ? await boxServiceFor(input.config).planOutcome(uploadedSessionId, workspace).catch(() => null) : null;
     if (boxPlan) capture.recordTrace(uploadedSessionId, "box.plan", boxPlan);

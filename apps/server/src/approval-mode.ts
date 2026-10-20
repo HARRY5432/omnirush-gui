@@ -58,3 +58,14 @@ export function resolveApprovalMode(
   if (setting) return { mode: setting, source: "settings", setting };
   return { mode: DEFAULT_APPROVAL_MODE, source: "default", setting };
 }
+
+/**
+ * The capture setup record's permission settings for a mode: Careful and
+ * Normal name it as `permission_mode`; Auto adds nothing, so its record stays
+ * what earlier versions sent (the CLI's permissionSetupSettings does the same).
+ */
+export function permissionSetupSettings(mode: ApprovalMode | null | undefined): Record<string, unknown> {
+  if (mode === "careful") return { permission_mode: "careful" };
+  if (mode === "guarded") return { permission_mode: "normal" };
+  return {};
+}
