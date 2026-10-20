@@ -50,6 +50,9 @@ describe("release build guard", () => {
     const other = join(root, "other");
     await writeFile(other, "#!/bin/sh\necho other\n");
     await expect(releaseEngineBinary(other, release)).rejects.toThrow("is not the bundled one");
+    // One hash per bundled architecture (macOS arm64 + x64), comma-separated.
+    expect(await releaseEngineBinary(bin, { release: true, engineSha256: ["f".repeat(64), sha].join(",") })).toBe(bin);
+    await expect(releaseEngineBinary(other, { release: true, engineSha256: ["f".repeat(64), sha].join(",") })).rejects.toThrow("is not the bundled one");
     // Bytes changed in place with the same size and time: still refused (hashed at every start, no cache).
     const { mtime } = await stat(bin);
     await writeFile(bin, "#!/bin/sh\necho EVILLL\n");

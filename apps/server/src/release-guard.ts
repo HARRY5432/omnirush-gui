@@ -94,6 +94,7 @@ export async function releaseEngineBinary(bin: string | undefined | null, facts:
   } catch {
     throw new Error(`${RELEASE_ENGINE_ERROR} The bundled engine could not be read.`);
   }
-  if (actual !== facts.engineSha256) throw new Error(`${RELEASE_ENGINE_ERROR} The engine at ${path} is not the bundled one. Reinstall OmniRush.ai.`);
+  // One hash per bundled architecture, comma-separated (apps/desktop/scripts/stamp-build-variant.mjs).
+  if (!facts.engineSha256.split(",").includes(actual)) throw new Error(`${RELEASE_ENGINE_ERROR} The engine at ${path} is not the bundled one. Reinstall OmniRush.ai.`);
   return path;
 }

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, mkdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -72,6 +72,10 @@ test("release: only the bundled engine with the recorded sha256", async () => {
   assert.deepEqual(releaseEngineBinary({ build, resourcesPath: directory, fileNames: ["opencode"] }), { path: path.join(directory, "sidecars", "opencode"), source: "bundled" });
   assert.throws(() => releaseEngineBinary({ build: { ...build, engineSha256: "c".repeat(64) }, resourcesPath: directory, fileNames: ["opencode"] }), /was changed/);
   assert.throws(() => releaseEngineBinary({ build, resourcesPath: directory, fileNames: ["missing"] }), /No bundled engine/);
+  // A macOS build records one hash per architecture; the binary present must be one of them.
+  const perArch = { ...build, engineSha256: ["d".repeat(64), sha].join(",") };
+  assert.equal(releaseEngineBinary({ build: perArch, resourcesPath: directory, fileNames: ["opencode"] }).source, "bundled");
+  assert.throws(() => releaseEngineBinary({ build: { ...build, engineSha256: ["d".repeat(64), "e".repeat(64)].join(",") }, resourcesPath: directory, fileNames: ["opencode"] }), /was changed/);
 });
 
 test("packaging stamps release with the engine hash, or dev when asked at build time", async () => {
@@ -92,6 +96,13 @@ test("packaging stamps release with the engine hash, or dev when asked at build 
   assert.deepEqual(stampBuildVariant({ env: { OMNIRUSH_DESKTOP_VARIANT: "dev" }, sidecarDir, serverDistDir, buildFilePath }), { variant: "dev", engineSha256: null });
   assert.equal(await readFile(path.join(serverDistDir, "build-variant.js"), "utf8"), source);
   assert.throws(() => desktopVariant({ OMNIRUSH_DESKTOP_VARIANT: "staging" }));
+  // macOS bundles one engine per architecture: both hashes are recorded, sorted.
   await writeFile(path.join(sidecarDir, "opencode-x86_64-unknown-linux-gnu"), "other");
-  assert.throws(() => stampBuildVariant({ env: {}, sidecarDir, serverDistDir, buildFilePath }), /one bundled engine/);
+  const other = createHash("sha256").update("other").digest("hex");
+  const both = [sha, other].sort().join(",");
+  assert.deepEqual(stampBuildVariant({ env: {}, sidecarDir, serverDistDir, buildFilePath }), { variant: "release", engineSha256: both });
+  assert.equal(await readFile(path.join(serverDistDir, "build-variant.js"), "utf8"), `export const BUILD_VARIANT = "release";\nexport const RELEASE_ENGINE_SHA256 = "${both}";\n`);
+  await rm(sidecarDir, { recursive: true, force: true });
+  await mkdir(sidecarDir);
+  assert.throws(() => stampBuildVariant({ env: {}, sidecarDir, serverDistDir, buildFilePath }), /one engine per architecture/);
 });
