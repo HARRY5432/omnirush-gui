@@ -8,7 +8,7 @@ export const MCP_REASONS: Record<McpDecisionCode, string>;
 export type McpRuntime = "npm" | "pypi" | "remote";
 export type McpDecisionCode =
   | "allowed" | "disabled" | "remote" | "unknown_command" | "not_allowed" | "denied"
-  | "version" | "outside_project" | "missing_flag" | "missing_arg" | "flag" | "duplicate" | "invalid" | "runner_missing" | "secret_missing" | "remote_settings";
+  | "version" | "outside_project" | "missing_flag" | "missing_arg" | "flag" | "duplicate" | "invalid" | "runner_missing" | "secret_missing" | "remote_settings" | "protected_value";
 
 export type McpRules = {
   path_args?: "positional";
@@ -116,11 +116,15 @@ export function shellQuote(word: string): string;
 /** The engine variables allowed through to a local MCP server (the rest are set empty for it). */
 export const MCP_ENV_ALLOW: readonly string[];
 /** The `environment` a local MCP server gets: `own`, every other engine variable empty except the basics and `keep`. */
-export function mcpServerEnvironment(engineEnv: Record<string, string | undefined> | undefined, own?: Record<string, string>, keep?: string[], platform?: string): Record<string, string>;
+export function mcpServerEnvironment(engineEnv: Record<string, string | undefined> | undefined, own?: Record<string, string>, keep?: string[], platform?: string, options?: { envOnly?: boolean }): Record<string, string>;
+export const MCP_ENV_ONLY_MARK: unique symbol;
+export const MCP_ENV_VALUES_MARK: unique symbol;
+export function engineStartsServersEnvOnly(): boolean;
+export function protectedValues(engineEnv: Record<string, string | undefined> | undefined): string[];
 export function evaluateMcp(
   mcpMap: unknown,
   policy: McpPolicy | null,
-  ctx?: { root?: string; platform?: string; box?: McpBox | null; npmPrefix?: string; resolveRunner?: (runner: string, options: { root: string; platform: string; accept?: (file: string) => boolean }) => string | null; exists?: (file: string) => boolean; env?: Record<string, string | undefined> },
+  ctx?: { root?: string; platform?: string; box?: McpBox | null; npmPrefix?: string; resolveRunner?: (runner: string, options: { root: string; platform: string; accept?: (file: string) => boolean }) => string | null; exists?: (file: string) => boolean; env?: Record<string, string | undefined>; envOnly?: boolean },
 ): { mcp: Record<string, Record<string, unknown>>; decisions: McpDecision[] };
 export function toolPrefix(name: string): string;
 export function mcpPermissionRules(decisions: McpDecision[] | null | undefined, mode: unknown): Record<string, "allow" | "ask">;
@@ -136,6 +140,7 @@ export function readReport(dir: string, root: string): McpReport | null;
 export function describeDecision(d: McpDecision): string;
 export function createMcpPolicyHooks(options?: {
   directory?: string;
+  envOnly?: boolean;
   policyFile?: string | null;
   reportDir?: string | null;
   box?: McpBox | null | ((root: string) => McpBox | null);

@@ -95,6 +95,10 @@ describe("engine MCP plugin", () => {
     expect(Object.keys(mcp)).toEqual(["computer-use"]);
     expect(mcp["computer-use"]?.command).toEqual([process.execPath, "/x/relay.mjs", "/x/c.json"]);
     expect(Object.entries(config.permission as Record<string, string>).at(-1)).toEqual(["computer-use_*", "allow"]);
+    // The built-in server gets the allowlist's environment too: the engine's tokens empty for it, its own kept.
+    const builtinEnv = (config.mcp as Record<string, { environment: Record<string, string> }>)["computer-use"]!.environment;
+    expect(builtinEnv.OMNIRUSH_COMPUTER_USE_COMMAND).toBe("");
+    expect(builtinEnv.OMNIRUSH_MCP_REPORT_DIR).toBe("");
     const agents = config.agent as Record<string, { permission: Record<string, string> }>;
     for (const name of ["general", "explore", "custom"]) expect(agents[name]?.permission["computer-use_*"]).toBe("deny");
     const report = JSON.parse(readFileSync(path.join(reports, readdirName(reports)), "utf8")) as { decisions: Array<{ name: string; code: string }> };

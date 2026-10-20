@@ -51,6 +51,22 @@ describe("managed OpenCode startup", () => {
     } finally { await managed.close(); }
   });
 
+  test("the next engine reads no project config (it would start a project's MCP servers unfiltered)", async () => {
+    const root = await createRoot();
+    const bin = await writeExecutable(root, "project-config-env.mjs", [
+      "const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch(request) {",
+      "  if (new URL(request.url).pathname === '/env') return Response.json({ a: process.env.OPENCODE_DISABLE_PROJECT_CONFIG ?? null, b: process.env.OPENCODE_CONFIG_PROJECT_DISABLE ?? null });",
+      "  return Response.json({ healthy: true, version: 'test', pid: process.pid });",
+      "} });",
+      "console.log(`opencode server listening on http://127.0.0.1:${server.port}`);",
+      "process.on('SIGTERM', () => { server.stop(true); process.exit(0); });",
+    ]);
+    const managed = await createManagedOpencodeV2Server({ bin, rootDir: root, env: {} });
+    try {
+      expect(await managed.fetchJson("/env")).toEqual({ status: 200, json: { a: "1", b: "1" } });
+    } finally { await managed.close(); }
+  });
+
   test("passes the model-catalog fetch switch to the next engine", async () => {
     const root = await createRoot();
     const bin = await writeExecutable(root, "catalog-env.mjs", [

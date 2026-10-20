@@ -55,6 +55,7 @@ export const MCP_REASONS = {
   runner_missing: "npx or uvx was not found on this computer outside the project folder, so the server does not start.",
   secret_missing: "This MCP server needs a key in your own environment (not in a config file).",
   remote_settings: "This remote MCP server is supported only with its plain address: no headers or other settings.",
+  protected_value: "This MCP server entry holds one of the app's own keys (in its command, variables or folder), so it does not start.",
 };
 
 const ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
@@ -164,14 +165,72 @@ const MCP_ENV_GIT_CREDENTIAL = /^GIT_(?:ASKPASS$|CREDENTIAL|HTTP_EXTRAHEADER|CON
 const MCP_ENV_NEVER = /^(?:OMNIRUSH_|OPENCODE_SERVER_|OPENCODE_PASSWORD$)/i;
 
 /**
- * The `environment` a local MCP server gets from the app: `own` (its
- * path_env / fixed_env values), every other variable of `engineEnv` set empty
- * (the engine merges its own environment under it), except the allowed
- * basics (MCP_ENV_ALLOW) and the keys in `keep` (the server's secret_env).
+ * The engine sets MCP_ENV_ONLY_MARK (on globalThis) when it can start a filtered server with only its basics
+ * plus the server's `environment`; the filter then gives each server the values it needs (envOnly) and marks
+ * the config with MCP_ENV_VALUES_MARK, and only then does the engine leave the rest of its environment out.
+ * Either side alone keeps the older way (the whole environment, the other variables emptied).
  */
-export function mcpServerEnvironment(engineEnv, own = {}, keep = [], platform = process.platform) {
+export const MCP_ENV_ONLY_MARK = Symbol.for("omnirush.mcp.envOnly");
+export const MCP_ENV_VALUES_MARK = Symbol.for("omnirush.mcp.envValues");
+
+/** Whether this engine starts a filtered server without the rest of its own environment (set by the engine). */
+export function engineStartsServersEnvOnly() {
+  return globalThis[MCP_ENV_ONLY_MARK] === true;
+}
+
+function allowedName(key) {
+  const upper = key.toUpperCase();
+  return (MCP_ENV_ALLOW_UPPER.has(upper) || (MCP_ENV_ALLOW_PREFIX.test(key) && !MCP_ENV_GIT_CREDENTIAL.test(key))) && !MCP_ENV_NEVER.test(key);
+}
+const MCP_ENV_ALLOW_UPPER = new Set(MCP_ENV_ALLOW.map((k) => k.toUpperCase()));
+
+// The engine's values a server's entry must not hold anywhere (its command, variables or folder): the app's
+// tokens and the engine's password, from 8 characters on. A project config could copy them in ({env:...}).
+const PROTECTED_VALUE_NAME = /^(?:OPENCODE_SERVER_|OPENCODE_PASSWORD$)|^OMNIRUSH_.*(?:TOKEN|SECRET|PASSWORD|PASSWD|KEY|AUTH|CREDENTIAL|COOKIE|SESSION)/i;
+export function protectedValues(engineEnv) {
+  return [...new Set(Object.entries(engineEnv ?? {})
+    .filter(([k, v]) => typeof v === "string" && v.length >= 8 && PROTECTED_VALUE_NAME.test(k))
+    .map(([, v]) => v))];
+}
+
+function holdsProtected(raw, values) {
+  if (!values.length) return false;
+  const words = [
+    ...(Array.isArray(raw.command) ? raw.command : []),
+    ...(isRecord(raw.environment) ? Object.entries(raw.environment).flat() : []),
+    raw.cwd,
+    raw.url,
+  ].filter((w) => typeof w === "string");
+  return words.some((w) => values.some((v) => w.includes(v)));
+}
+
+/**
+ * The `environment` a local MCP server gets from the app. `own`: its
+ * path_env / fixed_env values; `keep`: the keys its rules name (secret_env).
+ * `envOnly` (the engine starts the server with its basics plus this, nothing
+ * else of its own environment): the allowed basics (MCP_ENV_ALLOW) and the
+ * kept keys with their values, then `own`; nothing empty. Otherwise (the
+ * engine merges its whole environment under this): every other variable the
+ * engine has is set empty.
+ */
+export function mcpServerEnvironment(engineEnv, own = {}, keep = [], platform = process.platform, { envOnly = false } = {}) {
+  if (envOnly) {
+    const norm = (k) => (platform === "win32" ? k.toUpperCase() : k);
+    const kept = new Set(keep.filter((k) => !MCP_ENV_NEVER.test(k)).map(norm));
+    const ownKeys = new Set(Object.keys(own).map(norm));
+    const out = {};
+    for (const [key, value] of Object.entries(engineEnv ?? {})) {
+      if (typeof value !== "string" || value === "" || ownKeys.has(norm(key))) continue;
+      if (allowedName(key) || kept.has(norm(key))) out[key] = value;
+    }
+    for (const [key, value] of Object.entries(own)) if (!MCP_ENV_NEVER.test(key) && typeof value === "string") out[key] = value;
+    return out;
+  }
+  return blankedEnvironment(engineEnv, own, keep, platform);
+}
+
+function blankedEnvironment(engineEnv, own, keep, platform) {
   const norm = (k) => (platform === "win32" ? k.toUpperCase() : k);
-  const allowed = new Set(MCP_ENV_ALLOW.map((k) => k.toUpperCase()));
   const kept = new Set(keep.filter((k) => !MCP_ENV_NEVER.test(k)).map(norm));
   const ownKeys = new Set(Object.keys(own).map(norm));
   const out = {};
@@ -180,13 +239,15 @@ export function mcpServerEnvironment(engineEnv, own = {}, keep = [], platform = 
     // program does when it is not set at all (git's identity, Volta's home).
     if (typeof value !== "string" || value === "") continue;
     if (ownKeys.has(norm(key))) continue;
-    const upper = key.toUpperCase();
-    const basic = (allowed.has(upper) || (MCP_ENV_ALLOW_PREFIX.test(key) && !MCP_ENV_GIT_CREDENTIAL.test(key))) && !MCP_ENV_NEVER.test(key);
-    if (basic || kept.has(norm(key))) continue;
+    if (allowedName(key) || kept.has(norm(key))) continue;
     out[key] = "";
   }
-  // A name the app keeps from every server is empty even when the server's own variables name it.
-  for (const [key, value] of Object.entries(own)) out[key] = MCP_ENV_NEVER.test(key) ? "" : value;
+  // A name the app keeps from every server is empty even when the server's own variables name it (and left
+  // out when the engine does not have it).
+  for (const [key, value] of Object.entries(own)) {
+    if (!MCP_ENV_NEVER.test(key)) out[key] = value;
+    else if (typeof engineEnv?.[key] === "string" && engineEnv[key] !== "") out[key] = "";
+  }
   return out;
 }
 
@@ -581,12 +642,15 @@ export function evaluateMcp(mcpMap, policy, ctx = {}) {
   const root = ctx.root || process.cwd();
   const platform = ctx.platform || process.platform;
   const box = ctx.box && typeof ctx.box.shell === "string" && typeof ctx.box.key === "string" ? ctx.box : null;
+  const envOnly = ctx.envOnly ?? engineStartsServersEnvOnly();
+  const secretsHere = protectedValues(ctx.env ?? process.env);
   const out = {};
   const decisions = [];
   const entries = isRecord(mcpMap) ? Object.entries(mcpMap) : [];
   for (const [name, raw] of entries) {
     if (!isRecord(raw)) { decisions.push(blocked(name, "invalid")); continue; }
     if (!policy || !policy.enabled) { decisions.push(blocked(name, "disabled", policy?.message ? { reason: policy.message } : {})); continue; }
+    if (holdsProtected(raw, secretsHere)) { decisions.push(blocked(name, "protected_value")); continue; }
     if (raw.type === "remote" || typeof raw.url === "string") {
       const url = normalizeRemoteUrl(raw.url);
       const remote = url ? policy.allow.find((e) => e.runtime === "remote" && e.url === url) : null;
@@ -764,12 +828,12 @@ export function evaluateMcp(mcpMap, policy, ctx = {}) {
       // The box shell needs its key; the engine's other variables are empty for it (mcpServerEnvironment).
       // Its own settings (OMNIRUSH_BOX_HOME and the like: where the box lives, not a credential) stay too.
       const boxVars = Object.fromEntries(Object.entries(userEnv).filter(([k, v]) => /^OMNIRUSH_BOX_/i.test(k) && typeof v === "string"));
-      next.environment = { ...mcpServerEnvironment(userEnv, {}, [], platform), ...boxVars, OMNIRUSH_BOX_KEY: box.key };
+      next.environment = { ...mcpServerEnvironment(userEnv, {}, [], platform, { envOnly }), ...boxVars, OMNIRUSH_BOX_KEY: box.key };
       notes.push("runs in the sandbox");
     } else {
       next.command = argv;
       // The engine's tokens and the person's other keys never reach the server (mcpServerEnvironment).
-      next.environment = mcpServerEnvironment(userEnv, environment, secretNames, platform);
+      next.environment = mcpServerEnvironment(userEnv, environment, secretNames, platform, { envOnly });
       if (!Object.keys(next.environment).length) delete next.environment;
     }
     if (secretNames.length) notes.push(`uses ${secretNames[0]} from your environment`);
@@ -945,10 +1009,11 @@ export function describeDecision(d) {
  */
 export const MCP_FILTERED_MARK = Symbol.for("omnirush.mcp.filtered");
 
-function markFiltered(...configs) {
+function markFiltered(envValues, ...configs) {
   for (const config of configs) {
     if (isRecord(config)) {
       try { Object.defineProperty(config, MCP_FILTERED_MARK, { value: true, enumerable: false, configurable: true }); } catch { /* frozen */ }
+      try { Object.defineProperty(config, MCP_ENV_VALUES_MARK, { value: envValues, enumerable: false, configurable: true }); } catch { /* frozen */ }
     }
   }
 }
@@ -971,6 +1036,7 @@ function configTarget(input, output) {
 export function createMcpPolicyHooks(options = {}) {
   const root = path.resolve(options.directory || process.cwd());
   const state = { localOnly: [], pathInputs: [], roots: [] };
+  const envOnly = () => (typeof options.envOnly === "boolean" ? options.envOnly : engineStartsServersEnvOnly());
   const apply = (input, output) => {
     const target = configTarget(input, output);
     if (!target) return;
@@ -980,7 +1046,7 @@ export function createMcpPolicyHooks(options = {}) {
     if (!box) {
       try { mkdirSync(npmPrefix, { recursive: true }); } catch { /* npx makes it */ }
     }
-    const { mcp, decisions } = evaluateMcp(target.mcp, policy, { root, platform: options.platform, box, npmPrefix, ...(options.resolveRunner ? { resolveRunner: options.resolveRunner } : {}) });
+    const { mcp, decisions } = evaluateMcp(target.mcp, policy, { root, platform: options.platform, box, npmPrefix, envOnly: envOnly(), ...(options.resolveRunner ? { resolveRunner: options.resolveRunner } : {}) });
     target.mcp = mcp;
     const mode = typeof options.permissionMode === "function" ? options.permissionMode() : options.permissionMode ?? process.env.OMNIRUSH_PERMISSION_MODE;
     const rules = mcpPermissionRules(decisions, mode);
@@ -1004,14 +1070,14 @@ export function createMcpPolicyHooks(options = {}) {
     config: async (input, output) => {
       try {
         apply(input, output);
-        markFiltered(input, output);
+        markFiltered(envOnly(), input, output);
       } catch {
         // Never leave the engine's own list in place: no servers at all.
         const target = configTarget(input, output);
         if (target) target.mcp = {};
         state.localOnly = [];
         state.pathInputs = [];
-        markFiltered(input, output);
+        markFiltered(false, input, output);
       }
     },
     "tool.execute.before": async (input, output) => {
