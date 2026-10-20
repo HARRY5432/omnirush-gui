@@ -152,19 +152,25 @@ export function decideMcpEntry(stateDir: string, root: string, name: string, ent
   return decisions[0] ?? { name, status: "blocked", code: "invalid", reason: "This MCP server entry is not valid." };
 }
 
-export type McpServerUse = { id: string; package: string; version: string; runtime: string; sandbox: boolean };
+export type McpServerUse = { id: string; package: string; version: string; runtime: string; sandbox: boolean; enabled: boolean };
 
-/** The servers a session in this project uses (from the plugin's report); null when none is on. */
+/**
+ * The servers a session in this project can use (from the plugin's report);
+ * null when none is allowed. A server the user turned off is listed with
+ * `enabled: false`: it can still be switched on during the session, so the
+ * replay installs it too.
+ */
 export function mcpServersInUse(report: McpReport | null): McpServerUse[] | null {
   if (!report || !report.enabled) return null;
   const used = report.decisions
-    .filter((decision) => decision.status === "allowed" && decision.enabled !== false && decision.id && decision.package && decision.version && decision.runtime)
+    .filter((decision) => decision.status === "allowed" && decision.id && decision.package && decision.version && decision.runtime)
     .map((decision) => ({
       id: decision.id as string,
       package: decision.package as string,
       version: decision.version as string,
       runtime: decision.runtime as string,
       sandbox: decision.sandbox === true,
+      enabled: decision.enabled !== false,
     }));
   return used.length ? used : null;
 }

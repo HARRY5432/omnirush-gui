@@ -105,20 +105,21 @@ describe("the engine plugin (omnirush-mcp-policy)", () => {
     await hooks.config({}, output);
     const mcp = output.mcp as Record<string, { command: string[] }>;
     expect(Object.keys(mcp).sort()).toEqual(["filesystem", "time"]);
-    expect(mcp.filesystem!.command).toEqual(["npx", "-y", "@modelcontextprotocol/server-filesystem@2026.8.31", "."]);
-    expect(mcp.time!.command).toEqual(["uvx", "mcp-server-time@2026.8.18"]);
+    const npx = ["npx", "--prefix", path.join(process.env.OMNIRUSH_MCP_REPORT_DIR!, "..", "npx-prefix"), "-y"];
+    expect(mcp.filesystem!.command).toEqual([...npx, "@modelcontextprotocol/server-filesystem@2026.8.31", "."]);
+    expect(mcp.time!.command).toEqual(["uvx", "--no-config", "mcp-server-time@2026.8.18"]);
     const report = workspaceMcpReport(state, root);
     const byName = Object.fromEntries((report?.decisions ?? []).map((decision) => [decision.name, decision]));
     expect(byName.script).toMatchObject({ status: "blocked", code: "unknown_command" });
     expect(byName.notion).toMatchObject({ status: "blocked", code: "remote" });
     expect(byName.files).toMatchObject({ status: "allowed", renamed_to: "filesystem", sandbox: false });
     expect(mcpServersInUse(report)).toEqual([
-      { id: "time", package: "mcp-server-time", version: "2026.8.18", runtime: "pypi", sandbox: false },
-      { id: "filesystem", package: "@modelcontextprotocol/server-filesystem", version: "2026.8.31", runtime: "npm", sandbox: false },
+      { id: "time", package: "mcp-server-time", version: "2026.8.18", runtime: "pypi", sandbox: false, enabled: true },
+      { id: "filesystem", package: "@modelcontextprotocol/server-filesystem", version: "2026.8.31", runtime: "npm", sandbox: false, enabled: true },
     ]);
   });
 
-  test("a server the user turned off is not listed as in use", async () => {
+  test("a server the user turned off is listed, marked enabled: false", async () => {
     const { state, root } = setup();
     rememberMcpPolicy(state, { mcp: policyFixture });
     writeWorkspaceMcp(state, root, { files: { ...FILESYSTEM, enabled: false } });
@@ -127,7 +128,7 @@ describe("the engine plugin (omnirush-mcp-policy)", () => {
     await hooks.config({}, output);
     const report = workspaceMcpReport(state, root);
     expect(report?.decisions[0]?.enabled).toBe(false);
-    expect(mcpServersInUse(report)).toBeNull();
+    expect(mcpServersInUse(report)).toEqual([{ id: "filesystem", package: "@modelcontextprotocol/server-filesystem", version: "2026.8.31", runtime: "npm", sandbox: false, enabled: false }]);
   });
 
   test("a project whose sandbox is on runs its servers through the box shell", async () => {
@@ -145,7 +146,7 @@ describe("the engine plugin (omnirush-mcp-policy)", () => {
     await hooks.config({}, output);
     const entry = (output.mcp as Record<string, { command: string[]; environment: Record<string, string> }>).filesystem!;
     expect(entry.command[0]).toBe(path.join(home, "shell", process.platform === "win32" ? "bash.exe" : "bash"));
-    expect(entry.command.slice(1)).toEqual(["-c", "exec npx -y @modelcontextprotocol/server-filesystem@2026.8.31 ."]);
+    expect(entry.command.slice(1)).toEqual(["-c", "mkdir -p /tmp/omnirush-mcp-npx && exec npx --prefix /tmp/omnirush-mcp-npx -y @modelcontextprotocol/server-filesystem@2026.8.31 ."]);
     expect(entry.environment).toEqual({ OMNIRUSH_BOX_KEY: key });
     expect(mcpServersInUse(workspaceMcpReport(state, root))?.[0]?.sandbox).toBe(true);
   });
