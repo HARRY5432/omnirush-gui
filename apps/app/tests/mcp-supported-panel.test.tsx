@@ -132,6 +132,11 @@ describe("Settings > MCP: supported servers", () => {
       .toMatchObject({ hint: "Install Node.js (for npx) or uv (for uvx), then restart the app." });
   });
 
+  test("a server that needs a newer engine says to update", () => {
+    expect(mcpServerState(server("x"), { name: "x", status: "blocked", code: "engine_update", reason: "This MCP server needs a newer engine; update OmniRush to use it." }))
+      .toEqual({ kind: "blocked", reason: "This MCP server needs a newer engine; update OmniRush to use it.", hint: null });
+  });
+
   test("helpers", () => {
     expect(presetCommandLine({ command: ["uvx", "mcp-server-git", "--repository", "my repo"] })).toBe("uvx mcp-server-git --repository 'my repo'");
     expect(presetConfigured(filesystem, [], [{ name: "files", status: "allowed", code: "allowed", id: "filesystem" }])).toBe(true);

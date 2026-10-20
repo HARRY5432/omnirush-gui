@@ -138,6 +138,10 @@ export default async function omnirushMcpPolicy(input?: { directory?: string; cl
       // Fails closed: an error while applying the list leaves no servers at all.
       await hooks.config(configInput, output);
       if (reserved.length) reportReserved(root, reserved);
+      // Added after the allowlist, so it also starts on an engine too old for env-only servers (where the
+      // allowlist refuses a project's local servers, engine_update): its command and variables come from the
+      // app itself, never from a project config ({file:...}/{env:...}), and without the mark the engine's
+      // other variables are emptied for it below.
       const builtin = target ? computerUseBuiltins(process.env[COMPUTER_USE_DIR_ENV])[SERVER_ID] : null;
       if (target && builtin) {
         // Like every server: the engine's tokens never reach it, only the variables the allowlist keeps plus

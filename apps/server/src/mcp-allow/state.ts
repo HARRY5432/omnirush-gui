@@ -172,7 +172,10 @@ export function workspaceMcpReport(stateDir: string, root: string): McpReport | 
  * decision for it alone, with no sandbox (paths are checked the same way).
  */
 export function decideMcpEntry(stateDir: string, root: string, name: string, entry: Record<string, unknown>): McpDecision {
-  const { decisions } = evaluateMcp({ [name]: entry }, currentMcpPolicy(stateDir), { root: path.resolve(root) });
+  // An engine too old to start servers env-only (its last report says so) starts no local server.
+  const last = workspaceMcpReport(stateDir, root);
+  const olderEngine = last?.filter_required === true && last.env_only === false;
+  const { decisions } = evaluateMcp({ [name]: entry }, currentMcpPolicy(stateDir), { root: path.resolve(root), filterRequired: olderEngine, ...(olderEngine ? { envOnly: false } : {}) });
   return decisions[0] ?? { name, status: "blocked", code: "invalid", reason: "This MCP server entry is not valid." };
 }
 

@@ -12,6 +12,8 @@ import { registerComputerUseRoutes } from "./routes.js";
 import { expectedHostCommand, HOST_SECRET_KEY } from "./desktop.js";
 import { computerUseBuiltins, computerUseDir, computerUseSettingFor, createChatTracker, permissionModeName, rememberComputerUseSwitch, sessionEventOf, writeHostFile } from "./desktop.js";
 import { createMediaRewriter, usesComputer } from "./media-capture.js";
+import { MCP_ENV_ONLY_MARK, MCP_REASONS, writePolicyFile } from "../mcp-allow/mcp-allow.mjs";
+import policyFixture from "../mcp-allow/mcp-policy.fixture.json" with { type: "json" };
 import { encodePng } from "./shared/image.mjs";
 
 const dirs: string[] = [];
@@ -104,6 +106,30 @@ describe("engine MCP plugin", () => {
     const report = JSON.parse(readFileSync(path.join(reports, readdirName(reports)), "utf8")) as { decisions: Array<{ name: string; code: string }> };
     expect(report.decisions.find((d) => d.name === "computer-use")).toMatchObject({ code: "reserved" });
     expect(report.decisions.find((d) => d.name === "computer-use_computer")).toMatchObject({ code: "reserved" });
+  });
+
+  test("an engine too old for env-only servers: a project's local server is refused, the built-in starts with the filtered variables", async () => {
+    const state = tmp();
+    const dir = computerUseDir(state);
+    const reports = path.join(state, "reports");
+    const policyFile = writePolicyFile(path.join(state, "mcp-policy.json"), policyFixture);
+    writeHostFile(dir, { command: [process.execPath, "/x/relay.mjs", "/x/c.json"], environment: {} });
+    const pinnedEnv = { OMNIRUSH_COMPUTER_USE_COMMAND: JSON.stringify({ command: [process.execPath, "/x/relay.mjs", "/x/c.json"], environment: {} }) };
+    const appValues = { OMNIRUSH_SERVER_TOKEN: "srv-123456789", OMNIRUSH_POLICY_TOKEN: "pol-123456789", OMNIRUSH_ACCESS_TOKEN: "acc-123456789", OPENCODE_SERVER_PASSWORD: "pw-123456789" };
+    delete (globalThis as Record<symbol, unknown>)[MCP_ENV_ONLY_MARK];
+    const { config } = await run({ ...pinnedEnv, ...appValues, OMNIRUSH_MCP_FILTER: "required", OMNIRUSH_MCP_POLICY_FILE: policyFile, OMNIRUSH_COMPUTER_USE_DIR: dir, OMNIRUSH_COMPUTER_USE: "1", OMNIRUSH_MCP_REPORT_DIR: reports }, {
+      mcp: { memory: { type: "local", command: ["npx", "-y", "@modelcontextprotocol/server-memory"], environment: { X: "{env:OMNIRUSH_ACCESS_TOKEN}" } } },
+    });
+    const mcp = config.mcp as Record<string, { command: string[]; environment: Record<string, string> }>;
+    expect(Object.keys(mcp)).toEqual(["computer-use"]);
+    const report = JSON.parse(readFileSync(path.join(reports, readdirName(reports)), "utf8")) as { decisions: Array<{ name: string; code: string; reason: string }> };
+    expect(report.decisions.find((d) => d.name === "memory")).toMatchObject({ code: "engine_update", reason: MCP_REASONS.engine_update });
+    // The engine merges its environment for it: every app value is emptied.
+    const builtinEnv = mcp["computer-use"]!.environment;
+    for (const [name, value] of Object.entries(builtinEnv)) {
+      if (/^(?:OMNIRUSH_|OPENCODE_SERVER_)/i.test(name)) expect(`${name}=${value}`).toBe(`${name}=`);
+    }
+    for (const name of Object.keys(appValues)) expect(builtinEnv[name]).toBe("");
   });
 
   test("off: nothing is added and the config is as before", async () => {

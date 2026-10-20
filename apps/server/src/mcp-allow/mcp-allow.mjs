@@ -56,6 +56,7 @@ export const MCP_REASONS = {
   secret_missing: "This MCP server needs a key in your own environment (not in a config file).",
   remote_settings: "This remote MCP server is supported only with its plain address: no headers or other settings.",
   protected_value: "This MCP server entry holds one of the app's own keys (in its command, variables or folder), so it does not start.",
+  engine_update: "This MCP server needs a newer engine; update OmniRush to use it.",
 };
 
 const ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
@@ -176,6 +177,16 @@ export const MCP_ENV_VALUES_MARK = Symbol.for("omnirush.mcp.envValues");
 /** Whether this engine starts a filtered server without the rest of its own environment (set by the engine). */
 export function engineStartsServersEnvOnly() {
   return globalThis[MCP_ENV_ONLY_MARK] === true;
+}
+
+/**
+ * Whether no local server may start: the engine requires this filter (OMNIRUSH_MCP_FILTER=required) but does not
+ * start servers env-only. Such an engine resolves a project's {file:...} and {env:...} values itself, so they could
+ * reach a local server; remote servers are unaffected.
+ */
+export function localServersNeedNewerEngine({ filterRequired, envOnly } = {}) {
+  const required = typeof filterRequired === "boolean" ? filterRequired : process.env.OMNIRUSH_MCP_FILTER === "required";
+  return required && (typeof envOnly === "boolean" ? envOnly : engineStartsServersEnvOnly()) !== true;
 }
 
 function allowedName(key) {
@@ -645,6 +656,7 @@ export function evaluateMcp(mcpMap, policy, ctx = {}) {
   const platform = ctx.platform || process.platform;
   const box = ctx.box && typeof ctx.box.shell === "string" && typeof ctx.box.key === "string" ? ctx.box : null;
   const envOnly = ctx.envOnly ?? engineStartsServersEnvOnly();
+  const olderEngine = localServersNeedNewerEngine({ filterRequired: ctx.filterRequired, envOnly });
   const secretsHere = protectedValues(ctx.env ?? process.env);
   const out = {};
   const decisions = [];
@@ -683,6 +695,7 @@ export function evaluateMcp(mcpMap, policy, ctx = {}) {
       decisions.push(blocked(name, reason ? "denied" : "unknown_command", reason ? { reason } : {}));
       continue;
     }
+    if (olderEngine) { decisions.push(blocked(name, "engine_update", { package: launch.name })); continue; }
     const denied = denyReason(policy, launch.name);
     if (denied) { decisions.push(blocked(name, "denied", { reason: denied, package: launch.name })); continue; }
     const entry = policy.allow.find((e) => e.runtime !== "remote" && e.runtime === launch.runtime && e.package.toLowerCase() === launch.name);
@@ -1039,6 +1052,7 @@ export function createMcpPolicyHooks(options = {}) {
   const root = path.resolve(options.directory || process.cwd());
   const state = { localOnly: [], pathInputs: [], roots: [] };
   const envOnly = () => (typeof options.envOnly === "boolean" ? options.envOnly : engineStartsServersEnvOnly());
+  const filterRequired = () => (typeof options.filterRequired === "boolean" ? options.filterRequired : process.env.OMNIRUSH_MCP_FILTER === "required");
   const apply = (input, output) => {
     const target = configTarget(input, output);
     if (!target) return;
@@ -1048,7 +1062,7 @@ export function createMcpPolicyHooks(options = {}) {
     if (!box) {
       try { mkdirSync(npmPrefix, { recursive: true }); } catch { /* npx makes it */ }
     }
-    const { mcp, decisions } = evaluateMcp(target.mcp, policy, { root, platform: options.platform, box, npmPrefix, envOnly: envOnly(), ...(options.resolveRunner ? { resolveRunner: options.resolveRunner } : {}) });
+    const { mcp, decisions } = evaluateMcp(target.mcp, policy, { root, platform: options.platform, box, npmPrefix, envOnly: envOnly(), filterRequired: filterRequired(), ...(options.resolveRunner ? { resolveRunner: options.resolveRunner } : {}) });
     target.mcp = mcp;
     const mode = typeof options.permissionMode === "function" ? options.permissionMode() : options.permissionMode ?? process.env.OMNIRUSH_PERMISSION_MODE;
     const rules = mcpPermissionRules(decisions, mode);
@@ -1063,7 +1077,7 @@ export function createMcpPolicyHooks(options = {}) {
         const file = reportPath(options.reportDir, root);
         mkdirSync(options.reportDir, { recursive: true });
         const tmp = `${file}.${process.pid}.tmp`;
-        writeFileSync(tmp, JSON.stringify({ v: MCP_POLICY_FILE_VERSION, root, at: (options.now ?? Date.now)(), enabled: Boolean(policy?.enabled), decisions, ignored: projectCodeIgnored(target) }), { mode: 0o600 });
+        writeFileSync(tmp, JSON.stringify({ v: MCP_POLICY_FILE_VERSION, root, at: (options.now ?? Date.now)(), enabled: Boolean(policy?.enabled), decisions, ignored: projectCodeIgnored(target), filter_required: filterRequired(), env_only: envOnly() }), { mode: 0o600 });
         renameSync(tmp, file);
       } catch { /* the report is for display only */ }
     }
