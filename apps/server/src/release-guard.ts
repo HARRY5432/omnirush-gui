@@ -9,7 +9,7 @@
  * The dev variant takes any address and engine, as before.
  */
 import { createHash } from "node:crypto";
-import { createReadStream, statSync } from "node:fs";
+import { createReadStream } from "node:fs";
 import { isAbsolute } from "node:path";
 
 import { BUILD_VARIANT, RELEASE_ENGINE_SHA256 } from "./build-variant.js";
@@ -69,19 +69,13 @@ function reportOnce(key: string, message: string): void {
 
 export const RELEASE_ENGINE_ERROR = "This build of OmniRush.ai only runs the engine it ships with.";
 
-const hashCache = new Map<string, { size: number; mtimeMs: number; sha256: string }>();
-
+/** The file's sha256, read in full every time (an engine start checks the bytes it is about to run). */
 async function fileSha256(path: string): Promise<string> {
-  const stat = statSync(path);
-  const cached = hashCache.get(path);
-  if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) return cached.sha256;
   const hash = createHash("sha256");
   await new Promise<void>((resolvePromise, reject) => {
     createReadStream(path).on("data", (chunk) => hash.update(chunk)).on("end", () => resolvePromise()).on("error", reject);
   });
-  const sha256 = hash.digest("hex");
-  hashCache.set(path, { size: stat.size, mtimeMs: stat.mtimeMs, sha256 });
-  return sha256;
+  return hash.digest("hex");
 }
 
 /**

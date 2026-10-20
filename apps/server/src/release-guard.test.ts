@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -50,6 +50,11 @@ describe("release build guard", () => {
     const other = join(root, "other");
     await writeFile(other, "#!/bin/sh\necho other\n");
     await expect(releaseEngineBinary(other, release)).rejects.toThrow("is not the bundled one");
+    // Bytes changed in place with the same size and time: still refused (hashed at every start, no cache).
+    const { mtime } = await stat(bin);
+    await writeFile(bin, "#!/bin/sh\necho EVILLL\n");
+    await utimes(bin, mtime, mtime);
+    await expect(releaseEngineBinary(bin, release)).rejects.toThrow("is not the bundled one");
     expect(await releaseEngineBinary("opencode", DEV)).toBe("opencode");
     expect(await releaseEngineBinary(undefined, DEV)).toBeUndefined();
   });

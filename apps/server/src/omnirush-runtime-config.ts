@@ -246,7 +246,7 @@ export function buildOmniRushRuntimeConfigObjectFromSnapshot(
   // The global row's MCP entries are the account-linked Connect server, which
   // this app does not run; a project's own servers reach the engine through
   // its config files and the MCP plugin (opencode-plugins/omnirush-mcp-policy.ts).
-  const { managedPolicy: _managedPolicy, approvals: _approvals, bestPractices: _bestPractices, agentAssist: _agentAssist, mcp: _mcp, ...engineConfig } = runtimeConfig;
+  const { managedPolicy: _managedPolicy, approvals: _approvals, bestPractices: _bestPractices, agentAssist: _agentAssist, mcp: _mcp, provider: _rowProvider, ...engineConfig } = runtimeConfig;
   // Code diagnostics: the main languages' servers on, the rest off; the engine default (none) while off.
   const lsp = agentAssistFlags(runtimeConfig, env).diagnostics ? agentAssistLspConfig() : undefined;
   const enabled = bestPracticesEnabled(runtimeConfig);
@@ -256,8 +256,10 @@ export function buildOmniRushRuntimeConfigObjectFromSnapshot(
     ...(skillsDir ? [skillsDir] : []),
     ...(enabled && bestPracticesDir ? [bestPracticesDir] : []),
   ], userSkillPaths);
+  // The app's own provider comes from the internal gateway only: an `omnirush` entry in the stored row is never used.
+  const { [INTERNAL_PROVIDER_ID]: _storedOwnProvider, ...storedProviders } = runtimeProviderMap(runtimeConfig);
   const provider = {
-    ...runtimeProviderMap(runtimeConfig),
+    ...storedProviders,
     ...(internalGateway
       ? { [INTERNAL_PROVIDER_ID]: internalGatewayProvider(internalGateway, catalog, webSearch) }
       : {}),

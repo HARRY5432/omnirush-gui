@@ -190,7 +190,8 @@ import {
   applyProviderLockAnswer,
   assertConfigWithinLock,
   assertPluginsUnlocked,
-  assertProviderAllowed,
+  assertProviderWritable,
+  assertEngineStartedWithinLock,
   assertProxiedEngineRequestWithinProviderLock,
   currentProviderLockPolicy,
   parseJsoncContent,
@@ -1556,6 +1557,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
           await managedDesktopPolicy(config).assertRequest(request, mount.restPath, true);
           await assertProxiedEngineRequestWithinProviderLock(request, mount.restPath);
           const workspace = await resolveWorkspaceWithoutBootstrap(config, mount.workspaceId);
+          assertEngineStartedWithinLock(resolveWorkspaceOpencodeConnection(config, workspace).baseUrl, request.method, mount.restPath);
           await assertWorkspaceOwnsProxiedSessionRead(config, workspace, request.method, mount.restPath);
           proxyService = "opencode";
           proxyBaseUrl = workspace.baseUrl?.trim() || undefined;
@@ -1691,6 +1693,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
           await assertProxiedEngineRequestWithinProviderLock(request, url.pathname);
           proxyService = "opencode";
           const workspace = config.workspaces[0];
+          if (workspace) assertEngineStartedWithinLock(resolveWorkspaceOpencodeConnection(config, workspace).baseUrl, request.method, url.pathname);
           if (workspace) {
             await assertWorkspaceOwnsProxiedSessionRead(config, workspace, request.method, url.pathname);
           }
@@ -4631,7 +4634,7 @@ function createRoutes(
     const body = await readJsonBody(ctx.request);
     const providerPatch = parseRuntimeProviderPatchPayload(body);
     // The model provider lock (provider-lock.ts): only removals, or the allowed providers.
-    for (const [providerId, value] of Object.entries(providerPatch)) if (value !== null) assertProviderAllowed(providerId);
+    for (const [providerId, value] of Object.entries(providerPatch)) if (value !== null) assertProviderWritable(providerId);
     const result = await writeGlobalRuntimeOpencodeConfig(config, (current) => ({
       ...current,
       provider: mergeRuntimeProviderUpdate(current.provider, providerPatch),
@@ -4833,7 +4836,7 @@ function createRoutes(
       // would never reach the engine.
       const providerUpdate = isRecord(provider) ? provider : {};
       // The model provider lock (provider-lock.ts): no other provider and no model of one.
-      for (const [providerId, value] of Object.entries(providerUpdate)) if (value !== null) assertProviderAllowed(providerId);
+      for (const [providerId, value] of Object.entries(providerUpdate)) if (value !== null) assertProviderWritable(providerId);
       assertConfigWithinLock(topLevelUpdates);
       if (Object.keys(providerUpdate).length) await managedDesktopPolicy(config).assert("provider");
       if (Object.keys(providerUpdate).length) {

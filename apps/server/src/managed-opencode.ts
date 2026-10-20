@@ -3,7 +3,7 @@ import { realpathSync } from "node:fs";
 import net from "node:net";
 import { randomUUID } from "node:crypto";
 import { globalOpencodeConfigDir } from "@omnirush/paths";
-import { currentProviderLockPolicy, finishEngineEnv } from "./provider-lock.js";
+import { currentProviderLockPolicy, finishEngineEnv, noteEngineStarted } from "./provider-lock.js";
 import { providerLockEnv, withProviderLockEnv } from "./provider-lock/provider-lock.mjs";
 import { engineDataEnv } from "./engine-data-home.js";
 import { repairEngineStoreBeforeStart } from "./engine-store-repair.js";
@@ -321,6 +321,8 @@ async function startManagedOpencodeServer(
     throw error;
   }
 
+  // Model providers (provider-lock.ts): whether this engine started locked.
+  noteEngineStarted(url, providerLock);
   return {
     url,
     username,

@@ -18,6 +18,10 @@ import {
   lockedEngineEnv,
   providerAllowed,
   providerLockConfigViolations,
+  assertEngineStartedWithinLock,
+  assertProviderWritable,
+  noteEngineStarted,
+  resetEngineStarts,
   resetProviderLock,
   watchProviderLock,
 } from "./provider-lock.js";
@@ -29,6 +33,7 @@ const roots: string[] = [];
 
 afterEach(async () => {
   resetProviderLock();
+  resetEngineStarts();
   while (roots.length) await rm(roots.pop()!, { recursive: true, force: true });
 });
 
@@ -278,5 +283,41 @@ describe("provider lock: refusals", () => {
     expect(() => assertConfigWithinProviderLock({ enabled_providers: ["openai"] })).toThrow();
     expect(() => assertConfigWithinProviderLock({ $schema: "x", mcp: {}, disabled_providers: ["openai"] })).not.toThrow();
     expect(() => assertConfigWithinProviderLock(null)).not.toThrow();
+  });
+});
+
+describe("provider lock: the app's own provider and engines started unlocked", () => {
+  test("no route writes the omnirush provider, locked or not", () => {
+    expect(() => assertProviderWritable("omnirush")).toThrow("The OmniRush provider is set by the app only.");
+    expect(() => assertProviderWritable("OmniRush")).toThrow();
+    applyProviderLockAnswer(UNLOCKED);
+    expect(() => assertProviderWritable("omnirush")).toThrow("The OmniRush provider is set by the app only.");
+    expect(() => assertProviderWritable("openai")).not.toThrow();
+  });
+
+  test("an omnirush entry stored in the runtime row never reaches the engine config", () => {
+    const stored = { provider: { omnirush: { npm: "@ai-sdk/openai", options: { baseURL: "https://evil.example/v1" }, models: { m: {} } } } };
+    const signedIn = buildOmniRushRuntimeConfigObjectFromSnapshot(stored, { baseUrl: "http://127.0.0.1:1/omnirush-gateway/v1" }, {}, builtinOmniRushModelCatalog());
+    expect(((signedIn.provider as Record<string, { options: { baseURL: string } }>).omnirush).options.baseURL).toBe("http://127.0.0.1:1/omnirush-gateway/v1");
+    const signedOut = buildOmniRushRuntimeConfigObjectFromSnapshot(stored, undefined, {}, builtinOmniRushModelCatalog());
+    expect(signedOut).not.toHaveProperty("provider");
+    applyProviderLockAnswer(UNLOCKED);
+    expect(buildOmniRushRuntimeConfigObjectFromSnapshot(stored, undefined, {}, builtinOmniRushModelCatalog())).not.toHaveProperty("provider");
+  });
+
+  test("while locked, an engine that started unlocked takes no model work until the app restarts", () => {
+    applyProviderLockAnswer(UNLOCKED);
+    noteEngineStarted("http://127.0.0.1:4001");
+    resetProviderLock();
+    noteEngineStarted("http://127.0.0.1:4002");
+    for (const [method, path] of [["POST", "/session"], ["POST", "/session/ses_1/prompt_async"], ["POST", "/opencode/session/ses_1/message"], ["POST", "/api/session/ses_1/command"], ["POST", "/session/ses_1/shell"], ["POST", "/session/ses_1/summarize"]] as const) {
+      expect(() => assertEngineStartedWithinLock("http://127.0.0.1:4001/", method, path)).toThrow("Only OmniRush models are available. Restart the app to continue.");
+      expect(() => assertEngineStartedWithinLock("http://127.0.0.1:4002", method, path)).not.toThrow();
+    }
+    expect(() => assertEngineStartedWithinLock("http://127.0.0.1:4001", "GET", "/session/ses_1/message")).not.toThrow();
+    expect(() => assertEngineStartedWithinLock("http://127.0.0.1:4001", "POST", "/session/ses_1/abort")).not.toThrow();
+    expect(() => assertEngineStartedWithinLock("http://127.0.0.1:4999", "POST", "/session")).not.toThrow();
+    applyProviderLockAnswer(UNLOCKED);
+    expect(() => assertEngineStartedWithinLock("http://127.0.0.1:4001", "POST", "/session")).not.toThrow();
   });
 });

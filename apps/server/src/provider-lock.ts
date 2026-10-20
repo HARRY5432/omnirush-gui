@@ -89,6 +89,19 @@ export function assertProviderAllowed(providerId: unknown, policy: ProviderLockP
   if (!providerAllowed(providerId, policy)) throw providerLockedError(policy);
 }
 
+export const PROVIDER_RESERVED_CODE = "provider_reserved";
+export const PROVIDER_RESERVED_MESSAGE = "The OmniRush provider is set by the app only.";
+
+/**
+ * A provider a route may write into the app's runtime config: never the
+ * app's own (`omnirush`, which only the app sets, locked or not), and only
+ * allowed providers while locked. Throws 403 otherwise.
+ */
+export function assertProviderWritable(providerId: string, policy: ProviderLockPolicy = current): void {
+  if (providerId.trim().toLowerCase() === OMNIRUSH_PROVIDER_ID) throw new ApiError(403, PROVIDER_RESERVED_CODE, PROVIDER_RESERVED_MESSAGE);
+  assertProviderAllowed(providerId, policy);
+}
+
 /** Throws 403 provider_locked while locked (routes that only ever add another provider). */
 export function assertProvidersUnlocked(policy: ProviderLockPolicy = current): void {
   if (policy.locked) throw providerLockedError(policy);
@@ -268,6 +281,46 @@ export function watchProviderLock({ read, apply, everyMs }: { read: () => Promis
   }, everyMs);
   timer.unref?.();
   return () => clearInterval(timer);
+}
+
+function originOf(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return url;
+  }
+}
+
+/** Whether each engine this app started (by origin) started locked: its environment carries the lock from then on. */
+const engineStarts = new Map<string, boolean>();
+
+/** An engine started at `url` under `policy` (managed-opencode.ts, managed-opencode-v2.ts). */
+export function noteEngineStarted(url: string, policy: ProviderLockPolicy = current): void {
+  engineStarts.set(originOf(url), policy.locked);
+}
+
+/** Forgets the engines noted (tests). */
+export function resetEngineStarts(): void {
+  engineStarts.clear();
+}
+
+/** A request that makes the engine do model work: a new chat, a prompt, a command, a shell turn, a summary. */
+export function isModelWorkRequest(method: string, enginePath: string): boolean {
+  if (method.toUpperCase() !== "POST") return false;
+  const path = enginePath.replace(/^\/opencode2?(?=\/|$)/, "").replace(/^\/api(?=\/)/, "").replace(/\/+$/, "");
+  return path === "/session" || /^\/session\/[^/]+\/(?:prompt|prompt_async|message|command|shell|summarize|init)$/.test(path);
+}
+
+/**
+ * While locked, refuses model work on an engine this app started unlocked
+ * (its environment has no lock; the switch to locked replaces it, but a
+ * replacement that did not happen must not leave it serving other
+ * providers): 403 provider_locked, asking for a restart. Engines the app
+ * did not start, and every other request, pass.
+ */
+export function assertEngineStartedWithinLock(engineUrl: string | null | undefined, method: string, enginePath: string, policy: ProviderLockPolicy = current): void {
+  if (!policy.locked || !engineUrl || !isModelWorkRequest(method, enginePath)) return;
+  if (engineStarts.get(originOf(engineUrl)) === false) throw new ApiError(403, PROVIDER_LOCKED_CODE, `${policy.message} Restart the app to continue.`);
 }
 
 /** The policy for the app's UI (GET /omnirush/provider-lock). */
