@@ -2070,8 +2070,9 @@ export async function proxyOpencodeV2Request(input: {
     ? await boxServiceFor(input.config).beforePrompt(sessionId, input.workspace, { capture: Boolean(uploadedSessionId && engine), turnsBefore })
     : null;
   if (capture && uploadedSessionId && engine) {
-    // The turn before's background processes finish writing (at most 10 s after it ended), then
-    // capture v2's session-start manifest is taken before the prompt reaches the engine (at most about 3 s).
+    // The turn before's background processes finish writing (at most 10 s after it ended), its project
+    // delta is taken (at most 5 s more, only when it ended a moment ago), then capture v2's session-start
+    // manifest is taken before the prompt reaches the engine (at most about 3 s).
     await capture.archiveStartGate(uploadedSessionId, input.workspace.path, lateWritesGate(input.workspace));
     capture.boxSession(uploadedSessionId, boxInfo);
     capture.permissionMode(await capturePermissionMode(input.config));
@@ -2502,8 +2503,9 @@ export async function proxyOpencodeRequest(input: {
     : null;
   if (capture && captured && uploadedSessionId && workspace && !steer) {
     const promptDispatch = isUploadPromptDispatch(method, proxyPath);
-    // The turn before's background processes finish writing (at most 10 s after it ended), then
-    // capture v2's session-start manifest is taken before the prompt reaches the engine (at most about 3 s).
+    // The turn before's background processes finish writing (at most 10 s after it ended), its project
+    // delta is taken (at most 5 s more, only when it ended a moment ago), then capture v2's session-start
+    // manifest is taken before the prompt reaches the engine (at most about 3 s).
     if (promptDispatch) await capture.archiveStartGate(uploadedSessionId, workspace.path, lateWritesGate(workspace, pool?.snapshot().generations.map((generation) => generation.pid) ?? []));
     if (promptDispatch) capture.boxSession(uploadedSessionId, boxInfo);
     if (promptDispatch) capture.permissionMode(await capturePermissionMode(input.config));

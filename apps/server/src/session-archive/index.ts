@@ -441,8 +441,9 @@ type CaptureOptions = {
    * Capture v2, pre_tool: when the turn's first tool call started. A file
    * changed at or after it is the tool's own write: the state keeps the
    * chain's copy (none for a new file), and the turn's delta carries it.
+   * A turn's delta: when the next prompt went out (captureDelta).
    */
-  before?: number;
+  before?: number | (() => number | undefined);
   /** Capture v2, pre_tool: a file changed after this is a late write of the turn before (manifest reason "late_writes"). */
   lateAfter?: number;
 };
@@ -743,7 +744,16 @@ export class SessionArchiver {
    * (archived, or counted at a turn end that changed nothing). Whatever it captures, the turn counts as the session's activity
    * (the app-start window).
    */
-  captureDelta(sessionId: string, root: string, turn: number | null): Promise<CaptureResult> {
+  /**
+   * A completed turn's delta. `before` (capture v2): the next prompt went out at
+   * that time, before this delta ran; a file changed at or after it is that
+   * turn's write, so this delta keeps the chain's copy of it (none for a new
+   * file) and the next turn's delta carries it. The cut goes by modification
+   * time, like a pre_tool state's: a deletion, or a write that keeps an older
+   * time (an archive extracted with its times), after the cut still lands
+   * here. It only applies when the prompt's wait for this delta ran out.
+   */
+  captureDelta(sessionId: string, root: string, turn: number | null, options: { before?: number | (() => number | undefined) } = {}): Promise<CaptureResult> {
     return this.guard("delta", sessionId, turn ?? 0, async () => this.withSession(sessionId, async () => {
       const generation = this.generation;
       if (this.disabled) return { status: "skipped", reason: "disabled" };
@@ -767,7 +777,7 @@ export class SessionArchiver {
       if (key === "unavailable") return { status: "skipped", reason: "unavailable" };
       // A touched-files session without a base: its base, with this turn, once a touched file is there.
       if (state.next_sequence === 0) return this.captureArchive(state, "base", next, key, generation);
-      return this.captureArchive(state, "delta", next, key, generation, { trigger: "turn" });
+      return this.captureArchive(state, "delta", next, key, generation, { trigger: "turn", ...(options.before !== undefined ? { before: options.before } : {}) });
     }));
   }
 
@@ -1646,7 +1656,8 @@ export class SessionArchiver {
       if (v2) mergeScans(scan, await this.mediaEntries(sessionId));
       mergeScans(scan, await this.sandboxEntries(sessionId));
       if (filesUsed) mergeStaged(scan, await this.filesUsed.entries(sessionId));
-      if (options.trigger === "pre_tool" && options.before !== undefined) scanAsOf(scan.entries, new Map(baseline.map((entry) => [entry.path, entry])), options.before);
+      const asOf = typeof options.before === "function" ? options.before() : options.before;
+      if ((options.trigger === "pre_tool" || options.trigger === "turn") && asOf !== undefined) scanAsOf(scan.entries, new Map(baseline.map((entry) => [entry.path, entry])), asOf);
       const change = touchedChange(baseline, scan);
       if (change.files.length === 0 && change.deleted.length === 0 && !forced) {
         if (cache.changed) await this.saveHashCache(rootKey, cache);
@@ -1684,7 +1695,8 @@ export class SessionArchiver {
         enclosing = found.repo;
         mergeScans(scan, found);
       }
-      if (options.trigger === "pre_tool" && options.before !== undefined) scanAsOf(scan.entries, new Map(baseline.map((entry) => [entry.path, entry])), options.before);
+      const asOf = typeof options.before === "function" ? options.before() : options.before;
+      if ((options.trigger === "pre_tool" || options.trigger === "turn") && asOf !== undefined) scanAsOf(scan.entries, new Map(baseline.map((entry) => [entry.path, entry])), asOf);
       fullScan = scan.entries;
       files = scan.entries;
       excluded = scan.excluded;

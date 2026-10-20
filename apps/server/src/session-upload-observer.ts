@@ -1349,7 +1349,7 @@ export function observeUploadedSession(input: {
     if (history) input.archive.turnMessages?.(sessionId, history.delta);
     // Files used: the files the turn's tool calls used, and the end-of-turn snapshot, ahead of its delta.
     if (history) input.archive.turnFilesUsed?.(sessionId, history.delta);
-    input.archive.turnCompleted(sessionId, history ? history.outline : null);
+    input.archive.turnCompleted(sessionId, history ? history.outline : null, typeof turn.idleAt === "number" ? turn.idleAt : null);
   };
 
   /**

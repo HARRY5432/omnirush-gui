@@ -16,7 +16,7 @@ import { realpath } from "node:fs/promises";
 
 import { attachmentsFromMessages } from "./attachments.js";
 import type { StartCapture } from "./capture-v2.js";
-import { completedTurnCount, promptTurnAt } from "./turn-prompts.js";
+import { completedTurnCount, isPromptMessage, promptTurnAt, steerPrompts } from "./turn-prompts.js";
 import type { CaptureResult, DrainResult, FilesUsedStatus, FinalReason, SessionArchiver } from "./index.js";
 import type { UsedToolCall } from "./files-used.js";
 
@@ -60,6 +60,8 @@ export type ProjectArchiveLifecycleOptions = {
   finalIdleMs?: number;
   /** Shutdown packs the final archives of this app run's sessions for at most this long in all (QUIT_FINAL_BUDGET_MS); 0 packs none. */
   quitBudgetMs?: number;
+  /** A prompt waits at most this long for the turn before's delta (TURN_DELTA_WAIT_MS). */
+  turnDeltaWaitMs?: number;
   /** Tests. */
   now?: () => number;
   /** A pre_tool state took files written after the turn before ended (the session uploader records them). */
@@ -104,6 +106,13 @@ export const FINAL_IDLE_MS = 10 * 60_000;
  * checked at the next app start.
  */
 export const QUIT_FINAL_BUDGET_MS = 5_000;
+/**
+ * How long a prompt waits at most for the turn before (the observer's settle,
+ * then that turn's delta) when that turn ended a moment ago (startGate).
+ */
+export const TURN_DELTA_WAIT_MS = 5_000;
+/** The prompt times kept per session (promptTimes). */
+const PROMPT_TIMES_KEPT = 8;
 
 /** OMNIRUSH_ARCHIVE_ENABLED: on unless set to 0, false, no or off. */
 export function projectArchiveEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -172,6 +181,12 @@ type SessionRecord = {
   previousPromptAt?: number;
   /** When a turn of the session last settled (turnCompleted / turnIncomplete). */
   endedAt?: number;
+  /** When this run's latest prompts went out (the newest last; a turn delta's cut is the first one after its turn ended). */
+  promptTimes?: number[];
+  /** The latest turn delta queued, until it ran (a prompt's gate waits for it). */
+  pendingDelta?: Promise<void> | null;
+  /** Prompt gates waiting for the observer to settle the turn before. */
+  settleWaiters?: Array<() => void>;
 };
 
 /** A pre_tool state that took late writes of the turn before (lifecycle onLateWrites). */
@@ -198,6 +213,7 @@ export class ProjectArchiveLifecycle {
   private readonly baseMaxDeferMs: number;
   private readonly finalIdleMs: number;
   private readonly quitBudgetMs: number;
+  private readonly turnDeltaWaitMs: number;
   private readonly now: () => number;
   private readonly onLateWrites: ((late: LateWrites) => void) | undefined;
   private readonly onProjectArchive: ((sessionId: string, outcome: ProjectArchiveOutcome) => void) | undefined;
@@ -220,6 +236,8 @@ export class ProjectArchiveLifecycle {
   private readonly waiting: Array<() => void> = [];
   /** Final archives wait for a slot behind every other step. */
   private readonly waitingLow: Array<() => void> = [];
+  /** A turn delta a prompt may be waiting for (startGate) goes ahead of other sessions' steps. */
+  private readonly waitingHigh: Array<() => void> = [];
   /** When the last prompt was dispatched on any session: bases wait for a quiet period after it. */
   private lastPromptAt = 0;
   /** Bases waiting for the quiet period; stop() and signOut() wake them. */
@@ -236,6 +254,7 @@ export class ProjectArchiveLifecycle {
     this.baseMaxDeferMs = Math.max(this.baseIdleMs, options.baseMaxDeferMs ?? this.baseIdleMs * 5);
     this.finalIdleMs = Math.max(0, options.finalIdleMs ?? FINAL_IDLE_MS);
     this.quitBudgetMs = Math.max(0, options.quitBudgetMs ?? QUIT_FINAL_BUDGET_MS);
+    this.turnDeltaWaitMs = Math.max(0, options.turnDeltaWaitMs ?? TURN_DELTA_WAIT_MS);
     this.now = options.now ?? Date.now;
     this.onLateWrites = options.onLateWrites;
     this.onProjectArchive = options.onProjectArchive;
@@ -305,11 +324,12 @@ export class ProjectArchiveLifecycle {
       known.awaitingTool = true;
       known.previousPromptAt = known.promptedAt;
       known.promptedAt = promptedAt;
+      known.promptTimes = [...(known.promptTimes ?? []), promptedAt].slice(-PROMPT_TIMES_KEPT);
     }
     // Resolved, or its start step is still queued: nothing to add.
     if (known && (!known.start || known.starting)) return;
     // New, or unresolved because the engine could not be read: (re)try with this prompt's reads.
-    const record: SessionRecord = known ?? { root: null, start: null, starting: false, engine: input.engine, activeAt: promptedAt, idleTimer: null, idleFinal: null, awaitingTool: true, promptedAt };
+    const record: SessionRecord = known ?? { root: null, start: null, starting: false, engine: input.engine, activeAt: promptedAt, idleTimer: null, idleFinal: null, awaitingTool: true, promptedAt, promptTimes: [promptedAt] };
     record.start = { root: input.root, engine: input.engine };
     record.starting = true;
     this.sessions.set(input.sessionId, record);
@@ -330,7 +350,8 @@ export class ProjectArchiveLifecycle {
    * start manifest (hash and stat only, at most START_GATE_MS); any later
    * prompt resolves at once. Never rejects.
    */
-  async startGate(sessionId: string, root: string): Promise<StartCapture | "skipped"> {
+  async startGate(sessionId: string, root: string, options: { previousEnded?: boolean } = {}): Promise<StartCapture | "skipped"> {
+    if (options.previousEnded) await this.previousTurnArchived(sessionId);
     if (!this.active || this.consentOff || !this.archiver.startManifest) return "skipped";
     const known = this.sessions.get(sessionId);
     if (known && !known.start) return "skipped";
@@ -419,17 +440,31 @@ export class ProjectArchiveLifecycle {
    * (after an app restart the engine can take a minute to answer) is
    * resolved here first, so the turn is not lost.
    */
-  turnCompleted(sessionId: string, messages: unknown): void {
+  turnCompleted(sessionId: string, messages: unknown, idleAt: number | null = null): void {
     const record = this.sessions.get(sessionId);
     if (!this.active || this.consentOff || !record) return;
     const turns = completedTurnCount(messages);
     if (turns !== null) record.turns = turns;
     record.endedAt = this.now();
-    this.schedule(sessionId, "delta", async () => {
+    // The next prompt, when it went out before this delta's scan ended, cuts the delta there (captureDelta
+    // `before`, read when the scan ends): the first prompt after the one that opened this turn (its message's
+    // creation time in the engine), else after the engine went idle.
+    const span = turns !== null ? turnSpan(messages, turns) : null;
+    const cut = () => {
+      const times = record.promptTimes ?? [];
+      // The engine's times only count when this run sent that turn's prompt before it (the same clock). A prompt
+      // sent while the turn still answered (a steer the classifier let through) is not the next one.
+      const after = span !== null && times.some((at) => at <= span.opened) ? Math.max(span.opened, span.answered ?? span.opened) : idleAt;
+      return after === null ? undefined : times.find((at) => at > after);
+    };
+    const delta = this.schedule(sessionId, "delta", async () => {
       if (this.sessions.get(sessionId) !== record) return;
       if (record.start && !(await this.resolve(sessionId, record, turns))) return;
-      await this.captureTurn(sessionId, record, turns);
-    });
+      await this.captureTurn(sessionId, record, turns, false, cut);
+    }, undefined, false, true);
+    record.pendingDelta = delta;
+    void delta.then(() => { if (record.pendingDelta === delta) record.pendingDelta = null; });
+    this.turnSettled(record);
     this.armIdleFinal(sessionId, record);
   }
 
@@ -522,6 +557,7 @@ export class ProjectArchiveLifecycle {
     const record = this.sessions.get(sessionId);
     if (!this.active || this.consentOff || !record) return;
     record.endedAt = this.now();
+    this.turnSettled(record);
     this.schedule(sessionId, "turn", async () => {
       if (this.sessions.get(sessionId) !== record) return;
       if (record.start && !(await this.resolve(sessionId, record, null))) return;
@@ -530,6 +566,39 @@ export class ProjectArchiveLifecycle {
       await this.captureTurn(sessionId, record, turns, turns === null);
     });
     this.armIdleFinal(sessionId, record);
+  }
+
+  /**
+   * A prompt of the session is about to go out right after the turn before
+   * ended (startGate, `previousEnded`): that turn's delta is taken first, so it
+   * holds the folder as the turn left it. The prompt waits for the observer
+   * to settle that turn (it settles a moment after the engine goes idle, and
+   * queues the turn's attachments, files used and delta in order), then for
+   * that delta, at most turnDeltaWaitMs in all. A prompt that goes out
+   * before the delta ran (the wait ended) still never gives it a later write:
+   * the delta is cut at the prompt (turnCompleted). Sessions whose turn
+   * before was archived wait for nothing and read nothing. Never rejects.
+   */
+  private async previousTurnArchived(sessionId: string): Promise<void> {
+    const record = this.sessions.get(sessionId);
+    // A base still queued (it may wait for a quiet period) would hold the prompt: the cut covers that turn instead.
+    if (!this.active || this.consentOff || !record || !record.root || record.start || record.starting) return;
+    const settled = record.endedAt !== undefined && record.promptedAt !== undefined && record.endedAt >= record.promptedAt;
+    if (settled && !record.pendingDelta) return;
+    const startedAt = Date.now();
+    const gate = async () => {
+      if (!settled) await new Promise<void>((resolveSettle) => (record.settleWaiters ??= []).push(resolveSettle));
+      await record.pendingDelta;
+    };
+    const waited = await withDeadline(gate(), this.turnDeltaWaitMs).then(() => true, () => false);
+    if (!waited) this.log("info", "OmniRush project archive: a prompt went out before the turn before's delta; the delta is cut at the prompt", { sessionId, waitedMs: Date.now() - startedAt });
+  }
+
+  /** The observer settled a turn of the session (turnCompleted / turnIncomplete): prompt gates waiting for it go on. */
+  private turnSettled(record: SessionRecord): void {
+    const waiters = record.settleWaiters ?? [];
+    record.settleWaiters = [];
+    for (const waiter of waiters) waiter();
   }
 
   /**
@@ -654,11 +723,11 @@ export class ProjectArchiveLifecycle {
    * was reverted) gets a final archive instead, as does a turn whose count
    * is unknown when `finalWithoutCount`.
    */
-  private async captureTurn(sessionId: string, record: SessionRecord, turns: number | null, finalWithoutCount = false): Promise<void> {
+  private async captureTurn(sessionId: string, record: SessionRecord, turns: number | null, finalWithoutCount = false, before?: () => number | undefined): Promise<void> {
     if (!record.root || this.sessions.get(sessionId) !== record || this.consentOff) return;
     let result: CaptureResult | null = null;
     if (!finalWithoutCount) {
-      result = await this.archiver.captureDelta(sessionId, record.root, turns);
+      result = await this.archiver.captureDelta(sessionId, record.root, turns, before !== undefined ? { before } : {});
       if (result.status === "skipped" && result.reason === "stopped") record.root = null;
       this.settle(result);
     }
@@ -719,6 +788,7 @@ export class ProjectArchiveLifecycle {
   private release(record: SessionRecord): void {
     this.cancelIdleFinal(record);
     this.cancelRetry(record);
+    this.turnSettled(record);
   }
 
   /**
@@ -819,7 +889,8 @@ export class ProjectArchiveLifecycle {
    * never rejects), within the concurrency bound (a `low` step lets every
    * other waiting step go first); never rejects.
    */
-  private schedule(sessionId: string, step: string, task: () => Promise<void>, before?: () => Promise<void>, low = false): void {
+  /** Queues a step behind the session's earlier ones; resolves once it ran. `high`: ahead of other sessions' waiting steps. */
+  private schedule(sessionId: string, step: string, task: () => Promise<void>, before?: () => Promise<void>, low = false, high = false): Promise<void> {
     const previous = this.tails.get(sessionId) ?? Promise.resolve();
     const run = previous.then(before).then(() => this.bounded(async () => {
       if (!this.active) return;
@@ -828,21 +899,22 @@ export class ProjectArchiveLifecycle {
       } catch (error) {
         this.warn(step, error, sessionId);
       }
-    }, low));
+    }, low, high));
     this.tails.set(sessionId, run);
     void run.then(() => {
       if (this.tails.get(sessionId) === run) this.tails.delete(sessionId);
     });
+    return run;
   }
 
-  private async bounded(task: () => Promise<void>, low = false): Promise<void> {
+  private async bounded(task: () => Promise<void>, low = false, high = false): Promise<void> {
     if (this.running < this.concurrency) this.running += 1;
-    else await new Promise<void>((resolvePromise) => (low ? this.waitingLow : this.waiting).push(resolvePromise));
+    else await new Promise<void>((resolvePromise) => (high ? this.waitingHigh : low ? this.waitingLow : this.waiting).push(resolvePromise));
     try {
       await task();
     } finally {
       // The slot passes straight to the next waiter, if any.
-      const next = this.waiting.shift() ?? this.waitingLow.shift();
+      const next = this.waitingHigh.shift() ?? this.waiting.shift() ?? this.waitingLow.shift();
       if (next) next();
       else this.running -= 1;
     }
@@ -851,4 +923,44 @@ export class ProjectArchiveLifecycle {
   private warn(step: string, error: unknown, sessionId?: string): void {
     this.log("warn", "OmniRush project archive step failed", { step, ...(sessionId ? { sessionId } : {}), error: errorSummary(error) });
   }
+}
+
+/** `promise`, or a rejection after `ms` (the promise itself goes on). */
+function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error("deadline")), ms);
+    timer.unref?.();
+  });
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Turn `turn` (1 = the first) in the engine's messages: when its opening
+ * prompt was created, and when its last answer ended (before the next
+ * turn's prompt); null when it cannot be read.
+ */
+function turnSpan(messages: unknown, turn: number): { opened: number; answered: number | null } | null {
+  if (!Array.isArray(messages) || turn < 1) return null;
+  const steers = steerPrompts(messages);
+  let opened = 0;
+  let span: { opened: number; answered: number | null } | null = null;
+  for (const [index, message] of messages.entries()) {
+    if (typeof message !== "object" || message === null) continue;
+    const record = message as Record<string, unknown>;
+    const info = (typeof record.info === "object" && record.info !== null ? record.info : record) as Record<string, unknown>;
+    const time = (typeof info.time === "object" && info.time !== null ? info.time : {}) as { created?: unknown; completed?: unknown };
+    if (isPromptMessage(record) && !steers.has(typeof info.id === "string" ? info.id : index)) {
+      opened += 1;
+      if (opened === turn) {
+        if (typeof time.created !== "number") return null;
+        span = { opened: time.created, answered: null };
+      } else if (opened > turn) {
+        break;
+      }
+      continue;
+    }
+    if (span && info.role === "assistant" && typeof time.completed === "number") span.answered = Math.max(span.answered ?? 0, time.completed);
+  }
+  return span;
 }

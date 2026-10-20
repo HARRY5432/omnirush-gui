@@ -42,7 +42,7 @@ class FakeArchiver implements ProjectArchiver {
     return this.base(sessionId, turn);
   }
 
-  async captureDelta(sessionId: string, root: string, turn: number | null): Promise<CaptureResult> {
+  async captureDelta(sessionId: string, root: string, turn: number | null, _options: { before?: number | (() => number | undefined) } = {}): Promise<CaptureResult> {
     this.calls.push(`delta ${sessionId} ${root} ${turn}`);
     return this.delta(sessionId, turn);
   }
@@ -115,7 +115,7 @@ function engine(input: { parentID?: string; messages?: () => unknown; session?: 
   return { reader, reads };
 }
 
-function lifecycle(archiver: ProjectArchiver, options: { enabled?: boolean; accountMissing?: boolean; now?: () => number; concurrency?: number; finalIdleMs?: number; quitBudgetMs?: number } = {}) {
+function lifecycle(archiver: ProjectArchiver, options: { enabled?: boolean; accountMissing?: boolean; now?: () => number; concurrency?: number; finalIdleMs?: number; quitBudgetMs?: number; turnDeltaWaitMs?: number } = {}) {
   const logs: Array<{ level: string; message: string; attributes?: Record<string, unknown> }> = [];
   const subject = new ProjectArchiveLifecycle({
     archiver,
@@ -127,6 +127,7 @@ function lifecycle(archiver: ProjectArchiver, options: { enabled?: boolean; acco
     ...(options.concurrency ? { concurrency: options.concurrency } : {}),
     ...(options.finalIdleMs !== undefined ? { finalIdleMs: options.finalIdleMs } : {}),
     ...(options.quitBudgetMs !== undefined ? { quitBudgetMs: options.quitBudgetMs } : {}),
+    ...(options.turnDeltaWaitMs !== undefined ? { turnDeltaWaitMs: options.turnDeltaWaitMs } : {}),
   });
   return { subject, logs };
 }
@@ -319,6 +320,180 @@ describe("ProjectArchiveLifecycle", () => {
       `delta ses_turns_0001 ${root} 2`,
       `delta ses_turns_0001 ${root} null`,
     ]);
+  });
+
+  test("a prompt right after a turn ended waits for the observer's settle and that turn's delta, then goes out", async () => {
+    const archiver = new FakeArchiver();
+    const { subject } = lifecycle(archiver);
+    const root = await tempDir("root");
+    const reads = engine({ messages: () => messages(0) });
+    subject.sessionStarted({ sessionId: "ses_gate_0001", root, engine: reads.reader });
+    await subject.settled();
+    const order: string[] = [];
+    archiver.delta = async (_sessionId, turn) => { order.push(`delta ${turn}`); return queued("delta", turn ?? 0); };
+    // Turn 1 ended in the engine; the next prompt comes before the observer settled it.
+    const gate = subject.startGate("ses_gate_0001", root, { previousEnded: true }).then(() => order.push("prompt"));
+    await Bun.sleep(30);
+    expect(order).toEqual([]);
+    subject.turnCompleted("ses_gate_0001", messages(1), 1_000);
+    await gate;
+    expect(order).toEqual(["delta 1", "prompt"]);
+    // The turn before is archived now: the next gate waits for nothing and reads nothing.
+    const before = { ...reads.reads };
+    const started = Date.now();
+    await subject.startGate("ses_gate_0001", root, { previousEnded: true });
+    expect(Date.now() - started).toBeLessThan(50);
+    expect(reads.reads).toEqual(before);
+    expect(archiver.captures()).toEqual([`base ses_gate_0001 ${root} 0`, `delta ses_gate_0001 ${root} 1`]);
+  });
+
+  test("a prompt into a running turn, or a first prompt, waits for nothing", async () => {
+    const archiver = new FakeArchiver();
+    const { subject } = lifecycle(archiver);
+    const root = await tempDir("root");
+    const started = Date.now();
+    await subject.startGate("ses_gate_0002", root, { previousEnded: true });
+    subject.sessionStarted({ sessionId: "ses_gate_0002", root, engine: engine({ messages: () => messages(0) }).reader });
+    await subject.settled();
+    await subject.startGate("ses_gate_0002", root, { previousEnded: false });
+    await subject.startGate("ses_gate_0002", root);
+    expect(Date.now() - started).toBeLessThan(200);
+  });
+
+  test("the wait ends after turnDeltaWaitMs; a delta that runs after the next prompt went out is cut at that prompt", async () => {
+    const archiver = new FakeArchiver();
+    let clock = 10_000;
+    const { subject, logs } = lifecycle(archiver, { turnDeltaWaitMs: 100, now: () => clock });
+    const root = await tempDir("root");
+    const reads = engine({ messages: () => messages(0) });
+    subject.sessionStarted({ sessionId: "ses_gate_0003", root, engine: reads.reader });
+    await subject.settled();
+    const cuts: Array<number | undefined> = [];
+    const deltaGate = deferred<CaptureResult>();
+    archiver.delta = () => deltaGate.promise;
+    const capture = archiver.captureDelta.bind(archiver);
+    archiver.captureDelta = async (sessionId, root2, turn, options = {}) => {
+      const result = await capture(sessionId, root2, turn, options);
+      // The archiver reads the cut when its scan ends: here, once the capture finished.
+      cuts.push(typeof options.before === "function" ? options.before() : options.before);
+      return result;
+    };
+    // Turn 1 went idle at 10_500 and settled; its delta is slow. The next prompt waits 100 ms, then goes out at 11_000.
+    clock = 10_600;
+    subject.turnCompleted("ses_gate_0003", messages(1), 10_500);
+    const started = Date.now();
+    await subject.startGate("ses_gate_0003", root, { previousEnded: true });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(logs.some((line) => line.message.includes("cut at the prompt"))).toBe(true);
+    clock = 11_000;
+    subject.sessionStarted({ sessionId: "ses_gate_0003", root, engine: reads.reader });
+    deltaGate.resolve(queued("delta", 1));
+    await subject.settled();
+    // The delta read its cut when it ran: the prompt at 11_000, the first one after the turn went idle.
+    expect(cuts).toEqual([11_000]);
+  });
+
+  test("a turn the next prompt cut before the observer saw it end: the delta is cut at the first prompt after the turn's own", async () => {
+    const archiver = new FakeArchiver();
+    let clock = 1_000;
+    const { subject } = lifecycle(archiver, { now: () => clock });
+    const root = await tempDir("root");
+    const turn1 = [
+      { info: { id: "user_1", role: "user", time: { created: 1_010 } }, parts: [] },
+      { info: { id: "assistant_1", role: "assistant", time: { created: 1_020, completed: 1_500 }, finish: "stop" }, parts: [] },
+    ];
+    const reads = engine({ messages: () => [] });
+    subject.sessionStarted({ sessionId: "ses_gate_0005", root, engine: reads.reader });
+    await subject.settled();
+    const cuts: Array<number | undefined> = [];
+    const deltaGate = deferred<CaptureResult>();
+    archiver.delta = () => deltaGate.promise;
+    const capture = archiver.captureDelta.bind(archiver);
+    archiver.captureDelta = async (sessionId, root2, turn, options = {}) => {
+      const result = await capture(sessionId, root2, turn, options);
+      cuts.push(typeof options.before === "function" ? options.before() : options.before);
+      return result;
+    };
+    // No idle time (the observer saw the turn cut by the next prompt); the next prompt went out at 1_600.
+    clock = 1_550;
+    subject.turnCompleted("ses_gate_0005", turn1, null);
+    clock = 1_600;
+    subject.sessionStarted({ sessionId: "ses_gate_0005", root, engine: reads.reader });
+    deltaGate.resolve(queued("delta", 1));
+    await subject.settled();
+    expect(cuts).toEqual([1_600]);
+  });
+
+  test("the cut skips a prompt sent while the turn still answered, and falls back to the idle time for a turn opened before this run", async () => {
+    const cutFor = async (turn: Message[], promptsAt: number[], idleAt: number | null) => {
+      const archiver = new FakeArchiver();
+      let clock = promptsAt[0]!;
+      const { subject } = lifecycle(archiver, { now: () => clock });
+      const root = await tempDir("root");
+      const reads = engine({ messages: () => [] });
+      subject.sessionStarted({ sessionId: "ses_gate_0006", root, engine: reads.reader });
+      await subject.settled();
+      const cuts: Array<number | undefined> = [];
+      const deltaGate = deferred<CaptureResult>();
+      archiver.delta = () => deltaGate.promise;
+      const capture = archiver.captureDelta.bind(archiver);
+      archiver.captureDelta = async (sessionId, root2, number, options = {}) => {
+        const result = await capture(sessionId, root2, number, options);
+        cuts.push(typeof options.before === "function" ? options.before() : options.before);
+        return result;
+      };
+      subject.turnCompleted("ses_gate_0006", turn, idleAt);
+      for (const at of promptsAt.slice(1)) {
+        clock = at;
+        subject.sessionStarted({ sessionId: "ses_gate_0006", root, engine: reads.reader });
+      }
+      deltaGate.resolve(queued("delta", 1));
+      await subject.settled();
+      return cuts[0];
+    };
+    const steered = [
+      { info: { id: "user_1", role: "user", time: { created: 1_010 } }, parts: [] },
+      { info: { id: "assistant_1", role: "assistant", time: { created: 1_020, completed: 1_300 }, finish: "tool-calls" }, parts: [] },
+      // Sent at 1_200 while the turn still answered: a steer, part of turn 1.
+      { info: { id: "user_2", role: "user", time: { created: 1_205 } }, parts: [] },
+      { info: { id: "assistant_2", role: "assistant", time: { created: 1_310, completed: 1_500 }, finish: "stop" }, parts: [] },
+    ];
+    // Prompts went out at 1_000 (turn 1), 1_200 (the steer) and 1_600 (the next turn): the cut is 1_600.
+    expect(await cutFor(steered, [1_000, 1_200, 1_600], null)).toBe(1_600);
+    // A turn opened before this run (its prompt is older than every prompt time here): the idle time decides.
+    const older = [
+      { info: { id: "user_1", role: "user", time: { created: 500 } }, parts: [] },
+      { info: { id: "assistant_1", role: "assistant", time: { created: 510, completed: 900 }, finish: "stop" }, parts: [] },
+    ];
+    expect(await cutFor(older, [1_000, 2_000], 1_500)).toBe(2_000);
+    expect(await cutFor(older, [1_000, 2_000], null)).toBeUndefined();
+  });
+
+  test("a delta that runs before the next prompt has no cut; an aborted prompt still gets its final archive", async () => {
+    const archiver = new FakeArchiver();
+    const { subject } = lifecycle(archiver);
+    const root = await tempDir("root");
+    const reads = engine({ messages: () => messages(1) });
+    subject.sessionStarted({ sessionId: "ses_gate_0004", root, engine: reads.reader });
+    await subject.settled();
+    const cuts: Array<number | undefined> = [];
+    const capture = archiver.captureDelta.bind(archiver);
+    archiver.captureDelta = async (sessionId, root2, turn, options = {}) => {
+      const result = await capture(sessionId, root2, turn, options);
+      // The archiver reads the cut when its scan ends: here, once the capture finished.
+      cuts.push(typeof options.before === "function" ? options.before() : options.before);
+      return result;
+    };
+    subject.turnCompleted("ses_gate_0004", messages(1), Date.now());
+    await subject.settled();
+    await subject.startGate("ses_gate_0004", root, { previousEnded: true });
+    subject.sessionStarted({ sessionId: "ses_gate_0004", root, engine: reads.reader });
+    // The prompt is stopped before any answer: the count did not move, so the archiver answers stale_turn and a final follows.
+    archiver.delta = async () => skipped("stale_turn");
+    subject.turnCompleted("ses_gate_0004", messages(1), Date.now());
+    await subject.settled();
+    expect(cuts).toEqual([undefined, undefined]);
+    expect(archiver.finals()).toEqual(["final ses_gate_0004 turn_incomplete"]);
   });
 
   test("after a restart, a resumed session continues from the engine's turn count", async () => {

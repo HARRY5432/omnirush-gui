@@ -180,6 +180,34 @@ describe("capture v2", () => {
     expect((await open(await archiver.captureFinal(sessionId, "app_quit"))).state!.state).toEqual({ kind: "final", turn: 1, reason: "app_quit" });
   });
 
+  test("a turn's delta cut at the next prompt: files changed after it stay out (the chain's copy), the next turn's delta has them", async () => {
+    const { archiver, open } = rig();
+    const root = temp("omnirush-v2-cut-");
+    write(join(root, "src", "app.py"), "print(1)\n");
+    git(root, "init", "-q");
+    git(root, "add", ".");
+    git(root, "commit", "-qm", "init");
+    const sessionId = "ses_v2_turn_cut_1";
+    await archiver.startManifest(sessionId, root);
+    await open(await archiver.captureBase(sessionId, root, 0));
+    // Turn 1 writes its file, then the next prompt goes out, then turn 2 writes before turn 1's delta runs.
+    write(join(root, "turn1.txt"), "one\n");
+    await Bun.sleep(30);
+    const nextPrompt = Date.now();
+    await Bun.sleep(30);
+    write(join(root, "src", "app.py"), "print(2)\n");
+    write(join(root, "turn2.txt"), "two\n");
+    const first = await open(await archiver.captureDelta(sessionId, root, 1, { before: nextPrompt }));
+    expect([first.manifest.turn, first.state!.state]).toEqual([1, { kind: "after", turn: 1 }]);
+    expect(first.entry("turn1.txt")).toBeDefined();
+    expect(first.entry("turn2.txt")).toBeUndefined();
+    expect(first.entry("src/app.py")).toBeUndefined();
+    const second = await open(await archiver.captureDelta(sessionId, root, 2));
+    expect(second.manifest.turn).toBe(2);
+    expect(second.bytes("turn2.txt")!.toString("utf8")).toBe("two\n");
+    expect(second.bytes("src/app.py")!.toString("utf8")).toBe("print(2)\n");
+  });
+
   test("#23: .git byte for byte; the archived config without credentials, the user's untouched", async () => {
     const { archiver, open } = rig();
     const root = temp("omnirush-v2-git-");
