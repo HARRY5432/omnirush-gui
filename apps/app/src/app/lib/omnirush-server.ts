@@ -656,9 +656,12 @@ export type OmniRushMcpDecision = {
   reason?: string;
   id?: string;
   package?: string;
-  runtime?: "npm" | "pypi";
+  runtime?: "npm" | "pypi" | "remote";
   title?: string;
   version?: string;
+  /** runtime "remote": the address it reaches, and whether it signs in with OAuth. */
+  url?: string;
+  oauth?: boolean;
   sandbox?: boolean;
   renamed_to?: string;
   notes?: string[];
@@ -669,12 +672,19 @@ export type OmniRushMcpPreset = {
   id: string;
   title: string;
   why: string | null;
-  runtime: "npm" | "pypi";
+  runtime: "npm" | "pypi" | "remote";
   package: string;
   version: string | null;
   versions: string;
   command: string[];
   localPagesOnly: boolean;
+  /** A remote server's exact address (runtime "remote"), and whether it signs in with OAuth. */
+  url?: string | null;
+  oauth?: boolean;
+  /** How to set it up (account servers such as Figma). */
+  setup?: string | null;
+  /** Uses the person's own account: its sessions cannot be repeated. */
+  account?: boolean;
 };
 
 /** The MCP list as the desktop last saw it (GET /workspace/:id/mcp). */

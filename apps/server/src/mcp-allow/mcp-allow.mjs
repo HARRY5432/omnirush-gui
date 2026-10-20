@@ -18,6 +18,14 @@
 // Allowed servers are keyed by the entry's id (the engine names their tools
 // `<id>_<tool>`), so the same server gets the same tool names whatever the
 // user called it. With the project's sandbox on, they run in the sandbox.
+//
+// One exception, account servers (Figma): an entry with `runtime: "remote"`
+// matches its exact address only (no headers or OAuth settings from a config
+// file, where a token would travel with the project), and an entry whose
+// `rules.secret_env` names a key reads it from the person's own environment
+// only, never writes it into the server's settings, and runs on this computer
+// (the sandbox never sees the key). `read_tools` lists the tools that run
+// without asking in Normal (every other one asks).
 
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
@@ -41,9 +49,12 @@ export const MCP_REASONS = {
   missing_flag: "This MCP server needs a setting that points at a file in the project.",
   missing_arg: "This MCP server needs the file it works on, inside the project, as its argument.",
   flag: "This MCP server setting is not supported: it reaches outside the project.",
+  secret_flag: "A key or token is not supported in a config file (it would travel with the project): set it in your environment instead.",
   duplicate: "Another entry already starts this MCP server.",
   invalid: "This MCP server entry is not valid.",
   runner_missing: "npx or uvx was not found on this computer outside the project folder, so the server does not start.",
+  secret_missing: "This MCP server needs a key in your own environment (not in a config file).",
+  remote_settings: "This remote MCP server is supported only with its plain address: no headers or other settings.",
 };
 
 const ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
@@ -145,14 +156,69 @@ function normalizeRules(value) {
     if (Object.keys(env).length) out.path_env = env;
   }
   if (rules.local_urls === true) out.local_urls = true;
+  // Keys a server needs, read only from the person's own environment (never from a config file, which the
+  // project upload could carry); the first one present is passed on, none present: blocked.
+  const secrets = strings(rules.secret_env, 4).filter((k) => /^[A-Z_][A-Z0-9_]{0,63}$/.test(k));
+  if (secrets.length) out.secret_env = secrets;
   const inputs = strings(rules.path_inputs, 16).filter((k) => /^[A-Za-z_][\w]{0,63}$/.test(k));
   if (inputs.length) out.path_inputs = inputs;
   return out;
 }
 
+/** A remote server's address as compared: scheme, host and path, lower-case host, no trailing slash. */
+// The same check as the backend's mcp_policy.remote_url (test/fixtures/mcp-remote-urls.json, both sides): plain
+// host names only (no escapes, IP shortcuts or trailing dot), a port without leading zeros, a path without
+// escapes or dot segments, no user, query or fragment.
+// Token shapes a key server's arguments must not hold (Figma's personal and OAuth tokens).
+const TOKEN_SHAPE = /(?:^|[^A-Za-z0-9_])fig(?:d|u|ur)_[A-Za-z0-9_-]{20,}/;
+const REMOTE_URL = /^(https?):\/\/((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*|\[::1\])(?::([1-9][0-9]{0,4}))?(\/[A-Za-z0-9._~/-]*)?$/i;
+
+export function normalizeRemoteUrl(value) {
+  if (typeof value !== "string" || value.length > 300) return null;
+  const m = REMOTE_URL.exec(value);
+  if (!m) return null;
+  const scheme = m[1].toLowerCase();
+  let host = m[2].toLowerCase();
+  let port = m[3] ?? null;
+  const path = m[4] ?? "";
+  if (port !== null && Number(port) > 65535) return null;
+  if (path.split("/").some((part) => part === "." || part === "..")) return null;
+  // Plain http only to this computer (the Figma desktop app's server); anything else must be https.
+  if (scheme === "http" && !["127.0.0.1", "localhost", "[::1]"].includes(host)) return null;
+  // localhost and 127.0.0.1 name the same server here.
+  if (host === "localhost") host = "127.0.0.1";
+  if ((scheme === "https" && port === "443") || (scheme === "http" && port === "80")) port = null;
+  return `${scheme}://${host}${port ? `:${port}` : ""}${path.replace(/\/+$/, "") || "/"}`;
+}
+
+function normalizeRemoteEntry(value, id) {
+  const url = normalizeRemoteUrl(value.url);
+  const pkg = text(value.package, 214);
+  if (!url || !pkg || !/^(@[\w.-]+\/)?[\w.-]+$/.test(pkg)) return null;
+  return {
+    id,
+    runtime: "remote",
+    package: pkg,
+    url,
+    // OAuth sign-in through the engine (its own token store, never a config file); false: none.
+    oauth: value.oauth === true,
+    bins: [],
+    versions: "*",
+    pin: null,
+    title: text(value.title, 80) ?? id,
+    why: text(value.why, 400),
+    setup: text(value.setup, 400),
+    write_tools: Array.isArray(value.write_tools) ? strings(value.write_tools, 64).filter((t) => /^[\w-]{1,64}$/.test(t)) : null,
+    // Or the other way round: only these run without asking (a server whose tool list grows, such as Figma's).
+    read_tools: Array.isArray(value.read_tools) ? strings(value.read_tools, 64).filter((t) => /^[\w-]{1,64}$/.test(t)) : null,
+    rules: {},
+  };
+}
+
 function normalizeEntry(value) {
   if (!isRecord(value)) return null;
   const id = text(value.id, 40)?.toLowerCase();
+  if (value.runtime === "remote") return id && ID.test(id) ? normalizeRemoteEntry(value, id) : null;
   const runtime = value.runtime === "npm" || value.runtime === "pypi" ? value.runtime : null;
   const pkg = text(value.package, 214);
   if (!id || !ID.test(id) || !runtime || !pkg || !/^(@[\w.-]+\/)?[\w.-]+$/.test(pkg)) return null;
@@ -170,10 +236,13 @@ function normalizeEntry(value) {
     pin,
     title: text(value.title, 80) ?? id,
     why: text(value.why, 400),
+    setup: text(value.setup, 400),
     // The server's tools that change something (files, a database, the
     // repository, the memory file): Normal permission mode asks before them.
     // null (a list without the field): every tool counts as one that changes something.
     write_tools: Array.isArray(value.write_tools) ? strings(value.write_tools, 64).filter((t) => /^[\w-]{1,64}$/.test(t)) : null,
+    // Or the other way round: only these run without asking (a server whose tool list grows, such as Figma's).
+    read_tools: Array.isArray(value.read_tools) ? strings(value.read_tools, 64).filter((t) => /^[\w-]{1,64}$/.test(t)) : null,
     rules: normalizeRules(value.rules),
   };
 }
@@ -195,7 +264,8 @@ export function normalizePolicy(block) {
   const seen = new Set();
   for (const raw of Array.isArray(block.allow) ? block.allow.slice(0, 64) : []) {
     const entry = normalizeEntry(raw);
-    if (entry && !seen.has(entry.id)) { seen.add(entry.id); allow.push(entry); }
+    const key = entry ? `${entry.id}|${entry.runtime}|${entry.package}|${entry.url ?? ""}` : null;
+    if (entry && !seen.has(key)) { seen.add(key); allow.push(entry); }
   }
   const deny = (Array.isArray(block.deny) ? block.deny.slice(0, 128) : []).map(normalizeDeny).filter(Boolean);
   return { enabled: block.enabled === true, allow, deny, message: text(block.message, 400) };
@@ -446,6 +516,23 @@ export function evaluateMcp(mcpMap, policy, ctx = {}) {
     if (!isRecord(raw)) { decisions.push(blocked(name, "invalid")); continue; }
     if (!policy || !policy.enabled) { decisions.push(blocked(name, "disabled", policy?.message ? { reason: policy.message } : {})); continue; }
     if (raw.type === "remote" || typeof raw.url === "string") {
+      const url = normalizeRemoteUrl(raw.url);
+      const remote = url ? policy.allow.find((e) => e.runtime === "remote" && e.url === url) : null;
+      if (remote) {
+        const base = { id: remote.id, package: remote.package, runtime: "remote", title: remote.title };
+        if (Object.hasOwn(out, remote.id)) { decisions.push(blocked(name, "duplicate", base)); continue; }
+        // Headers could carry a token into a config file (and the project upload): the plain address only.
+        const extra = Object.keys(raw).filter((k) => !["type", "url", "enabled", "timeout", "oauth"].includes(k));
+        if (extra.length || (raw.oauth !== undefined && typeof raw.oauth !== "boolean")) {
+          decisions.push(blocked(name, "remote_settings", { ...base, reason: `${MCP_REASONS.remote_settings} (${extra.concat(typeof raw.oauth === "object" ? ["oauth"] : []).slice(0, 4).join(", ")})` }));
+          continue;
+        }
+        const next = { type: "remote", url: remote.url, oauth: remote.oauth ? undefined : false, ...(raw.enabled === false ? { enabled: false } : {}), ...(Number.isInteger(raw.timeout) ? { timeout: raw.timeout } : {}) };
+        if (next.oauth === undefined) delete next.oauth;
+        out[remote.id] = next;
+        decisions.push({ name, status: "allowed", code: "allowed", ...base, version: "remote", url: remote.url, oauth: remote.oauth, sandbox: false, enabled: raw.enabled !== false, write_tools: remote.write_tools, read_tools: remote.read_tools, ...(name !== remote.id ? { renamed_to: remote.id } : {}), notes: [remote.oauth ? "signs in with your account in the browser" : "reaches an app on this computer"] });
+        continue;
+      }
       const reason = denyReason(policy, name, hostOf(raw.url));
       decisions.push(blocked(name, "remote", { url_host: hostOf(raw.url), ...(reason ? { reason: `${reason} ${MCP_REASONS.remote}` } : {}) }));
       continue;
@@ -460,7 +547,7 @@ export function evaluateMcp(mcpMap, policy, ctx = {}) {
     }
     const denied = denyReason(policy, launch.name);
     if (denied) { decisions.push(blocked(name, "denied", { reason: denied, package: launch.name })); continue; }
-    const entry = policy.allow.find((e) => e.runtime === launch.runtime && e.package.toLowerCase() === launch.name);
+    const entry = policy.allow.find((e) => e.runtime !== "remote" && e.runtime === launch.runtime && e.package.toLowerCase() === launch.name);
     if (!entry) { decisions.push(blocked(name, "not_allowed", { package: launch.name })); continue; }
     // `-p <pkg> <program>` / `--from <pkg> <program>`: the program must be one
     // the package itself provides (the entry's `bins`), never `node -e ...`.
@@ -495,9 +582,30 @@ export function evaluateMcp(mcpMap, policy, ctx = {}) {
     const ignored = Object.keys(given).filter((k) => !kept.has(k));
     if (ignored.length) notes.push(`ignores ${ignored.slice(0, 4).join(", ")}${ignored.length > 4 ? " ..." : ""}`);
     let refusal = null;
+    const userEnv = ctx.env ?? process.env;
+    if (!refusal && rules.secret_env) {
+      // A key server takes its flags only: a bare argument could be the key itself (in the config, and in
+      // the process list). A path flag's value is the one argument allowed.
+      for (let i = 0; i < rest.length; i += 1) {
+        const arg = String(rest[i]);
+        // A path flag's value that looks like a token is refused too (a key typed in the wrong place).
+        const value = arg.startsWith("-") ? (arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : !arg.includes("=") && (rules.path_flags ?? []).includes(arg) ? String(rest[i + 1] ?? "") : "") : null;
+        if (value !== null && !TOKEN_SHAPE.test(value)) { if (!arg.includes("=") && (rules.path_flags ?? []).includes(arg)) i += 1; continue; }
+        refusal = blocked(name, "flag", { ...base, version, reason: MCP_REASONS.secret_flag });
+        break;
+      }
+    }
+    const secretNames = (rules.secret_env ?? []).filter((k) => typeof userEnv[k] === "string" && userEnv[k] !== "");
+    if (!refusal && rules.secret_env && !secretNames.length) {
+      refusal = blocked(name, "secret_missing", { ...base, version, reason: `${MCP_REASONS.secret_missing} Set ${rules.secret_env.join(" or ")} before starting the app.` });
+    }
+    // A server that needs the person's key runs on this computer, where the engine's own environment holds it
+    // (the sandbox never sees it, and the key is never written into the server's settings).
+    const boxHere = rules.secret_env ? null : box;
+    if (box && !boxHere) notes.push("runs on this computer (needs your key)");
     if (rules.allow_flags) {
       const other = rest.map((a) => (a.includes("=") ? a.slice(0, a.indexOf("=")) : a)).find((a) => a.startsWith("-") && !rules.allow_flags.includes(a));
-      if (other) refusal = blocked(name, "flag", { ...base, version, reason: `${MCP_REASONS.flag} (${other})` });
+      if (other) refusal = blocked(name, "flag", { ...base, version, reason: `${/key|token|secret|passw/i.test(other) ? MCP_REASONS.secret_flag : MCP_REASONS.flag} (${other})` });
     }
     if (!refusal) for (const [flag, values] of Object.entries(rules.flag_values ?? {})) {
       const found = flagValue(rest, flag);
@@ -527,27 +635,27 @@ export function evaluateMcp(mcpMap, policy, ctx = {}) {
       if (!refusal && rules.min_args && rest.filter((a) => !a.startsWith("-")).length < rules.min_args) {
         refusal = blocked(name, "missing_arg", { ...base, version });
       }
-      if (!refusal) rest = rest.map((a) => (a.startsWith("-") ? a : boxPath(a, root, box, platform)));
+      if (!refusal) rest = rest.map((a) => (a.startsWith("-") ? a : boxPath(a, root, boxHere, platform)));
     }
     if (!refusal) for (const flag of rules.path_flags ?? []) {
       const found = flagValue(rest, flag);
       if (!found || found.value === null) continue;
       if (!inside(found.value)) { refusal = blocked(name, "outside_project", { ...base, version, reason: `${MCP_REASONS.outside_project} (${flag} ${found.value})` }); break; }
-      const mapped = boxPath(found.value, root, box, platform);
+      const mapped = boxPath(found.value, root, boxHere, platform);
       rest = [...rest];
       if (found.inline) rest[found.index] = `${flag}=${mapped}`; else rest[found.index] = mapped;
     }
     if (!refusal) for (const [key, fallback] of Object.entries(rules.path_env ?? {})) {
       const value = environment[key];
       if (value === undefined || value === "") {
-        environment[key] = boxPath(lib.join(lib.resolve(root), fallback), root, box, platform);
+        environment[key] = boxPath(lib.join(lib.resolve(root), fallback), root, boxHere, platform);
         notes.push(`keeps its data in ${fallback.split("\\").join("/")}`);
       } else if (!inside(value)) {
         refusal = blocked(name, "outside_project", { ...base, version, reason: `${MCP_REASONS.outside_project} (${key})` });
         break;
       } else {
         // Absolute: a server may resolve a relative path against its own install folder.
-        environment[key] = boxPath(lib.resolve(workRoot, value), root, box, platform);
+        environment[key] = boxPath(lib.resolve(workRoot, value), root, boxHere, platform);
       }
     }
     if (refusal) { decisions.push(refusal); continue; }
@@ -555,10 +663,10 @@ export function evaluateMcp(mcpMap, policy, ctx = {}) {
       const at = flag.indexOf("=");
       if (!flagValue(rest, at > 0 ? flag.slice(0, at) : flag)) { rest = [...rest, flag]; notes.push(`adds ${flag}`); }
     }
-    const npmPrefix = box ? BOX_NPM_PREFIX : ctx.npmPrefix || path.join(os.homedir(), ".cache", "omnirush-mcp-npx");
+    const npmPrefix = boxHere ? BOX_NPM_PREFIX : ctx.npmPrefix || path.join(os.homedir(), ".cache", "omnirush-mcp-npx");
     const argv = [...launchCommand(entry, launch, version, npmPrefix), ...rest];
     if (launch.runner !== (entry.runtime === "npm" ? "npx" : "uvx")) notes.push(`runs with ${argv[0]}`);
-    if (!box) {
+    if (!boxHere) {
       // By absolute path: the engine starts the server in the project folder, and on Windows a bare name
       // is looked up there before PATH (a repo's own npx.cmd would run instead).
       const exists = ctx.exists ?? existsSync;
@@ -572,8 +680,10 @@ export function evaluateMcp(mcpMap, policy, ctx = {}) {
       }
       argv.splice(0, 1, ...program);
     }
-    const next = { ...raw, type: "local" };
-    if (box) {
+    // Only the keys the engine uses for a local server: anything else in the entry (headers, a token under
+    // another name) never reaches the engine's config.
+    const next = { type: "local", ...Object.fromEntries(["command", "environment", "enabled", "timeout", "cwd"].filter((k) => Object.hasOwn(raw, k)).map((k) => [k, raw[k]])) };
+    if (boxHere) {
       const envWords = Object.entries(environment).map(([k, v]) => `${k}=${shellQuote(v)}`);
       next.command = [box.shell, "-c", `${entry.runtime === "npm" ? `mkdir -p ${BOX_NPM_PREFIX} && ` : ""}exec ${envWords.length ? `env ${envWords.join(" ")} ` : ""}${argv.map(shellQuote).join(" ")}`];
       next.environment = { OMNIRUSH_BOX_KEY: box.key };
@@ -582,8 +692,9 @@ export function evaluateMcp(mcpMap, policy, ctx = {}) {
       next.command = argv;
       if (Object.keys(environment).length) next.environment = environment; else delete next.environment;
     }
+    if (secretNames.length) notes.push(`uses ${secretNames[0]} from your environment`);
     out[entry.id] = next;
-    decisions.push({ name, status: "allowed", code: "allowed", ...base, version, sandbox: Boolean(box), enabled: raw.enabled !== false, write_tools: entry.write_tools, ...(name !== entry.id ? { renamed_to: entry.id } : {}), notes });
+    decisions.push({ name, status: "allowed", code: "allowed", ...base, version, sandbox: Boolean(boxHere), enabled: raw.enabled !== false, write_tools: entry.write_tools, read_tools: entry.read_tools, ...(name !== entry.id ? { renamed_to: entry.id } : {}), notes });
   }
   return { mcp: out, decisions };
 }
@@ -637,7 +748,8 @@ export function toolRefusal(state, tool, args) {
  * The engine `permission` rules the MCP servers add in a permission mode
  * (the safety modes, OMNIRUSH_PERMISSION_MODE): Normal lets an allowed
  * server's tools run (`<id>_*: allow`) and asks before the ones that change
- * something (`<id>_<tool>: ask`, its entry's `write_tools`); Careful asks
+ * something (`<id>_<tool>: ask`, its entry's `write_tools`; with `read_tools`, it asks for every
+ * tool but those); Careful asks
  * for every tool already and Auto for none, so they add nothing. The
  * engine takes the last rule that matches, so these go after the mode's own.
  */
@@ -646,6 +758,11 @@ export function mcpPermissionRules(decisions, mode) {
   const rules = {};
   for (const d of decisions ?? []) {
     if (!d || d.status !== "allowed" || !d.id) continue;
+    if (Array.isArray(d.read_tools)) {
+      rules[`${toolPrefix(d.id)}*`] = "ask";
+      for (const tool of d.read_tools) rules[`${toolPrefix(d.id)}${String(tool).replace(/[^a-zA-Z0-9_-]/g, "_")}`] = "allow";
+      continue;
+    }
     if (!Array.isArray(d.write_tools)) {
       rules[`${toolPrefix(d.id)}*`] = "ask";
       continue;
@@ -736,7 +853,8 @@ export function describeDecision(d) {
   if (d.status === "allowed") {
     // The version is in the line already; the other notes say what the app changed.
     const notes = (d.notes ?? []).filter((n) => !n.startsWith("runs version "));
-    return `MCP ${d.id}${d.renamed_to && d.name !== d.id ? ` (${d.name})` : ""}: ${d.enabled === false ? "turned off" : "on"}${d.version ? `, ${d.package}@${d.version}` : ""}${notes.length ? ` (${notes.join("; ")})` : ""}`;
+    const what = d.runtime === "remote" ? (d.url ? `, ${d.url}` : "") : d.version ? `, ${d.package}@${d.version}` : "";
+    return `MCP ${d.id}${d.renamed_to && d.name !== d.id ? ` (${d.name})` : ""}: ${d.enabled === false ? "turned off" : "on"}${what}${notes.length ? ` (${notes.join("; ")})` : ""}`;
   }
   return `MCP ${d.name}: blocked. ${d.reason}`;
 }
