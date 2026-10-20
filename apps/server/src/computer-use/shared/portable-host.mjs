@@ -191,6 +191,15 @@ export async function createPortableHost({ native, spool = null, settings, conte
   }, 1000);
   ticker.unref?.();
 
+  // Windows: the agent's ancestor processes (its terminal or IDE) read natively when the app passed none.
+  let nativeAncestors = null;
+  async function ancestorsOf(ctx) {
+    if (Array.isArray(ctx.ancestors) && ctx.ancestors.length) return ctx.ancestors;
+    if (platform !== "win32") return ctx.ancestors ?? [];
+    if (!nativeAncestors) nativeAncestors = await native.call("ancestors", { pid: process.pid }).catch(() => null);
+    return nativeAncestors ?? [];
+  }
+
   async function screenOf(w) {
     const screens = await native.call("screens").catch(() => []);
     const cx = w.bounds.x + w.bounds.width / 2, cy = w.bounds.y + w.bounds.height / 2;
@@ -385,9 +394,10 @@ export async function createPortableHost({ native, spool = null, settings, conte
     const ctx = (await context()) ?? {};
     const config = settings() ?? {};
     const windows = await native.call("list");
+    const ancestors = await ancestorsOf(ctx);
     const apps = new Map();
     for (const w of windows) {
-      const denied = deniedApp(appIdentity(w), { ancestors: ctx.ancestors, self_pids: [...(ctx.self_pids ?? []), process.pid, native.pid].filter(Boolean), tty_pids: ctx.tty_pids, deny_apps: config.deny_apps });
+      const denied = deniedApp(appIdentity(w), { ancestors, self_pids: [...(ctx.self_pids ?? []), process.pid, native.pid].filter(Boolean), tty_pids: ctx.tty_pids, deny_apps: config.deny_apps });
       const key = `${w.appId}\0${w.pid}`;
       if (!apps.has(key)) apps.set(key, { app_id: w.appId, name: w.appName, pid: w.pid, ...(denied ? { available: false, reason: denied.reason } : {}), windows: [] });
       if (!denied) apps.get(key).windows.push({ id: String(w.id), title: w.title });
@@ -404,7 +414,7 @@ export async function createPortableHost({ native, spool = null, settings, conte
     if (lease) return mcpResult(failure("session_busy", "Another computer use session is open. Close it first."));
     const windows = (await native.call("list")).filter((w) => w.appId === args.app_id && (args.pid === undefined || w.pid === args.pid));
     if (!windows.length) return mcpResult(failure("app_unavailable", "That app has no visible window. Open it yourself, then call computer_discover again."));
-    const denied = deniedApp(appIdentity(windows[0]), { ancestors: ctx.ancestors, self_pids: [...(ctx.self_pids ?? []), process.pid, native.pid].filter(Boolean), tty_pids: ctx.tty_pids, deny_apps: config.deny_apps });
+    const denied = deniedApp(appIdentity(windows[0]), { ancestors: await ancestorsOf(ctx), self_pids: [...(ctx.self_pids ?? []), process.pid, native.pid].filter(Boolean), tty_pids: ctx.tty_pids, deny_apps: config.deny_apps });
     if (denied) return mcpResult(failure(denied.code, denied.reason));
     const preferred = args.window_id !== undefined ? windows.find((w) => String(w.id) === args.window_id) : windows[0];
     if (!preferred) return mcpResult(failure("window_unavailable", "That window is not open. Call computer_discover again."));

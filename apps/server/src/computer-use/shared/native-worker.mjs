@@ -88,12 +88,19 @@ function windows() {
   const clientToScreen = f(u, "int __stdcall ClientToScreen(uintptr_t hwnd, _Inout_ CU2_POINT *point)");
   const guiInfo = f(u, "int __stdcall GetGUIThreadInfo(uint32_t thread, _Inout_ CU2_GUITHREADINFO *info)");
   const focusWindow = f(u, "int __stdcall SetForegroundWindow(uintptr_t hwnd)");
+  const bringToTop = f(u, "int __stdcall BringWindowToTop(uintptr_t hwnd)");
+  const attachInput = f(u, "int __stdcall AttachThreadInput(uint32_t attach, uint32_t to, int on)");
+  const currentThread = f(k, "uint32_t __stdcall GetCurrentThreadId()");
   const send = f(u, "uint32_t __stdcall SendInput(uint32_t count, CU2_INPUT *inputs, int size)");
   const metrics = f(u, "int __stdcall GetSystemMetrics(int index)");
   const openProcess = f(k, "uintptr_t __stdcall OpenProcess(uint32_t access, int inherit, uint32_t pid)");
   const processName = f(k, "int __stdcall QueryFullProcessImageNameW(uintptr_t process, uint32_t flags, _Out_ uint16_t *name, _Inout_ uint32_t *size)");
   const times = f(k, "int __stdcall GetProcessTimes(uintptr_t process, _Out_ CU2_FILETIME *created, _Out_ CU2_FILETIME *exited, _Out_ CU2_FILETIME *kernel, _Out_ CU2_FILETIME *user)");
   const closeHandle = f(k, "int __stdcall CloseHandle(uintptr_t handle)");
+  const processEntry = koffi.struct("CU2_PROCESSENTRY32W", { dwSize: "uint32_t", cntUsage: "uint32_t", th32ProcessID: "uint32_t", th32DefaultHeapID: "uintptr_t", th32ModuleID: "uint32_t", cntThreads: "uint32_t", th32ParentProcessID: "uint32_t", pcPriClassBase: "int32_t", dwFlags: "uint32_t", szExeFile: koffi.array("uint16_t", 260) });
+  const snapshot = f(k, "uintptr_t __stdcall CreateToolhelp32Snapshot(uint32_t flags, uint32_t pid)");
+  const firstProcess = f(k, "int __stdcall Process32FirstW(uintptr_t snapshot, _Inout_ CU2_PROCESSENTRY32W *entry)");
+  const nextProcess = f(k, "int __stdcall Process32NextW(uintptr_t snapshot, _Inout_ CU2_PROCESSENTRY32W *entry)");
   const openDesktop = f(u, "uintptr_t __stdcall OpenInputDesktop(uint32_t flags, int inherit, uint32_t access)");
   const closeDesktop = f(u, "int __stdcall CloseDesktop(uintptr_t desktop)");
   const userInfo = f(u, "int __stdcall GetUserObjectInformationW(uintptr_t object, int index, _Out_ uint16_t *value, uint32_t size, _Out_ uint32_t *needed)");
@@ -105,6 +112,11 @@ function windows() {
   const select = f(gdi, "uintptr_t __stdcall SelectObject(uintptr_t hdc, uintptr_t object)");
   const deleteObject = f(gdi, "int __stdcall DeleteObject(uintptr_t object)");
   const deleteDC = f(gdi, "int __stdcall DeleteDC(uintptr_t hdc)");
+  let monitorDpi = null;
+  try { monitorDpi = f(koffi.load("shcore.dll"), "int32_t __stdcall GetDpiForMonitor(uintptr_t monitor, int type, _Out_ uint32_t *x, _Out_ uint32_t *y)"); } catch { /* older Windows */ }
+  const bitBlt = f(gdi, "int __stdcall BitBlt(uintptr_t dest, int x, int y, int width, int height, uintptr_t source, int sx, int sy, uint32_t rop)");
+  const getWindow = f(u, "uintptr_t __stdcall GetWindow(uintptr_t hwnd, uint32_t cmd)");
+  const dwmValue = f(dwm, "int32_t __stdcall DwmGetWindowAttribute(uintptr_t hwnd, uint32_t attribute, _Out_ uint32_t *value, uint32_t size)");
   const getBits = f(gdi, "int __stdcall GetDIBits(uintptr_t hdc, uintptr_t bitmap, uint32_t start, uint32_t lines, _Out_ uint8_t *bits, CU2_BITMAPINFOHEADER *info, uint32_t usage)");
   // Per-monitor DPI awareness v2 for this process, then this thread.
   try { f(u, "int __stdcall SetProcessDpiAwarenessContext(intptr_t context)")(-4); } catch { /* older Windows */ }
@@ -163,7 +175,22 @@ function windows() {
     const value = {};
     while (peek(value, 0, 0, 0, 1)) { /* pump hook messages */ }
   };
+  let wts = null;
+  try {
+    const lib = koffi.load("wtsapi32.dll");
+    wts = { query: f(lib, "int __stdcall WTSQuerySessionInformationW(uintptr_t server, uint32_t session, int info, _Out_ void **buffer, _Out_ uint32_t *bytes)"), free: f(lib, "void __stdcall WTSFreeMemory(void *memory)") };
+  } catch { /* no WTS: the input desktop check only */ }
+  // The lock screen (LockApp) runs on the Default desktop since Windows 10: ask the session itself.
+  const locked = () => {
+    if (!wts) return false;
+    const buffer = [null], bytes = [0];
+    if (!wts.query(0, 0xffffffff, 25, buffer, bytes) || !buffer[0]) return false;
+    // WTSINFOEXW: Level, then (8-byte aligned) SessionId, SessionState, SessionFlags (0 = WTS_SESSIONSTATE_LOCK).
+    try { const [level, , , , flags] = koffi.decode(buffer[0], "int32_t", 5); return level === 1 && flags === 0; }
+    finally { wts.free(buffer[0]); }
+  };
   const available = () => {
+    if (locked()) return false;
     const handle = openDesktop(0, 0, 1);
     if (!handle) return false;
     try { const data = Buffer.alloc(512), size = [0]; return Boolean(userInfo(handle, 2, data, data.length, size)) && data.toString("utf16le").split("\0")[0].toLowerCase() === "default"; }
@@ -190,11 +217,50 @@ function windows() {
     try { dpi = dpiOfWindow(id) || 96; } catch { /* older Windows */ }
     return { id: Number(id), pid: pid[0], thread, identity, executable, appId: executable.toLowerCase(), appName: path.win32.basename(executable, ".exe"), title: text(titleOf, id), bounds, dpi, scale: dpi / 96, monitor: String(Number(monitorOf(id, 2))) };
   }
+  // The ancestor processes of `pid`, nearest first ([{ pid, name, exe }]): the terminal or IDE the agent runs in.
+  function ancestors(pid) {
+    const table = new Map();
+    const snap = snapshot(2, 0);
+    if (!snap || Number(snap) >= 2 ** 52) return []; // INVALID_HANDLE_VALUE
+    try {
+      const entry = { dwSize: koffi.sizeof(processEntry) };
+      for (let ok = firstProcess(snap, entry); ok; ok = nextProcess(snap, entry)) {
+        table.set(entry.th32ProcessID, { ppid: entry.th32ParentProcessID, name: Buffer.from(Uint16Array.from(entry.szExeFile).buffer).toString("utf16le").split("\0")[0] });
+        entry.dwSize = koffi.sizeof(processEntry);
+      }
+    } finally { closeHandle(snap); }
+    const info = (id) => {
+      const handle = openProcess(0x1000, 0, id);
+      if (!handle) return { exe: "", started: 0 };
+      try {
+        const name = Buffer.alloc(65536), size = [32768], created = {};
+        const exe = processName(handle, 0, name, size) ? name.toString("utf16le", 0, size[0] * 2) : "";
+        const started = times(handle, created, {}, {}, {}) ? created.high * 2 ** 32 + created.low : 0;
+        return { exe, started };
+      } finally { closeHandle(handle); }
+    };
+    const out = [], seen = new Set([pid]);
+    let child = { ...table.get(pid), ...info(pid) };
+    for (let i = 0; i < 64 && child.ppid > 4 && table.has(child.ppid) && !seen.has(child.ppid); i += 1) {
+      seen.add(child.ppid);
+      const parent = { pid: child.ppid, ...table.get(child.ppid), ...info(child.ppid) };
+      // A parent that started after its child is a reused pid: the real parent has exited.
+      if (parent.started && child.started && parent.started > child.started) break;
+      // The desktop shell and system services start everything: not an app the agent runs in.
+      if (/^(explorer|svchost|services|wininit|winlogon|smss|sihost)\.exe$/i.test(parent.name)) break;
+      out.push({ pid: parent.pid, name: parent.name.replace(/\.exe$/i, ""), exe: parent.exe });
+      child = parent;
+    }
+    return out;
+  }
   function screens() {
     const out = [];
     const cb = koffi.register((monitor) => {
       const info = { cbSize: koffi.sizeof("CU2_MONITORINFO"), rcMonitor: {}, rcWork: {}, dwFlags: 0 };
-      if (monitorInfo(monitor, info)) out.push({ id: String(Number(monitor)), x: info.rcMonitor.left, y: info.rcMonitor.top, width: info.rcMonitor.right - info.rcMonitor.left, height: info.rcMonitor.bottom - info.rcMonitor.top, scale: 1, primary: (info.dwFlags & 1) === 1 });
+      // Effective DPI of the monitor (the person's scaling, e.g. 144 = 150%); bounds are native pixels.
+      const dx = [96], dy = [96];
+      const scale = monitorDpi && monitorDpi(monitor, 0, dx, dy) === 0 && dx[0] ? dx[0] / 96 : 1;
+      if (monitorInfo(monitor, info)) out.push({ id: String(Number(monitor)), x: info.rcMonitor.left, y: info.rcMonitor.top, width: info.rcMonitor.right - info.rcMonitor.left, height: info.rcMonitor.bottom - info.rcMonitor.top, scale, primary: (info.dwFlags & 1) === 1 });
       return 1;
     }, koffi.pointer(monitorProto));
     try { enumMonitors(0, null, cb, 0); } finally { koffi.unregister(cb); }
@@ -209,7 +275,29 @@ function windows() {
     if (Number(ancestor(foreground(), 2)) !== expected.id) fail("focus_changed", "The approved window must stay in front. Choose Continue when ready.");
     return current;
   }
-  const hit = (expected, p) => Number(ancestor(fromPoint({ x: p.x, y: p.y }), 2)) === expected.id;
+  // The approved window's own popups: windows it owns (bubbles, dropdowns, dialogs' popups) and the
+  // process's menus (#32768). Another top-level window of the same process (a second browser window) is not.
+  const ownPopup = (h, expected) => {
+    if (!h || Number(h) === expected.id) return Number(h) === expected.id;
+    const pid = [0]; pidOf(h, pid);
+    if (pid[0] !== expected.pid) return false;
+    if (text(classOf, h, 64) === "#32768") return true;
+    for (let owner = getWindow(h, 4), i = 0; owner && i < 8; owner = getWindow(owner, 4), i += 1) if (Number(owner) === expected.id) return true;
+    return false;
+  };
+  const hit = (expected, p) => ownPopup(Number(ancestor(fromPoint({ x: p.x, y: p.y }), 2)), expected);
+  const cloaked = (h) => { const v = [0]; try { return dwmValue(h, 14, v, 4) === 0 && v[0] !== 0; } catch { return false; } };
+  // The approved window's own popups drawn over it, lowest first (they go into its image on top of it).
+  function popupsOver(current) {
+    const b = current.bounds, out = [];
+    for (let h = getWindow(current.id, 3), i = 0; h && i < 512; h = getWindow(h, 3), i += 1) {
+      if (!visible(h) || iconic(h) || cloaked(h) || !ownPopup(Number(h), current)) continue;
+      const r = {};
+      if (!windowRect(h, r) || r.left >= b.x + b.width || r.top >= b.y + b.height || r.right <= b.x || r.bottom <= b.y) continue;
+      out.push({ id: Number(h), r });
+    }
+    return out.reverse();
+  }
   const moveTo = (x, y) => {
     const left = metrics(76), top = metrics(77), width = metrics(78), height = metrics(79);
     if (width <= 1 || height <= 1) fail("input_unavailable", "The desktop bounds could not be read.");
@@ -250,8 +338,19 @@ function windows() {
     if (fw <= 0 || fh <= 0 || fw * fh > 33_177_600) fail("capture_unavailable", "This window is too large to capture. Resize it and observe again.");
     const screen = getDC(0), memory = createDC(screen), bitmap = createBitmap(screen, fw, fh), previous = select(memory, bitmap);
     try {
-      // PW_RENDERFULLCONTENT: the window's own pixels, never another window covering it.
+      // PW_RENDERFULLCONTENT: the window's own pixels, never another app covering it ...
       if (!printWindow(current.id, memory, 2)) fail("capture_unavailable", "The window image is unavailable. Keep it visible and observe again.");
+      // ... with its own popups (menus, dropdowns, bubbles) drawn on top: what a click there would hit.
+      for (const popup of popupsOver(current)) {
+        const pw = popup.r.right - popup.r.left, ph = popup.r.bottom - popup.r.top;
+        if (pw <= 0 || ph <= 0 || pw * ph > 33_177_600) continue;
+        const pdc = createDC(screen), pbm = createBitmap(screen, pw, ph), pprev = select(pdc, pbm);
+        // Only the popup's visible frame (DWM bounds): its shadow margin would print black.
+        const v = {};
+        if (boundsOf(popup.id, 9, v, koffi.sizeof(rect)) !== 0 || v.right <= v.left) Object.assign(v, popup.r);
+        try { if (printWindow(popup.id, pdc, 2)) bitBlt(memory, v.left - wr.left, v.top - wr.top, v.right - v.left, v.bottom - v.top, pdc, v.left - popup.r.left, v.top - popup.r.top, 0x00cc0020); }
+        finally { select(pdc, pprev); deleteObject(pbm); deleteDC(pdc); }
+      }
       const bits = Buffer.alloc(fw * fh * 4);
       const header = { biSize: 40, biWidth: fw, biHeight: -fh, biPlanes: 1, biBitCount: 32, biCompression: 0, biSizeImage: 0, biXPelsPerMeter: 0, biYPelsPerMeter: 0, biClrUsed: 0, biClrImportant: 0 };
       if (getBits(memory, bitmap, 0, fh, bits, header, 0) !== fh) fail("capture_unavailable", "The window image could not be read.");
@@ -318,10 +417,23 @@ function windows() {
     } finally { release(); }
   }
   return {
-    poll, window, screens, available, release, startMonitoring, stopMonitoring, check, hit, capture, act,
+    poll, window, screens, ancestors, available, release, startMonitoring, stopMonitoring, check, hit, capture, act,
     cursor() { const p = {}; return cursorPos(p) ? { x: p.x, y: p.y } : null; },
     list() { const result = []; const cb = koffi.register((id) => { try { const item = window(id); if (item.title) result.push(item); } catch { /* skip */ } return 1; }, koffi.pointer(enumProto)); try { enumWindows(cb, 0); } finally { koffi.unregister(cb); } return result; },
-    focus(expected) { if (window(expected.id).identity !== expected.identity || !focusWindow(expected.id)) fail("focus_changed", "Bring the approved app to the front, then choose Continue."); poll(); },
+    focus(expected) {
+      if (window(expected.id).identity !== expected.identity) fail("focus_changed", "Bring the approved app to the front, then choose Continue.");
+      const front = () => Number(ancestor(foreground(), 2)) === expected.id;
+      // Windows lets the process that sent the last input set the foreground window: a zero move of ours first.
+      if (!front()) { try { injectBatch([mouseItem(1, 0, 0, 0)]); } catch { /* the lock fallback below */ } focusWindow(expected.id); }
+      if (!front()) {
+        // Windows' foreground lock refuses a background process: join the foreground thread's input for the switch.
+        const other = pidOf(foreground(), [0]), me = currentThread();
+        const joined = other && other !== me ? attachInput(me, other, 1) : 0;
+        try { bringToTop(expected.id); focusWindow(expected.id); } finally { if (joined) attachInput(me, other, 0); }
+      }
+      if (!front()) fail("focus_changed", "Bring the approved app to the front, then choose Continue.");
+      poll();
+    },
     releaseHeld({ keys = [], buttons = [] }) { for (const key of keys) downKeys.add(key); for (const b of buttons) downButtons.add(b); release(); },
     close() { release(); stopMonitoring(); },
   };
@@ -755,6 +867,7 @@ process.on("message", async (message) => {
     if (method === "list") result = backend.list();
     else if (method === "window") result = backend.window(params.id);
     else if (method === "screens") result = backend.screens();
+    else if (method === "ancestors") result = backend.ancestors ? backend.ancestors(Number(params.pid)) : [];
     else if (method === "cursor") result = backend.cursor();
     else if (method === "focus") { backend.focus(params.window); result = { generation }; }
     else if (method === "state") result = { generation, available: backend.available() };

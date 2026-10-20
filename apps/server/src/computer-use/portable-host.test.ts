@@ -282,6 +282,26 @@ describe("portable host: observe and act", () => {
   });
 });
 
+describe("portable host on Windows: the agent's ancestors come from the worker", () => {
+  test("an IDE the agent runs in is denied as an ancestor when the app passed none", async () => {
+    const native = fakeNative();
+    native.windows.push({ id: 13, pid: 700, identity: "700:1", executable: "C:\\Program Files\\Microsoft VS Code\\Code.exe", appId: "c:\\program files\\microsoft vs code\\code.exe", appName: "Code", title: "main.ts - Code", bounds: { x: 0, y: 0, width: 800, height: 600 }, dpi: 96, scale: 1, monitor: "0" });
+    const call0 = native.call.bind(native);
+    let asked = 0;
+    native.call = async (method: string, params: Record<string, unknown> = {}) => {
+      if (method === "ancestors") { asked += 1; return [{ pid: 690, name: "cmd", exe: "C:\\Windows\\System32\\cmd.exe" }, { pid: 700, name: "Code", exe: "C:\\Program Files\\Microsoft VS Code\\Code.exe" }]; }
+      return call0(method, params);
+    };
+    const host = await createPortableHost({ native, platform: "win32", settings: () => ({ enabled: true, real_screen: true, mode: "auto" }), context: () => ({ chat: "ses_w" }), approve: { open: async () => ({ decision: "once" }), act: async () => ({ allow: true }) } });
+    const c = host.connect();
+    const found = await call(c, "computer_discover", {});
+    expect((found.state.apps as Array<{ name: string; available?: boolean }>).find((a) => a.name === "Code")).toMatchObject({ available: false });
+    expect((await call(c, "computer_open_session", { app_id: "c:\\program files\\microsoft vs code\\code.exe", mode: "control", purpose: "edit" })).state).toMatchObject({ ok: false, code: "protected_app" });
+    expect(asked).toBe(1);
+    await host.close();
+  });
+});
+
 describe("native worker process: stuck input is released by the parent", () => {
   test("a worker that dies holding a button gets a --release run", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "cu-worker-"));
