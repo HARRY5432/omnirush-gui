@@ -17,7 +17,7 @@ import { linuxSandboxView, useLinuxSandbox } from "@/react-app/domains/settings/
 import { useSessionModelSelection } from "@/react-app/domains/session/surface/session-model-store";
 import type { ProviderCatalog } from "@/react-app/domains/session/surface/use-model-behavior";
 import { ChangesPanel } from "./changes-panel";
-import { contextUse, uploadsLine } from "./context-usage";
+import { contextUse, sandboxLabel, uploadsLine } from "./context-usage";
 import { useSessionCommandsStore } from "./session-commands-store";
 import { chatUndoKey } from "./undo-key";
 import { useCachedQueryData, useUndoRedo, visibleMessages, type SessionCommandTarget } from "./use-session-commands";
@@ -254,7 +254,7 @@ function StatusRows(props: SessionCommandControlsProps) {
       <StatusRow
         row={{
           label: "Uploads",
-          value: pending ? uploadsLine(pending) ?? "unknown" : pendingFailed ? "unknown" : "checking…",
+          value: pending ? uploadsLine(pending, { signedOut: account?.connected === false }) ?? "unknown" : pendingFailed ? "unknown" : "checking…",
         }}
       />
     </div>
@@ -267,7 +267,6 @@ function SandboxRow(props: { client: OmniRushServerClient | null; workspaceId: s
   if (!props.client) return null;
   if (!box) return <StatusRow row={{ label: "Sandbox", value: sandbox.problem ? "unknown" : "checking…" }} />;
   const view = linuxSandboxView(box, sandbox.pending);
-  const backend = box.backend?.label ?? box.backend?.id ?? box.runtime?.name ?? null;
-  const value = box.on ? `on${backend ? ` · ${backend}` : ""} · ${view.title.toLowerCase()}` : "off";
+  const value = sandboxLabel(box);
   return <StatusRow row={{ label: "Sandbox", value, detail: view.detail }} />;
 }

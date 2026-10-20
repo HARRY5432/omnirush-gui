@@ -6,6 +6,7 @@ export type RevertOutcome = {
   restored?: readonly string[] | null;
   merged?: readonly string[] | null;
   kept?: readonly string[] | null;
+  outside?: readonly string[] | null;
 };
 
 export type UndoNotice = {
@@ -33,18 +34,20 @@ export function undoNotice(revert: RevertOutcome | null | undefined, tracked: bo
   const restored = strings(revert?.restored);
   const merged = strings(revert?.merged);
   const kept = strings(revert?.kept);
+  const outside = strings(revert?.outside);
   const lines: string[] = [];
   const changed = restored.length + merged.length;
   if (changed) lines.push(`Restored ${plural(changed, "file")}: ${list([...restored, ...merged])}.`);
   if (merged.length) lines.push(`Your own edits in ${list(merged)} were kept.`);
   if (kept.length) {
     lines.push(
-      `Left ${plural(kept.length, "file")} as ${kept.length === 1 ? "it is" : "they are"}: ${list(kept)} (changed by you or another program too).`,
+      `Left ${plural(kept.length, "file")} as ${kept.length === 1 ? "it is" : "they are"}: ${list(kept)} (edited after the turn, and the turn's change could not be taken out cleanly).`,
     );
   }
+  if (outside.length) lines.push(`Not touched: ${list(outside)} (changed during the turn, but not by the agent).`);
   if (!lines.length) lines.push("The last turn changed no files.");
   lines.push("Redo puts it back.");
-  return { title: "Undid the last turn", message: lines.join(" "), variant: kept.length ? "warning" : "success" };
+  return { title: "Undid the last turn", message: lines.join(" "), variant: kept.length || outside.length ? "warning" : "success" };
 }
 
 export const REDO_NOTICE = "Redid the last turn";

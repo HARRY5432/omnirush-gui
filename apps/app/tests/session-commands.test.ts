@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { NOT_TRACKED_MESSAGE, projectTracksFiles, undoNotice } from "../src/react-app/domains/session/commands/undo-notice";
 import { commandTemplateLabel, parseReviewReply } from "../src/react-app/domains/session/commands/review-message";
-import { contextUse, uploadsLine } from "../src/react-app/domains/session/commands/context-usage";
+import { contextUse, sandboxLabel, uploadsLine } from "../src/react-app/domains/session/commands/context-usage";
 import { changeTotals, normalizeChanges, patchLines } from "../src/react-app/domains/session/commands/changes";
 import { chatUndoKey } from "../src/react-app/domains/session/commands/undo-key";
 
@@ -15,11 +15,16 @@ describe("undoNotice", () => {
     });
     expect(undoNotice({ restored: ["a.ts"], merged: ["c.ts"], kept: ["d.ts"] }, true)).toEqual({
       title: "Undid the last turn",
-      message: "Restored 2 files: a.ts, c.ts. Your own edits in c.ts were kept. Left 1 file as it is: d.ts (changed by you or another program too). Redo puts it back.",
+      message: "Restored 2 files: a.ts, c.ts. Your own edits in c.ts were kept. Left 1 file as it is: d.ts (edited after the turn, and the turn's change could not be taken out cleanly). Redo puts it back.",
       variant: "warning",
     });
     expect(undoNotice({ restored: ["1", "2", "3", "4", "5"] }, true).message).toBe("Restored 5 files: 1, 2, 3 and 2 more. Redo puts it back.");
-    expect(undoNotice({ kept: ["x", "y"] }, true).message).toBe("Left 2 files as they are: x, y (changed by you or another program too). Redo puts it back.");
+    expect(undoNotice({ kept: ["x", "y"] }, true).message).toBe("Left 2 files as they are: x, y (edited after the turn, and the turn's change could not be taken out cleanly). Redo puts it back.");
+    expect(undoNotice({ restored: ["a"], outside: ["log.txt"] }, true)).toEqual({
+      title: "Undid the last turn",
+      message: "Restored 1 file: a. Not touched: log.txt (changed during the turn, but not by the agent). Redo puts it back.",
+      variant: "warning",
+    });
   });
 
   test("a turn that changed nothing, and a folder that is not a git repository", () => {
@@ -106,10 +111,18 @@ describe("contextUse", () => {
     expect(contextUse([{ role: "user" }], limit)).toBeNull();
   });
 
-  test("uploads line", () => {
+  test("uploads and sandbox lines, in the CLI's words", () => {
     expect(uploadsLine({ uploads: 0, archives: 0 })).toBe("nothing waiting");
-    expect(uploadsLine({ uploads: 2, archives: 1 })).toBe("3 waiting");
+    expect(uploadsLine({ uploads: 2, archives: 1 })).toBe("3 waiting to be sent");
+    expect(uploadsLine({ uploads: 0, archives: 0 }, { signedOut: true })).toBe("paused · sign in to send");
+    expect(uploadsLine({ uploads: 2, archives: 0 }, { signedOut: true })).toBe("2 waiting · sign in to send");
     expect(uploadsLine(null)).toBeNull();
+    expect(sandboxLabel(null)).toBe("off");
+    expect(sandboxLabel({ on: false })).toBe("off");
+    expect(sandboxLabel({ on: true, state: "ready", backend: { id: "docker" } })).toBe("on · docker");
+    expect(sandboxLabel({ on: true, state: "ready", backend: null, runtime: { ok: true, name: "podman" } })).toBe("on · podman");
+    expect(sandboxLabel({ on: true, state: "unavailable", backend: { id: "docker" } })).toBe("off (fell back to this machine)");
+    expect(sandboxLabel({ on: true, state: "starting" })).toBe("on");
   });
 });
 

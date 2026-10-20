@@ -48,9 +48,25 @@ export function contextUse(
   };
 }
 
-/** The Uploads row: "nothing waiting" or "N waiting" (sessions and project archives still queued). */
-export function uploadsLine(pending: { uploads?: number; archives?: number } | null | undefined): string | null {
+/** The Uploads row, in the CLI's words: "nothing waiting", "N waiting to be sent", or paused while signed out. */
+export function uploadsLine(pending: { uploads?: number; archives?: number } | null | undefined, { signedOut = false } = {}): string | null {
   if (!pending) return null;
   const waiting = num(pending.uploads) + num(pending.archives);
-  return waiting === 0 ? "nothing waiting" : `${waiting} waiting`;
+  if (signedOut) return waiting ? `${waiting} waiting · sign in to send` : "paused · sign in to send";
+  return waiting === 0 ? "nothing waiting" : `${waiting} waiting to be sent`;
+}
+
+type SandboxBox = {
+  on: boolean;
+  state?: string | null;
+  backend?: { id?: string | null } | null;
+  runtime?: { ok?: boolean; name?: string | null } | null;
+};
+
+/** The Sandbox row, in the CLI's words: "off", "on · docker", "off (fell back to this machine)". */
+export function sandboxLabel(box: SandboxBox | null | undefined): string {
+  if (!box?.on) return "off";
+  if (box.state === "unavailable" || box.state === "failed") return "off (fell back to this machine)";
+  const backend = box.backend?.id || (box.runtime?.ok ? box.runtime.name : null) || null;
+  return backend ? `on · ${backend}` : "on";
 }

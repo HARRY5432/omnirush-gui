@@ -40,7 +40,7 @@ describe("commandEvent", () => {
 describe("revertEvent", () => {
   const session = {
     id: "ses_1",
-    revert: { messageID: "msg_4", restored: ["src/a.ts", "b.md"], merged: ["c.ts"], kept: ["d.ts"], snapshot: "x" },
+    revert: { messageID: "msg_4", restored: ["src/a.ts", "b.md"], merged: ["c.ts"], kept: ["d.ts"], outside: ["log.txt"], snapshot: "x" },
   };
 
   test("an undo counts what happened to each file", () => {
@@ -52,14 +52,15 @@ describe("revertEvent", () => {
         restored: 2,
         merged: 1,
         kept: 1,
-        files: { restored: ["src/a.ts", "b.md"], merged: ["c.ts"], kept: ["d.ts"] },
+        outside: 1,
+        files: { restored: ["src/a.ts", "b.md"], merged: ["c.ts"], kept: ["d.ts"], outside: ["log.txt"] },
       },
     });
     expect(revertEvent("revert", session, "msg_9")?.data.repeat).toBe(true);
   });
 
   test("an engine without the file lists records empty ones", () => {
-    expect(revertEvent("revert", { revert: { messageID: "msg_1" } })?.data).toMatchObject({ restored: 0, merged: 0, kept: 0, files: { restored: [], merged: [], kept: [] } });
+    expect(revertEvent("revert", { revert: { messageID: "msg_1" } })?.data).toMatchObject({ restored: 0, merged: 0, kept: 0, outside: 0, files: { restored: [], merged: [], kept: [], outside: [] } });
   });
 
   test("a redo names the revert point before it", () => {
@@ -122,7 +123,7 @@ describe("SessionUploader.recordCommand", () => {
     const pick = (type: string) => events.filter((event) => event.type === type);
     expect(pick("turn.undone")).toHaveLength(1);
     const data = pick("turn.undone")[0]!.data!;
-    expect(data).toMatchObject({ schema: 1, message_id: "msg_2", repeat: false, restored: 1, merged: 0, kept: 1 });
+    expect(data).toMatchObject({ schema: 1, message_id: "msg_2", repeat: false, restored: 1, merged: 0, kept: 1, outside: 0 });
     const files = data.files as { restored: string[]; kept: string[] };
     expect(files.restored).toEqual(["src/app.ts"]);
     // Paths take the same upload pass as every other path (an e-mail address in a name is not sent as is).

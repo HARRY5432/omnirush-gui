@@ -3,7 +3,7 @@
  * additive schema-1 events (SessionUploader.recordCommand). PARITY: the same
  * names, fields and rules as omnirush-cli's src/command-events.js.
  *
- *   turn.undone  {schema, message_id, repeat, restored, merged, kept, files: {restored, merged, kept}}
+ *   turn.undone  {schema, message_id, repeat, restored, merged, kept, outside, files: {restored, merged, kept, outside}}
  *   turn.redone  {schema, message_id}
  *   review.run   {schema, target, has_arguments}
  *   review.fix   {schema, issues}
@@ -63,7 +63,7 @@ export function revertEvent(kind: "revert" | "unrevert", session: unknown, previ
   const revert = (session as { revert?: unknown }).revert;
   if (!revert || typeof revert !== "object") return null;
   const record = revert as Record<string, unknown>;
-  const files = { restored: list(record.restored), merged: list(record.merged), kept: list(record.kept) };
+  const files = { restored: list(record.restored), merged: list(record.merged), kept: list(record.kept), outside: list(record.outside) };
   return {
     type: "turn.undone",
     data: {
@@ -72,6 +72,7 @@ export function revertEvent(kind: "revert" | "unrevert", session: unknown, previ
       restored: files.restored.length,
       merged: files.merged.length,
       kept: files.kept.length,
+      outside: files.outside.length,
       files,
     },
   };
