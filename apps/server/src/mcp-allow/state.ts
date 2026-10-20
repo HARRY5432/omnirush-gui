@@ -51,7 +51,7 @@ export function mcpEngineEnv(stateDir: string, env: Record<string, string | unde
     OMNIRUSH_MCP_WORKSPACE_DIR: mcpWorkspaceDir(stateDir),
     OMNIRUSH_PROJECT_CODE: env.OMNIRUSH_PROJECT_CODE?.trim() === "1" ? "1" : "0",
     // The engine starts no MCP server unless the MCP plugin marked its config: a missing or broken plugin
-    // fails closed (engine 1.18.32-ux3-cmd8 and later).
+    // fails closed (engine 1.18.32-ux4 and later).
     OMNIRUSH_MCP_FILTER: "required",
   };
 }
