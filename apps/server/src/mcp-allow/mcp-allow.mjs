@@ -124,6 +124,13 @@ function normalizeRules(value) {
   const out = {};
   if (rules.path_args === "positional") out.path_args = "positional";
   if (Number.isInteger(rules.min_args) && rules.min_args > 0 && rules.min_args < 9) out.min_args = rules.min_args;
+  if (isRecord(rules.flag_values)) {
+    const values = Object.fromEntries(Object.entries(rules.flag_values)
+      .filter(([k, v]) => /^-{1,2}[\w-]+$/.test(k) && Array.isArray(v))
+      .map(([k, v]) => [k, strings(v, 16)])
+      .slice(0, 16));
+    if (Object.keys(values).length) out.flag_values = values;
+  }
   const defaults = strings(rules.default_args, 8);
   if (defaults.length) out.default_args = defaults;
   for (const key of ["path_flags", "require_flags", "add_flags", "forbid_flags", "allow_flags"]) {
@@ -402,9 +409,14 @@ export function evaluateMcp(mcpMap, policy, ctx = {}) {
     }
     const denied = denyReason(policy, launch.name);
     if (denied) { decisions.push(blocked(name, "denied", { reason: denied, package: launch.name })); continue; }
-    const entry = policy.allow.find((e) => e.runtime === launch.runtime && e.package.toLowerCase() === launch.name
-      && (launch.bin === null || e.bins.length === 0 || e.bins.includes(launch.bin)));
+    const entry = policy.allow.find((e) => e.runtime === launch.runtime && e.package.toLowerCase() === launch.name);
     if (!entry) { decisions.push(blocked(name, "not_allowed", { package: launch.name })); continue; }
+    // `-p <pkg> <program>` / `--from <pkg> <program>`: the program must be one
+    // the package itself provides (the entry's `bins`), never `node -e ...`.
+    if (launch.bin !== null && !entry.bins.includes(launch.bin)) {
+      decisions.push(blocked(name, "unknown_command", { package: launch.name, reason: `${MCP_REASONS.unknown_command} (${launch.bin} is not one of its programs)` }));
+      continue;
+    }
     const base = { id: entry.id, package: entry.package, runtime: entry.runtime, title: entry.title };
     if (Object.hasOwn(out, entry.id)) { decisions.push(blocked(name, "duplicate", base)); continue; }
     let version = launch.version;
@@ -435,6 +447,10 @@ export function evaluateMcp(mcpMap, policy, ctx = {}) {
     if (rules.allow_flags) {
       const other = rest.map((a) => (a.includes("=") ? a.slice(0, a.indexOf("=")) : a)).find((a) => a.startsWith("-") && !rules.allow_flags.includes(a));
       if (other) refusal = blocked(name, "flag", { ...base, version, reason: `${MCP_REASONS.flag} (${other})` });
+    }
+    if (!refusal) for (const [flag, values] of Object.entries(rules.flag_values ?? {})) {
+      const found = flagValue(rest, flag);
+      if (found && !values.includes(found.value ?? "")) { refusal = blocked(name, "flag", { ...base, version, reason: `${MCP_REASONS.flag} (${flag} ${found.value ?? ""}; supported: ${values.join(", ")})` }); break; }
     }
     if (!refusal) for (const flag of rules.forbid_flags ?? []) {
       if (flagValue(rest, flag)) { refusal = blocked(name, "flag", { ...base, version, reason: `${MCP_REASONS.flag} (${flag})` }); break; }

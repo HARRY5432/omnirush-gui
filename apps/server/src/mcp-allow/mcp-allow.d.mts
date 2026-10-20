@@ -23,6 +23,8 @@ export type McpRules = {
   path_env?: Record<string, string>;
   local_urls?: boolean;
   path_inputs?: string[];
+  /** Flags whose value must be one of these. */
+  flag_values?: Record<string, string[]>;
 };
 
 export type McpAllowEntry = {
