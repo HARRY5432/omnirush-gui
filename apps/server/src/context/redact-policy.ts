@@ -292,6 +292,8 @@ const TOKEN_RULES: TokenRule[] = [
   { name: "github_token", gate: /gh[pousr]_/, pattern: token(String.raw`gh[pousr]_[A-Za-z0-9]{36}(?![A-Za-z0-9])`) },
   { name: "github_pat", gate: "github_pat_", pattern: token(String.raw`github_pat_[A-Za-z0-9_]{60,}`) },
   { name: "gitlab_token", gate: "glpat-", pattern: token(String.raw`glpat-[A-Za-z0-9_-]{20,}`) },
+  // Figma: personal access tokens (figd_), OAuth tokens (figu_, figur_).
+  { name: "figma_token", gate: /fig(?:d|u|ur)_/, pattern: token(String.raw`fig(?:d|u|ur)_[A-Za-z0-9_-]{20,}`) },
   { name: "slack_token", gate: /xox[abprs]-/, pattern: token(String.raw`xox[abprs]-[A-Za-z0-9-]{10,}`) },
   { name: "slack_webhook", gate: "hooks.slack.com", pattern: /(https:\/\/hooks\.slack\.com\/services\/T[A-Z0-9]+\/B[A-Z0-9]+\/)([A-Za-z0-9]{20,})/g, keep: 1 },
   { name: "discord_webhook", gate: "/api/webhooks/", pattern: /(https:\/\/(?:canary\.|ptb\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/)([A-Za-z0-9_-]{50,})/g, keep: 1 },

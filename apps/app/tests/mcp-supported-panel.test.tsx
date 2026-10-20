@@ -12,6 +12,7 @@ import {
   mcpServerState,
   presetCommandLine,
   presetConfigured,
+  needsSignIn,
 } from "../src/react-app/domains/settings/pages/mcp-supported-panel";
 
 const filesystem: OmniRushMcpPreset = {
@@ -137,5 +138,33 @@ describe("Settings > MCP: supported servers", () => {
     expect(presetConfigured(filesystem, [server("other")], [])).toBe(false);
     expect(mcpServerState(server("x", { type: "local", command: ["npx", "x"], enabled: false }), { name: "x", status: "allowed", code: "allowed" })).toEqual({ kind: "off" });
     expect(mcpServerState(server("x"), null)).toEqual({ kind: "pending" });
+  });
+
+  test("Figma: listed apart as an account server, with its address or command and how to set it up", () => {
+    const desk: OmniRushMcpPreset = { ...filesystem, id: "figma", title: "Figma (desktop app)", why: "Reads designs through the Figma desktop app.", runtime: "remote", package: "figma-dev-mode", version: null, command: [], url: "http://127.0.0.1:3845/mcp", oauth: false, setup: "In the Figma desktop app, turn on the MCP server.", account: true };
+    const remote: OmniRushMcpPreset = { ...desk, title: "Figma (remote)", package: "figma-remote", url: "https://mcp.figma.com/mcp", oauth: true, setup: "Sign in on the Figma card." };
+    const key: OmniRushMcpPreset = { ...filesystem, id: "figma", title: "Figma (API key)", why: null, package: "figma-developer-mcp", version: "0.13.2", command: ["npx", "-y", "figma-developer-mcp"], setup: "Set FIGMA_API_KEY in your environment.", account: true };
+    const html = render({ policy: policy({ supported: [filesystem, desk, remote, key] }) });
+    expect(html).toContain("mcp-account-servers");
+    expect(html).toContain("Servers that use your account");
+    expect(html).toContain("http://127.0.0.1:3845/mcp");
+    expect(html).toContain("https://mcp.figma.com/mcp");
+    expect(html).toContain("npx -y figma-developer-mcp");
+    expect(html).toContain("mcp-setup-figma-figma-dev-mode");
+    expect(html).toContain("Set FIGMA_API_KEY in your environment.");
+    expect(html).toContain("never in a config file");
+    // Three routes of one id: each is its own row; one being on marks only that route added.
+    const on = [{ name: "figma", status: "allowed" as const, code: "allowed", id: "figma", package: "figma-remote", runtime: "remote" as const, url: "https://mcp.figma.com/mcp", oauth: true }];
+    expect(presetConfigured(remote, [server("figma")], on)).toBe(true);
+    expect(presetConfigured(desk, [server("figma")], on)).toBe(false);
+    expect(presetCommandLine(desk)).toBe("http://127.0.0.1:3845/mcp");
+    // The configured remote server offers its sign-in; the desktop app's server does not need one.
+    expect(needsSignIn(on[0])).toBe(true);
+    expect(needsSignIn({ ...on[0], oauth: false, package: "figma-dev-mode" })).toBe(false);
+    const signed = render({ policy: policy({ supported: [remote], decisions: on }), servers: [server("figma", { type: "remote", url: "https://mcp.figma.com/mcp" })], signIn: () => undefined });
+    expect(signed).toContain("mcp-sign-in-figma");
+    expect(signed).toContain("https://mcp.figma.com/mcp");
+    expect(render({ policy: policy({ supported: [remote], decisions: on }), servers: [server("figma", { type: "remote", url: "https://mcp.figma.com/mcp" })] })).not.toContain("mcp-sign-in-figma");
+    expect(MCP_BLOCKED_HINTS.secret_missing).toContain("environment");
   });
 });

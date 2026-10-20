@@ -553,16 +553,23 @@ export function McpView(props: McpViewProps) {
   // The supported-servers panel stands for the MCP part of the library.
   const mcpPanelShown = Boolean(mcpPolicy) && (filter === "all" || filter === "mcp") && inventoryState === "all";
   const addSupportedMcp = async (preset: OmniRushMcpPreset) => {
-    const result = await props.connectMcp({
-      id: preset.id,
-      name: preset.id,
-      description: preset.why ?? preset.title,
-      kind: "mcp",
-      type: "local",
-      command: preset.command,
-      oauth: false,
-    });
+    // A remote server on the list (Figma's): its exact address only; the engine signs in itself.
+    const result = await props.connectMcp(preset.runtime === "remote" && preset.url
+      ? { id: preset.id, name: preset.id, description: preset.why ?? preset.title, kind: "mcp", type: "remote", url: preset.url, oauth: false }
+      : {
+        id: preset.id,
+        name: preset.id,
+        description: preset.why ?? preset.title,
+        kind: "mcp",
+        type: "local",
+        command: preset.command,
+        oauth: false,
+      });
     return result.ok ? { ok: true } : { ok: false, error: result.error };
+  };
+  const signInSupportedMcp = (name: string) => {
+    const server = props.mcpServers.find((entry) => entry.name === name);
+    if (server) props.authorizeMcp(server);
   };
   const libraryDetailLists = {
     quickConnect: quickConnectList,
@@ -1525,6 +1532,7 @@ export function McpView(props: McpViewProps) {
             canAdd={props.allowManageExtensions && !props.isRemoteWorkspace && mcpPolicy.engineV2 !== true}
             busy={props.busy}
             addPreset={addSupportedMcp}
+            signIn={signInSupportedMcp}
             removeServer={props.allowManageExtensions ? (name) => {
               setRemoveTarget(name);
               setRemoveOpen(true);

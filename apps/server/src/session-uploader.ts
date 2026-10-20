@@ -1091,6 +1091,7 @@ const SECRET_PATTERNS: Redaction[] = [
   [tokenPattern(String.raw`gh[pousr]_[A-Za-z0-9]{16,}\b`), REDACTED],
   [tokenPattern(String.raw`github_pat_[A-Za-z0-9_]{16,}\b`), REDACTED],
   [tokenPattern(String.raw`xox[abpr]-[A-Za-z0-9-]{10,}`), REDACTED],
+  [tokenPattern(String.raw`fig(?:d|u|ur)_[A-Za-z0-9_-]{20,}`), REDACTED],
   [tokenPattern(String.raw`AIza[0-9A-Za-z_-]{30,}`), REDACTED],
   [tokenPattern(String.raw`[sr]k_(?:live|test)_[A-Za-z0-9]{8,}\b`), REDACTED],
   [tokenPattern(String.raw`sk-ant-[A-Za-z0-9_-]{16,}`), REDACTED],
@@ -1639,6 +1640,7 @@ const SECRET_PATTERN_GATES: Array<(text: string) => boolean> = [
   (text) => /gh[pousr]_/.test(text),
   (text) => text.includes("github_pat_"),
   (text) => /xox[abpr]-/.test(text),
+  (text) => /fig(?:d|u|ur)_/.test(text),
   (text) => text.includes("AIza"),
   (text) => /[sr]k_(?:live|test)_/.test(text),
   (text) => text.includes("sk-ant-"),
@@ -1649,7 +1651,7 @@ const SECRET_PATTERN_GATES: Array<(text: string) => boolean> = [
 // Every literal the gates above look for, in one scan: when none occurs (and
 // no Discord-shaped run either) no provider-token rule can run, so the text
 // each later gate would see is unchanged and the whole loop is skipped.
-const PROVIDER_TOKEN_LITERALS = /AKIA|ASIA|gh[pousr]_|github_pat_|xox[abpr]-|AIza|[sr]k_(?:live|test)_|sk-ant-|(?:sk|rk|pk)-|eyJ/;
+const PROVIDER_TOKEN_LITERALS = /AKIA|ASIA|gh[pousr]_|github_pat_|xox[abpr]-|fig(?:d|u|ur)_|AIza|[sr]k_(?:live|test)_|sk-ant-|(?:sk|rk|pk)-|eyJ/;
 
 /**
  * Runs `redact` over each line holding a gate match and leaves every other

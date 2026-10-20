@@ -3,16 +3,20 @@
 // presets) and this project's configured servers with the engine plugin's
 // decision for each: on (its version, and whether it runs in the sandbox) or
 // blocked with the reason. Remote and account-linked services are not
-// supported: a session that used them could not be repeated.
+// supported (a session that used them could not be repeated), with one
+// exception the list names: Figma, listed apart with its setup.
 import { useState } from "react";
-import { Loader2, Plus } from "lucide-react";
+import { LogIn, Loader2, Plus } from "lucide-react";
 
 import type { OmniRushMcpDecision, OmniRushMcpPolicyView, OmniRushMcpPreset } from "../../../../app/lib/omnirush-server";
 import type { McpServerEntry } from "../../../../app/types";
 import { Button } from "@/components/ui/button";
 
 export const MCP_REMOTE_NOT_SUPPORTED =
-  "Remote services (Notion, Linear, GitHub, Slack and other sign-in connectors) are not supported: they answer from an outside account, so a session that used them could not be repeated.";
+  "Other remote services (Notion, Linear, GitHub, Slack and other sign-in connectors) are not supported: they answer from an outside account, so a session that used them could not be repeated.";
+
+export const MCP_ACCOUNT_NOTE =
+  "These use your own account, so a session with them cannot be repeated from the project. Keys and sign-ins stay on this computer: never in a config file.";
 
 export const MCP_ENGINE_V2_NOTE =
   "MCP servers are off while the preview engine runs chats. Turn the preview engine off to use them.";
@@ -26,6 +30,8 @@ export const MCP_BLOCKED_HINTS: Record<string, string> = {
   outside_project: "Point it at a folder or file inside the project.",
   version: "Leave the version out to use the supported one.",
   runner_missing: "Install Node.js (for npx) or uv (for uvx), then restart the app.",
+  secret_missing: "Set the key in your environment, then restart the app.",
+  remote_settings: "Remove the headers and settings: only the plain address is supported.",
 };
 
 export type McpServerState =
@@ -48,7 +54,8 @@ export function mcpServerState(entry: Pick<McpServerEntry, "name" | "config">, d
   }
   if ((entry.config as { enabled?: unknown } | undefined)?.enabled === false) return { kind: "off" };
   const parts = [
-    decision.package && decision.version ? `${decision.package}@${decision.version}` : null,
+    decision.runtime === "remote" ? decision.url ?? null : null,
+    decision.runtime !== "remote" && decision.package && decision.version ? `${decision.package}@${decision.version}` : null,
     decision.sandbox ? "runs in the sandbox" : null,
     decision.renamed_to && decision.renamed_to !== decision.name ? `tools named ${decision.renamed_to}_…` : null,
   ].filter((part): part is string => Boolean(part));
@@ -68,15 +75,22 @@ export function PlainText(props: { text: string }) {
   );
 }
 
-/** The command a preset adds, as one line. */
-export function presetCommandLine(preset: Pick<OmniRushMcpPreset, "command">): string {
+/** The command a preset adds, as one line (a remote server: its address). */
+export function presetCommandLine(preset: Pick<OmniRushMcpPreset, "command"> & Partial<Pick<OmniRushMcpPreset, "url">>): string {
+  if (!preset.command.length && preset.url) return preset.url;
   return preset.command.map((word) => (/^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replace(/'/g, "'\\''")}'`)).join(" ");
 }
 
-/** Whether a configured entry already starts the preset's package. */
-export function presetConfigured(preset: Pick<OmniRushMcpPreset, "id">, servers: Array<Pick<McpServerEntry, "name">>, decisions: OmniRushMcpDecision[]): boolean {
+/** Whether a configured entry already starts the preset's package (an account server: that route of it). */
+export function presetConfigured(preset: Pick<OmniRushMcpPreset, "id"> & Partial<Pick<OmniRushMcpPreset, "account" | "package">>, servers: Array<Pick<McpServerEntry, "name">>, decisions: OmniRushMcpDecision[]): boolean {
+  if (preset.account) return decisions.some((decision) => decision.status === "allowed" && decision.id === preset.id && decision.package === preset.package);
   return servers.some((server) => server.name === preset.id)
     || decisions.some((decision) => decision.status === "allowed" && decision.id === preset.id);
+}
+
+/** A configured server that signs in with an account (Figma's remote server), from its decision. */
+export function needsSignIn(decision: OmniRushMcpDecision | null | undefined): boolean {
+  return Boolean(decision && decision.status === "allowed" && decision.runtime === "remote" && decision.oauth === true);
 }
 
 export function McpSupportedPanel(props: {
@@ -86,6 +100,8 @@ export function McpSupportedPanel(props: {
   busy: boolean;
   addPreset: (preset: OmniRushMcpPreset) => Promise<{ ok: boolean; error?: string }>;
   removeServer?: (name: string) => void;
+  /** Starts the engine's own sign-in for a configured server (Figma's remote server). */
+  signIn?: (name: string) => void;
 }) {
   const [adding, setAdding] = useState<string | null>(null);
   const [addError, setAddError] = useState<{ id: string; message: string } | null>(null);
@@ -106,16 +122,18 @@ export function McpSupportedPanel(props: {
     );
   }
 
-  const add = async (preset: OmniRushMcpPreset) => {
-    setAdding(preset.id);
+  const add = async (preset: OmniRushMcpPreset, key: string = preset.id) => {
+    setAdding(key);
     setAddError(null);
     try {
       const result = await props.addPreset(preset);
-      if (!result.ok) setAddError({ id: preset.id, message: result.error ?? "Could not add this server." });
+      if (!result.ok) setAddError({ id: key, message: result.error ?? "Could not add this server." });
     } finally {
       setAdding(null);
     }
   };
+  const local = props.policy.supported.filter((preset) => !preset.account);
+  const account = props.policy.supported.filter((preset) => preset.account);
 
   return (
     <div data-testid="mcp-supported-panel" className="mb-6 flex flex-col gap-5">
@@ -152,11 +170,19 @@ export function McpSupportedPanel(props: {
                       <p className="mt-0.5 text-xs text-dls-secondary">{server.source === "config.project" ? "From the project's opencode.json" : "From your global opencode config"}</p>
                     ) : null}
                   </div>
-                  {props.removeServer && server.source === "config.remote" ? (
-                    <Button variant="ghost" size="sm" disabled={props.busy} onClick={() => props.removeServer?.(server.name)}>
-                      Remove
-                    </Button>
-                  ) : null}
+                  <div className="flex shrink-0 items-center gap-1">
+                    {props.signIn && needsSignIn(decisionFor(server.name)) ? (
+                      <Button data-testid={`mcp-sign-in-${server.name}`} variant="outline" size="sm" disabled={props.busy} onClick={() => props.signIn?.(server.name)}>
+                        <LogIn size={13} />
+                        Sign in
+                      </Button>
+                    ) : null}
+                    {props.removeServer && server.source === "config.remote" ? (
+                      <Button variant="ghost" size="sm" disabled={props.busy} onClick={() => props.removeServer?.(server.name)}>
+                        Remove
+                      </Button>
+                    ) : null}
+                  </div>
                 </li>
               );
             })}
@@ -164,12 +190,12 @@ export function McpSupportedPanel(props: {
         </div>
       ) : null}
 
-      {props.policy.supported.length > 0 ? (
+      {local.length > 0 ? (
         <div className="flex flex-col gap-2">
           <h3 className="text-sm font-medium text-foreground">Supported servers</h3>
           <p className="text-xs text-dls-secondary">Local servers that work on this project's own files. Each runs a fixed version, inside the project's sandbox when it is on.</p>
           <ul className="flex flex-col divide-y divide-dls-border rounded-xl border border-dls-border">
-            {props.policy.supported.map((preset) => {
+            {local.map((preset) => {
               const configured = presetConfigured(preset, props.servers, props.policy.decisions);
               return (
                 <li key={preset.id} data-testid={`mcp-preset-${preset.id}`} className="flex items-start justify-between gap-3 px-4 py-3">
@@ -190,6 +216,40 @@ export function McpSupportedPanel(props: {
                   ) : props.canAdd ? (
                     <Button variant="outline" size="sm" className="shrink-0" disabled={props.busy || adding !== null} onClick={() => void add(preset)}>
                       {adding === preset.id ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
+                      Add
+                    </Button>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      ) : null}
+
+      {account.length > 0 ? (
+        <div data-testid="mcp-account-servers" className="flex flex-col gap-2">
+          <h3 className="text-sm font-medium text-foreground">Servers that use your account</h3>
+          <p className="text-xs text-dls-secondary">{MCP_ACCOUNT_NOTE}</p>
+          <ul className="flex flex-col divide-y divide-dls-border rounded-xl border border-dls-border">
+            {account.map((preset) => {
+              const key = `${preset.id}-${preset.package}`;
+              const configured = presetConfigured(preset, props.servers, props.policy.decisions);
+              return (
+                <li key={key} data-testid={`mcp-preset-${key}`} className="flex items-start justify-between gap-3 px-4 py-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-foreground">{preset.title}</p>
+                    {preset.why ? <p className="mt-0.5 text-xs text-dls-secondary"><PlainText text={preset.why} /></p> : null}
+                    <code className="mt-1 block truncate rounded-md bg-dls-hover px-2 py-1 font-mono text-[11px] text-dls-secondary" title={presetCommandLine(preset)}>
+                      {presetCommandLine(preset)}
+                    </code>
+                    {preset.setup ? <p data-testid={`mcp-setup-${key}`} className="mt-1 text-[11px] text-dls-secondary"><PlainText text={preset.setup} /></p> : null}
+                    {addError?.id === key ? <p className="mt-1 text-xs text-red-11">{addError.message}</p> : null}
+                  </div>
+                  {configured ? (
+                    <span className="shrink-0 pt-1 text-xs text-dls-secondary">Added</span>
+                  ) : props.canAdd ? (
+                    <Button variant="outline" size="sm" className="shrink-0" disabled={props.busy || adding !== null} onClick={() => void add(preset, key)}>
+                      {adding === key ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
                       Add
                     </Button>
                   ) : null}

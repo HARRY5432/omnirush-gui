@@ -5,10 +5,10 @@ export const MCP_POLICY_FILE_VERSION: 1;
 export const BOX_NPM_PREFIX: string;
 export const MCP_REASONS: Record<McpDecisionCode, string>;
 
-export type McpRuntime = "npm" | "pypi";
+export type McpRuntime = "npm" | "pypi" | "remote";
 export type McpDecisionCode =
   | "allowed" | "disabled" | "remote" | "unknown_command" | "not_allowed" | "denied"
-  | "version" | "outside_project" | "missing_flag" | "missing_arg" | "flag" | "duplicate" | "invalid" | "runner_missing";
+  | "version" | "outside_project" | "missing_flag" | "missing_arg" | "flag" | "duplicate" | "invalid" | "runner_missing" | "secret_missing" | "remote_settings";
 
 export type McpRules = {
   path_args?: "positional";
@@ -23,6 +23,8 @@ export type McpRules = {
   path_env?: Record<string, string>;
   local_urls?: boolean;
   path_inputs?: string[];
+  /** Variables read only from the person's own environment (one must be set). */
+  secret_env?: string[];
   /** Flags whose value must be one of these. */
   flag_values?: Record<string, string[]>;
 };
@@ -36,8 +38,14 @@ export type McpAllowEntry = {
   pin: string | null;
   title: string;
   why: string | null;
+  /** Setup hint shown with the preset. */
+  setup: string | null;
+  /** runtime "remote": the exact address, and whether the engine signs in with OAuth. */
+  url?: string;
+  oauth?: boolean;
   /** null: not listed, every tool counts as one that changes something. */
   write_tools: string[] | null;
+  read_tools: string[] | null;
   rules: McpRules;
 };
 
@@ -63,7 +71,10 @@ export type McpDecision = {
   enabled?: boolean;
   renamed_to?: string;
   url_host?: string | null;
+  url?: string;
+  oauth?: boolean;
   write_tools?: string[] | null;
+  read_tools?: string[] | null;
   notes?: string[];
 };
 
@@ -92,6 +103,7 @@ export function splitSpec(spec: string, runtime: McpRuntime): { name: string; ve
 export function parseLaunch(command: unknown): McpLaunch | null;
 export function launchCommand(entry: McpAllowEntry, launch: McpLaunch, version: string, npmPrefix: string): string[];
 export function windowsDirect(found: string, platform?: string, exists?: (file: string) => boolean): string[] | null;
+export function normalizeRemoteUrl(value: unknown): string | null;
 export function resolveRunner(runner: string, options?: { root?: string | null; platform?: string; env?: Record<string, string | undefined>; exists?: (file: string) => boolean; home?: string; accept?: ((file: string) => boolean) | null }): string | null;
 export function projectCodeIgnored(cfg: unknown): McpIgnored[];
 export function describeIgnored(items: McpIgnored[] | null | undefined): string | null;
@@ -101,7 +113,7 @@ export function shellQuote(word: string): string;
 export function evaluateMcp(
   mcpMap: unknown,
   policy: McpPolicy | null,
-  ctx?: { root?: string; platform?: string; box?: McpBox | null; npmPrefix?: string; resolveRunner?: (runner: string, options: { root: string; platform: string; accept?: (file: string) => boolean }) => string | null; exists?: (file: string) => boolean },
+  ctx?: { root?: string; platform?: string; box?: McpBox | null; npmPrefix?: string; resolveRunner?: (runner: string, options: { root: string; platform: string; accept?: (file: string) => boolean }) => string | null; exists?: (file: string) => boolean; env?: Record<string, string | undefined> },
 ): { mcp: Record<string, Record<string, unknown>>; decisions: McpDecision[] };
 export function toolPrefix(name: string): string;
 export function mcpPermissionRules(decisions: McpDecision[] | null | undefined, mode: unknown): Record<string, "allow" | "ask">;

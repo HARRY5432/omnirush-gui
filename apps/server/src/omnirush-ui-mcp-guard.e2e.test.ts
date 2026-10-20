@@ -270,6 +270,46 @@ describe("MCP allowlist at the HTTP and runtime boundaries", () => {
     expect(engine.pushedNames()).toEqual([]);
   });
 
+  test("Figma: its exact addresses can be added, and only its remote server's sign-in reaches the engine", async () => {
+    const { config, engine } = await fixture();
+    const { call } = await start(config, engine.baseUrl);
+    // MCP off: no sign-in either.
+    const off = await call("POST", "/workspace/ws_1/opencode/mcp/figma/auth/authenticate", {});
+    expect(off.status).toBe(403);
+    allowList(config);
+    const view = await (await call("GET", "/workspace/ws_1/mcp")).json() as { mcpPolicy: { supported: Array<{ id: string; package: string; url: string | null; account: boolean; setup: string | null; command: string[] }> } };
+    const figma = view.mcpPolicy.supported.filter((preset) => preset.id === "figma");
+    expect(figma.map((preset) => [preset.package, preset.url, preset.account])).toEqual([
+      ["figma-dev-mode", "http://127.0.0.1:3845/mcp", true],
+      ["figma-remote", "https://mcp.figma.com/mcp", true],
+      ["figma-developer-mcp", null, true],
+    ]);
+    expect(figma.every((preset) => Boolean(preset.setup))).toBe(true);
+    expect(figma[2]?.command).toEqual(["npx", "-y", "figma-developer-mcp"]);
+    expect(view.mcpPolicy.supported.find((preset) => preset.id === "filesystem")?.account).toBe(false);
+
+    const added = await call("POST", "/workspace/ws_1/mcp", { name: "figma", config: { type: "remote", url: "http://127.0.0.1:3845/mcp", enabled: true } });
+    expect(added.status).toBe(200);
+    for (const bad of [
+      { type: "remote", url: "https://mcp.figma.com/other", enabled: true },
+      { type: "remote", url: "https://mcp.figma.com/mcp", headers: { "X-Figma-Token": "x" }, enabled: true },
+    ]) {
+      const refused = await call("POST", "/workspace/ws_1/mcp", { name: "figma2", config: bad });
+      expect(refused.status).toBe(403);
+      expect(await refused.json()).toMatchObject({ code: "mcp_not_supported" });
+    }
+
+    for (const path of ["/workspace/ws_1/opencode/mcp/figma/auth", "/workspace/ws_1/opencode/mcp/figma/auth/authenticate", "/workspace/ws_1/opencode/api/mcp/figma/auth/callback"]) {
+      const response = await call("POST", path, {});
+      expect(response.status).not.toBe(403);
+    }
+    for (const path of ["/workspace/ws_1/opencode/mcp/filesystem/auth/authenticate", "/workspace/ws_1/opencode/mcp/figma-x/auth", "/workspace/ws_1/opencode/mcp/notion/auth/authenticate"]) {
+      const response = await call("POST", path, {});
+      expect(response.status).toBe(403);
+      expect(await response.json()).toMatchObject({ code: "mcp_account_linked" });
+    }
+  });
+
   test("legacy stored rows are never pushed, and registry launches never reach the plugin's file", async () => {
     const { config, engine } = await fixture();
     allowList(config);

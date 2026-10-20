@@ -6420,12 +6420,29 @@ function assertEngineMcpRouteAllowed(config: ServerConfig, method: string, route
     assertMcpAllowed(config);
     return;
   }
-  if (/^[^/]+\/auth(?:\/|$)/.test(rest)) refuseAccountLinkedMcp();
+  const auth = /^([^/]+)\/auth(?:\/|$)/.exec(rest);
+  if (auth) {
+    // The one account sign-in the list allows: a remote server on it that signs in with OAuth (Figma's), by
+    // its id (the engine plugin keys it so); the engine keeps the tokens in its own store, not in a config.
+    if (mcpSignInAllowed(config, decodeURIComponent(auth[1] ?? ""))) return;
+    refuseAccountLinkedMcp();
+  }
   throw new ApiError(403, "engine_mcp_managed", "Add MCP servers in Settings > MCP: only the supported servers run.");
 }
 
+/** Whether `name` is a remote server on the list that signs in with OAuth. */
+export function mcpSignInAllowed(config: ServerConfig, name: string): boolean {
+  if (!mcpAllowed(config)) return false;
+  const policy = currentMcpPolicy(runtimeStorageDir(config));
+  return Boolean(policy?.allow.some((entry) => entry.runtime === "remote" && entry.oauth === true && entry.id === name));
+}
+
 /** A supported server as a one-click preset: what it is, and the command it adds. */
-function mcpPreset(entry: McpAllowEntry): { id: string; title: string; why: string | null; runtime: string; package: string; version: string | null; versions: string; command: string[]; localPagesOnly: boolean } {
+function mcpPreset(entry: McpAllowEntry): { id: string; title: string; why: string | null; runtime: string; package: string; version: string | null; versions: string; command: string[]; localPagesOnly: boolean; url: string | null; oauth: boolean; setup: string | null; account: boolean } {
+  const account = { url: entry.url ?? null, oauth: entry.oauth === true, setup: entry.setup ?? null, account: Boolean(entry.setup) };
+  if (entry.runtime === "remote") {
+    return { id: entry.id, title: entry.title, why: entry.why, runtime: entry.runtime, package: entry.package, version: null, versions: entry.versions, command: [], localPagesOnly: false, ...account };
+  }
   // The file a database server needs is a placeholder in the project: data.db.
   const placeholder = /sqlite|db/i.test(`${entry.id} ${entry.package}`) ? "data.db" : ".";
   const args: string[] = [...(entry.rules.default_args ?? [])];
@@ -6445,6 +6462,7 @@ function mcpPreset(entry: McpAllowEntry): { id: string; title: string; why: stri
     versions: entry.versions,
     command,
     localPagesOnly: entry.rules.local_urls === true,
+    ...account,
   };
 }
 
