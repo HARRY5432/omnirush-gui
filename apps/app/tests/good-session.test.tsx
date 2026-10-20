@@ -719,6 +719,16 @@ describe("the server's auto-retry and one-more-turn nudge", () => {
     expect(autoRetryMessage({ ...base, ended: busy.ended, retryable: busy.retryable })).toBe("Continue.");
   });
 
+  test("never after a declined approval: the turn ended on the user's stop", () => {
+    const declined = tool("bash", { command: "npm publish" }, "output-error", "The user rejected permission to use this specific tool call.");
+    const facts = messageFacts([prompt(), assistant("a1", [declined], { finish: "tool-calls" })]);
+    expect(facts.ended).toBe("stopped");
+    expect(autoRetryMessage({ ...base, ended: facts.ended, retryable: facts.retryable })).toBeNull();
+    // Any other failed tool call that cut the chain is still retried once.
+    const failed = messageFacts([prompt(), assistant("a2", [tool("bash", { command: "make" }, "output-error", "exit 2")], { finish: "tool-calls" })]);
+    expect(autoRetryMessage({ ...base, ended: failed.ended, retryable: failed.retryable })).toBe("Continue.");
+  });
+
   test("never after the Stop button or on a refusal", () => {
     expect(autoRetryMessage({ ...base, userStopped: true })).toBeNull();
     expect(autoRetryMessage({ ...base, ended: "stopped", retryable: false })).toBeNull();

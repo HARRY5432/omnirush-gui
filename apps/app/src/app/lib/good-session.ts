@@ -860,6 +860,9 @@ function lastTurnEnd(messages: readonly UIMessage[]): TurnEnding {
   return compaction ? { ...ending, retryable: false } : ending;
 }
 
+/** A tool call the user declined in the approval card (the engine's RejectedError / CorrectedError text). */
+const DECLINED_TOOL = "The user rejected permission to use this specific tool call";
+
 function turnEndOf(turn: readonly UIMessage[], last: UIMessage): TurnEnding {
   const completed = messageOpencode(last).completed;
   const endedAt = typeof completed === "number" ? completed : null;
@@ -868,6 +871,7 @@ function turnEndOf(turn: readonly UIMessage[], last: UIMessage): TurnEnding {
   let finalText = "";
   let afterLastTool = true;
   let unfinished = false;
+  let declined = false;
   let finish = "";
   for (const message of turn) {
     const reason = messageOpencode(message).finish;
@@ -878,6 +882,7 @@ function turnEndOf(turn: readonly UIMessage[], last: UIMessage): TurnEnding {
         afterLastTool = false;
         finalText = "";
         if (value.state === "input-streaming" || value.state === "input-available") unfinished = true;
+        else if (value.state === "output-error" && str(value.errorText).startsWith(DECLINED_TOOL)) declined = true;
       } else if (part.type === "text" && str(value.text).trim()) {
         afterLastTool = true;
         finalText = str(value.text);
@@ -885,6 +890,8 @@ function turnEndOf(turn: readonly UIMessage[], last: UIMessage): TurnEnding {
     }
   }
   const reason = finish.toLowerCase();
+  // A turn that ended on a declined approval is the user's stop: no automatic "continue" (as the CLI).
+  if (declined && !unfinished && !(afterLastTool && finalText.trim())) return { ended: "stopped", endedAt, retryable: false };
   if (unfinished || BAD_FINISH.has(reason) || !finalText.trim() || !afterLastTool) {
     // A tool chain cut mid-call, or a stream that ended on an error or between tool calls.
     return { ended: "cut", endedAt, retryable: unfinished || reason === "tool-calls" || reason === "error" };
