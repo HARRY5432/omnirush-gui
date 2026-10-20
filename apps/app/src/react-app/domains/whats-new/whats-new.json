@@ -9,11 +9,16 @@
         "Permission modes: Careful asks before every change and command, Normal asks only before risky actions, Auto never asks. Switch with `/permissions` or `omnirush permissions <mode>`.",
         "Answer approval questions with one key: y allows once, a always, n rejects.",
         "A notification when a task finishes or waits for you while the terminal is in the background. Change it with `omnirush notify`.",
+        "The Figma MCP server can be used with the key from your own environment; in Normal mode only its read tools run without asking.",
         "See what changed in each release with `/changelog` or `omnirush changelog`."
       ],
       "improved": [],
       "fixed": [
-        "One `/undo` takes back a whole turn, also when the chat was compacted part-way through it."
+        "One `/undo` takes back a whole turn, also when the chat was compacted part-way through it.",
+        "Skills you added are kept across updates, and skills lost in earlier updates are found again.",
+        "The question about wrapping up a chat is asked once instead of coming back.",
+        "Code from a project's own settings (plugins, tools, formatter and language-server commands) no longer runs on its own.",
+        "`/share` says that sharing isn't available yet; chats are never sent to a sharing service."
       ]
     },
     {
@@ -165,13 +170,19 @@
         "Permission modes: Careful asks before every change and command, Normal asks only before risky actions, Auto never asks. Pick one in the composer or in Settings.",
         "Answer approvals from the keyboard: Y allows once, A for this chat, N denies.",
         "Notifications when a task finishes or needs your approval while the window is in the background.",
+        "The Figma MCP server can be used with the key from your own environment; in Normal mode only its read tools run without asking.",
         "What's new in the sidebar, the Help menu and the command palette."
       ],
       "improved": [
-        "The chat works better when narrow: header actions fold into a menu, approval buttons wrap and the quality check stays readable."
+        "The chat works better when narrow: header actions fold into a menu, approval buttons wrap and the quality check stays readable.",
+        "A calmer start screen: the composer and starter prompts come first, with recent chats and search in one line underneath."
       ],
       "fixed": [
-        "Undo keeps files you saved in the editor and refreshes open files; one undo takes back a whole turn, also after a compaction."
+        "Undo keeps files you saved in the editor and refreshes open files; one undo takes back a whole turn, also after a compaction.",
+        "Skills you added are kept across updates, and skills lost in earlier updates are found again.",
+        "The question about wrapping up a chat is asked once instead of coming back.",
+        "Code from a project's own settings (plugins, tools, formatter and language-server commands) no longer runs on its own.",
+        "Chats are never sent to a sharing service."
       ]
     },
     {
