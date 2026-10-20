@@ -1717,8 +1717,8 @@ export default function EditorPanel(props: EditorPanelProps) {
         </button>
         <span className="flex-1" />
         {cursor && activeTab ? <span className="shrink-0 max-[1100px]:hidden">Ln {cursor.line}, Col {cursor.column}</span> : null}
-        {activePath ? <span className="shrink-0 max-[1250px]:hidden">{languageForPath(activePath)}</span> : null}
-        {activeTab?.kind === "file" ? <span className="shrink-0" data-editor-saved={activeDirty ? "0" : "1"}>{activeDirty ? "Unsaved" : "Saved"}</span> : null}
+        {activePath ? <span className="shrink-0 max-[1250px]:hidden">{surface?.kind === "image" ? `Image (${activePath.slice(activePath.lastIndexOf(".") + 1).toUpperCase()})` : surface?.kind === "preview" ? "Markdown preview" : languageForPath(activePath)}</span> : null}
+        {activeTab?.kind === "file" && surface?.kind !== "image" ? <span className="shrink-0" data-editor-saved={activeDirty ? "0" : "1"}>{activeDirty ? "Unsaved" : "Saved"}</span> : null}
       </div>
     </div>
   );
@@ -1813,7 +1813,7 @@ export default function EditorPanel(props: EditorPanelProps) {
           <ResizablePanelGroup orientation="horizontal" className="h-full min-h-0">
             {sideOpen ? (
               <>
-                <ResizablePanel defaultSize="230px" minSize="160px" maxSize="50%" className="min-h-0">
+                <ResizablePanel defaultSize="230px" minSize="160px" maxSize="50%" groupResizeBehavior="preserve-pixel-size" className="min-h-0">
                   {side}
                 </ResizablePanel>
                 <ResizableHandle />

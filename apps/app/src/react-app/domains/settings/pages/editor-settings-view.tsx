@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 /** Settings → Editor: the IDE layout's code editor (text, saving, language features, keys). */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { OmniRushServerClient } from "@/app/lib/omnirush-server";
 import { Button } from "@/components/ui/button";
@@ -8,7 +8,6 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { useEditorStore } from "../../session/editor/editor-store";
 import {
   EDITOR_FONT_SIZES,
@@ -31,8 +30,46 @@ import {
 } from "../settings-layout";
 
 const SEGMENT =
-  "h-7 rounded-md border border-transparent px-3 text-sm text-muted-foreground aria-pressed:border-foreground/70 aria-pressed:bg-background aria-pressed:font-medium aria-pressed:text-foreground aria-pressed:shadow-xs";
-const GROUP = "w-fit gap-0.5 rounded-lg border border-border bg-muted/40 p-0.5";
+  "h-7 rounded-md border border-transparent px-3 text-sm text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring aria-checked:border-foreground/70 aria-checked:bg-background aria-checked:font-medium aria-checked:text-foreground aria-checked:shadow-xs";
+const GROUP = "flex w-fit gap-0.5 rounded-lg border border-border bg-muted/40 p-0.5";
+
+/** A row of choices that is a real radio group: one tab stop, arrow keys (and Home/End) change the choice. */
+function SegmentedRadio<T extends string>(props: { label: string; value: T; options: Array<{ value: T; label: string }>; onChange: (value: T) => void }) {
+  const refs = useRef<Array<HTMLButtonElement | null>>([]);
+  const select = (index: number) => {
+    const count = props.options.length;
+    const next = ((index % count) + count) % count;
+    props.onChange(props.options[next]!.value);
+    refs.current[next]?.focus();
+  };
+  return (
+    <div role="radiogroup" aria-label={props.label} className={GROUP}>
+      {props.options.map((option, index) => (
+        <button
+          key={option.value}
+          ref={(element) => {
+            refs.current[index] = element;
+          }}
+          type="button"
+          role="radio"
+          aria-checked={option.value === props.value}
+          tabIndex={option.value === props.value ? 0 : -1}
+          className={SEGMENT}
+          onClick={() => props.onChange(option.value)}
+          onKeyDown={(event) => {
+            const keys: Record<string, number> = { ArrowRight: index + 1, ArrowDown: index + 1, ArrowLeft: index - 1, ArrowUp: index - 1, Home: 0, End: props.options.length - 1 };
+            const next = keys[event.key];
+            if (next === undefined) return;
+            event.preventDefault();
+            select(next);
+          }}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 function SwitchRow(props: { title: string; description: string; checked: boolean; onChange: (value: boolean) => void; id: string }) {
   return (
@@ -122,16 +159,12 @@ export function EditorSettingsView(props: { client: OmniRushServerClient | null;
             <LayoutSectionItemTitle>Tab size</LayoutSectionItemTitle>
             <LayoutSectionItemDescription>For files without indentation of their own; others keep theirs.</LayoutSectionItemDescription>
           </LayoutSectionItemHeader>
-          <ToggleGroup
-            value={[String(settings.tabSize)]}
-            onValueChange={(value) => value[0] && set("tabSize", Number(value[0]) as EditorSettings["tabSize"])}
-            aria-label="Tab size"
-            className={GROUP}
-          >
-            {["2", "4", "8"].map((size) => (
-              <ToggleGroupItem key={size} value={size} aria-label={`${size} spaces`} className={SEGMENT}>{size}</ToggleGroupItem>
-            ))}
-          </ToggleGroup>
+          <SegmentedRadio
+            label="Tab size"
+            value={String(settings.tabSize) as "2" | "4" | "8"}
+            options={[{ value: "2", label: "2" }, { value: "4", label: "4" }, { value: "8", label: "8" }]}
+            onChange={(value) => set("tabSize", Number(value) as EditorSettings["tabSize"])}
+          />
         </LayoutSectionItem>
         <SwitchRow id="editor-word-wrap" title="Word wrap" description="Long lines wrap at the editor's edge." checked={settings.wordWrap} onChange={(value) => set("wordWrap", value)} />
         <SwitchRow id="editor-minimap" title="Minimap" description="A small overview of the file at the right edge." checked={settings.minimap} onChange={(value) => set("minimap", value)} />
@@ -150,16 +183,12 @@ export function EditorSettingsView(props: { client: OmniRushServerClient | null;
             <LayoutSectionItemTitle>Auto save</LayoutSectionItemTitle>
             <LayoutSectionItemDescription>After a delay: one second after you stop typing (waits while an agent is working). When focus leaves: when you click away from the editor.</LayoutSectionItemDescription>
           </LayoutSectionItemHeader>
-          <ToggleGroup
-            value={[settings.autoSave]}
-            onValueChange={(value) => value[0] && set("autoSave", value[0] as AutoSave)}
-            aria-label="Auto save"
-            className={GROUP}
-          >
-            <ToggleGroupItem value="off" className={SEGMENT}>Off</ToggleGroupItem>
-            <ToggleGroupItem value="afterDelay" className={SEGMENT}>After a delay</ToggleGroupItem>
-            <ToggleGroupItem value="onFocusChange" className={SEGMENT}>When focus leaves</ToggleGroupItem>
-          </ToggleGroup>
+          <SegmentedRadio<AutoSave>
+            label="Auto save"
+            value={settings.autoSave}
+            options={[{ value: "off", label: "Off" }, { value: "afterDelay", label: "After a delay" }, { value: "onFocusChange", label: "When focus leaves" }]}
+            onChange={(value) => set("autoSave", value)}
+          />
         </LayoutSectionItem>
         <LayoutSectionItem>
           <LayoutSectionItemHeader>
