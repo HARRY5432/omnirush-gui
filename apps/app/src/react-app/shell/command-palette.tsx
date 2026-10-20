@@ -30,6 +30,7 @@ import { Button } from "@/components/ui/button";
 import { DEFAULT_FEEDBACK_URL } from "@/app/lib/feedback";
 import { openFeedbackDialog } from "@/app/lib/in-app-feedback";
 import { isDesktopRuntime } from "@/app/utils";
+import { displayVersion, openWhatsNew, useWhatsNewUnseen } from "../domains/whats-new/whats-new";
 import { ChevronLeftIcon } from "lucide-react";
 import type { ModelOption, ModelRef } from "@/app/types";
 import { useCheckDesktopRestriction } from "../domains/cloud/desktop-config-provider";
@@ -201,6 +202,7 @@ export function CommandPalette(props: CommandPaletteProps) {
     }
   };
 
+  const whatsNewUnseen = useWhatsNewUnseen();
   const accessibleTargetCount = props.accessibleTargets?.length ?? 0;
   const sessionGroupCount = props.sessionGroups?.length ?? 0;
   const canMoveCurrentSessionToGroup = Boolean(props.currentSessionForGroupMove && props.onMoveCurrentSessionToGroup);
@@ -352,6 +354,20 @@ export function CommandPalette(props: CommandPaletteProps) {
         openUrl("https://github.com/omnirush-ai/omnirush-gui#readme");
       },
     },
+    ...(isDesktopRuntime()
+      ? [{
+          id: "whats-new",
+          title: t("whats_new.title"),
+          detail: t("whats_new.palette_detail", { version: displayVersion() }),
+          meta: whatsNewUnseen ? t("whats_new.unseen") : undefined,
+          keywords: ["what's new", "whats new", "changelog", "release notes", "updates", "version", "help"],
+          group: ACTIONS_GROUP,
+          action: () => {
+            props.onClose();
+            openWhatsNew("palette");
+          },
+        }]
+      : []),
     {
       id: "open-feedback",
       title: t("session.support_feedback"),
@@ -365,7 +381,7 @@ export function CommandPalette(props: CommandPaletteProps) {
         else openUrl(DEFAULT_FEEDBACK_URL);
       },
     },
-  ], [accessibleTargetCount, canMoveCurrentSessionToGroup, hasNestedModelPicker, props, sessionGroupCount, sessionNumberHelp]);
+  ], [accessibleTargetCount, canMoveCurrentSessionToGroup, hasNestedModelPicker, props, sessionGroupCount, sessionNumberHelp, whatsNewUnseen]);
 
   const sessionItems = useMemo<PaletteItem[]>(
     () =>

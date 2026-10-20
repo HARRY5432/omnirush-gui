@@ -1,0 +1,312 @@
+{
+  "$comment": "What's new in OmniRush: release notes written for users, newest first, shown in the CLI (/changelog, omnirush changelog) and the desktop app (Help > What's new). Same file in omnirush-cli (src/whats-new/) and omnirush-gui (apps/app/src/react-app/domains/whats-new/); keep the copies byte-identical (PARITY.sha256). Plain language, no PR numbers, nothing internal. Write the entry for every release before tagging.",
+  "schema": 1,
+  "cli": [
+    {
+      "version": "2.6.2",
+      "date": "2026-10-20",
+      "new": [
+        "Permission modes: Careful asks before every change and command, Normal asks only before risky actions, Auto never asks. Switch with `/permissions` or `omnirush permissions <mode>`.",
+        "Answer approval questions with one key: y allows once, a always, n rejects.",
+        "A notification when a task finishes or waits for you while the terminal is in the background. Change it with `omnirush notify`.",
+        "See what changed in each release with `/changelog` or `omnirush changelog`."
+      ],
+      "improved": [],
+      "fixed": [
+        "One `/undo` takes back a whole turn, also when the chat was compacted part-way through it."
+      ]
+    },
+    {
+      "version": "2.6.1",
+      "date": "2026-10-20",
+      "new": [
+        "`/review` reviews your changes, and `/fix` fixes what it found.",
+        "`/undo` takes out only the last turn's changes and keeps your own later edits; `/redo` puts them back. `/diff` shows the whole chat's changes and `/status` the current state.",
+        "`/tasks` runs tasks in parallel, each in its own folder.",
+        "The start screen lists recent chats, with search and one-click resume."
+      ],
+      "improved": [
+        "The agent checks its own changes with the project's checks, keeps project notes in AGENTS.md (`/init`), sees code diagnostics after edits, and writes fuller summaries when a long chat is compacted. Turn any of these off with `omnirush assist off`."
+      ],
+      "fixed": [
+        "MCP servers from a project's own settings no longer start on their own. Only supported servers start, at a supported version, inside the project; others are skipped with a reason."
+      ]
+    },
+    {
+      "version": "2.6.0",
+      "date": "2026-10-20",
+      "new": [
+        "The sidebar shows the chat id (click it, ctrl+x i or `/copy-id` to copy it), the model and effort, context use, tokens left today and the sandbox state.",
+        "Send feedback with `/feedback` in a chat, or `omnirush feedback` in a terminal.",
+        "Web search for the model, when it is available for your account."
+      ],
+      "improved": [
+        "`omnirush doctor` shows where the log file is and no longer reports a reachable server as an error."
+      ],
+      "fixed": [
+        "A chat stops before the first request when the project folder can't be written to, and says how to fix it.",
+        "`/thinking` also works on the start screen and always says what it changed."
+      ]
+    },
+    {
+      "version": "2.5.9",
+      "date": "2026-10-19",
+      "new": [
+        "A calmer full-screen view: one short headline per reasoning step (click it or use `/thinking` to read more), a live status line with a timer, and \"Worked for …\" after each answer.",
+        "Sign in from the app: a welcome screen on first start, and `/login` and `/logout` in a chat."
+      ],
+      "improved": [
+        "Sign-in renewal copes better with a slow or unreliable connection."
+      ],
+      "fixed": [
+        "A refused request or a spent daily allowance is shown once and is not sent again, with no automatic \"Continue.\" afterwards."
+      ]
+    },
+    {
+      "version": "2.5.8",
+      "date": "2026-10-19",
+      "new": [],
+      "improved": [
+        "Reliability improvements."
+      ],
+      "fixed": []
+    },
+    {
+      "version": "2.5.7",
+      "date": "2026-10-19",
+      "new": [],
+      "improved": [
+        "Product analytics, linked to your account. The Privacy Policy explains what is sent."
+      ],
+      "fixed": [
+        "A spent daily allowance or a refused request ends the turn with its message instead of waiting to send it again."
+      ]
+    },
+    {
+      "version": "2.5.6",
+      "date": "2026-10-18",
+      "new": [],
+      "improved": [
+        "Groundwork for future features."
+      ],
+      "fixed": []
+    },
+    {
+      "version": "2.5.5",
+      "date": "2026-10-18",
+      "new": [],
+      "improved": [],
+      "fixed": [
+        "The sandbox reconnects on its own after it stops while the app is open, for example after a long idle time; installed packages are kept.",
+        "Large dependency installs no longer fail a turn in the sandbox.",
+        "Tool calls are closed properly when you stop a run or quit.",
+        "Security fixes for sign-in, sign-out and the local connections."
+      ]
+    },
+    {
+      "version": "2.5.4",
+      "date": "2026-10-17",
+      "new": [],
+      "improved": [
+        "A prompt waits at most 30 seconds for an automatic compaction before it goes out."
+      ],
+      "fixed": [
+        "Esc during an automatic compaction really stops it, and your next prompts are answered straight away.",
+        "No automatic \"Continue.\" after you stop a compaction."
+      ]
+    },
+    {
+      "version": "2.5.3",
+      "date": "2026-10-17",
+      "new": [],
+      "improved": [
+        "Reliability improvements."
+      ],
+      "fixed": []
+    },
+    {
+      "version": "2.5.2",
+      "date": "2026-10-16",
+      "new": [
+        "Long chats are compacted automatically so they stay fast, never in the middle of a turn, with a note when it happens."
+      ],
+      "improved": [],
+      "fixed": [
+        "A prompt sent during a compaction starts a turn of its own."
+      ]
+    },
+    {
+      "version": "2.5.1",
+      "date": "2026-10-16",
+      "new": [],
+      "improved": [
+        "Windows: `omnirush doctor` says when npm's folder is not on PATH or PowerShell blocks `omnirush`, and how to fix it."
+      ],
+      "fixed": [
+        "Windows: a leftover installer lock from a closed app no longer stops the next start."
+      ]
+    },
+    {
+      "version": "2.5.0",
+      "date": "2026-10-14",
+      "new": [
+        "Frontier Buildathon: `omnirush buildathon` shows the event, lets you join, and lists updates from the organisers."
+      ],
+      "improved": [],
+      "fixed": []
+    }
+  ],
+  "desktop": [
+    {
+      "version": "3.6.3",
+      "date": "2026-10-20",
+      "new": [
+        "Chat and IDE layouts: switch with the toggle at the top left or Cmd/Ctrl+Shift+Y. IDE puts files, changes and Git on the left, the editor and terminal in the middle and the chat on the right.",
+        "Permission modes: Careful asks before every change and command, Normal asks only before risky actions, Auto never asks. Pick one in the composer or in Settings.",
+        "Answer approvals from the keyboard: Y allows once, A for this chat, N denies.",
+        "Notifications when a task finishes or needs your approval while the window is in the background.",
+        "What's new in the Help menu and the command palette."
+      ],
+      "improved": [
+        "The chat works better when narrow: header actions fold into a menu, approval buttons wrap and the session check stays readable."
+      ],
+      "fixed": [
+        "Undo keeps files you saved in the editor and refreshes open files; one undo takes back a whole turn, also after a compaction."
+      ]
+    },
+    {
+      "version": "3.6.2",
+      "date": "2026-10-20",
+      "new": [
+        "A code editor beside the chat.",
+        "Review your changes and fix what the review found. Undo the last turn while keeping your own later edits, and redo it.",
+        "Parallel tasks, each in its own copy of the project.",
+        "A home screen with recent projects and chats, and a search of past chats."
+      ],
+      "improved": [
+        "The agent checks its own changes with the project's checks, keeps project notes in AGENTS.md, sees code diagnostics after edits, and writes fuller summaries when a long chat is compacted. Each can be switched off in Settings."
+      ],
+      "fixed": [
+        "MCP servers from a project's own settings no longer start on their own. Only supported servers start, at a supported version, inside the project; the others are listed with the reason."
+      ]
+    },
+    {
+      "version": "3.6.1",
+      "date": "2026-10-20",
+      "new": [
+        "Send feedback from the sidebar, the Help menu or the command palette.",
+        "Web search for the model, when it is available for your account. Searches and their sources show in the chat."
+      ],
+      "improved": [
+        "The unused web search setting is gone."
+      ],
+      "fixed": [
+        "A chat stops before the first prompt when the project folder can't be written to, says how to fix it, and offers to choose another folder."
+      ]
+    },
+    {
+      "version": "3.6.0",
+      "date": "2026-10-19",
+      "new": [],
+      "improved": [],
+      "fixed": [
+        "Limit and policy messages are shown once and are not sent again automatically."
+      ]
+    },
+    {
+      "version": "3.5.9",
+      "date": "2026-10-19",
+      "new": [],
+      "improved": [
+        "Groundwork for future features."
+      ],
+      "fixed": []
+    },
+    {
+      "version": "3.5.8",
+      "date": "2026-10-19",
+      "new": [],
+      "improved": [
+        "Usage analytics go to OmniRush's own analytics and are linked to your account. The Privacy Policy explains what is sent."
+      ],
+      "fixed": []
+    },
+    {
+      "version": "3.5.7",
+      "date": "2026-10-18",
+      "new": [],
+      "improved": [
+        "Groundwork for future features."
+      ],
+      "fixed": []
+    },
+    {
+      "version": "3.5.6",
+      "date": "2026-10-18",
+      "new": [],
+      "improved": [],
+      "fixed": [
+        "The sandbox reconnects on its own after it stops while the app is open, for example after a long idle time.",
+        "Large dependency installs no longer fail a turn in the sandbox.",
+        "Tool calls are closed properly when you stop a run or quit.",
+        "Security fixes for links, deep links and the developer tools port."
+      ]
+    },
+    {
+      "version": "3.5.5",
+      "date": "2026-10-17",
+      "new": [],
+      "improved": [
+        "The app repairs its local store on start when it was left damaged."
+      ],
+      "fixed": [
+        "Esc stops an automatic compaction straight away."
+      ]
+    },
+    {
+      "version": "3.5.4",
+      "date": "2026-10-17",
+      "new": [
+        "When the app cannot start, it explains why and offers a reset."
+      ],
+      "improved": [],
+      "fixed": []
+    },
+    {
+      "version": "3.5.3",
+      "date": "2026-10-17",
+      "new": [],
+      "improved": [
+        "Reliability improvements."
+      ],
+      "fixed": []
+    },
+    {
+      "version": "3.5.2",
+      "date": "2026-10-16",
+      "new": [
+        "Long chats are compacted automatically, so they stay fast."
+      ],
+      "improved": [],
+      "fixed": []
+    },
+    {
+      "version": "3.5.1",
+      "date": "2026-10-16",
+      "new": [],
+      "improved": [
+        "Windows: faster, more reliable start."
+      ],
+      "fixed": []
+    },
+    {
+      "version": "3.5.0",
+      "date": "2026-10-14",
+      "new": [
+        "Frontier Buildathon card and an updates feed in the app."
+      ],
+      "improved": [],
+      "fixed": []
+    }
+  ]
+}

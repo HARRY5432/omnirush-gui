@@ -24,6 +24,7 @@ import { startDebugLogger, stopDebugLogger } from "./debug-logger";
 import { resolveOmniRushConnection } from "./omnirush-connection";
 import { ReloadCoordinatorProvider } from "./reload-coordinator";
 import { FeedbackDialog } from "../domains/feedback/feedback";
+import { WhatsNewSheet, WhatsNewUpdateToast } from "../domains/whats-new/whats-new-sheet";
 
 function resolveDefaultServerUrl(): string {
   if (isDesktopRuntime()) return "http://127.0.0.1:4096";
@@ -70,6 +71,8 @@ function EnterpriseAwareAppProviders({ children }: AppProvidersProps) {
                 <ReloadCoordinatorProvider>{children}</ReloadCoordinatorProvider>
                 <Toaster />
                 <FeedbackDialog />
+                <WhatsNewSheet />
+                {isDesktopRuntime() ? <WhatsNewUpdateToast /> : null}
               </LocalProvider>
             </RestrictionNoticeProvider>
           </BrandThemeProvider>
