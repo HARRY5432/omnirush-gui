@@ -170,6 +170,34 @@ describe("media references", () => {
     expect(((out.message.parts[0] as ReturnType<typeof toolPart>).state.attachments[2] as Record<string, unknown>).omitted).toBe("budget");
   });
 
+  test("a frame released after one chat's upload comes back whole for the next chat (thumb and full)", () => {
+    const dir = tmp();
+    const spool = createMediaSpool(path.join(dir, "spool"));
+    const big = frame(1600, 1000, 11);
+    const model = encodePng(fitLongSide(big, 800));
+    const put = () => spool.put({ bytes: model, mime: "image/png", full: { bytes: encodePng(big, { level: 1 }), width: 1600, height: 1000 }, thumb: encodeJpeg(fitLongSide(big, 320)) });
+    const meta = put();
+    spool.ref(meta.sha256, "ses_a");
+    spool.ref(meta.sha256, "ses_b");
+    expect(spool.release(meta.sha256, "ses_a")).toBe(false);
+    expect(spool.has(meta.sha256, meta.ext)).toBe(true);
+    expect(spool.release(meta.sha256, "ses_b")).toBe(true);
+    expect(spool.has(meta.sha256, meta.ext)).toBe(false);
+    // The host takes the identical frame again in a new chat; the reader meets it too.
+    put();
+    const out = rewriteMessageMedia({ parts: [toolPart("x", [dataUrl("image/png", model)])] }, { spool, index: createMediaIndex(path.join(dir, "c.json")), limits: {}, chat: "ses_c" });
+    const ref = (out.message.parts[0] as ReturnType<typeof toolPart>).state.attachments[0] as Record<string, unknown>;
+    expect(String(ref.thumb)).toStartWith("data:image/jpeg;base64,");
+    expect(ref.full).toMatchObject({ width: 1600, height: 1000 });
+    expect(out.files.map((f) => f.kind)).toEqual(["model", "full"]);
+    // Only the reader meets it (meta kept, files gone): the model copy and a thumb come back from the message.
+    spool.ref(meta.sha256, "ses_c");
+    for (const sub of ["", "thumb"]) rmSync(path.join(dir, "spool", sub, sub ? `${meta.sha256}.jpg` : `${meta.sha256}.png`), { force: true });
+    const back = rewriteMessageMedia({ parts: [toolPart("y", [dataUrl("image/png", model)])] }, { spool, index: createMediaIndex(path.join(dir, "d.json")), limits: {}, chat: "ses_d" });
+    expect(String(((back.message.parts[0] as ReturnType<typeof toolPart>).state.attachments[0] as Record<string, unknown>).thumb)).toStartWith("data:image/jpeg;base64,");
+    expect(spool.has(meta.sha256, "png")).toBe(true);
+  });
+
   test("data URL parsing", () => {
     expect(parseImageDataUrl("data:image/png;base64,AQID")).toEqual({ mime: "image/png", bytes: Buffer.from([1, 2, 3]) });
     expect(parseImageDataUrl("data:text/plain;base64,AQID")).toBeNull();

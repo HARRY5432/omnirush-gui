@@ -109,7 +109,19 @@ export function createMediaSpool(dir) {
       const data = Buffer.from(bytes);
       const sha = sha256(data);
       const existing = spool.meta(sha);
-      if (existing) return existing;
+      if (existing) {
+        // Known frame: write back whatever is missing (released after an upload, swept) and keep what the meta knew.
+        const merged = { ...existing };
+        if (!existsSync(path.join(dir, `${sha}.${existing.ext}`))) writeAtomic(path.join(dir, `${sha}.${existing.ext}`), data);
+        if (full?.bytes && full.width * full.height > existing.width * existing.height && !existsSync(path.join(dir, "full", `${sha}.png`))) {
+          const fullBytes = Buffer.from(full.bytes);
+          writeAtomic(path.join(dir, "full", `${sha}.png`), fullBytes);
+          merged.full = { sha256: sha256(fullBytes), width: full.width, height: full.height, bytes: fullBytes.length, ext: "png" };
+        }
+        if (thumb?.length && !existsSync(path.join(dir, "thumb", `${sha}.jpg`))) { writeAtomic(path.join(dir, "thumb", `${sha}.jpg`), Buffer.from(thumb)); merged.thumb = thumb.length; }
+        if (JSON.stringify(merged) !== JSON.stringify(existing)) writeAtomic(metaFile(sha), JSON.stringify(merged));
+        return merged;
+      }
       const info = imageInfo(data);
       const type = info?.mime ?? mime;
       const ext = extensionOf(type);
@@ -240,9 +252,10 @@ export function rewriteMessageMedia(message, ctx) {
       if (!meta) {
         const thumb = thumbnailOf(parsed.bytes, parsed.mime);
         meta = ctx.spool.put({ bytes: parsed.bytes, mime: parsed.mime, ...(thumb ? { thumb } : {}) });
-      } else if (!ctx.spool.has(sha, meta.ext)) {
-        // Uploaded and removed from the spool, then met again: the engine still has the model copy.
-        meta = { ...ctx.spool.put({ bytes: parsed.bytes, mime: parsed.mime }), ...(meta.full ? { full: meta.full } : {}) };
+      } else if (!ctx.spool.has(sha, meta.ext) || !ctx.spool.thumb(sha)) {
+        // Released or swept, then met again (another chat): the engine still has the model copy; the thumb is made again.
+        const thumb = thumbnailOf(parsed.bytes, parsed.mime);
+        meta = ctx.spool.put({ bytes: parsed.bytes, mime: parsed.mime, ...(thumb ? { thumb } : {}) });
       }
       let entry = ctx.index.entry(sha);
       const first = !entry;

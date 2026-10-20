@@ -296,33 +296,44 @@ export async function createPortableHost({ native, spool = null, settings, conte
     const current = await native.call("window", { id: s.window.id });
     const common = { action, frame_before: { sha256: observed.sha }, window: windowRef(current), screen: s.screen, dpi: current.dpi, monitor_id: current.monitor, scale: current.bounds.width / observed.model.width };
     if (current.identity !== observed.window.identity || JSON.stringify(current.bounds) !== JSON.stringify(observed.window.bounds)) return finish({ ...common, ok: false, code: "window_changed", message: "The window moved or changed. Observe again.", next: "computer_observe" });
-    // Per-action approval by permission mode (host channel, never the engine's).
-    const decision = actApproval({ mode: settings()?.mode, action, intent: args.intent, target: {}, window: { id: String(current.id), app_id: current.appId, app_name: current.appName, title: current.title }, approved: s.approved, after_takeover: s.afterTakeover });
-    let approval = { asked: false };
-    if (decision.ask) {
-      const pointList = action.type === "drag" ? action.path : action.x !== undefined ? [{ x: action.x, y: action.y }] : [];
-      const answer = await askAct(s, { action, intent: args.intent, reasons: decision.reasons, points: pointList, frame: observed });
-      approval = { asked: true, reasons: decision.reasons.map((r) => r.code), by: "person" };
-      if (!answer.allow) return finish({ ...common, approval, ok: false, code: "approval_denied", message: "The person did not allow this action. Ask them or choose another way." });
-      if (sessions.get(s.id) !== s || s.phase !== "working") return finish({ ...common, approval, ok: false, code: "paused_by_person", message: "The session was paused or ended." });
-      if (decision.reasons.some((r) => r.code === "document_changed")) s.approved = { ...s.approved, title: current.title };
-    }
-    s.afterTakeover = false;
     // Native coordinates; every point must hit the approved window.
     const mapped = action.type === "drag" ? action.path.map((p) => mapPoint(p, observed.model, current.bounds)) : action.x !== undefined ? [mapPoint(action, observed.model, current.bounds)] : [];
-    if (mapped.length) {
-      const hits = await native.call("hit", { window: current, points: mapped.map((m) => m.screen) });
-      if (!hits.inside.every(Boolean)) return finish({ ...common, approval, ok: false, code: "window_occluded", message: "Another window covers this point, or it is outside the approved window. Observe again." });
-    }
-    // Tolerant stale check: the window must still look like the observation (caret masked).
+    const hitAll = async (w) => !mapped.length || (await native.call("hit", { window: w, points: mapped.map((m) => m.screen) })).inside.every(Boolean);
+    if (!(await hitAll(current))) return finish({ ...common, ok: false, code: "window_occluded", message: "Another window covers this point, or it is outside the approved window. Observe again." });
+    // Tolerant stale check (caret masked), before any question: the person is asked about what the model saw.
     if (action.type !== "wait") {
       const fresh = await native.call("capture", { window: current }, 15_000);
       // The observation's grid was taken after masking: mask the fresh frame the same way.
       paintBoxes(fresh, fresh.secure ?? []);
       const grid = luminanceGrid(fitLongSide(fresh, l.model_long_side));
       const compare = compareGrids(observed.grid, grid, { mask: observed.caret ? [observed.caret] : [] });
-      if (compare.stale) return finish({ ...common, approval, ok: false, code: "stale_observation", message: "The window changed since the observation. Observe again.", next: "computer_observe" });
+      if (compare.stale) return finish({ ...common, ok: false, code: "stale_observation", message: "The window changed since the observation. Observe again.", next: "computer_observe" });
     }
+    // Per-action approval by permission mode (host channel, never the engine's).
+    const decision = actApproval({ mode: settings()?.mode, action, intent: args.intent, target: {}, window: { id: String(current.id), app_id: current.appId, app_name: current.appName, title: current.title }, approved: s.approved, after_takeover: s.afterTakeover });
+    let approval = { asked: false };
+    if (decision.ask) {
+      // The same action with the same intent, allowed a moment ago (a retry after a fresh observation), is not asked again.
+      const key = JSON.stringify([action, args.intent]);
+      const remembered = s.allowed.get(key);
+      if (remembered && remembered > Date.now()) {
+        approval = { asked: false, reasons: decision.reasons.map((r) => r.code), by: "person" };
+      } else {
+        const pointList = action.type === "drag" ? action.path : action.x !== undefined ? [{ x: action.x, y: action.y }] : [];
+        const answer = await askAct(s, { action, intent: args.intent, reasons: decision.reasons, points: pointList, frame: observed });
+        approval = { asked: true, reasons: decision.reasons.map((r) => r.code), by: "person" };
+        if (!answer.allow) return finish({ ...common, approval, ok: false, code: "approval_denied", message: "The person did not allow this action. Ask them or choose another way." });
+        if (sessions.get(s.id) !== s || s.phase !== "working") return finish({ ...common, approval, ok: false, code: "paused_by_person", message: "The session was paused or ended." });
+        s.allowed.set(key, Date.now() + 30_000);
+        if (s.allowed.size > 64) s.allowed.delete(s.allowed.keys().next().value);
+      }
+      if (decision.reasons.some((r) => r.code === "document_changed")) s.approved = { ...s.approved, title: current.title };
+      // While the person answered, the window may have moved or been covered: geometry and hits again (no image compare).
+      const after = await native.call("window", { id: s.window.id });
+      if (after.identity !== current.identity || JSON.stringify(after.bounds) !== JSON.stringify(current.bounds)) return finish({ ...common, approval, ok: false, code: "window_changed", message: "The window moved or changed. Observe again.", next: "computer_observe" });
+      if (!(await hitAll(after))) return finish({ ...common, approval, ok: false, code: "window_occluded", message: "Another window covers this point, or it is outside the approved window. Observe again." });
+    }
+    s.afterTakeover = false;
     const cursorBefore = await native.call("cursor").catch(() => null);
     const point = mapped.length === 1 ? { model: mapped[0].model, screen: mapped[0].screen } : undefined;
     const path = action.type === "drag" ? mapped.map((m) => ({ model: m.model, screen: m.screen })) : undefined;
@@ -397,7 +408,7 @@ export async function createPortableHost({ native, spool = null, settings, conte
     const s = {
       id: randomUUID(), connection, window: preferred, windows, mode: args.mode, purpose: args.purpose, phase: "approval", status: "",
       approval: null, chat: ctx.chat ?? null, actions: 0, requests: new Set(), observation: null, resumeObservation: null, log: [],
-      lastOperation: Date.now(), lastAct: 0, afterTakeover: false, generation: 0, expiresAt: Date.now() + l.approval_timeout_seconds * 1000, screen: await screenOf(preferred),
+      lastOperation: Date.now(), lastAct: 0, afterTakeover: false, generation: 0, allowed: new Map(), expiresAt: Date.now() + l.approval_timeout_seconds * 1000, screen: await screenOf(preferred),
     };
     lease = s.id; sessions.set(s.id, s);
     update();

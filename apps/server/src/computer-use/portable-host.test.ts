@@ -205,6 +205,27 @@ describe("portable host: observe and act", () => {
     await host.close();
   });
 
+  test("a slow approval: the window changing meanwhile is not stale, and the same act is not asked twice", async () => {
+    const r = rig("careful");
+    const { host, c, session, obs } = await opened(r);
+    // The person takes a while; the caret blinks or a spinner turns meanwhile.
+    const slow = r.native as ReturnType<typeof fakeNative>;
+    const original = r.acts.push.bind(r.acts);
+    r.acts.push = (...items: ActRequest[]) => { slow.setShade(90); return original(...items); };
+    const first = await call(c, "computer_act", { session_id: session, observation_id: obs.state.observation?.id, request_id: "a", intent: "Type the greeting", action: { type: "type", text: "hi" } });
+    expect(first.state).toMatchObject({ ok: true, approval: { asked: true } });
+    expect(r.acts.length).toBe(1);
+    // The model retries the same act on a fresh observation: no second question within 30 s.
+    const again = await call(c, "computer_act", { session_id: session, observation_id: (first.state.observation as { id: string }).id, request_id: "b", intent: "Type the greeting", action: { type: "type", text: "hi" } });
+    expect(again.state).toMatchObject({ ok: true, approval: { asked: false } });
+    expect(r.acts.length).toBe(1);
+    // Another act asks.
+    const other = await call(c, "computer_act", { session_id: session, observation_id: (again.state.observation as { id: string }).id, request_id: "c", intent: "Type more", action: { type: "type", text: "there" } });
+    expect(other.state).toMatchObject({ ok: true, approval: { asked: true } });
+    expect(r.acts.length).toBe(2);
+    await host.close();
+  });
+
   test("person input pauses; only Continue resumes; first act after takeover asks in Normal", async () => {
     const r = rig("normal");
     const { host, c, session, obs } = await opened(r);
