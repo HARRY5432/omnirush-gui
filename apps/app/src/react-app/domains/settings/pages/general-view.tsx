@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import {
   ArrowRight,
+  Bot,
   Coffee,
   Cog,
   FolderLock,
@@ -40,6 +41,8 @@ import {
 import { DiagnosticsSection } from "./diagnostics-section";
 import { keptPendingLine, sendPendingBeforeSignOut } from "../sign-out-uploads";
 import { BEST_PRACTICES_HELP, useBestPractices, type BestPracticesClient } from "../best-practices";
+import { AGENT_ASSIST_ITEMS, useAgentAssist, type AgentAssistClient } from "../agent-assist";
+import type { OmniRushAgentAssist, OmniRushAgentAssistFeature } from "../../../../app/lib/omnirush-server";
 import { useLinuxSandbox, type LinuxSandboxClient } from "../linux-sandbox";
 import { LinuxSandboxCard } from "../linux-sandbox-card";
 import { BuildathonTrackCard } from "../../buildathon/buildathon";
@@ -51,6 +54,8 @@ export type GeneralSettingsViewProps = {
   omnirushClient?: ApprovalsClient | null;
   /** Global guides do not depend on workspace selection or history loading. */
   bestPracticesClient?: BestPracticesClient | null;
+  /** Agent assist switches (self-check, project notes, diagnostics, summaries); hidden without one. */
+  agentAssistClient?: AgentAssistClient | null;
   /** Workspace whose engine is reloaded after the approval mode changes. */
   runtimeWorkspaceId?: string | null;
   /** The Linux sandbox card (per project); hidden without a client or a selected workspace. */
@@ -224,6 +229,53 @@ export function BestPracticesCard(props: {
   );
 }
 
+/** Settings > General > Agent: what the agent does on its own (agent-assist-config.ts on the server). */
+export function AgentAssistCard(props: {
+  setting: OmniRushAgentAssist | null;
+  busy: boolean;
+  status: string;
+  onToggle: (key: OmniRushAgentAssistFeature, enabled: boolean) => void;
+}) {
+  return (
+    <div className="space-y-3">
+      <div className="text-[11px] font-semibold uppercase tracking-[0.15em] text-dls-secondary">Agent</div>
+      <div className="rounded-2xl border border-dls-border bg-dls-surface" data-testid="agent-assist-card">
+        {AGENT_ASSIST_ITEMS.map((item, index) => {
+          const forced = props.setting?.forced.includes(item.key) ?? false;
+          return (
+            <div key={item.key} className={`flex items-center gap-4 p-4${index > 0 ? " border-t border-dls-border" : ""}`}>
+              {index === 0 ? (
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-dls-border bg-dls-hover">
+                  <Bot size={17} className="text-dls-secondary" />
+                </div>
+              ) : (
+                <div className="h-10 w-10 shrink-0" aria-hidden="true" />
+              )}
+              <div className="min-w-0 flex-1">
+                <div className="text-[13px] font-medium text-dls-text">{item.title}</div>
+                <div id={`agent-assist-${item.key}-help`} className="text-[11px] text-dls-secondary">
+                  {item.help}
+                  {forced ? " Set by the app's environment." : ""}
+                </div>
+              </div>
+              <Switch
+                aria-label={item.title}
+                aria-describedby={`agent-assist-${item.key}-help`}
+                checked={props.setting?.features[item.key] === true}
+                disabled={props.busy || props.setting === null || forced}
+                onCheckedChange={(enabled) => props.onToggle(item.key, enabled)}
+              />
+            </div>
+          );
+        })}
+      </div>
+      {props.status ? (
+        <div className="text-[11px] text-dls-secondary" role="status" data-testid="agent-assist-status">{props.status}</div>
+      ) : null}
+    </div>
+  );
+}
+
 export const KEEP_AWAKE_TITLE = "Keep this computer awake while the agent works";
 export const KEEP_AWAKE_HELP = "Your computer won't go to sleep while a turn runs, or while the app finishes up as it quits. The screen can still turn off and lock.";
 
@@ -292,6 +344,8 @@ export function GeneralSettingsView(props: GeneralSettingsViewProps) {
   const approvalMode = useApprovalMode(approvalsClient, props.runtimeWorkspaceId ?? null);
   const bestPracticesClient = props.bestPracticesClient ?? null;
   const bestPractices = useBestPractices(bestPracticesClient);
+  const agentAssistClient = props.agentAssistClient ?? null;
+  const agentAssist = useAgentAssist(agentAssistClient);
   const linuxSandboxClient = props.linuxSandboxClient ?? null;
   const linuxSandbox = useLinuxSandbox(linuxSandboxClient, props.sandboxWorkspaceId ?? null);
   const keepAwake = useKeepAwake();
@@ -461,6 +515,15 @@ export function GeneralSettingsView(props: GeneralSettingsViewProps) {
           busy={bestPractices.busy}
           status={bestPractices.status}
           onToggle={(enabled) => void bestPractices.setEnabled(enabled)}
+        />
+      ) : null}
+
+      {agentAssistClient ? (
+        <AgentAssistCard
+          setting={agentAssist.setting}
+          busy={agentAssist.busy}
+          status={agentAssist.status}
+          onToggle={(key, enabled) => void agentAssist.setFeature(key, enabled)}
         />
       ) : null}
 

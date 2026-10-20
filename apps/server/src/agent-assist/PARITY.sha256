@@ -1,0 +1,4 @@
+# Agent assist modules that are the same files in omnirush-cli (assets/extensions/omnirush/agent-assist/)
+# and omnirush-gui (apps/server/src/opencode-plugins/agent-assist/). A change to one must be ported to the other and this list updated in both.
+a247f54af7fb805067ab23caa9d2cf029f2b149d8ff8ea237e069e3b5f3ec8d0  agent-assist.js
+af984a19b9b854f433267bb84b8a8956e9ee9a026d35ed05e3aac73cdf46bc7a  agent-assist-hooks.js

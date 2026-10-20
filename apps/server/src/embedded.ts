@@ -5,6 +5,8 @@
  * in one call -- mirrors what cli.ts does but returns a handle instead
  * of owning the process lifecycle.
  */
+import { agentAssistEngineEnv, agentAssistFlags } from "./agent-assist-config.js";
+import { readGlobalRuntimeOpencodeConfig } from "./runtime-opencode-config-store.js";
 import { randomUUID } from "node:crypto";
 import { stopTaskRecovery } from "./task-recovery.js";
 import { managedDesktopPolicy } from "./managed-desktop-policy.js";
@@ -276,6 +278,8 @@ export async function startEmbeddedServer(options: EmbeddedServerOptions): Promi
         OPENCODE_CONFIG: runtimeConfigPath,
         ...opencodeModelsEnv,
         ...pluginsNoDepsEnv(omnirushOwnPluginPaths()),
+        // Agent assist: the plugin's switch file and notes folder, the language servers' heap cap.
+        ...agentAssistEngineEnv(config, process.env, { diagnostics: agentAssistFlags(await readGlobalRuntimeOpencodeConfig(config)).diagnostics }),
       };
       engineSpawnTemplate = {
         bin: opencodeBin,

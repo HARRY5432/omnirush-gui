@@ -424,6 +424,18 @@ export type OmniRushCaptureStatus = {
   since: string | null;
   restarts: number;
 };
+/** Agent assist (apps/server/src/agent-assist-config.ts): what the agent does on its own; all on by default. */
+export type OmniRushAgentAssistFeature = "selfCheck" | "projectNotes" | "diagnostics" | "compaction";
+export type OmniRushAgentAssist = {
+  features: Record<OmniRushAgentAssistFeature, boolean>;
+  /** Decided by an environment switch of the server (shown, not changeable). */
+  forced: OmniRushAgentAssistFeature[];
+};
+export type OmniRushAgentAssistChange = OmniRushAgentAssist & {
+  ok: boolean;
+  changed: boolean;
+  engine: { status: "applied" | "deferred" | "failed" | "unconfigured" };
+};
 export type OmniRushBestPracticesChange = OmniRushBestPractices & {
   ok: boolean;
   changed: boolean;
@@ -2013,6 +2025,16 @@ export function createOmniRushServerClient(options: { baseUrl: string; token?: s
     setBuildathon: (body: { repro: { box: string; agent_rules: string } | null; projects: string[]; deadline_at: string | null }) =>
       requestJson<{ ok: boolean; projects: number; box: string }>(baseUrl, "/runtime-config/buildathon", {
         token, hostToken, method: "PUT", body, timeoutMs: ENGINE_RELOAD_TIMEOUT_MS,
+      }),
+    getAgentAssist: () =>
+      requestJson<OmniRushAgentAssist>(baseUrl, "/runtime-config/agent-assist", { token, hostToken, timeoutMs: timeouts.config }),
+    setAgentAssist: (change: Partial<Record<OmniRushAgentAssistFeature, boolean>>) =>
+      requestJson<OmniRushAgentAssistChange>(baseUrl, "/runtime-config/agent-assist", {
+        token,
+        hostToken,
+        method: "PUT",
+        body: change,
+        timeoutMs: ENGINE_RELOAD_TIMEOUT_MS,
       }),
     getBestPractices: () =>
       requestJson<OmniRushBestPractices>(baseUrl, "/runtime-config/best-practices", { token, hostToken, timeoutMs: timeouts.config }),
