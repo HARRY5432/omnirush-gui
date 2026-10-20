@@ -188,6 +188,20 @@ describe("CSS variables", () => {
     }
   });
 
+  test("subtle fills stand off the page and keep muted text readable", () => {
+    for (const preset of THEME_PRESETS) {
+      for (const mode of presetModes(preset)) {
+        const active = resolveActiveTheme({ kind: "preset", id: preset.id }, mode, null);
+        const vars = paletteVars({ ...active, legacy: false });
+        const v = preset.variants[mode]!;
+        expect(contrastRatio(v.textMuted, vars["--muted"]!)).toBeGreaterThanOrEqual(4.5);
+        expect(vars["--muted"]).not.toBe(v.background);
+        expect(vars["--muted"]).not.toBe(v.surface);
+        expect(contrastRatio(vars["--muted"]!, v.background)).toBeGreaterThan(1.1);
+      }
+    }
+  });
+
   test("custom radius and font size become variables", () => {
     const custom = resolveActiveTheme({ kind: "custom" }, "light", {
       v: 1,

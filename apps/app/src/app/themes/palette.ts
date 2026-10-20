@@ -4,7 +4,7 @@
  * style.setProperty. Only names from this module and only validated values
  * (#rrggbb, #rrggbbaa, "r g b", px and plain numbers) are ever written.
  */
-import { hexToRgb, isDarkColour, rgbToHex, textSafeAccent } from "./contrast";
+import { contrastRatio, hexToRgb, isDarkColour, rgbToHex, textSafeAccent } from "./contrast";
 import { THEME_PRESETS } from "./presets";
 import {
   DEFAULT_FONT_SIZE_PX,
@@ -106,13 +106,25 @@ function rgbTriplet(hex: string): string {
 
 // Steps of the neutral (gray/slate) scale as a blend from background (1) to text (12),
 // close to Radix slate's spacing; 2 = surface, 5 = border and 11 = muted text are exact.
-const NEUTRAL_MIX = [0, 0, 0.055, 0.085, 0, 0.15, 0.2, 0.28, 0.45, 0.5, 0, 1];
+const NEUTRAL_MIX = [0, 0, 0, 0, 0, 0.15, 0.2, 0.28, 0.45, 0.5, 0, 1];
 const NEUTRAL_ALPHA = [0.012, 0.027, 0.06, 0.09, 0.12, 0.15, 0.2, 0.28, 0.45, 0.5, 0.62, 0.9];
+
+function subtleFill(v: ThemeVariant, amount: number): string {
+  for (let t = amount; t > 0.015; t -= 0.01) {
+    const fill = mix(v.surface, v.text, t);
+    if (contrastRatio(v.textMuted, fill) >= 4.5) return fill;
+  }
+  return v.surface;
+}
 
 function neutralScale(v: ThemeVariant): string[] {
   return NEUTRAL_MIX.map((t, index) => {
     if (index === 0) return v.background;
     if (index === 1) return v.surface;
+    // Steps 3 and 4 fill subtle controls (chips, hovers, the user's message): visibly off the
+    // page and the surface, while muted text on them keeps 4.5:1.
+    if (index === 2) return subtleFill(v, 0.07);
+    if (index === 3) return subtleFill(v, 0.11);
     if (index === 4) return v.border;
     if (index === 10) return v.textMuted;
     if (index === 11) return v.text;
@@ -138,7 +150,9 @@ export function paletteVars(active: Pick<ActiveTheme, "variant" | "mode" | "lega
     for (const name of names) vars[name] = value;
   };
   set(["--background", "--dls-background", "--dls-app-bg"], v.background);
-  set(["--card", "--dls-surface", "--sidebar", "--dls-sidebar", "--secondary", "--muted", "--dls-canvas"], v.surface);
+  set(["--card", "--dls-surface", "--sidebar", "--dls-sidebar", "--dls-canvas"], v.surface);
+  // Subtle fills must stand out from the page and from surface-coloured cards.
+  set(["--secondary", "--muted"], scale[2]!);
   set(["--popover", "--dls-surface-muted"], v.surfaceRaised);
   set(["--border", "--dls-border", "--sidebar-border", "--popover-border"], v.border);
   set(["--input"], mix(v.border, v.textMuted, 0.25));
