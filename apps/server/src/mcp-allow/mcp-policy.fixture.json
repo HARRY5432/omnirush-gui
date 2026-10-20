@@ -1,0 +1,20 @@
+{
+  "enabled": true,
+  "allow": [
+    {"id": "filesystem", "title": "Filesystem", "runtime": "npm", "package": "@modelcontextprotocol/server-filesystem", "versions": ">=2025.1.14", "pin": "2026.8.31", "rules": {"path_args": "positional", "default_args": ["."]}},
+    {"id": "git", "title": "Git", "runtime": "pypi", "package": "mcp-server-git", "versions": ">=2025.1.0", "pin": "2026.8.18", "rules": {"path_flags": ["--repository", "-r"], "path_inputs": ["repo_path"]}},
+    {"id": "sqlite", "title": "SQLite", "runtime": "npm", "package": "mcp-server-sqlite-npx", "versions": ">=0.8.0", "pin": "0.8.0", "rules": {"path_args": "positional", "min_args": 1}},
+    {"id": "memory", "title": "Memory", "runtime": "npm", "package": "@modelcontextprotocol/server-memory", "versions": ">=2025.4.25", "pin": "2026.8.31", "rules": {"path_env": {"MEMORY_FILE_PATH": ".mcp-memory.jsonl"}}},
+    {"id": "sequential-thinking", "title": "Sequential thinking", "runtime": "npm", "package": "@modelcontextprotocol/server-sequential-thinking", "versions": ">=2025.7.1", "pin": "2026.8.31"},
+    {"id": "time", "title": "Time", "runtime": "pypi", "package": "mcp-server-time", "versions": ">=2025.1.0", "pin": "2026.8.18"},
+    {"id": "everything", "title": "Everything (test server)", "runtime": "npm", "package": "@modelcontextprotocol/server-everything", "versions": ">=2025.7.1", "pin": "2026.8.31"},
+    {"id": "playwright", "title": "Playwright (local pages)", "runtime": "npm", "package": "@playwright/mcp", "versions": ">=0.0.40", "pin": "0.0.83", "rules": {"add_flags": ["--isolated"], "forbid_flags": ["--cdp-endpoint", "--extension", "--user-data-dir", "--storage-state", "--remote-endpoint", "--proxy-server", "--allowed-hosts"], "local_urls": true}}
+  ],
+  "deny": [
+    {"match": "@modelcontextprotocol/server-github", "reason": "The GitHub server works on your GitHub account."},
+    {"match": "api.githubcopilot.com", "reason": "The GitHub server works on your GitHub account."},
+    {"match": "@upstash/context7-mcp", "reason": "Context7 answers from an online service."},
+    {"match": "mcp-server-fetch", "reason": "The fetch server reads the web; use the built-in web fetch."},
+    {"match": "mcp-server-sqlite", "reason": "This SQLite server no longer starts with current libraries; use npx -y mcp-server-sqlite-npx <file in the project>."}
+  ]
+}

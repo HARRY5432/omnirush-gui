@@ -587,11 +587,11 @@ function updateRuntimeConfig(
   const result = pending.catch(() => undefined).then(async () => {
     const row = await runtimeOpencodeConfigStore.getRow(config, workspaceId);
     const current = row?.value ?? {};
-    // MCP is never persisted by a runtime write. Existing rows are allowed to
-    // be read by cleanup code, but the next write removes every registration.
-    const next = withoutMcpRuntimeConfig(
-      refuseRegistryOmniRushUiMcp(current, normalizeRuntimeOpencodeConfig(updater(current))),
-    );
+    // A project's MCP entries are kept (the engine's MCP plugin applies the
+    // server's list to them). The global row's are the account-linked Connect
+    // server, which this app does not run: never persisted there.
+    const checked = refuseRegistryOmniRushUiMcp(current, normalizeRuntimeOpencodeConfig(updater(current)));
+    const next = isEngineGlobalRuntimeConfigId(workspaceId) ? withoutMcpRuntimeConfig(checked) : checked;
     const configJson = runtimeOpencodeConfigStore.serialize(next);
     if (row?.valueJson === configJson) return { config: next, changed: false };
     await runtimeOpencodeConfigStore.setSerialized(config, workspaceId, configJson, Date.now());

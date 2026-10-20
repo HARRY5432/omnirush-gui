@@ -145,7 +145,6 @@ import {
   markOmniRushCloudMcpStale,
   migrateOmniRushCloudMcpRuntimeConfig,
   OMNIRUSH_CLOUD_MCP_NAME,
-  reconcilePersistedOmniRushCloudMcp,
   removeOmniRushCloudMcpDesiredConfig,
   type CloudMcpHealth,
 } from "./cloud-mcp-health.js";
@@ -184,7 +183,10 @@ import { rememberServerDefault, watchServerDefault } from "./box/launch.js";
 import { rememberWebSearchSwitch, watchWebSearchSwitch } from "./web-search.js";
 import { normalizeBackend } from "./box/backends/index.js";
 import { buildOmniRushRuntimeConfigObject, omnirushGatewayConfigured, omnirushRuntimeConfigFilePath, writeOmniRushRuntimeConfigFile } from "./omnirush-runtime-config.js";
-import { assertMcpAllowed, mcpAllowed, mcpPolicyForConfig, MCP_DISABLED_MESSAGE } from "./mcp-policy.js";
+import { assertMcpAllowed, mcpAllowed, mcpDisabledMessage, mcpPolicyForConfig, refuseAccountLinkedMcp } from "./mcp-policy.js";
+import { currentMcpPolicy, rememberMcpPolicy, watchMcpPolicy, workspaceMcpReport, writeWorkspaceMcp } from "./mcp-allow/state.js";
+import { isOmniRushUiMcpRegistryEntry } from "./omnirush-ui-mcp-command.js";
+import type { McpAllowEntry } from "./mcp-allow/mcp-allow.mjs";
 import { omnirushModelWantsReasoningSummary, readOmniRushModelCatalog } from "./omnirush-model-catalog.js";
 import {
   SUBAGENT_MODEL_FALLBACK_TRACE,
@@ -1256,10 +1258,15 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
   const boxes = boxServiceFor(config, (level, message, attributes) => logger.log(level, message, attributes));
   let stopBoxDefaultWatch: () => void = () => {};
   let stopWebSearchWatch: () => void = () => {};
+  let stopMcpPolicyWatch: () => void = () => {};
   if (gatewayBroker.enabled) {
     // Read before the first plan and the engine's first config (at most 1.5 s, else the last answer is
     // used until it comes): a switch flipped or rolled back on the server applies at this start.
-    const read = gatewayBroker.sessionUploadCapabilities().then((capabilities) => rememberServerDefault(runtimeStorageDir(config), capabilities)).catch(() => false);
+    // The MCP list (mcp-allow/state.ts) is remembered from the same answer: the engine's MCP plugin reads it when a project starts.
+    const read = gatewayBroker.sessionUploadCapabilities().then((capabilities) => {
+      rememberMcpPolicy(runtimeStorageDir(config), capabilities);
+      return rememberServerDefault(runtimeStorageDir(config), capabilities);
+    }).catch(() => false);
     // The model's own web search (web-search.ts), from the same answer. Strict: a failed read keeps
     // the last answer, while an answer without the block (an older server) turns it off.
     const readWebSearch = gatewayBroker.sessionUploadCapabilities({ strict: true }).then((capabilities) => rememberWebSearchSwitch(runtimeStorageDir(config), capabilities)).catch(() => false);
@@ -1274,6 +1281,11 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
     });
     // Read again while the app stays open (from the capabilities cache: at most one request per its
     // TTL), so a switch flipped on the server reaches an app started before it without a restart.
+    stopMcpPolicyWatch = watchMcpPolicy({
+      stateDir: runtimeStorageDir(config),
+      read: () => gatewayBroker.sessionUploadCapabilities(),
+      everyMs: BOX_DEFAULT_REFRESH_MS,
+    });
     stopBoxDefaultWatch = watchServerDefault({
       stateDir: runtimeStorageDir(config),
       read: () => gatewayBroker.sessionUploadCapabilities(),
@@ -1645,6 +1657,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
   } catch (error) {
     stopBoxDefaultWatch();
     stopWebSearchWatch();
+    stopMcpPolicyWatch();
     bestPracticesReloads.stop();
     // First, and synchronously: archive part uploads in flight are aborted now, not after the other shutdown steps.
     const captureStopped = capture.stop();
@@ -1735,7 +1748,8 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
       // Before them, each chat in a box gets its last checkpoint (bounded; only when chats ran in a
       // box this run, and the account answers it is still stored within a second).
       stopBoxDefaultWatch();
-    stopWebSearchWatch();
+      stopWebSearchWatch();
+      stopMcpPolicyWatch();
       const archiveFinals = accountStillStored();
       if (boxes.hasChats() && await Promise.race([archiveFinals.catch(() => false), new Promise<false>((resolvePromise) => setTimeout(() => resolvePromise(false), 1_000).unref?.())])) {
         await boxes.finals({ budgetMs: 10_000 }).catch(() => []);
@@ -1807,11 +1821,10 @@ export async function proxyOpencodeV2Request(input: {
   if (/^\/api\/config(?:\/|$)/.test(decodedPath)) {
     throw new ApiError(403, "engine_config_private", "Engine configuration is private");
   }
-  if (/^(?:\/api)?\/mcp(?:\/|$)/.test(decodedPath)) {
-    assertMcpAllowed(input.config);
-    if (method !== "GET" && method !== "HEAD") {
-      throw new ApiError(403, "engine_mcp_managed", "Manage connections through OmniRush.ai");
-    }
+  // The preview engine cannot apply the server's MCP list: MCP stays off
+  // there (its servers are removed before each request; engine-v2-preview.ts).
+  if (/^(?:\/api)?\/mcp(?:\/|$)/.test(decodedPath) && method !== "GET" && method !== "HEAD") {
+    throw new ApiError(403, "engine_mcp_managed", "Manage connections through OmniRush.ai");
   }
   const sessionMatch = routePath.match(/^\/api\/session\/([^/]+)(?:\/|$)/);
   const sessionId = sessionMatch?.[1] ? decodeEngineRouteParam(sessionMatch[1]) : null;
@@ -2251,9 +2264,7 @@ export async function proxyOpencodeRequest(input: {
   if (method !== "GET" && method !== "HEAD") {
     ensureWritable(input.config);
   }
-  if (/^(?:\/api)?\/mcp(?:\/|$)/.test(normalizeOpencodeProxyPath(proxyPath))) {
-    assertMcpAllowed(input.config);
-  }
+  assertEngineMcpRouteAllowed(input.config, method, normalizeOpencodeProxyPath(proxyPath));
   if (workspace && workspace.workspaceType !== "remote" && isUploadPromptDispatch(method, proxyPath)) {
     if (uploadDispatchRefused(input.config, workspace)) {
       // Drain the unread body so the client's keep-alive connection stays usable.
@@ -3093,7 +3104,7 @@ function buildCapabilities(config: ServerConfig): Capabilities {
     providerSync: true,
     skills: { read: true, write: writeEnabled, source: "omnirush" },
     plugins: { read: true, write: writeEnabled },
-    mcp: { read: mcpAllowed(config), write: writeEnabled && mcpAllowed(config) },
+    mcp: { read: true, write: writeEnabled && mcpAllowed(config) },
     commands: { read: true, write: writeEnabled },
     config: { read: true, write: writeEnabled },
     engine: { rollover: enginePoolForConfig(config) !== null },
@@ -4603,8 +4614,10 @@ function createRoutes(
     if (opencode) {
       const configPath = omnirushConfigPath(workspace.path);
       const nextOpencode = ensurePlainObject(opencode);
+      // MCP servers are added one at a time through POST /workspace/:id/mcp,
+      // which checks each against the server's list.
       if (Object.prototype.hasOwnProperty.call(nextOpencode, "mcp")) {
-        assertMcpAllowed(config);
+        throw new ApiError(403, "mcp_config_patch", "Add MCP servers in Settings > MCP: each is checked against the supported list.");
       }
       const { permission, provider, ...topLevelUpdates } = nextOpencode;
       const logicalUpdates: Record<string, unknown> = { ...topLevelUpdates };
@@ -4996,28 +5009,34 @@ function createRoutes(
     return jsonResponse({ ok: true, name, path: result.path });
   });
 
+  // The project's MCP servers with the engine plugin's decision for each (on,
+  // or blocked and why), and the servers the list supports (one-click presets).
   addRoute(routes, "GET", "/workspace/:id/mcp", "client", async (ctx) => {
-    if (!mcpAllowed(config)) {
-      return jsonResponse({
-        items: [],
-        engineSync: null,
-        managedOAuthState: { available: false, recovery: false },
-        mcpPolicy: { mode: mcpPolicyForConfig(config), enabled: false, message: MCP_DISABLED_MESSAGE },
-      });
-    }
     const workspace = await resolveWorkspace(config, ctx.params.id);
     const items = await listMcp(config, workspace.id, workspace.path);
-    const managedState = await listLocalManagedMcpConnectionsSafe(config, workspace.id);
-    const managed = new Map(managedState.connections.map((connection) => [connection.name, connection]));
+    const stateDir = runtimeStorageDir(config);
+    const policy = currentMcpPolicy(stateDir);
+    const report = workspace.workspaceType === "remote" ? null : workspaceMcpReport(stateDir, resolveOpencodeDirectory(workspace) || workspace.path);
+    const decisions = report?.decisions ?? [];
+    const enabled = policy?.enabled === true;
     return jsonResponse({
-      items: items.map((item) => ({ ...item, managedOAuth: managed.get(item.name) ?? null })),
-      engineSync: engineMcpSyncStateInState(config, engineMcpServerState, workspace),
-      managedOAuthState: { available: managedState.available, recovery: managedState.recovery },
+      items: items.map((item) => ({ ...item, managedOAuth: null, decision: decisions.find((decision) => decision.name === item.name) ?? null })),
+      engineSync: null,
+      managedOAuthState: { available: false, recovery: false },
+      mcpPolicy: {
+        mode: mcpPolicyForConfig(config),
+        enabled,
+        message: enabled ? policy?.message ?? null : mcpDisabledMessage(config),
+        engineV2: engineV2Preview.status().chatRouting === true,
+        supported: enabled && policy ? policy.allow.map(mcpPreset) : [],
+        decisions,
+        reportAt: report?.at ?? null,
+      },
     });
   });
 
   addRoute(routes, "GET", "/mcp-apps/sandbox.html", "none", async (ctx) => {
-    assertMcpAllowed(config);
+    refuseAccountLinkedMcp();
     return new Response(MCP_APP_SANDBOX_PROXY_HTML, {
       headers: {
         "Content-Type": "text/html; charset=utf-8",
@@ -5029,20 +5048,20 @@ function createRoutes(
     });
   });
   addRoute(routes, "GET", "/mcp-apps/sandbox.js", "none", async () => {
-    assertMcpAllowed(config);
+    refuseAccountLinkedMcp();
     return new Response(MCP_APP_SANDBOX_PROXY_SCRIPT, {
       headers: { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" },
     });
   });
   addRoute(routes, "GET", "/mcp-apps/sandbox.css", "none", async () => {
-    assertMcpAllowed(config);
+    refuseAccountLinkedMcp();
     return new Response(MCP_APP_SANDBOX_PROXY_CSS, {
       headers: { "Content-Type": "text/css; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" },
     });
   });
 
   addRoute(routes, "GET", "/workspace/:id/mcp-apps/list", "client", async (ctx) => {
-    assertMcpAllowed(config);
+    refuseAccountLinkedMcp();
     requireClientScope(ctx, "viewer");
     const workspace = await resolveWorkspace(config, ctx.params.id);
     try {
@@ -5058,38 +5077,76 @@ function createRoutes(
   });
 
   addRoute(routes, "POST", "/workspace/:id/mcp-apps/resolve", "client", async (ctx) => {
-    assertMcpAllowed(config);
+    refuseAccountLinkedMcp();
   });
 
   addRoute(routes, "POST", "/workspace/:id/mcp-apps/call", "client", async () => {
-    assertMcpAllowed(config);
+    refuseAccountLinkedMcp();
   });
 
   addRoute(routes, "POST", "/workspace/:id/mcp/managed", "client", async () => {
-    assertMcpAllowed(config);
+    refuseAccountLinkedMcp();
   });
 
   addRoute(routes, "GET", "/workspace/:id/mcp/:name/managed", "client", async () => {
-    assertMcpAllowed(config);
+    refuseAccountLinkedMcp();
   });
 
   addRoute(routes, "POST", "/workspace/:id/mcp/:name/managed/connect", "client", async () => {
-    assertMcpAllowed(config);
+    refuseAccountLinkedMcp();
   });
 
   addRoute(routes, "GET", "/mcp/oauth/callback", "none", async () => {
-    assertMcpAllowed(config);
+    refuseAccountLinkedMcp();
   });
 
   const managedGatewayHandler = async () => {
-    assertMcpAllowed(config);
+    refuseAccountLinkedMcp();
   };
   addRoute(routes, "POST", "/mcp/managed/:workspaceId/:name", "none", managedGatewayHandler);
   addRoute(routes, "GET", "/mcp/managed/:workspaceId/:name", "none", managedGatewayHandler);
   addRoute(routes, "DELETE", "/mcp/managed/:workspaceId/:name", "none", managedGatewayHandler);
 
-  addRoute(routes, "POST", "/workspace/:id/mcp", "client", async () => {
+  // Adds a local MCP server the list allows (addMcp refuses others with the
+  // reason). It reaches the engine through the MCP plugin when the project's
+  // engine instance reloads (the reload event below).
+  addRoute(routes, "POST", "/workspace/:id/mcp", "client", async (ctx) => {
     assertMcpAllowed(config);
+    ensureWritable(config);
+    requireClientScope(ctx, "collaborator");
+    const workspace = await resolveWorkspace(config, ctx.params.id);
+    if (workspace.workspaceType === "remote") throw new ApiError(400, "mcp_remote_workspace", "MCP servers can be added to local projects only.");
+    const body = await readJsonBody(ctx.request);
+    const name = String(body.name ?? "");
+    validateUserMcpName(name);
+    const configPayload = body.config as Record<string, unknown> | undefined;
+    if (!configPayload || typeof configPayload !== "object" || Array.isArray(configPayload)) {
+      throw new ApiError(400, "invalid_payload", "MCP config is required");
+    }
+    await requireApproval(ctx, {
+      workspaceId: workspace.id,
+      action: "mcp.add",
+      summary: `Add MCP ${name}`,
+      paths: [omnirushConfigPath(workspace.path)],
+    });
+    const result = await addMcp(config, workspace.id, name, configPayload, resolveOpencodeDirectory(workspace) || workspace.path);
+    await syncRuntimeMcpToOpencodeEngine(config, workspace, [name], undefined, engineMcpServerState).catch(() => undefined);
+    await recordAudit(workspace.path, {
+      id: shortId(),
+      workspaceId: workspace.id,
+      actor: ctx.actor ?? { type: "remote" },
+      action: "mcp.add",
+      target: omnirushConfigPath(workspace.path),
+      summary: `Added MCP ${name}`,
+      timestamp: Date.now(),
+    });
+    emitReloadEvent(ctx.reloadEvents, workspace, "mcp", {
+      type: "mcp",
+      name,
+      action: result.action,
+    });
+    const items = await listMcp(config, workspace.id, workspace.path);
+    return jsonResponse({ items });
   });
 
   addRoute(routes, "DELETE", "/workspace/:id/mcp/:name", "client", async (ctx) => {
@@ -5129,6 +5186,7 @@ function createRoutes(
           deleteEngineMcpRegistration(config, engineMcpServerState, affectedWorkspace, removedName);
           await disconnectMcpFromOpencodeEngine(config, affectedWorkspace, removedName).catch(() => undefined);
         }
+        await syncRuntimeMcpToOpencodeEngine(config, affectedWorkspace, undefined, undefined, engineMcpServerState).catch(() => undefined);
       }));
       emitReloadEvent(ctx.reloadEvents, workspace, "mcp", {
         type: "mcp",
@@ -6160,17 +6218,8 @@ function enqueueWorkspaceMcpRefreshSync(request: WorkspaceMcpRefreshRequest): Pr
 
 async function runWorkspaceMcpRefreshSync(input: WorkspaceMcpRefreshRequest): Promise<void> {
   const { config, workspace, trigger } = input;
-  if (!mcpAllowed(config)) {
-    // The policy is also applied at engine config/proxy level; skip cloud
-    // reconciliation so a background timer cannot recreate a live MCP entry.
-    await syncRuntimeMcpToOpencodeEngine(config, workspace, undefined, undefined, input.serverState ?? null).catch(() => undefined);
-    return;
-  }
-  const directory = resolveOpencodeDirectory(workspace);
-  // Re-register runtime-DB MCPs: a rebuilt instance reads disk configs
-  // (including the server-managed runtime config file for the primary
-  // workspace), but other workspaces' runtime MCPs only reach the engine
-  // through this dynamic push.
+  // The project's app-added MCP entries go to the file the engine's MCP plugin
+  // reads. The account-linked Connect server is never reconciled (not run here).
   try {
     await syncRuntimeMcpToOpencodeEngine(
       config,
@@ -6181,28 +6230,6 @@ async function runWorkspaceMcpRefreshSync(input: WorkspaceMcpRefreshRequest): Pr
     );
   } catch (error) {
     logRuntimeMcpSyncError({ config, workspace, trigger, error });
-  }
-  try {
-    const health = await reconcilePersistedOmniRushCloudMcp({
-      config,
-      workspace,
-      directory,
-      serverMetadata: { serverVersion: SERVER_VERSION, expectedOpencodeVersion: OPENCODE_VERSION },
-      createWorkspaceOpencodeClient,
-      refreshRegistrationFromLiveStatus: refreshEngineMcpRegistrationFromLiveStatus,
-      registerRuntimeMcp: (routeConfig, routeWorkspace, onlyNames, options) =>
-        syncRuntimeMcpToOpencodeEngine(
-          routeConfig,
-          routeWorkspace,
-          onlyNames,
-          options,
-          input.serverState ?? null,
-        ),
-      trigger,
-    });
-    logPersistedCloudMcpReconcileResult({ config, workspace, trigger, health });
-  } catch (error) {
-    logPersistedCloudMcpReconcileError({ config, workspace, trigger, error });
   }
   // The reconcile above may write the ENGINE_GLOBAL runtime row; refresh the
   // engine-visible file synchronously so the next provider-sync pass compares
@@ -6229,142 +6256,76 @@ async function syncRuntimeMcpToOpencodeEngine(
   options?: { throwOnFailure?: boolean; deferred?: boolean },
   serverState?: EngineMcpServerState | null,
 ): Promise<EngineMcpSyncResult> {
-  if (!mcpAllowed(config)) {
-    const state = activeEngineMcpServerState(config, serverState);
-    const recordedNames = state
-      ? [...(state.registrationByWorkspace.get(workspace.id)?.keys() ?? [])]
-      : [];
-    const liveNames = await readEngineMcpNames(config, workspace).catch(() => []);
-    const names = [...new Set([...recordedNames, ...liveNames])]
-      .filter((name) => !onlyNames || onlyNames.includes(name));
-    await Promise.all(names.map(async (name) => {
-      if (state) deleteEngineMcpRegistration(config, state, workspace, name);
-      await disconnectMcpFromOpencodeEngine(config, workspace, name).catch(() => undefined);
-    }));
-    return { status: "skipped", syncedNames: [], failures: [] };
-  }
-  const activeState = activeEngineMcpServerState(config, serverState);
-  const coordinationState = activeEngineMcpServerState(config);
-  if (!coordinationState) {
-    return runRuntimeMcpSyncToOpencodeEngine(config, workspace, onlyNames, options, serverState);
-  }
-  if (activeState) {
-    reconcileEngineMcpWorkspaceIdentity(
-      activeState,
-      workspace.id,
-      engineMcpConnectionIdentity(config, workspace),
-    );
-    if (!options?.deferred) cancelDeferredEngineMcpSync(activeState, workspace.id);
-  }
-  return withEngineMcpRegistrationLock(coordinationState, workspace.id, () =>
-    runRuntimeMcpSyncToOpencodeEngine(config, workspace, onlyNames, options, serverState)
-  );
+  // Nothing is pushed into a running engine: every MCP server goes through the
+  // engine's MCP plugin (the server's list), which reads the project's
+  // app-added entries from this file when the project's instance starts.
+  await writeWorkspaceMcpFile(config, workspace);
+  const state = activeEngineMcpServerState(config, serverState);
+  const recordedNames = (state ? [...(state.registrationByWorkspace.get(workspace.id)?.keys() ?? [])] : [])
+    .filter((name) => !onlyNames || onlyNames.includes(name));
+  // Registrations an earlier push made (never by this version) are taken down.
+  await Promise.all(recordedNames.map(async (name) => {
+    if (state) deleteEngineMcpRegistration(config, state, workspace, name);
+    await disconnectMcpFromOpencodeEngine(config, workspace, name).catch(() => undefined);
+  }));
+  return { status: "skipped", syncedNames: [], failures: [] };
 }
 
-async function runRuntimeMcpSyncToOpencodeEngine(
-  config: ServerConfig,
-  workspace: WorkspaceInfo,
-  onlyNames?: string[],
-  options?: { throwOnFailure?: boolean; deferred?: boolean },
-  serverState?: EngineMcpServerState | null,
-): Promise<EngineMcpSyncResult> {
-  const activeState = activeEngineMcpServerState(config, serverState);
-  const connection = resolveWorkspaceOpencodeConnection(config, workspace);
-  const baseUrl = connection.baseUrl?.trim() ?? "";
-  const connectionIdentity = engineMcpConnectionIdentity(config, workspace);
-  const registrationIdentity = engineMcpRegistrationIdentity(config, workspace);
-  if (activeState) reconcileEngineMcpWorkspaceIdentity(activeState, workspace.id, connectionIdentity);
-  if (activeState && !options?.deferred) cancelDeferredEngineMcpSync(activeState, workspace.id);
-  if (!baseUrl || !connectionIdentity) {
-    return { status: "skipped", syncedNames: [], failures: [] };
-  }
-
-  const runtimeConfig = await readEffectiveRuntimeOpencodeConfig(config, workspace.id);
-  const entries = Object.entries(runtimeMcpMap(runtimeConfig)).filter(
-    ([name]) => !name.startsWith(CONNECT_MCP_SERVER_NAME_PREFIX)
-      && (!onlyNames || onlyNames.includes(name)),
-  );
-  if (entries.length === 0) {
-    if (!onlyNames) {
-      recordEngineMcpSyncResult(
-        config,
-        activeState ?? null,
-        workspace,
-        connectionIdentity,
-        registrationIdentity,
-        {
-          entries: [],
-          failures: [],
-          replace: true,
-        },
-      );
-    }
-    return { status: "skipped", syncedNames: [], failures: [] };
-  }
-
-  const url = new URL(baseUrl);
-  url.pathname = "/mcp";
-  url.search = "";
-  const directory = resolveOpencodeDirectory(workspace);
-  if (directory) url.searchParams.set("directory", directory);
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (connection.authHeader) headers.Authorization = connection.authHeader;
-
-  // Keep going past per-entry failures: one dead or invalid MCP must not
-  // block re-registration of every entry after it (e.g. omnirush-ui) on
-  // each engine reload.
-  const failures: EngineMcpSyncFailure[] = [];
-  const registrations: EngineMcpRegistrationResult[] = [];
-  for (const [name, mcpConfig] of entries) {
-    const registration = await withEngineDirectoryFence(config, workspace, () =>
-      registerRuntimeMcpEntry(config, workspace, url, headers, name, mcpConfig)
-    );
-    registrations.push(registration);
-    if (registration.failure) failures.push(registration.failure);
-  }
-
-  recordEngineMcpSyncResult(
-    config,
-    activeState ?? null,
-    workspace,
-    connectionIdentity,
-    registrationIdentity,
-    {
-      entries,
-      registrations,
-      failures,
-      // A full sync covered every runtime entry, so its result replaces any
-      // previously recorded failures (e.g. for since-removed MCPs).
-      replace: !onlyNames,
-    },
-  );
-
-  if (failures.length > 0) {
-    if (activeState && (!options?.deferred || failures.some((failure) => failure.deferredForActivity)) && hasRetryableMcpSyncFailure(failures)) {
-      scheduleDeferredEngineMcpSync({
-        config,
-        state: activeState,
-        workspace,
-        connectionIdentity,
-        onlyNames,
-      });
-    }
-    const names = failures.map((failure) => failure.name).join(", ");
-    createServerLogger(config).log("warn", `Engine MCP sync failed for workspace ${workspace.id}: ${names}`, {
+/** The project's app-added MCP entries (runtime row) for the engine's MCP plugin. */
+async function writeWorkspaceMcpFile(config: ServerConfig, workspace: WorkspaceInfo): Promise<void> {
+  if (workspace.workspaceType === "remote") return;
+  const runtimeConfig = await readRuntimeOpencodeConfig(config, workspace.id).catch(() => ({}) as RuntimeOpencodeConfig);
+  const entries = Object.fromEntries(Object.entries(runtimeMcpMap(runtimeConfig))
+    .filter(([name, entry]) => !name.startsWith(CONNECT_MCP_SERVER_NAME_PREFIX) && name !== OMNIRUSH_CLOUD_MCP_NAME && !isOmniRushUiMcpRegistryEntry(entry)));
+  try {
+    writeWorkspaceMcp(runtimeStorageDir(config), resolveOpencodeDirectory(workspace) || workspace.path, entries);
+  } catch (error) {
+    createServerLogger(config).log("warn", "Could not write the project's MCP servers for the engine.", {
       "workspace.id": workspace.id,
-      "mcp.failed": names,
+      error: error instanceof Error ? error.message : String(error),
     });
-    if (options?.throwOnFailure !== false) {
-      throw new ApiError(502, "opencode_mcp_sync_failed", `Failed to register MCPs with the engine: ${names}`, {
-        failures,
-      });
-    }
   }
+}
 
+/**
+ * The engine's own MCP routes through the proxy: reading the list and
+ * connecting or disconnecting a configured server are fine; adding a server
+ * at runtime (it would skip the list) or its OAuth flow are not.
+ */
+function assertEngineMcpRouteAllowed(config: ServerConfig, method: string, routePath: string): void {
+  const match = /^(?:\/api)?\/mcp(?:\/(.*))?$/.exec(routePath.split("?")[0] ?? "");
+  if (!match) return;
+  if (method === "GET" || method === "HEAD") return;
+  const rest = match[1] ?? "";
+  if (/^[^/]+\/(?:connect|disconnect)\/?$/.test(rest)) {
+    assertMcpAllowed(config);
+    return;
+  }
+  if (/^[^/]+\/auth(?:\/|$)/.test(rest)) refuseAccountLinkedMcp();
+  throw new ApiError(403, "engine_mcp_managed", "Add MCP servers in Settings > MCP: only the supported servers run.");
+}
+
+/** A supported server as a one-click preset: what it is, and the command it adds. */
+function mcpPreset(entry: McpAllowEntry): { id: string; title: string; why: string | null; runtime: string; package: string; version: string | null; versions: string; command: string[]; localPagesOnly: boolean } {
+  // The file a database server needs is a placeholder in the project: data.db.
+  const placeholder = /sqlite|db/i.test(`${entry.id} ${entry.package}`) ? "data.db" : ".";
+  const args: string[] = [...(entry.rules.default_args ?? [])];
+  for (const flag of entry.rules.require_flags ?? []) {
+    if (args.includes(flag)) continue;
+    args.push(flag, placeholder);
+  }
+  while (args.filter((arg) => !arg.startsWith("-")).length < (entry.rules.min_args ?? 0)) args.push(placeholder);
+  const command = entry.runtime === "npm" ? ["npx", "-y", entry.package, ...args] : ["uvx", entry.package, ...args];
   return {
-    status: failures.length > 0 ? "failed" : "ok",
-    syncedNames: entries.map(([name]) => name),
-    failures,
+    id: entry.id,
+    title: entry.title,
+    why: entry.why,
+    runtime: entry.runtime,
+    package: entry.package,
+    version: entry.pin,
+    versions: entry.versions,
+    command,
+    localPagesOnly: entry.rules.local_urls === true,
   };
 }
 

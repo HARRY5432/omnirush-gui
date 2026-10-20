@@ -11,7 +11,7 @@ import {
   type CloudMcpLiveStatusObserver,
 } from "../cloud-mcp-health.js";
 import { ApiError } from "../errors.js";
-import { assertMcpAllowed } from "../mcp-policy.js";
+import { refuseAccountLinkedMcp } from "../mcp-policy.js";
 import type { ServerConfig, TokenScope, WorkspaceInfo } from "../types.js";
 import { addRoute, type RequestContext, type Route } from "./registry.js";
 
@@ -96,14 +96,14 @@ export function registerCloudMcpRoutes(options: RegisterCloudMcpRoutesOptions): 
   } = options;
 
   addRoute(routes, "GET", "/workspace/:id/mcp/omnirush-cloud/health", "client", async () => {
-    assertMcpAllowed(config);
+    refuseAccountLinkedMcp();
   });
 
   addRoute(routes, "POST", "/workspace/:id/mcp/omnirush-cloud/engine-refresh", "client", async () => {
-    assertMcpAllowed(config);
+    refuseAccountLinkedMcp();
   });
 
   addRoute(routes, "POST", "/workspace/:id/mcp/omnirush-cloud/reconcile", "client", async () => {
-    assertMcpAllowed(config);
+    refuseAccountLinkedMcp();
   });
 }

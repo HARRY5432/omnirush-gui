@@ -50,6 +50,8 @@ import { assertOpencodeConfigCompat } from "./opencode-config-compat.js";
 import { adoptOpencodeCredentials, startEngine2SessionImport } from "./engine2/import.js";
 import type { ServeResult } from "./serve-node.js";
 import type { CaptureFileUpload, LocalManagedMcpVaultKeyProvider, OmniRushGatewayCredentials, ServerConfig } from "./types.js";
+import { mcpEngineEnv } from "./mcp-allow/state.js";
+import { runtimeStorageDir } from "./runtime-db.js";
 
 export type EmbeddedServerOptions = CliArgs & {
   /** When true, spawn a managed OpenCode child process. */
@@ -277,6 +279,8 @@ export async function startEmbeddedServer(options: EmbeddedServerOptions): Promi
         OMNIRUSH_POLICY_TOKEN: managedDesktopPolicy(config).evaluationToken,
         OPENCODE_CONFIG: runtimeConfigPath,
         ...opencodeModelsEnv,
+        // The MCP plugin's policy, report and app-added servers (mcp-allow/state.ts).
+        ...mcpEngineEnv(runtimeStorageDir(config)),
         ...pluginsNoDepsEnv(omnirushOwnPluginPaths()),
         // Agent assist: the plugin's switch file and notes folder, the language servers' heap cap.
         ...agentAssistEngineEnv(config, process.env, { diagnostics: agentAssistFlags(await readGlobalRuntimeOpencodeConfig(config)).diagnostics }),

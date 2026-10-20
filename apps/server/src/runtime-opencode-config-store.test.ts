@@ -122,16 +122,24 @@ describe("runtime OpenCode config store", () => {
           ...current,
           mcp: { posthog: { type: "remote", url: "https://mcp.posthog.com/mcp", enabled: false } },
         }));
-        expect(third.changed).toBe(false);
-        expect(third.config).toEqual(first.config);
-        expect(writes).toBe(1);
+        // A project's MCP entries are kept (the engine plugin applies the server's list).
+        expect(third.changed).toBe(true);
+        expect(third.config.mcp).toEqual({ posthog: { type: "remote", url: "https://mcp.posthog.com/mcp", enabled: false } });
+        expect(writes).toBe(2);
+
+        const global = await writeGlobalRuntimeOpencodeConfig(config, (current) => ({
+          ...current,
+          mcp: { "omnirush-cloud": { type: "remote", url: "https://cloud.example/mcp" } },
+        }));
+        // The global row's MCP is the account-linked Connect server: never stored.
+        expect(global.config.mcp).toBeUndefined();
       } finally {
         unsubscribe();
       }
     });
   });
 
-  test("drops MCP writes without rewriting workspace files", async () => {
+  test("keeps a project's MCP writes in the runtime DB without rewriting workspace files", async () => {
     await withWorkspace(async ({ root, config }) => {
       const opencodePath = join(root, "opencode.jsonc");
       const opencode = '{\n  "mcp": {\n    "project": { "type": "remote", "url": "https://project.example/mcp" }\n  }\n}\n';
@@ -145,10 +153,12 @@ describe("runtime OpenCode config store", () => {
       expect(await readFile(opencodePath, "utf8")).toBe(opencode);
       await expectMissing(join(root, ".opencode", "omnirush.json"));
       expect(result.changed).toBe(true);
-      expect((await readRuntimeOpencodeConfig(config, WORKSPACE_ID)).mcp).toBeUndefined();
+      expect((await readRuntimeOpencodeConfig(config, WORKSPACE_ID)).mcp).toEqual({
+        runtime: { type: "remote", url: "https://runtime.example/mcp", enabled: true },
+      });
 
       const items = await listMcp(config, WORKSPACE_ID, root);
-      expect(items).toEqual([]);
+      expect(items.map((item) => item.name).sort()).toEqual(["project", "runtime"]);
     });
   });
 
@@ -175,7 +185,7 @@ describe("runtime OpenCode config store", () => {
         mcp?: Record<string, Record<string, unknown>>;
       };
       expect(runtimeConfig.plugin).toContain("runtime-plugin");
-      // Per-workspace MCPs reach the engine via the dynamic push, not the file.
+      // Per-workspace MCPs reach the engine through its MCP plugin, not the file.
       expect(runtimeConfig.mcp?.runtime).toBeUndefined();
     });
   });

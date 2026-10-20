@@ -6,7 +6,10 @@ import { readJsoncFile } from "./jsonc.js";
 import { opencodeConfigPath } from "./workspace-files.js";
 import { validateMcpConfig, validateMcpName, validateUserMcpName } from "./validators.js";
 import { ApiError } from "./errors.js";
-import { assertMcpAllowed, mcpAllowed, MCP_DISABLED_MESSAGE } from "./mcp-policy.js";
+import { assertMcpAllowed, MCP_DISABLED_MESSAGE } from "./mcp-policy.js";
+import { decideMcpEntry } from "./mcp-allow/state.js";
+import { runtimeStorageDir } from "./runtime-db.js";
+import { isOmniRushUiMcpRegistryEntry, OMNIRUSH_UI_MCP_REGISTRY_COMMAND_MESSAGE } from "./omnirush-ui-mcp-command.js";
 import {
   readRuntimeOpencodeConfig,
   runtimeMcpMap,
@@ -476,8 +479,12 @@ function isMcpDisabledByTools(config: Record<string, unknown>, name: string): bo
   return deniedToolIds([config], "", [`${sanitizedName}___omnirush_mcp_probe__`]).length > 0;
 }
 
+/**
+ * The project's configured MCP entries (its config files and the app's
+ * runtime row), listed whether MCP is on or off: the MCP view shows each with
+ * the engine plugin's decision (on, or blocked and why).
+ */
 export async function listMcp(serverConfig: ServerConfig, workspaceId: string, workspaceRoot: string): Promise<McpItem[]> {
-  if (!mcpAllowed(serverConfig)) return [];
   return listMcpFromRuntimeSnapshot(workspaceRoot, await readRuntimeOpencodeConfig(serverConfig, workspaceId));
 }
 
@@ -610,13 +617,17 @@ export async function configuredMcpNames(
   ])].sort();
 }
 
+/** The preview engine (v2) cannot apply the server's MCP list: MCP stays off there. */
+export const MCP_ENGINE_V2_MESSAGE =
+  "MCP servers are off with the preview engine. Turn the preview engine off to use this project's MCP servers, or remove them.";
+
 export async function assertNoConfiguredMcp(
   workspaceRoot: string,
   runtimeConfig: RuntimeOpencodeConfig = {},
 ): Promise<void> {
   const names = await configuredMcpNames(workspaceRoot, runtimeConfig);
   if (names.length === 0) return;
-  throw new ApiError(403, "mcp_disabled", MCP_DISABLED_MESSAGE, { servers: names });
+  throw new ApiError(403, "mcp_disabled", MCP_ENGINE_V2_MESSAGE, { servers: names });
 }
 
 /**
@@ -702,10 +713,17 @@ export async function addMcp(
   workspaceId: string,
   name: string,
   config: Record<string, unknown>,
+  workspaceRoot?: string,
 ): Promise<{ action: "added" | "updated" }> {
   assertMcpAllowed(serverConfig);
   validateUserMcpName(name);
   validateMcpConfig(config);
+  // Only a server the list allows is saved (its reason otherwise); the engine
+  // plugin applies the same list again when the project starts.
+  const decision = decideMcpEntry(runtimeStorageDir(serverConfig), workspaceRoot ?? process.cwd(), name, config);
+  if (decision.status !== "allowed") {
+    throw new ApiError(403, "mcp_not_supported", decision.reason ?? MCP_DISABLED_MESSAGE, { code: decision.code });
+  }
   const runtimeConfig = await readRuntimeOpencodeConfig(serverConfig, workspaceId);
   const mcpMap = { ...runtimeMcpMap(runtimeConfig) };
   const existed = Object.prototype.hasOwnProperty.call(mcpMap, name);
@@ -743,7 +761,22 @@ export async function setMcpEnabled(
   const runtimeConfig = await readRuntimeOpencodeConfig(serverConfig, workspaceId);
   const mcpMap = { ...runtimeMcpMap(runtimeConfig) };
   if (!Object.prototype.hasOwnProperty.call(mcpMap, name)) return false;
-  delete mcpMap[name];
+  const current = mcpMap[name];
+  if (!current || typeof current !== "object" || Array.isArray(current)) return false;
+  if (isOmniRushUiMcpRegistryEntry(current)) {
+    // Never re-enable a registry launch of omnirush-ui-mcp. Disabling one
+    // removes it: the runtime store does not keep such entries.
+    if (enabled) throw new ApiError(400, "unsafe_mcp_command", OMNIRUSH_UI_MCP_REGISTRY_COMMAND_MESSAGE);
+    delete mcpMap[name];
+    await writeRuntimeOpencodeConfig(serverConfig, workspaceId, (currentConfig) => ({ ...currentConfig, mcp: mcpMap }));
+    return true;
+  }
+  try {
+    validateMcpConfig({ ...(current as Record<string, unknown>), enabled });
+  } catch {
+    return false;
+  }
+  mcpMap[name] = { ...(current as Record<string, unknown>), enabled };
   await writeRuntimeOpencodeConfig(serverConfig, workspaceId, (currentConfig) => ({ ...currentConfig, mcp: mcpMap }));
   return true;
 }

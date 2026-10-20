@@ -34,6 +34,8 @@ import { assertOpencodeConfigCompat } from "./opencode-config-compat.js";
 import { adoptOpencodeCredentials, startEngine2SessionImport } from "./engine2/import.js";
 import { startWorkerActivityHeartbeat } from "./worker-activity-heartbeat.js";
 import pkg from "../package.json" with { type: "json" };
+import { mcpEngineEnv } from "./mcp-allow/state.js";
+import { runtimeStorageDir } from "./runtime-db.js";
 
 const args = parseCliArgs(process.argv.slice(2));
 
@@ -97,6 +99,8 @@ if (!config.opencodeBaseUrl && process.env.OMNIRUSH_MANAGE_OPENCODE === "1") {
       OMNIRUSH_POLICY_TOKEN: managedDesktopPolicy(config).evaluationToken,
       OPENCODE_CONFIG: runtimeConfigPath,
       ...opencodeModelsEnv,
+      // The MCP plugin's policy, report and app-added servers (mcp-allow/state.ts).
+      ...mcpEngineEnv(runtimeStorageDir(config)),
     };
     const engineSpawnTemplate: EngineSpawnTemplate = {
       bin: process.env.OMNIRUSH_OPENCODE_BIN,
