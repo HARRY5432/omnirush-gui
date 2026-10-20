@@ -11,8 +11,11 @@ export type GutterMark = {
   removed: number;
 };
 
-/** Beyond this many differing lines the gutter gives up (null): a whole-file rewrite needs no per-line marks. */
-export const MAX_EDIT_DISTANCE = 4_000;
+/**
+ * Beyond this many differing lines the gutter gives up (null): a whole-file rewrite needs no per-line marks. The
+ * trace kept for the walk back is O(D²) numbers (about 4 MB at this cap), whatever the file's length.
+ */
+export const MAX_EDIT_DISTANCE = 1_000;
 
 type Edit = { kind: "equal" | "insert" | "delete"; count: number };
 
@@ -38,10 +41,11 @@ export function diffLines(before: readonly string[], after: readonly string[], m
     const max = n + m;
     const offset = max;
     const v = new Int32Array(2 * max + 2);
+    // trace[d]: v for diagonals -(d+1)..d+1 before step d (the walk back reads k-1 and k+1), at index k + d + 1.
     const trace: Int32Array[] = [];
     let found = -1;
     for (let d = 0; d <= Math.min(max, maxD); d += 1) {
-      trace.push(v.slice());
+      trace.push(v.slice(offset - d - 1, offset + d + 2));
       for (let k = -d; k <= d; k += 2) {
         let x = k === -d || (k !== d && v[offset + k - 1]! < v[offset + k + 1]!) ? v[offset + k + 1]! : v[offset + k - 1]! + 1;
         let y = x - k;
@@ -64,9 +68,10 @@ export function diffLines(before: readonly string[], after: readonly string[], m
     let y = m;
     for (let d = found; d > 0; d -= 1) {
       const vd = trace[d]!;
+      const at = (k: number) => vd[k + d + 1]!;
       const k = x - y;
-      const prevK = k === -d || (k !== d && vd[offset + k - 1]! < vd[offset + k + 1]!) ? k + 1 : k - 1;
-      const prevX = vd[offset + prevK]!;
+      const prevK = k === -d || (k !== d && at(k - 1) < at(k + 1)) ? k + 1 : k - 1;
+      const prevX = at(prevK);
       const prevY = prevX - prevK;
       while (x > prevX && y > prevY) {
         steps.push("equal");

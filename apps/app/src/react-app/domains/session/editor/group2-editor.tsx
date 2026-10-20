@@ -8,7 +8,7 @@ import type * as MonacoApi from "monaco-editor/editor/editor.api.js";
 
 import { monacoOptionsFor, useEditorSettings } from "./editor-settings";
 import type { AgentAction } from "./editor-surface";
-import { addGroupKeys, monacoThemeName, type Monaco } from "./monaco";
+import { addGroupKeys, monacoThemeName, scopeEditor, type Monaco } from "./monaco";
 
 export function Group2Editor(props: {
   monaco: Monaco;
@@ -45,8 +45,18 @@ export function Group2Editor(props: {
       editor.onDidFocusEditorWidget(() => latest.current.onFocus()),
       editor.onDidBlurEditorWidget(() => window.dispatchEvent(new Event("omnirush:editor-blur"))),
     ];
-    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => latest.current.onSave());
-    addGroupKeys(monaco, editor);
+    // Keys scoped to this editor (Monaco shares keybindings between editors; see scopeEditor).
+    const context = scopeEditor(editor, "group2");
+    disposables.push(
+      editor.addAction({
+        id: "omnirush.editor.saveGroup2",
+        label: "Save",
+        keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
+        keybindingContext: context,
+        run: () => latest.current.onSave(),
+      }),
+      addGroupKeys(monaco, editor, context),
+    );
     const actions: Array<{ id: string; label: string; action: AgentAction; keys: number[]; order: number }> = [
       { id: "omnirush.agent.ask", label: "Ask about selection", action: "ask", keys: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyL], order: 1 },
       { id: "omnirush.agent.explain", label: "Explain with agent", action: "explain", keys: [], order: 2 },
@@ -58,6 +68,7 @@ export function Group2Editor(props: {
         id: item.id,
         label: item.label,
         keybindings: item.keys,
+        keybindingContext: context,
         contextMenuGroupId: "navigation",
         contextMenuOrder: item.order / 10,
         run: (target) => latest.current.onAgentAction(item.action, target),

@@ -8,12 +8,13 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import { ApiError } from "../errors.js";
-import type { ServerConfig, WorkspaceInfo } from "../types.js";
-import { addRoute, type Route } from "./registry.js";
+import type { ServerConfig, TokenScope, WorkspaceInfo } from "../types.js";
+import { addRoute, type RequestContext, type Route } from "./registry.js";
 import { findOnPath } from "./editor-search.js";
 
 const MAX_TEXT = 2_000_000;
-const FORMAT_TIMEOUT_MS = 5_000;
+/** As long as the editor waits (3 s): a slower formatter is stopped, the save has already gone out unformatted. */
+const FORMAT_TIMEOUT_MS = 3_000;
 
 const PRETTIER_EXTENSIONS = new Set([
   ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".json", ".jsonc", ".json5", ".css", ".scss", ".less",
@@ -28,6 +29,8 @@ type RegisterOptions = {
   jsonResponse: (data: unknown, status?: number) => Response;
   readJsonBody: (request: Request) => Promise<Record<string, unknown>>;
   resolveWorkspace: (config: ServerConfig, id: string) => Promise<WorkspaceInfo>;
+  ensureWritable: (config: ServerConfig) => void;
+  requireClientScope: (ctx: RequestContext, required: TokenScope) => void;
 };
 
 function readText(path: string): string | null {
@@ -141,12 +144,15 @@ export function runFormatter(formatter: Formatter, cwd: string, text: string, ti
 }
 
 export function registerEditorFormatRoutes(options: RegisterOptions): void {
-  const { routes, config, jsonResponse, readJsonBody, resolveWorkspace } = options;
+  const { routes, config, jsonResponse, readJsonBody, resolveWorkspace, ensureWritable, requireClientScope } = options;
   addRoute(routes, "GET", "/workspace/:id/editor/formatters", "client", async (ctx) => {
     const workspace = await resolveWorkspace(config, ctx.params.id);
     return jsonResponse({ formatters: projectFormatters(resolve(workspace.path)) });
   });
   addRoute(routes, "POST", "/workspace/:id/editor/format", "client", async (ctx) => {
+    // It runs the project's own code (the formatter, its config and plugins): as for saving, a writer's action.
+    ensureWritable(config);
+    requireClientScope(ctx, "collaborator");
     const workspace = await resolveWorkspace(config, ctx.params.id);
     const root = resolve(workspace.path);
     const body = await readJsonBody(ctx.request);

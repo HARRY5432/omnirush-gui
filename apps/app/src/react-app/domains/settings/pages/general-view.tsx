@@ -1,6 +1,7 @@
 /** @jsxImportSource react */
 import { useEffect, useState } from "react";
-import { Code2,
+import {
+  Code2,
   ArrowRight,
   Bot,
   Coffee,

@@ -22,6 +22,13 @@ function diffInWorker(head: string, current: string): Promise<GutterMark[] | nul
       pending.get(event.data.id)?.(event.data.marks);
       pending.delete(event.data.id);
     };
+    // A crashed worker: pending diffs end without marks, the next one starts a new worker.
+    worker.onerror = () => {
+      for (const resolve of pending.values()) resolve(null);
+      pending.clear();
+      worker?.terminate();
+      worker = null;
+    };
   }
   const id = (nextId += 1);
   return new Promise((resolve) => {

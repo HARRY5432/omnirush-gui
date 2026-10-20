@@ -1067,11 +1067,13 @@ export default function EditorPanel(props: EditorPanelProps) {
         }
         return;
       }
-      // Typed while the formatter ran: that text wins, unformatted.
-      if (model.getAlternativeVersionId() !== version || outcome.text === model.getValue()) return;
+      // Typed while the formatter ran: that text wins, unformatted. Line endings alone are no change.
+      const lf = (text: string) => text.replace(/\r\n/g, "\n");
+      if (model.getAlternativeVersionId() !== version || lf(outcome.text) === lf(model.getValue())) return;
       model.pushStackElement();
       model.pushEditOperations([], [{ range: model.getFullModelRange(), text: outcome.text }], () => null);
       model.pushStackElement();
+      toast(`Formatted with ${outcome.formatter}`, { duration: 1500 });
     } catch {
       toast("Couldn't format this file; it was saved as is.");
     }
@@ -1113,20 +1115,6 @@ export default function EditorPanel(props: EditorPanelProps) {
   const autoSaveTimers = useRef(new Map<string, number>());
   const heldForAgent = useRef(new Set<string>());
   const agentBusyRef = useRef(agentBusy);
-  useEffect(() => {
-    if (autoSave !== "afterDelay" || !surface || surface.kind !== "file") return;
-    const doc = surface.doc;
-    const subscription = doc.model.onDidChangeContent(() => {
-      const timers = autoSaveTimers.current;
-      window.clearTimeout(timers.get(doc.path));
-      timers.set(doc.path, window.setTimeout(() => {
-        timers.delete(doc.path);
-        if (agentBusyRef.current) heldForAgent.current.add(doc.path);
-        else void saveFile(doc.path, "delay");
-      }, AUTO_SAVE_DELAY_MS));
-    });
-    return () => subscription.dispose();
-  }, [autoSave, saveFile, surface]);
   useEffect(() => {
     agentBusyRef.current = agentBusy;
     if (agentBusy || !heldForAgent.current.size) return;
@@ -1225,10 +1213,14 @@ export default function EditorPanel(props: EditorPanelProps) {
     return () => observer.disconnect();
   }, []);
   const splitAllowed = editorWidth === 0 || editorWidth >= MIN_GROUP_PX * 2;
+  // Folds only when the width stays too small (not on one reading while panels settle or a sidebar animates).
   useEffect(() => {
     if (!group2 || splitAllowed) return;
-    useEditorStore.getState().foldGroup2(workspaceId);
-    toast("The window got too narrow for two editor groups, so they were joined. Split again when it is wider.");
+    const timer = window.setTimeout(() => {
+      useEditorStore.getState().foldGroup2(workspaceId);
+      toast("The window got too narrow for two editor groups, so they were joined. Split again when it is wider.");
+    }, 250);
+    return () => window.clearTimeout(timer);
   }, [group2, splitAllowed, workspaceId]);
   const splitGroupRef = useGroupRef();
 
@@ -1294,6 +1286,29 @@ export default function EditorPanel(props: EditorPanelProps) {
       if (!keepOpen) store.closeTab2(workspaceId, tab.id);
     }
   }, [splitAllowed, workspaceId]);
+
+  // The files shown in either group (typing happens there).
+  const shownDocs = useMemo(() => {
+    const list: FileDoc[] = [];
+    if (surface?.kind === "file") list.push(surface.doc);
+    if (group2Doc && state.group2 && !list.includes(group2Doc)) list.push(group2Doc);
+    return list;
+  }, [group2Doc, state.group2, surface]);
+  useEffect(() => {
+    if (autoSave !== "afterDelay" || !shownDocs.length) return;
+    const subscriptions = shownDocs.map((doc) => doc.model.onDidChangeContent(() => {
+      const timers = autoSaveTimers.current;
+      window.clearTimeout(timers.get(doc.path));
+      timers.set(doc.path, window.setTimeout(() => {
+        timers.delete(doc.path);
+        if (agentBusyRef.current) heldForAgent.current.add(doc.path);
+        else void saveFile(doc.path, "delay");
+      }, AUTO_SAVE_DELAY_MS));
+    }));
+    return () => {
+      for (const subscription of subscriptions) subscription.dispose();
+    };
+  }, [autoSave, saveFile, shownDocs]);
 
   // Commands from the app's shortcuts and palette (use-shell-shortcuts.ts, session-route.tsx).
   useEffect(() => {
@@ -1431,6 +1446,11 @@ export default function EditorPanel(props: EditorPanelProps) {
   );
 
   const mac = /Mac/i.test(navigator.platform);
+  /** A group takes the keyboard when used, except through the split / preview buttons: those act on the focused one. */
+  const focusFrom = (event: React.SyntheticEvent, group: 1 | 2) => {
+    if ((event.target as HTMLElement).closest("[data-editor-tools]")) return;
+    useEditorStore.getState().setFocusedGroup(group);
+  };
   const renderTab = (tab: EditorTab, group: 1 | 2, active: boolean) => {
     const name = tab.path.split("/").pop() ?? tab.path;
     const isDirty = (tab.kind === "file") && dirty?.[tab.path];
@@ -1490,7 +1510,7 @@ export default function EditorPanel(props: EditorPanelProps) {
 
   const focusedTab = focusedGroup === 2 ? group2Tab : activeTab;
   const tabTools = (
-    <div className="ms-auto flex shrink-0 items-center gap-0.5 px-1">
+    <div className="ms-auto flex shrink-0 items-center gap-0.5 px-1" data-editor-tools>
       {focusedTab && focusedTab.kind === "file" && isMarkdownPath(focusedTab.path) ? (
         <Tooltip>
           <TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label="Open preview to the side" onClick={() => openPreview("side")} data-editor-preview-button><Eye /></Button>} />
@@ -1522,8 +1542,8 @@ export default function EditorPanel(props: EditorPanelProps) {
     <div
       className="flex h-full min-h-0 min-w-0 flex-col"
       data-editor-group="1"
-      onFocusCapture={() => useEditorStore.getState().setFocusedGroup(1)}
-      onPointerDownCapture={() => useEditorStore.getState().setFocusedGroup(1)}
+      onFocusCapture={(event) => focusFrom(event, 1)}
+      onPointerDownCapture={(event) => focusFrom(event, 1)}
     >
       <div className="flex h-8 shrink-0 items-stretch overflow-x-auto border-b border-border [scrollbar-width:none]" role="tablist" data-editor-tabs>
         {state.tabs.map((tab) => renderTab(tab, 1, tab.id === state.activeId))}
@@ -1605,8 +1625,8 @@ export default function EditorPanel(props: EditorPanelProps) {
     <div
       className="flex h-full min-h-0 min-w-0 flex-col"
       data-editor-group="2"
-      onFocusCapture={() => useEditorStore.getState().setFocusedGroup(2)}
-      onPointerDownCapture={() => useEditorStore.getState().setFocusedGroup(2)}
+      onFocusCapture={(event) => focusFrom(event, 2)}
+      onPointerDownCapture={(event) => focusFrom(event, 2)}
     >
       <div className="flex h-8 shrink-0 items-stretch overflow-x-auto border-b border-border [scrollbar-width:none]" role="tablist" aria-label="Second editor group" data-editor-tabs-2>
         {group2.tabs.map((tab) => renderTab(tab, 2, tab.id === group2.activeId))}

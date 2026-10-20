@@ -64,19 +64,16 @@ export function MarkdownPreview(props: {
     };
   }, [props.model, props.isDirty]);
 
-  const html = useMemo(() => ({ __html: renderMarkdownHtml(text, "surface") }), [text]);
-
-  // Images: relative ones from the project (blob URLs, released with the render); remote ones not loaded.
-  useEffect(() => {
-    const root = rootRef.current;
-    if (!root) return;
-    const urls: string[] = [];
-    let cancelled = false;
-    let loaded = 0;
-    for (const image of Array.from(root.querySelectorAll("img"))) {
+  // Images are rewritten before the HTML reaches the page (a <template> loads nothing): a remote one becomes a
+  // placeholder with its address, a relative one keeps its path in data-src and loads from the project below.
+  const html = useMemo(() => {
+    const template = document.createElement("template");
+    template.innerHTML = renderMarkdownHtml(text, "surface");
+    for (const image of Array.from(template.content.querySelectorAll("img"))) {
       const src = image.getAttribute("src") ?? "";
       image.removeAttribute("srcset");
-      if (/^[a-z][a-z0-9+.-]*:/i.test(src) && !src.startsWith("blob:")) {
+      image.removeAttribute("src");
+      if (/^[a-z][a-z0-9+.-]*:/i.test(src) || src.startsWith("//")) {
         const note = document.createElement("span");
         note.className = "my-2 inline-block rounded-md border border-dashed border-border px-2 py-1 text-xs text-muted-foreground";
         note.textContent = `Remote image not loaded: ${src}`;
@@ -84,23 +81,43 @@ export function MarkdownPreview(props: {
         (image.closest("button") ?? image).replaceWith(note);
         continue;
       }
-      const target = resolveProjectPath(props.path, src);
-      image.removeAttribute("src");
+      image.dataset.src = src;
+    }
+    return { __html: template.innerHTML };
+  }, [text]);
+
+  // Project images, read once per path while the preview is open (typing re-renders the HTML, not the images).
+  const imageUrls = useRef(new Map<string, Promise<string | null>>());
+  useEffect(() => {
+    const urls = imageUrls.current;
+    return () => {
+      for (const url of urls.values()) void url.then((value) => value && URL.revokeObjectURL(value));
+      urls.clear();
+    };
+  }, [props.client, props.workspaceId]);
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    let cancelled = false;
+    let loaded = 0;
+    for (const image of Array.from(root.querySelectorAll<HTMLImageElement>("img[data-src]"))) {
+      const target = resolveProjectPath(props.path, image.dataset.src ?? "");
       if (!target || !isImagePath(target) || loaded >= MAX_IMAGES) continue;
       loaded += 1;
-      props.client.editorRaw(props.workspaceId, target).then(
-        (result) => {
-          if (cancelled) return;
-          const url = URL.createObjectURL(new Blob([result.data], { type: result.contentType ?? "application/octet-stream" }));
-          urls.push(url);
-          image.src = url;
-        },
-        () => undefined,
-      );
+      let url = imageUrls.current.get(target);
+      if (!url) {
+        url = props.client.editorRaw(props.workspaceId, target).then(
+          (result) => URL.createObjectURL(new Blob([result.data], { type: result.contentType ?? "application/octet-stream" })),
+          () => null,
+        );
+        imageUrls.current.set(target, url);
+      }
+      void url.then((value) => {
+        if (!cancelled && value) image.src = value;
+      });
     }
     return () => {
       cancelled = true;
-      for (const url of urls) URL.revokeObjectURL(url);
     };
   }, [html, props.client, props.path, props.workspaceId]);
 

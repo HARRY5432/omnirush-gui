@@ -1,6 +1,7 @@
 /** @jsxImportSource react */
 import type * as React from "react";
-import { Code2,
+import {
+  Code2,
   ArrowLeft,
   Bug,
   Cable,

@@ -39,3 +39,21 @@ describe("git gutter line diff", () => {
     expect(gutterLabel({ kind: "delete", startLine: 6, endLine: 6, removed: 1 })).toBe("1 line removed here since the last commit");
   });
 });
+
+describe("git gutter line diff on large files", () => {
+  test("many scattered changes in a large file stay bounded and correct", () => {
+    const head = Array.from({ length: 20_000 }, (_, i) => `line ${i}`);
+    const current = head.map((line, i) => (i % 40 === 0 ? `${line} changed` : line));
+    const marks = gutterMarks(head.join("\n"), current.join("\n"));
+    expect(marks).not.toBeNull();
+    expect(marks!.length).toBe(500);
+    expect(marks!.every((mark) => mark.kind === "change" && mark.startLine === mark.endLine)).toBe(true);
+    expect(marks![1]).toEqual({ kind: "change", startLine: 41, endLine: 41, removed: 1 });
+  });
+
+  test("a near-total rewrite gives up instead of using a lot of memory", () => {
+    const head = Array.from({ length: 20_000 }, (_, i) => `a${i}`).join("\n");
+    const current = Array.from({ length: 20_000 }, (_, i) => `b${i}`).join("\n");
+    expect(gutterMarks(head, current)).toBeNull();
+  });
+});

@@ -148,7 +148,6 @@ export function editorPath(input: unknown): string {
   return parts.join("/");
 }
 
-/** The file's absolute path inside the workspace; a symlinked folder that leads out of it is refused. */
 /** Image types the editor previews, by extension. */
 const EDITOR_IMAGE_TYPES: Record<string, string> = {
   ".png": "image/png",
@@ -163,6 +162,7 @@ const EDITOR_IMAGE_TYPES: Record<string, string> = {
 };
 const EDITOR_MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 
+/** The file's absolute path inside the workspace; a symlinked folder that leads out of it is refused. */
 async function resolveInside(root: string, relativePath: string): Promise<string> {
   const rootResolved = resolve(root);
   const candidate = resolve(rootResolved, relativePath);

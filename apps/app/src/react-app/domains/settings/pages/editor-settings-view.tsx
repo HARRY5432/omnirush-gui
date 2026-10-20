@@ -148,7 +148,7 @@ export function EditorSettingsView(props: { client: OmniRushServerClient | null;
         <LayoutSectionItem>
           <LayoutSectionItemHeader className="w-full">
             <LayoutSectionItemTitle>Auto save</LayoutSectionItemTitle>
-            <LayoutSectionItemDescription>After a delay: one second after you stop typing. When focus leaves: when you click away from the editor.</LayoutSectionItemDescription>
+            <LayoutSectionItemDescription>After a delay: one second after you stop typing (waits while an agent is working). When focus leaves: when you click away from the editor.</LayoutSectionItemDescription>
           </LayoutSectionItemHeader>
           <ToggleGroup
             value={[settings.autoSave]}
