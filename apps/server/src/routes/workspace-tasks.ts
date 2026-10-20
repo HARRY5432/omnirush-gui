@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import path from "node:path";
 
 import { ApiError } from "../errors.js";
@@ -25,6 +26,15 @@ import {
 } from "../workspace/worktree-tasks.mjs";
 import { addRoute, type Route } from "./registry.js";
 import { addLocalWorkspace, forgetLocalWorkspace } from "./workspaces.js";
+
+/** A folder's real path (symlinks resolved), or its resolved form when it cannot be read. */
+function realPath(folder: string): string {
+  try {
+    return realpathSync(folder);
+  } catch {
+    return path.resolve(folder);
+  }
+}
 
 /** At most this many tasks of one repository run at once (the CLI's limit too). */
 export const MAX_RUNNING_TASKS = 4;
@@ -155,14 +165,14 @@ function taskApiError(error: unknown): never {
   throw error;
 }
 
+/** Tasks whose first prompt was noted already: later prompts in their chats skip the record read. */
+const startedTasks = new Set<string>();
+
 /**
  * The first prompt of a task's own chat: the task records which chat it is
  * and that it runs, and that chat's trace gets "worktree.task_started" once.
  * Only for task workspaces; every other prompt is untouched.
  */
-/** Tasks whose first prompt was noted already: later prompts in their chats skip the record read. */
-const startedTasks = new Set<string>();
-
 export async function noteTaskPrompt(
   workspace: WorkspaceInfo,
   sessionId: string,
@@ -199,7 +209,8 @@ export function registerWorkspaceTaskRoutes(options: RegisterWorkspaceTaskRoutes
     const record = await readTask(workspace.path, taskId).catch(taskApiError);
     // Only a record of this workspace's own repository (a copied or edited record names another).
     const repo = await repoOf(workspace.path);
-    if (!repo || path.resolve(record.repo) !== repo.top) throw new ApiError(404, "task_not_found", "No such task in this repository.");
+    // Real paths on both sides: a symlinked folder (macOS /var, a linked ~/code) is the same repository.
+    if (!repo || realPath(record.repo) !== realPath(repo.top)) throw new ApiError(404, "task_not_found", "No such task in this repository.");
     return liveTask(record, taskWorkspaceOf(config, record), engine);
   };
 
