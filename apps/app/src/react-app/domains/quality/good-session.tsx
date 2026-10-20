@@ -287,6 +287,12 @@ export function GoodSessionLine({ result }: { result: OmniRushGoodSession | null
   );
 }
 
+/** Two status lines that say the same ("Good session." and "Good session ★"): shown once in the tooltip. */
+function sameStatus(a: string, b: string): boolean {
+  const plain = (text: string) => text.toLowerCase().replace(/[★.\s]+/g, " ").trim();
+  return plain(a) === plain(b);
+}
+
 const TONE_TEXT: Record<GoodSessionTone, string> = { amber: "text-amber-11", red: "text-red-11" };
 const TONE_BOX: Record<GoodSessionTone, string> = {
   amber: "border-amber-7/40 bg-amber-2/30 text-amber-11",
@@ -476,7 +482,7 @@ export function GoodSessionChecklistBar(props: GoodSessionChecklistBarProps) {
     ...checklist.reasons,
     ...(checklist.delivery ? [checklist.delivery] : []),
     ...(props.client ? [goodSessionCopy(goodSession).text] : []),
-  ];
+  ].filter((line, index, all) => all.findIndex((other) => sameStatus(other, line)) === index);
   const dock = checklist.dock;
   const dockLink = dock?.link;
   return (
