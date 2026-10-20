@@ -1822,7 +1822,8 @@ export class SessionArchiver {
         kid: sealed.kid,
         content: SEAL_CONTENT,
         marker: state.marker,
-        ...(mediaBytes > 0 ? { media_bytes: mediaBytes } : {}),
+        // Only to a server that counts them (an older one refuses fields it does not know).
+        ...(mediaBytes > 0 && this.policy?.value.mediaBytes === true ? { media_bytes: mediaBytes } : {}),
       };
       const record: QueueRecord = {
         v: 1,
