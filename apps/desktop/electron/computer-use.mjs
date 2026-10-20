@@ -35,6 +35,7 @@ let preview = null;
 let shared = null;
 let pollTimer = null;
 let refreshTimer = null;
+let failedAt = 0; // a host that did not start is tried again after a minute
 const pending = new Map(); // request_id → { request, resolve }
 
 function shippedModule(name) {
@@ -197,7 +198,8 @@ async function stopHost(by = "server") {
 
 async function apply(next) {
   server = next;
-  if (server?.enabled && supported()) await startHost().catch((error) => { deps?.log?.("computer use host did not start", error); });
+  if (server?.enabled && supported() && !hostPromise && Date.now() - failedAt < 60_000) { pushStatus(); return; }
+  if (server?.enabled && supported()) await startHost().catch((error) => { failedAt = Date.now(); deps?.log?.("computer use host did not start", error); });
   else if (host) await stopHost("server");
   pushStatus();
 }
