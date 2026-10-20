@@ -42,7 +42,7 @@ function fakeNative() {
     personInput() { generation += 1; for (const l of listeners) l({ event: "person-input", generation }); },
     die() { for (const l of listeners) l({ event: "unavailable" }); },
     onEvent(listener: (v: Record<string, unknown>) => void) { listeners.add(listener); return () => listeners.delete(listener); },
-    async call(method: string, params: Record<string, unknown> = {}) {
+    async call(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
       calls.push({ method, params });
       if (method === "list") return windows;
       if (method === "window") { const w = windows.find((x) => x.id === params.id); if (!w) throw Object.assign(new Error("gone"), { code: "window_unavailable" }); return { ...w, bounds: { ...w.bounds } }; }
