@@ -1,0 +1,374 @@
+/**
+ * Language features in the editor from the project's own language servers,
+ * the ones the agent already runs (the engine's /editor/lsp routes): hover,
+ * go to definition (F12, Cmd/Ctrl+click), references (Shift+F12), rename
+ * (F2), document symbols (outline, breadcrumbs, Cmd/Ctrl+Shift+O),
+ * diagnostics (squiggles and the Problems panel), and "Fix with agent" as a
+ * quick fix. An unsaved buffer's text goes with each request; the engine
+ * uses it for that request only and then goes back to the file on disk.
+ */
+import { create } from "zustand";
+import type * as MonacoApi from "monaco-editor/editor/editor.api.js";
+
+import type { OmniRushServerClient } from "@/app/lib/omnirush-server";
+import type { EditorDocuments } from "./editor-models";
+import type { Monaco } from "./monaco";
+
+export type LspPosition = { line: number; character: number };
+export type LspRange = { start: LspPosition; end: LspPosition };
+export type LspDiagnostic = { range: LspRange; severity?: number; message: string; source?: string; code?: string | number | { value: string | number } };
+export type ProblemFile = { path: string; diagnostics: LspDiagnostic[] };
+
+type Context = {
+  monaco: Monaco;
+  client: OmniRushServerClient;
+  workspaceId: string;
+  workspaceRoot: string;
+  docs: EditorDocuments;
+  /** Opens a project file in the editor at a 1-based position. */
+  openAt: (path: string, line: number, column: number) => void;
+  /** "Fix with agent" for a diagnostic. */
+  fixWithAgent: (path: string, diagnostic: LspDiagnostic) => void;
+};
+
+let current: Context | null = null;
+let installed = false;
+let unavailable = false;
+
+/** The Problems panel: diagnostics per project file, as the language servers last reported them. */
+export const useProblemsStore = create<{
+  byWorkspace: Record<string, ProblemFile[]>;
+  available: boolean;
+  set: (workspaceId: string, files: ProblemFile[]) => void;
+  merge: (workspaceId: string, file: ProblemFile) => void;
+  setAvailable: (available: boolean) => void;
+}>((set) => ({
+  byWorkspace: {},
+  available: true,
+  set: (workspaceId, files) => set((state) => ({ byWorkspace: { ...state.byWorkspace, [workspaceId]: files.filter((file) => file.diagnostics.length) } })),
+  merge: (workspaceId, file) =>
+    set((state) => {
+      const rest = (state.byWorkspace[workspaceId] ?? []).filter((item) => item.path !== file.path);
+      return { byWorkspace: { ...state.byWorkspace, [workspaceId]: file.diagnostics.length ? [...rest, file].sort((a, b) => a.path.localeCompare(b.path)) : rest } };
+    }),
+  setAvailable: (available) => set({ available }),
+}));
+
+export function problemCounts(files: readonly ProblemFile[]) {
+  let errors = 0;
+  let warnings = 0;
+  for (const file of files) {
+    for (const diagnostic of file.diagnostics) {
+      if ((diagnostic.severity ?? 1) === 1) errors += 1;
+      else if (diagnostic.severity === 2) warnings += 1;
+    }
+  }
+  return { errors, warnings };
+}
+
+/** The workspace-relative path of an editor model, or null (baselines, other workspaces). */
+function modelPath(model: MonacoApi.editor.ITextModel): string | null {
+  if (!current || model.uri.scheme !== "omnirush-file") return null;
+  if (model.uri.authority !== current.docs.uri("x").authority) return null;
+  return model.uri.path.replace(/^\//, "");
+}
+
+/** A `file://` URI from a language server to a workspace path, or null when it is outside the project. */
+export function uriToPath(uri: string, workspaceRoot: string): string | null {
+  if (!uri.startsWith("file://")) return null;
+  let path: string;
+  try {
+    path = decodeURIComponent(new URL(uri).pathname);
+  } catch {
+    return null;
+  }
+  if (/^\/[A-Za-z]:\//.test(path)) path = path.slice(1);
+  const root = workspaceRoot.replace(/\\/g, "/").replace(/\/+$/, "");
+  const normalized = path.replace(/\\/g, "/");
+  const caseless = /^[A-Za-z]:\//.test(root);
+  const inside = caseless ? normalized.toLowerCase().startsWith(`${root.toLowerCase()}/`) : normalized.startsWith(`${root}/`);
+  return inside ? normalized.slice(root.length + 1) : null;
+}
+
+function toMonacoRange(monaco: Monaco, range: LspRange): MonacoApi.IRange {
+  return new monaco.Range(range.start.line + 1, range.start.character + 1, range.end.line + 1, range.end.character + 1);
+}
+
+function payloadFor(model: MonacoApi.editor.ITextModel, path: string, position?: MonacoApi.Position) {
+  const doc = current?.docs.get(path);
+  const text = doc && current?.docs.isDirty(doc) ? model.getValue() : undefined;
+  return {
+    path,
+    ...(position ? { line: position.lineNumber - 1, character: position.column - 1 } : {}),
+    ...(text !== undefined ? { text } : {}),
+  };
+}
+
+async function call<T>(op: Parameters<OmniRushServerClient["editorLsp"]>[1], payload: Parameters<OmniRushServerClient["editorLsp"]>[2]): Promise<T | null> {
+  if (!current || unavailable) return null;
+  try {
+    return await current.client.editorLsp<T>(current.workspaceId, op, payload);
+  } catch (error) {
+    // An engine without the editor routes (older build): language features stay off quietly.
+    if ((error as { status?: number }).status === 404) {
+      unavailable = true;
+      useProblemsStore.getState().setAvailable(false);
+    }
+    return null;
+  }
+}
+
+type LspLocation = { uri?: string; range?: LspRange; targetUri?: string; targetRange?: LspRange; targetSelectionRange?: LspRange };
+
+/** Locations inside the project, with an editor model ready for each (peek and go-to need one). */
+async function toLocations(raw: unknown): Promise<MonacoApi.languages.Location[]> {
+  if (!current) return [];
+  const ctx = current;
+  const list = (Array.isArray(raw) ? raw : raw ? [raw] : []) as LspLocation[];
+  const out: MonacoApi.languages.Location[] = [];
+  const opened = new Set<string>();
+  for (const item of list.slice(0, 200)) {
+    const uri = item.targetUri ?? item.uri;
+    const range = item.targetSelectionRange ?? item.targetRange ?? item.range;
+    if (!uri || !range) continue;
+    const path = uriToPath(uri, ctx.workspaceRoot);
+    if (!path) continue;
+    if (!opened.has(path)) {
+      if (opened.size >= 30) continue;
+      const result = await ctx.docs.open(path);
+      if (!result.ok) continue;
+      opened.add(path);
+    }
+    out.push({ uri: ctx.docs.uri(path), range: toMonacoRange(ctx.monaco, range) });
+  }
+  return out;
+}
+
+const SYMBOL_KIND_MAP = (monaco: Monaco, kind: number) => {
+  // LSP SymbolKind is 1-based; Monaco's is the same list 0-based.
+  const value = Math.max(0, kind - 1);
+  return value as MonacoApi.languages.SymbolKind;
+};
+
+type LspDocumentSymbol = { name: string; detail?: string; kind: number; range?: LspRange; selectionRange?: LspRange; children?: LspDocumentSymbol[]; location?: { uri: string; range: LspRange } };
+
+function toDocumentSymbols(monaco: Monaco, raw: LspDocumentSymbol[]): MonacoApi.languages.DocumentSymbol[] {
+  return raw
+    .filter((symbol) => symbol && typeof symbol.name === "string")
+    .map((symbol): MonacoApi.languages.DocumentSymbol | null => {
+      const range = symbol.range ?? symbol.location?.range;
+      const selection = symbol.selectionRange ?? range;
+      if (!range || !selection) return null;
+      return {
+        name: symbol.name,
+        detail: symbol.detail ?? "",
+        kind: SYMBOL_KIND_MAP(monaco, symbol.kind),
+        tags: [],
+        range: toMonacoRange(monaco, range),
+        selectionRange: toMonacoRange(monaco, selection),
+        children: symbol.children ? toDocumentSymbols(monaco, symbol.children) : undefined,
+      };
+    })
+    .filter((item): item is MonacoApi.languages.DocumentSymbol => item !== null);
+}
+
+/** Document symbols of a model (cached per version), for the outline and breadcrumbs. */
+const symbolCache = new Map<string, { version: number; symbols: MonacoApi.languages.DocumentSymbol[] }>();
+export async function documentSymbols(model: MonacoApi.editor.ITextModel): Promise<MonacoApi.languages.DocumentSymbol[]> {
+  const path = modelPath(model);
+  if (!path || !current) return [];
+  const key = model.uri.toString();
+  const cached = symbolCache.get(key);
+  if (cached && cached.version === model.getVersionId()) return cached.symbols;
+  const raw = await call<LspDocumentSymbol[]>("symbols", payloadFor(model, path));
+  const symbols = Array.isArray(raw) ? toDocumentSymbols(current.monaco, raw) : [];
+  symbolCache.set(key, { version: model.getVersionId(), symbols });
+  return symbols;
+}
+
+/** The symbols around a position, outermost first (breadcrumbs). */
+export function symbolPath(symbols: readonly MonacoApi.languages.DocumentSymbol[], line: number, column: number): MonacoApi.languages.DocumentSymbol[] {
+  const inside = (range: MonacoApi.IRange) =>
+    (line > range.startLineNumber || (line === range.startLineNumber && column >= range.startColumn))
+    && (line < range.endLineNumber || (line === range.endLineNumber && column <= range.endColumn));
+  for (const symbol of symbols) {
+    if (inside(symbol.range)) return [symbol, ...symbolPath(symbol.children ?? [], line, column)];
+  }
+  return [];
+}
+
+function hoverContents(raw: unknown): MonacoApi.IMarkdownString[] {
+  const out: MonacoApi.IMarkdownString[] = [];
+  const add = (value: unknown) => {
+    if (!value) return;
+    if (typeof value === "string") out.push({ value });
+    else if (typeof value === "object" && "value" in (value as Record<string, unknown>)) {
+      const item = value as { value: string; language?: string; kind?: string };
+      out.push({ value: item.language ? `\`\`\`${item.language}\n${item.value}\n\`\`\`` : item.value });
+    }
+  };
+  for (const hover of Array.isArray(raw) ? raw : [raw]) {
+    const contents = (hover as { contents?: unknown } | null)?.contents;
+    if (Array.isArray(contents)) contents.forEach(add);
+    else add(contents);
+  }
+  return out;
+}
+
+const SEVERITY = (monaco: Monaco, severity?: number) =>
+  severity === 2 ? monaco.MarkerSeverity.Warning : severity === 3 ? monaco.MarkerSeverity.Info : severity === 4 ? monaco.MarkerSeverity.Hint : monaco.MarkerSeverity.Error;
+
+export function diagnosticCode(diagnostic: LspDiagnostic): string | undefined {
+  const code = diagnostic.code;
+  if (code === undefined || code === null) return undefined;
+  return typeof code === "object" ? String(code.value) : String(code);
+}
+
+/** Squiggles for one open file, from diagnostics. */
+export function applyMarkers(path: string, diagnostics: readonly LspDiagnostic[]) {
+  if (!current) return;
+  const doc = current.docs.get(path);
+  if (!doc) return;
+  const monaco = current.monaco;
+  monaco.editor.setModelMarkers(doc.model, "lsp", diagnostics.map((diagnostic) => ({
+    ...toMonacoRange(monaco, diagnostic.range),
+    severity: SEVERITY(monaco, diagnostic.severity),
+    message: diagnostic.message,
+    source: diagnostic.source,
+    code: diagnosticCode(diagnostic),
+  })));
+}
+
+/** Diagnostics of one file (its unsaved text when dirty) into its squiggles and the Problems panel. */
+export async function refreshFileDiagnostics(path: string): Promise<void> {
+  if (!current) return;
+  const ctx = current;
+  const doc = ctx.docs.get(path);
+  if (!doc) return;
+  const raw = await call<ProblemFile[]>("diagnostics", payloadFor(doc.model, path));
+  if (!raw || current !== ctx) return;
+  const file = raw.find((item) => item.path === path) ?? { path, diagnostics: [] };
+  applyMarkers(path, file.diagnostics);
+  useProblemsStore.getState().merge(ctx.workspaceId, file);
+}
+
+/** Every diagnostic the language servers hold for the project (files they have seen). */
+export async function refreshAllDiagnostics(): Promise<void> {
+  if (!current) return;
+  const ctx = current;
+  const raw = await call<ProblemFile[]>("diagnostics", {});
+  if (!raw || current !== ctx) return;
+  useProblemsStore.getState().set(ctx.workspaceId, raw);
+  for (const file of raw) applyMarkers(file.path, file.diagnostics);
+}
+
+/** Where the editor's language features act now (the workspace shown). */
+export function setLanguageContext(ctx: Context | null) {
+  current = ctx;
+  unavailable = false;
+  symbolCache.clear();
+  useProblemsStore.getState().setAvailable(true);
+}
+
+/** The providers, once per Monaco instance; they act on the current context. */
+export function installLanguageFeatures(monaco: Monaco) {
+  if (installed) return;
+  installed = true;
+  const selector = "*";
+  monaco.languages.registerHoverProvider(selector, {
+    provideHover: async (model, position) => {
+      const path = modelPath(model);
+      if (!path) return null;
+      const contents = hoverContents(await call("hover", payloadFor(model, path, position)));
+      return contents.length ? { contents } : null;
+    },
+  });
+  monaco.languages.registerDefinitionProvider(selector, {
+    provideDefinition: async (model, position) => {
+      const path = modelPath(model);
+      if (!path) return null;
+      return toLocations(await call("definition", payloadFor(model, path, position)));
+    },
+  });
+  monaco.languages.registerReferenceProvider(selector, {
+    provideReferences: async (model, position) => {
+      const path = modelPath(model);
+      if (!path) return null;
+      return toLocations(await call("references", payloadFor(model, path, position)));
+    },
+  });
+  monaco.languages.registerDocumentSymbolProvider(selector, {
+    displayName: "Language server",
+    provideDocumentSymbols: (model) => documentSymbols(model),
+  });
+  monaco.languages.registerRenameProvider(selector, {
+    provideRenameEdits: async (model, position, newName) => {
+      const path = modelPath(model);
+      if (!path || !current) return null;
+      const ctx = current;
+      const raw = await call<unknown[]>("rename", { ...payloadFor(model, path, position), newName });
+      const edits: MonacoApi.languages.IWorkspaceTextEdit[] = [];
+      type TextEdit = { range: LspRange; newText: string };
+      const addEdits = async (uri: string, list: TextEdit[]) => {
+        const target = uriToPath(uri, ctx.workspaceRoot);
+        if (!target) return;
+        const opened = await ctx.docs.open(target);
+        if (!opened.ok) return;
+        for (const edit of list) {
+          edits.push({ resource: ctx.docs.uri(target), versionId: undefined, textEdit: { range: toMonacoRange(ctx.monaco, edit.range), text: edit.newText } });
+        }
+      };
+      for (const result of raw ?? []) {
+        const workspaceEdit = result as { changes?: Record<string, TextEdit[]>; documentChanges?: Array<{ textDocument?: { uri: string }; edits?: TextEdit[] }> };
+        for (const [uri, list] of Object.entries(workspaceEdit.changes ?? {})) await addEdits(uri, list);
+        for (const change of workspaceEdit.documentChanges ?? []) {
+          if (change.textDocument?.uri && change.edits) await addEdits(change.textDocument.uri, change.edits);
+        }
+      }
+      if (!edits.length) return { edits: [], rejectReason: "Nothing to rename here (or the language server cannot rename this)." };
+      return { edits };
+    },
+  });
+  const fixCommand = "omnirush.editor.fixWithAgent";
+  monaco.editor.registerCommand(fixCommand, (_accessor, path: string, diagnostic: LspDiagnostic) => {
+    current?.fixWithAgent(path, diagnostic);
+  });
+  monaco.languages.registerCodeActionProvider(selector, {
+    provideCodeActions: (model, _range, context) => {
+      const path = modelPath(model);
+      if (!path || !context.markers.length) return { actions: [], dispose: () => undefined };
+      const actions = context.markers.slice(0, 3).map((marker) => ({
+        title: `Fix with agent: ${marker.message.split("\n")[0]!.slice(0, 60)}`,
+        kind: "quickfix",
+        diagnostics: [marker],
+        isPreferred: false,
+        command: {
+          id: fixCommand,
+          title: "Fix with agent",
+          arguments: [path, {
+            range: { start: { line: marker.startLineNumber - 1, character: marker.startColumn - 1 }, end: { line: marker.endLineNumber - 1, character: marker.endColumn - 1 } },
+            severity: marker.severity === monaco.MarkerSeverity.Warning ? 2 : marker.severity === monaco.MarkerSeverity.Error ? 1 : 3,
+            message: marker.message,
+            source: marker.source,
+            code: typeof marker.code === "object" ? marker.code?.value : marker.code,
+          } satisfies LspDiagnostic],
+        },
+      }));
+      return { actions, dispose: () => undefined };
+    },
+  });
+  // Go to definition / references into another file: open it as a tab.
+  monaco.editor.registerEditorOpener({
+    openCodeEditor: (_source, resource, selectionOrPosition) => {
+      if (!current || resource.scheme !== "omnirush-file") return false;
+      const path = resource.path.replace(/^\//, "");
+      const at = selectionOrPosition && "startLineNumber" in selectionOrPosition
+        ? { line: selectionOrPosition.startLineNumber, column: selectionOrPosition.startColumn }
+        : selectionOrPosition && "lineNumber" in selectionOrPosition
+          ? { line: selectionOrPosition.lineNumber, column: selectionOrPosition.column }
+          : { line: 1, column: 1 };
+      current.openAt(path, at.line, at.column);
+      return true;
+    },
+  });
+}

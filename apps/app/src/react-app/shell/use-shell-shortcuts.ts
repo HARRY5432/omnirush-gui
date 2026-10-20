@@ -123,7 +123,9 @@ export function useShellShortcuts(input: UseShellShortcutsInput) {
   //   Cmd/Ctrl+Shift+H  -> IDE layout: show / hide the chat
   //   Ctrl+Shift+`      -> new terminal tab (matches VS Code; Ctrl on macOS too)
   //   Cmd/Ctrl+F        -> find in current conversation (handled by session surface)
-  //   Cmd/Ctrl+Shift+F  -> search every session (titles + messages)
+  //   Cmd/Ctrl+Shift+F  -> search every session (titles + messages); in the IDE layout: search in files
+  //   Cmd/Ctrl+Shift+P  -> command palette (as Cmd/Ctrl+K)
+  //   Cmd+Shift+M       -> IDE layout, macOS: Problems
   //   Cmd/Ctrl+T        -> next session tab
   //   Cmd/Ctrl+Shift+T  -> previous session tab
   //   Ctrl+T / Ctrl+Shift+T (macOS) -> next / previous thinking mode
@@ -152,9 +154,24 @@ export function useShellShortcuts(input: UseShellShortcutsInput) {
     const isMac = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
     const mod = isMac ? event.metaKey : event.ctrlKey;
     if (!mod) return;
+    // In the IDE layout these keys work as in VS Code: Cmd/Ctrl+Shift+F searches the files, Cmd/Ctrl+Shift+P opens the palette,
+    // Cmd+Shift+M (macOS) opens Problems. In the Chat layout Cmd/Ctrl+Shift+F stays the session search.
+    const ideLayout = typeof document !== "undefined" && Boolean(document.querySelector("[data-editor-layout='ide']"));
+    const editorCommand = (command: string) => window.dispatchEvent(new CustomEvent("omnirush:editor-command", { detail: command }));
     if (event.shiftKey && !event.altKey && event.key?.toLowerCase() === "f") {
       event.preventDefault();
-      setSessionSearchOpen((value) => !value);
+      if (ideLayout) editorCommand("search");
+      else setSessionSearchOpen((value) => !value);
+      return;
+    }
+    if (event.shiftKey && !event.altKey && event.key?.toLowerCase() === "p") {
+      event.preventDefault();
+      setCommandPaletteOpen(true);
+      return;
+    }
+    if (ideLayout && isMac && event.shiftKey && !event.altKey && event.key?.toLowerCase() === "m") {
+      event.preventDefault();
+      editorCommand("problems");
       return;
     }
     if (event.shiftKey && !event.altKey && event.key?.toLowerCase() === "e") {

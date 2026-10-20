@@ -1,0 +1,65 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { findRipgrep, parseSearchOptions, searchWorkspace } from "./routes/editor-search.js";
+
+const roots: string[] = [];
+afterEach(async () => {
+  while (roots.length) await rm(roots.pop()!, { recursive: true, force: true });
+});
+
+async function project() {
+  const root = await mkdtemp(join(tmpdir(), "omnirush-search-"));
+  roots.push(root);
+  await mkdir(join(root, "src"), { recursive: true });
+  await mkdir(join(root, "dist"), { recursive: true });
+  await writeFile(join(root, ".gitignore"), "dist/\n");
+  await writeFile(join(root, "src", "a.ts"), "const limit = 50;\nconst unlimited = limit * 2;\nconst é = 'limit';\n");
+  await writeFile(join(root, "src", "b.test.ts"), "expect(limit).toBe(50);\n");
+  await writeFile(join(root, "dist", "out.js"), "var limit=1;\n");
+  await writeFile(join(root, "logo.bin"), new Uint8Array([0, 1, 108, 105, 109, 105, 116]));
+  execFileSync("git", ["init", "-q"], { cwd: root });
+  return root;
+}
+
+const options = (over: Record<string, unknown>) => parseSearchOptions({ query: "limit", ...over });
+
+describe.each([["ripgrep", findRipgrep()], ["git", null]] as const)("search in files (%s)", (_name, rg) => {
+  test("plain, gitignore respected, binary skipped", async () => {
+    if (_name === "ripgrep" && !rg) return;
+    const root = await project();
+    const result = await searchWorkspace(root, options({}), rg);
+    expect(result.files.map((file) => file.path).sort()).toEqual(["src/a.ts", "src/b.test.ts"]);
+    expect(result.matchCount).toBe(5);
+    const third = result.files.find((file) => file.path === "src/a.ts")!.matches.at(-1)!;
+    expect(third.text.slice(third.start, third.end)).toBe("limit");
+  });
+
+  test("whole word, case, include and exclude", async () => {
+    if (_name === "ripgrep" && !rg) return;
+    const root = await project();
+    const word = await searchWorkspace(root, options({ wholeWord: true, exclude: ["**/*.test.ts"] }), rg);
+    expect(word.files.map((file) => file.path)).toEqual(["src/a.ts"]);
+    expect(word.matchCount).toBe(3);
+    const cased = await searchWorkspace(root, options({ query: "LIMIT", caseSensitive: true }), rg);
+    expect(cased.matchCount).toBe(0);
+    const included = await searchWorkspace(root, options({ include: ["**/*.test.ts"] }), rg);
+    expect(included.files.map((file) => file.path)).toEqual(["src/b.test.ts"]);
+  });
+
+  test("regex", async () => {
+    if (_name === "ripgrep" && !rg) return;
+    const root = await project();
+    const result = await searchWorkspace(root, options({ query: "lim[a-z]t \\*", regex: true }), rg);
+    expect(result.matchCount).toBe(1);
+  });
+});
+
+test("bad input is refused", () => {
+  expect(() => parseSearchOptions({ query: "" })).toThrow();
+  expect(() => parseSearchOptions({ query: "(", regex: true })).toThrow();
+  expect(parseSearchOptions({ query: "x", include: ["../etc/*", "/abs", "src/**"] }).include).toEqual(["src/**"]);
+});
