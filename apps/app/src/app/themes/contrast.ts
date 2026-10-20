@@ -222,7 +222,6 @@ export function contrastWarnings(v: ThemeVariant, aaa = false): ContrastWarning[
   for (const [token, tokenRows] of byToken) {
     const current = readPath(v, token);
     const target = Math.max(...tokenRows.map((row) => row.target));
-    let backgrounds: string[];
     if (token === "accent") {
       // Fix the accent fill against its text colour first, then keep it visible as a UI colour.
       const accentTextRow = tokenRows.find((row) => row.fg === "accentText");
@@ -239,7 +238,7 @@ export function contrastWarnings(v: ThemeVariant, aaa = false): ContrastWarning[
       });
       continue;
     }
-    backgrounds = rows.filter((row) => row.fg === token).map((row) => row.bgColour);
+    const backgrounds = rows.filter((row) => row.fg === token).map((row) => row.bgColour);
     const suggestion = suggestColour(current, backgrounds, target);
     warnings.push({
       token,
