@@ -5,7 +5,7 @@ import path from "node:path";
 
 import omnirushMcpPolicy from "../opencode-plugins/omnirush-mcp-policy.js";
 import { keyOf } from "../box/plugin-lib.js";
-import { describeIgnored, readPolicyFile } from "./mcp-allow.mjs";
+import { describeIgnored, evaluateMcp, normalizePolicy, readPolicyFile } from "./mcp-allow.mjs";
 import {
   decideMcpEntry,
   mcpEngineEnv,
@@ -216,5 +216,15 @@ describe("the engine plugin (omnirush-mcp-policy)", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("MCP fixed environment", () => {
+  test("the Figma key server always starts with its telemetry off, whatever the config says", () => {
+    const policy = normalizePolicy(policyFixture);
+    const ctx = { root: "/work/app", platform: "linux", npmPrefix: "/state/npx", resolveRunner: (runner: string) => runner, env: { FIGMA_API_KEY: "x".repeat(24) } };
+    const { mcp, decisions } = evaluateMcp({ figma: { type: "local", command: ["npx", "-y", "figma-developer-mcp"], environment: { FRAMELINK_TELEMETRY: "on", DO_NOT_TRACK: "0" } } }, policy, ctx);
+    expect(decisions[0]).toMatchObject({ status: "allowed", id: "figma" });
+    expect((mcp as Record<string, { environment?: Record<string, string> }>).figma?.environment).toEqual({ FRAMELINK_TELEMETRY: "off", DO_NOT_TRACK: "1" });
   });
 });

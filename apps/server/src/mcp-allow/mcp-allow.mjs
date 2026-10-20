@@ -131,6 +131,9 @@ export function validRange(range) {
 
 // -------------------------------------------------------------------- policy
 
+// Variables a `fixed_env` rule may not set: they change which program runs or how it loads.
+const FIXED_ENV_REFUSED = /^(?:PATH|PATHEXT|HOME|USERPROFILE|COMSPEC|SHELL|TMPDIR|TEMP|TMP|NODE_.*|NPM_.*|LD_.*|DYLD_.*|PYTHON.*|UV_.*|VIRTUAL_ENV|BUN_.*|DENO_.*|OMNIRUSH_.*|OPENCODE_.*|.*_PROXY|.*(?:KEY|TOKEN|SECRET|PASSWORD).*)$/i;
+
 function normalizeRules(value) {
   const rules = isRecord(value) ? value : {};
   const out = {};
@@ -160,6 +163,16 @@ function normalizeRules(value) {
   // project upload could carry); the first one present is passed on, none present: blocked.
   const secrets = strings(rules.secret_env, 4).filter((k) => /^[A-Z_][A-Z0-9_]{0,63}$/.test(k));
   if (secrets.length) out.secret_env = secrets;
+  // Variables the server always starts with, set to the list's literal values (a telemetry opt-out): never
+  // taken from a config file and never overridden by one. Names that change what runs (PATH, NODE_OPTIONS,
+  // LD_*, npm_config_*, ...) and the names of path_env / secret_env are not accepted.
+  if (isRecord(rules.fixed_env)) {
+    const taken = new Set([...Object.keys(out.path_env ?? {}), ...(out.secret_env ?? [])]);
+    const env = Object.fromEntries(Object.entries(rules.fixed_env)
+      .filter(([k, v]) => /^[A-Z_][A-Z0-9_]{0,63}$/.test(k) && !FIXED_ENV_REFUSED.test(k) && !taken.has(k) && typeof v === "string" && /^[A-Za-z0-9._-]{1,64}$/.test(v))
+      .slice(0, 8));
+    if (Object.keys(env).length) out.fixed_env = env;
+  }
   const inputs = strings(rules.path_inputs, 16).filter((k) => /^[A-Za-z_][\w]{0,63}$/.test(k));
   if (inputs.length) out.path_inputs = inputs;
   return out;
@@ -659,6 +672,9 @@ export function evaluateMcp(mcpMap, policy, ctx = {}) {
       }
     }
     if (refusal) { decisions.push(refusal); continue; }
+    // Last, so neither the config nor path_env can change them; in the sandbox they go through `env` below.
+    for (const [key, value] of Object.entries(rules.fixed_env ?? {})) environment[key] = value;
+    if (rules.fixed_env) notes.push(`starts with ${Object.entries(rules.fixed_env).map(([k, v]) => `${k}=${v}`).join(" ")}`);
     for (const flag of rules.add_flags ?? []) {
       const at = flag.indexOf("=");
       if (!flagValue(rest, at > 0 ? flag.slice(0, at) : flag)) { rest = [...rest, flag]; notes.push(`adds ${flag}`); }
