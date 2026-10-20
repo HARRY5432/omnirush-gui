@@ -3,8 +3,7 @@ import { useState } from "react";
 import { Zap } from "lucide-react";
 
 import type { ComposerAttachment } from "@/app/types";
-import { CODING_STARTER_CARDS, resolveOrganizationPromptCardContent } from "@/components/chat/task-suggestions";
-import { useCheckDesktopRestriction, useOrgRestrictions } from "@/react-app/domains/cloud/desktop-config-provider";
+import { useCheckDesktopRestriction } from "@/react-app/domains/cloud/desktop-config-provider";
 import { BuildathonPromoCard } from "@/react-app/domains/buildathon/buildathon-promo";
 import { PlacementHomeCard } from "@/react-app/domains/placements/placements";
 import { HomeContinue, type HomeViewContext } from "@/react-app/domains/session/home/home-recent";
@@ -13,19 +12,6 @@ import {
   type NewTaskComposerContext,
   type NewTaskComposerHandoff,
 } from "./new-task-composer";
-
-type HeroSuggestion = {
-  title: string;
-  description: string;
-  prompt: string;
-};
-
-/** The coding task templates (task-suggestions.tsx): filled in, never sent on their own. */
-const DEFAULT_SUGGESTIONS: HeroSuggestion[] = CODING_STARTER_CARDS.map((card) => ({
-  title: card.title,
-  description: card.description,
-  prompt: card.prompt,
-}));
 
 type TimeGreeting = {
   title: string;
@@ -85,28 +71,14 @@ export type SessionEmptyHeroProps = {
 };
 
 /**
- * Paper "first chat" empty state: the real session composer front and
- * center with suggestion cards below. Suggestions come from desktop
- * policies (organization onboarding prompts) when configured, with
- * built-in defaults otherwise.
+ * Paper "first chat" empty state: the greeting and the real session composer
+ * front and center, with one quiet "Continue … Search" line under it.
  */
 export function SessionEmptyHero(props: SessionEmptyHeroProps) {
   const [prompt, setPrompt] = useState("");
   const [greeting] = useState(() => greetingForLocalHour(new Date().getHours()));
-  const orgRestrictions = useOrgRestrictions();
   const checkDesktopRestriction = useCheckDesktopRestriction();
   const canAddProviders = !checkDesktopRestriction({ restriction: "allowCustomProviders" });
-  const organizationPrompts = orgRestrictions.onboardingPrompts;
-  const suggestions: HeroSuggestion[] = organizationPrompts !== undefined
-    ? organizationPrompts.map((orgPrompt, index) => {
-      const card = resolveOrganizationPromptCardContent({
-        prompt: orgPrompt,
-        description: orgRestrictions.onboardingPromptDescriptions?.[index],
-        index,
-      });
-      return { title: card.title, description: card.description, prompt: card.selectionPrompt };
-    })
-    : DEFAULT_SUGGESTIONS;
 
   const submit = (
     resolvedPrompt: string,
@@ -116,11 +88,6 @@ export function SessionEmptyHero(props: SessionEmptyHeroProps) {
     const trimmedPrompt = resolvedPrompt.trim();
     if ((!trimmedPrompt && !attachments.length) || props.busy) return;
     return props.onRunTask(trimmedPrompt, attachments, handoff);
-  };
-
-  const fillPrompt = (value: string) => {
-    setPrompt(value);
-    window.dispatchEvent(new Event("omnirush:focusPrompt"));
   };
 
   return (
@@ -157,24 +124,6 @@ export function SessionEmptyHero(props: SessionEmptyHeroProps) {
       ) : null}
 
       {props.home ? <HomeContinue context={props.home} /> : null}
-
-      <div className="grid grid-cols-2 gap-1.5">
-        {suggestions.map((suggestion) => (
-          <button
-            key={suggestion.title}
-            type="button"
-            title={suggestion.description}
-            aria-label={`${suggestion.title}: ${suggestion.description}`}
-            className="group flex min-h-10 items-center justify-between gap-2 rounded-lg border border-border/80 bg-background px-3 py-2 text-left transition-colors hover:bg-accent"
-            onClick={() => fillPrompt(suggestion.prompt)}
-          >
-            <span className="truncate text-[12px] font-medium text-foreground">{suggestion.title}</span>
-            <span aria-hidden="true" className="shrink-0 text-[12px] text-muted-foreground transition-transform group-hover:translate-x-0.5">
-              →
-            </span>
-          </button>
-        ))}
-      </div>
 
       <BuildathonPromoCard />
 
