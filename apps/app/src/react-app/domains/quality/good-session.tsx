@@ -524,7 +524,7 @@ export function GoodSessionChecklistBar(props: GoodSessionChecklistBarProps) {
       {props.client ? <GoodSessionLine result={goodSession} /> : null}
       {/* At every width: a compact summary ("On track ★ 4/6") that opens to the full checklist,
           and the guide link on its own line under it (never cut off at the right edge). */}
-      <div className="mx-auto flex max-w-[800px] flex-col items-start gap-1 pb-1.5" data-testid="good-session-row" data-expanded={checklistOpen ? "" : undefined}>
+      <div className="mx-auto flex max-w-[800px] flex-col items-start gap-1 pb-1.5" role="status" data-testid="good-session-row" data-expanded={checklistOpen ? "" : undefined}>
         <button
           type="button"
           onClick={() => {
@@ -534,7 +534,6 @@ export function GoodSessionChecklistBar(props: GoodSessionChecklistBarProps) {
           }}
           aria-expanded={checklistOpen}
           aria-label={checklist.text}
-          role="status"
           data-testid="good-session-summary"
           className={cn(
             "flex max-w-full min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 border border-border bg-popover/60 px-2.5 py-1 text-start text-[11px] leading-4 text-muted-foreground transition-colors hover:bg-muted/60",
