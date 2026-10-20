@@ -34,7 +34,7 @@ export type TasksBoardPageProps = {
   workspaceId: string;
   workspaceName: string;
   /** Creates the task and sends its prompt in its own chat, like the composer. */
-  onStartTask: (prompt: string) => Promise<void>;
+  onStartTask: (prompt: string) => Promise<OmniRushWorkspaceTask>;
   onOpenChat: (workspaceId: string, sessionId: string | null) => void;
   /** The workspace list changed (a task's workspace was added or removed). */
   onWorkspacesChanged: () => void;
@@ -95,10 +95,10 @@ export function TasksBoardPage(props: TasksBoardPageProps) {
     if (!text || starting) return;
     setStarting(true);
     try {
-      await props.onStartTask(text);
+      const task = await props.onStartTask(text);
       setPrompt("");
       setNewOpen(false);
-      toast.success("Task started in its own copy of the repository");
+      toast.success("Task started in its own copy of the repository", task.startedDirty ? { description: dirtyNote(task) } : undefined);
     } catch (error) {
       toast.error(errorMessage(error));
     } finally {
@@ -315,6 +315,10 @@ export function TasksBoardPage(props: TasksBoardPageProps) {
   );
 }
 
+function dirtyNote(task: Pick<OmniRushWorkspaceTask, "baseCommit">): string {
+  return `It starts from the last commit (${task.baseCommit.slice(0, 7)}); your uncommitted changes are not in it.`;
+}
+
 function confirmMessage(pending: PendingAction, branch: string | null): string {
   const into = branch ? ` (${branch})` : "";
   if (pending.kind === "apply") {
@@ -365,6 +369,7 @@ function TaskCard({ task, busy, ...actions }: TaskCardProps) {
         {task.age ? <span>Started {task.age}</span> : null}
         {task.result ? <span>{task.result.mode === "apply" ? "Applied" : "Merged"} {plural(task.result.files, "file")}</span> : null}
       </div>
+      {task.startedDirty && !task.result ? <p className="text-xs text-muted-foreground" data-testid="task-dirty-note">{dirtyNote(task)}</p> : null}
       <div className="mt-auto flex flex-wrap gap-1.5">
         <Button size="sm" variant="outline" onClick={actions.onOpenChat} disabled={!task.workspaceId || !task.sessionId}>
           <MessageSquare /> Open chat

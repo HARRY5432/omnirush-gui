@@ -275,6 +275,27 @@ describe("parallel tasks (desktop)", () => {
     expect(listed.json.tasks).toEqual([]);
   });
 
+  test("removing a running task stops its chat and waits for it to end first; a dirty checkout is noted on the task", async () => {
+    await writeFile(join(repo, "README.md"), "edited, not committed\n");
+    const created = await h.call("POST", `/workspaces/${mainId}/tasks`, { prompt: "Runs a while" });
+    const task = created.json.task as Record<string, unknown>;
+    expect(task.startedDirty).toBe(true);
+    expect(String(task.baseCommit)).toMatch(/^[0-9a-f]{40}$/);
+    git(repo, "checkout", "--", "README.md");
+    const workspace = h.config.workspaces.find((entry) => entry.task?.taskId === task.id)!;
+    await noteTaskPrompt(workspace, "ses_task4", () => undefined);
+    h.busy.set("ses_task4", true);
+    const order: string[] = [];
+    const before = h.aborted.length;
+    setTimeout(() => { order.push("ended"); h.busy.set("ses_task4", false); }, 600);
+    const removed = await h.call("DELETE", `/workspaces/${mainId}/tasks/${String(task.id)}`);
+    order.push("removed");
+    expect(removed.status).toBe(200);
+    expect(h.aborted.slice(before)).toEqual(["ses_task4"]);
+    expect(order).toEqual(["ended", "removed"]);
+    expect(existsSync(String(task.path))).toBe(false);
+  });
+
   test("a task whose prompt never arrived stops counting as starting", async () => {
     const created = await h.call("POST", `/workspaces/${mainId}/tasks`, { prompt: "Never sent" });
     const task = created.json.task as Record<string, string>;

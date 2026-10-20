@@ -3296,6 +3296,7 @@ export function SessionRoute() {
     if (model) useSessionModelStore.getState().setModel(session.id, model, modelVariantValue ?? null);
     writeLastSessionFor(taskWorkspace.id, session.id);
     void queryClient.invalidateQueries({ queryKey: workspaceTasksQueryKey(workspaceId) });
+    return created.task;
   }, [baseUrl, client, environmentRuntimeKey, local.prefs.defaultModel, modelVariantValue, queryClient, refreshRouteState, selectedAgent, selectedSessionId, token]);
 
   // The new task's folder, picked above its composer: switch to another

@@ -30,6 +30,8 @@ export const MAX_RUNNING_TASKS = 4;
 const START_GRACE_MS = 5_000;
 /** A task that never got its prompt (the app closed in between) stops counting as starting. */
 const NEVER_STARTED_MS = 2 * 60_000;
+/** How long removing a running task waits for its stopped chat to end. */
+const STOP_WAIT_MS = 15_000;
 const REPLY_MAX_CHARS = 4_000;
 
 /** What the routes need from the engine, per task workspace (server.ts supplies it; tests fake it). */
@@ -64,6 +66,9 @@ export type TaskView = {
   label: string;
   branch: string;
   baseBranch: string | null;
+  baseCommit: string;
+  /** The main checkout had uncommitted changes when the task started: they are not in the task. */
+  startedDirty: boolean;
   name: string;
   path: string;
   workspaceId: string | null;
@@ -93,14 +98,19 @@ function sinceMs(iso: string | null, now: number): number {
  * when its prompt never arrived. Changes are saved into the record.
  */
 export async function liveTask(record: TaskRecord, workspace: WorkspaceInfo | null, engine: TaskEngine, now = Date.now()): Promise<TaskRecord> {
+  // Each change is decided again on the stored record: its first prompt may be noted at the same time.
   if (record.state === "created" && !record.sessionId && sinceMs(record.createdAt, now) > NEVER_STARTED_MS) {
-    return updateTask(record, { state: "stopped", finishedAt: new Date(now).toISOString() });
+    return updateTask(record, (current) => current.state === "created" && !current.sessionId
+      ? { state: "stopped", finishedAt: new Date(now).toISOString() }
+      : {});
   }
   if (!workspace || !record.sessionId || (record.state !== "running" && record.state !== "done")) return record;
   const busy = await engine.sessionBusy(workspace, record.sessionId).catch(() => null);
-  if (busy === true && record.state === "done") return updateTask(record, { state: "running", finishedAt: null });
+  if (busy === true && record.state === "done") {
+    return updateTask(record, (current) => current.state === "done" ? { state: "running", finishedAt: null } : {});
+  }
   if (busy === false && record.state === "running" && sinceMs(record.startedAt, now) > START_GRACE_MS) {
-    return updateTask(record, { state: "done", finishedAt: new Date(now).toISOString() });
+    return updateTask(record, (current) => current.state === "running" ? { state: "done", finishedAt: new Date(now).toISOString() } : {});
   }
   return record;
 }
@@ -114,6 +124,8 @@ export async function taskView(config: ServerConfig, record: TaskRecord, now = D
     label: stateLabel(record.state),
     branch: record.branch,
     baseBranch: record.baseBranch,
+    baseCommit: record.baseCommit,
+    startedDirty: record.startedDirty === true,
     name: projectName(record.path),
     path: record.path,
     workspaceId: taskWorkspaceOf(config, record)?.id ?? null,
@@ -153,8 +165,13 @@ export async function noteTaskPrompt(
   if (!link) return;
   const record = await readTask(workspace.path, link.taskId).catch(() => null);
   if (!record || record.sessionId) return;
-  const started = await updateTask(record, { sessionId, state: "running", startedAt: new Date(now).toISOString() }).catch(() => null);
-  if (started) recordTrace(sessionId, TASK_STARTED_EVENT, taskStartedData(started));
+  let first = false;
+  const started = await updateTask(record, (current) => {
+    if (current.sessionId) return {};
+    first = true;
+    return { sessionId, state: "running", startedAt: new Date(now).toISOString() };
+  }).catch(() => null);
+  if (started && first) recordTrace(sessionId, TASK_STARTED_EVENT, taskStartedData(started));
 }
 
 export function registerWorkspaceTaskRoutes(options: RegisterWorkspaceTaskRoutesOptions): void {
@@ -171,9 +188,16 @@ export function registerWorkspaceTaskRoutes(options: RegisterWorkspaceTaskRoutes
     return liveTask(record, taskWorkspaceOf(config, record), engine);
   };
 
-  /** Stops the task's work, removes its folder, branch and record, and its workspace. */
+  /** Stops the task's work (and waits for its chat to end), removes its folder, branch and record, and its workspace. */
   const removeOne = async (record: TaskRecord) => {
     const workspace = taskWorkspaceOf(config, record);
+    if (workspace && record.sessionId && (record.state === "running" || record.state === "created")) {
+      await engine.abort(workspace, record.sessionId).catch(() => undefined);
+      const deadline = Date.now() + STOP_WAIT_MS;
+      while (Date.now() < deadline && (await engine.sessionBusy(workspace, record.sessionId).catch(() => false))) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
     if (workspace) await options.stopWorkspaceWork?.(config, workspace).catch(() => undefined);
     await removeTask(record, { force: true }).catch(taskApiError);
     if (workspace) await forgetLocalWorkspace(config, workspace.id);

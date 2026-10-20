@@ -269,6 +269,9 @@ export type OmniRushWorkspaceTask = {
   label: string;
   branch: string;
   baseBranch: string | null;
+  baseCommit: string;
+  /** The main checkout had uncommitted changes when the task started: they are not in it. */
+  startedDirty: boolean;
   name: string;
   path: string;
   workspaceId: string | null;

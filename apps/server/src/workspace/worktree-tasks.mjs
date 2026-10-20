@@ -27,7 +27,7 @@
 //
 // Plain JavaScript (node and bun), no dependencies besides node:*.
 
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -57,7 +57,8 @@ export function runGit(args, { cwd, env, input, timeoutMs = GIT_TIMEOUT_MS } = {
   return new Promise((resolve) => {
     const child = execFile("git", args, {
       cwd, timeout: timeoutMs, maxBuffer: MAX_BUFFER, windowsHide: true,
-      env: { ...process.env, ...env, GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" },
+      // GIT_OPTIONAL_LOCKS=0: reading a running task's status never takes its index.lock.
+      env: { ...process.env, ...env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0", LC_ALL: "C" },
     }, (error, stdout, stderr) => {
       const code = error ? (typeof error.code === "number" ? error.code : 1) : 0;
       resolve({ code, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") || (error && typeof error.code !== "number" ? String(error.message) : "") });
@@ -93,9 +94,10 @@ function firstLine(text) {
 export async function repoOf(dir) {
   const top = await runGit(["rev-parse", "--show-toplevel"], { cwd: dir });
   if (top.code !== 0) return null;
-  const common = await runGit(["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: dir });
+  // Relative to `dir` when relative (git before 2.31 has no --path-format=absolute).
+  const common = await runGit(["rev-parse", "--git-common-dir"], { cwd: dir });
   if (common.code !== 0) return null;
-  const commonDir = path.resolve(common.stdout.trim());
+  const commonDir = path.resolve(dir, common.stdout.trim());
   const here = path.resolve(top.stdout.trim());
   // The main checkout is the folder holding the common .git directory (a bare repository has none).
   const main = path.basename(commonDir) === ".git" ? path.dirname(commonDir) : here;
@@ -162,31 +164,48 @@ export async function createTask({ dir, prompt, title, origin = "cli", parentSes
   const repo = await repoOf(dir);
   if (!repo) throw new TaskError("Tasks run in a git repository; this folder is not in one.", "not_git");
   if (!repo.head) throw new TaskError("The repository has no commit yet; commit once, then start a task.", "no_commit");
-  const id = newTaskId(now);
-  const name = `${slugify(title || text, 24)}-${id.slice(-4)}`;
-  const branch = `${BRANCH_PREFIX}${name}`;
-  const worktree = path.join(tasksDir(repo.top), name);
-  if (await exists(worktree)) throw new TaskError("A task folder with that name exists already; try again.", "exists");
-  await mkdir(tasksDir(repo.top), { recursive: true });
-  const added = await runGit(["worktree", "add", "-b", branch, worktree, repo.head], { cwd: repo.top });
+  if (path.dirname(repo.top) === repo.top) throw new TaskError("Tasks need the repository inside a folder (its worktrees go next to it).", "no_parent");
+  try {
+    await mkdir(tasksDir(repo.top), { recursive: true });
+  } catch (error) {
+    throw new TaskError(`Cannot create ${tasksDir(repo.top)} for the task's folder (${error?.code || error?.message}).`, "no_tasks_dir");
+  }
+  let id, name, branch, worktree, added;
+  // A new id when the name or the branch is taken already (a rare collision of the short id).
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    id = newTaskId(now + attempt);
+    name = `${slugify(title || text, 24)}-${id.slice(-4)}`;
+    branch = `${BRANCH_PREFIX}${name}`;
+    worktree = path.join(tasksDir(repo.top), name);
+    if (await exists(worktree)) continue;
+    if ((await runGit(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: repo.top })).code === 0) continue;
+    added = await runGit(["worktree", "add", "-b", branch, worktree, repo.head], { cwd: repo.top });
+    break;
+  }
+  if (!added) throw new TaskError("A task folder or branch with that name exists already; try again.", "exists");
   if (added.code !== 0) throw new TaskError(firstLine(added.stderr) || "Could not create the task's folder.", "worktree_failed");
+  // The task starts from the last commit: what is not committed in the main checkout is not in it.
+  const dirty = (await runGit(["status", "--porcelain", "--untracked-files=no"], { cwd: repo.top })).stdout.trim() !== "";
   const record = {
     version: TASKS_VERSION, id, title: titleFor(title || text), prompt: text, origin,
     repo: repo.top, repoName: repo.name, path: worktree, branch,
     baseBranch: repo.branch, baseCommit: repo.head,
     state: "created", createdAt: new Date(now).toISOString(), startedAt: null, finishedAt: null,
     sessionId: null, parentSessionId: parentSessionId || null, pid: null, exitCode: null,
-    summary: null, log: null, result: null,
+    summary: null, log: null, result: null, startedDirty: dirty,
   };
   await writeRecord(recordPath(repo.top, id), record);
   return record;
 }
 
-/** Merges `patch` into the stored record (re-read first, so concurrent writers keep each other's fields). */
+/**
+ * Merges `patch` into the stored record (re-read first, so concurrent writers keep each other's
+ * fields); `patch` may be a function of the stored record.
+ */
 export async function updateTask(record, patch) {
   const file = recordPath(record.repo, record.id);
   const current = JSON.parse(await readFile(file, "utf8").catch(() => "null")) || record;
-  const next = { ...current, ...patch };
+  const next = { ...current, ...(typeof patch === "function" ? patch(current) : patch) };
   await writeRecord(file, next);
   return next;
 }
@@ -200,22 +219,40 @@ export async function updateTaskFile(file, patch) {
   return next;
 }
 
-/** Whether a process id is alive (signal 0). */
-export function pidAlive(pid) {
+/**
+ * When a process started (`ps -o lstart=`; null on Windows or when unknown):
+ * kept with a task's pid, so a pid the system gave to another process later is
+ * never taken for the task's run (nor signalled).
+ */
+export function processStartTime(pid) {
+  if (process.platform === "win32" || !Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    return execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 3_000, stdio: ["ignore", "pipe", "ignore"] }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether a process id is alive (signal 0) and, when `record.pidStart` is known, still the same process. */
+export function pidAlive(pid, record = null) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
-    return true;
   } catch (error) {
-    return error?.code === "EPERM";
+    if (error?.code !== "EPERM") return false;
   }
+  if (record?.pidStart) {
+    const started = processStartTime(pid);
+    if (started && started !== record.pidStart) return false;
+  }
+  return true;
 }
 
 /** A record as it is now: a running task whose process is gone is "stopped", a task whose folder is gone "missing". */
 export async function reconcile(record, { alive = pidAlive } = {}) {
   let next = record;
   if (!["applied", "merged"].includes(record.state) && !(await exists(record.path))) next = { ...next, state: "missing" };
-  else if (record.state === "running" && record.pid && !alive(record.pid)) next = { ...next, state: "stopped" };
+  else if (record.state === "running" && record.pid && !alive(record.pid, record)) next = { ...next, state: "stopped" };
   return next;
 }
 
@@ -248,8 +285,8 @@ export async function listTasks(dir, options = {}) {
 }
 
 /** Finds a task by id or by a unique id/name prefix. */
-export async function findTask(dir, ref) {
-  const tasks = await listTasks(dir);
+export async function findTask(dir, ref, options = {}) {
+  const tasks = await listTasks(dir, options);
   const wanted = String(ref || "").trim();
   const exact = tasks.find((task) => task.id === wanted || path.basename(task.path) === wanted);
   if (exact) return exact;
@@ -322,6 +359,10 @@ export async function bringBack(task, { mode = "apply", message, now = Date.now(
     const applied = await runGit(["apply", "--binary", "-"], { cwd: task.repo, input: patch });
     if (applied.code !== 0) throw new TaskError(firstLine(applied.stderr) || "Could not apply the changes.", "apply_failed");
   } else if (mode === "merge") {
+    const here = await repoOf(task.repo);
+    if (!here?.branch) throw new TaskError("The main checkout is not on a branch (detached HEAD); use apply instead.", "detached");
+    const busy = await gitBusy(task.repo);
+    if (busy) throw new TaskError(`The main checkout has a ${busy} in progress; finish or abort it first.`, "busy");
     const subject = message || `${task.title}`;
     const committed = await runGit(["commit", "-q", "-m", subject], { cwd: task.path });
     if (committed.code !== 0 && !/nothing to commit/.test(committed.stdout + committed.stderr)) {
@@ -329,7 +370,8 @@ export async function bringBack(task, { mode = "apply", message, now = Date.now(
     }
     const merged = await runGit(["merge", "--no-ff", "--no-edit", task.branch], { cwd: task.repo });
     if (merged.code !== 0) {
-      await runGit(["merge", "--abort"], { cwd: task.repo });
+      // Only the merge this call started is undone (there was none in progress before it).
+      if (await gitBusy(task.repo)) await runGit(["merge", "--abort"], { cwd: task.repo });
       throw new TaskError(firstLine(merged.stderr) || firstLine(merged.stdout) || "The merge stopped on a conflict; nothing was changed.", "conflict", { stderr: (merged.stdout + merged.stderr).slice(0, 2000) });
     }
   } else {
@@ -339,12 +381,30 @@ export async function bringBack(task, { mode = "apply", message, now = Date.now(
   return { record, files, mode };
 }
 
+/** "merge", "rebase", "cherry-pick" or "revert" when one is in progress in `dir`, else null. */
+export async function gitBusy(dir) {
+  const has = async (ref) => (await runGit(["rev-parse", "-q", "--verify", ref], { cwd: dir })).code === 0;
+  if (await has("MERGE_HEAD")) return "merge";
+  if (await has("CHERRY_PICK_HEAD")) return "cherry-pick";
+  if (await has("REVERT_HEAD")) return "revert";
+  const gitDir = (await runGit(["rev-parse", "--git-dir"], { cwd: dir })).stdout.trim();
+  if (gitDir && ((await exists(path.resolve(dir, gitDir, "rebase-merge"))) || (await exists(path.resolve(dir, gitDir, "rebase-apply"))))) return "rebase";
+  return null;
+}
+
+/** Whether `folder` is a task folder of `repo` (directly in its tasks folder, not the records folder). */
+export function isTaskPath(repo, folder) {
+  const resolved = path.resolve(String(folder || ""));
+  return path.dirname(resolved) === tasksDir(path.resolve(repo)) && path.basename(resolved) !== RECORDS_DIR && path.basename(resolved) !== "";
+}
+
 /**
  * Removes a task: its worktree (even with changes left in it), its branch
  * (unless keepBranch) and its record. A running task is refused unless force.
  */
 export async function removeTask(task, { keepBranch = false, force = false, alive = pidAlive } = {}) {
-  if (task.state === "running" && alive(task.pid) && !force) throw new TaskError("The task is still running; stop it first.", "running");
+  if (task.state === "running" && alive(task.pid, task) && !force) throw new TaskError("The task is still running; stop it first.", "running");
+  if (!isTaskPath(task.repo, task.path)) throw new TaskError("That record does not name a task folder; nothing was removed.", "bad_record");
   if (await exists(task.path)) {
     const removed = await runGit(["worktree", "remove", "--force", task.path], { cwd: task.repo });
     if (removed.code !== 0) {

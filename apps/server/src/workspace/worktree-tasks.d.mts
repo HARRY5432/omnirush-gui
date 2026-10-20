@@ -25,6 +25,9 @@ export type TaskRecord = {
   summary: string | null;
   log: string | null;
   result: { mode: "apply" | "merge"; files: number; at: string } | null;
+  /** The main checkout had uncommitted changes when the task started (they are not in it). */
+  startedDirty?: boolean;
+  pidStart?: string | null;
 };
 
 export type RepoInfo = {
@@ -62,20 +65,23 @@ export function slugify(text: string, max?: number): string;
 export function titleFor(prompt: string): string;
 export function newTaskId(now?: number, random?: Uint8Array): string;
 export function createTask(input: { dir: string; prompt: string; title?: string | null; origin?: string; parentSessionId?: string | null; now?: number }): Promise<TaskRecord>;
-export function updateTask(record: TaskRecord, patch: Partial<TaskRecord>): Promise<TaskRecord>;
+export function updateTask(record: TaskRecord, patch: Partial<TaskRecord> | ((current: TaskRecord) => Partial<TaskRecord>)): Promise<TaskRecord>;
 export function updateTaskFile(file: string, patch: Partial<TaskRecord>): Promise<TaskRecord | null>;
-export function pidAlive(pid: number | null): boolean;
-export function reconcile(record: TaskRecord, options?: { alive?: (pid: number | null) => boolean }): Promise<TaskRecord>;
+export function processStartTime(pid: number | null): string | null;
+export function pidAlive(pid: number | null, record?: TaskRecord | null): boolean;
+export function reconcile(record: TaskRecord, options?: { alive?: (pid: number | null, record?: TaskRecord | null) => boolean }): Promise<TaskRecord>;
 export function readTask(dir: string, id: string): Promise<TaskRecord>;
-export function listTasks(dir: string, options?: { repo?: RepoInfo; alive?: (pid: number | null) => boolean }): Promise<TaskRecord[]>;
-export function findTask(dir: string, ref: string): Promise<TaskRecord>;
+export function listTasks(dir: string, options?: { repo?: RepoInfo; alive?: (pid: number | null, record?: TaskRecord | null) => boolean }): Promise<TaskRecord[]>;
+export function findTask(dir: string, ref: string, options?: { repo?: RepoInfo }): Promise<TaskRecord>;
 export function taskChanges(task: TaskRecord): Promise<TaskChange[]>;
 export function taskFileCount(task: TaskRecord): Promise<number | null>;
 export function taskPatch(task: TaskRecord): Promise<string>;
 export function taskStat(task: TaskRecord): Promise<string>;
 export function bringBack(task: TaskRecord, options?: { mode?: "apply" | "merge"; message?: string; now?: number }): Promise<{ record: TaskRecord; files: TaskChange[]; mode: "apply" | "merge" }>;
-export function removeTask(task: TaskRecord, options?: { keepBranch?: boolean; force?: boolean; alive?: (pid: number | null) => boolean }): Promise<{ removed: boolean; branchKept: boolean }>;
-export function cleanTasks(dir: string, options?: { keepBranch?: boolean; force?: boolean; alive?: (pid: number | null) => boolean }): Promise<string[]>;
+export function gitBusy(dir: string): Promise<"merge" | "rebase" | "cherry-pick" | "revert" | null>;
+export function isTaskPath(repo: string, folder: string): boolean;
+export function removeTask(task: TaskRecord, options?: { keepBranch?: boolean; force?: boolean; alive?: (pid: number | null, record?: TaskRecord | null) => boolean }): Promise<{ removed: boolean; branchKept: boolean }>;
+export function cleanTasks(dir: string, options?: { keepBranch?: boolean; force?: boolean; alive?: (pid: number | null, record?: TaskRecord | null) => boolean }): Promise<string[]>;
 export function taskStartedData(task: TaskRecord): Record<string, unknown>;
 export function taskMergedData(task: TaskRecord, result: { mode: "apply" | "merge"; files: TaskChange[] | number }): Record<string, unknown>;
 export function isFinished(task: TaskRecord): boolean;

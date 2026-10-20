@@ -25,7 +25,7 @@ type Root = ReturnType<typeof createRoot>;
 function task(overrides: Partial<OmniRushWorkspaceTask>): OmniRushWorkspaceTask {
   return {
     id: "t1", title: "Add a greeting", prompt: "Add a greeting", state: "running", label: "running",
-    branch: "omnirush/add-a-greeting-ab12", baseBranch: "main", name: "app › add-a-greeting-ab12",
+    branch: "omnirush/add-a-greeting-ab12", baseBranch: "main", baseCommit: "0123456789abcdef0123456789abcdef01234567", startedDirty: false, name: "app › add-a-greeting-ab12",
     path: "/code/app-tasks/add-a-greeting-ab12", workspaceId: "ws_task1", sessionId: "ses_1",
     createdAt: "2026-10-20T00:00:00.000Z", startedAt: "2026-10-20T00:00:00.000Z", finishedAt: null,
     age: "2 min ago", files: 1, finished: false, result: null, ...overrides,
@@ -71,7 +71,7 @@ async function mount(client: WorkspaceTasksClient, extra: { opened?: string[]; s
             client={client}
             workspaceId="ws_main"
             workspaceName="app"
-            onStartTask={async (prompt) => { extra.started?.push(prompt); }}
+            onStartTask={async (prompt) => { extra.started?.push(prompt); return task({ prompt, startedDirty: true }); }}
             onOpenChat={(workspaceId, sessionId) => extra.opened?.push(`${workspaceId}/${sessionId}`)}
             onWorkspacesChanged={() => undefined}
           />
@@ -119,6 +119,7 @@ describe("parallel tasks board", () => {
     expect(cards[0]!.querySelector("[data-testid=task-apply]")).toBeNull();
     expect(button("Stop", cards[0]!)).toBeTruthy();
     expect(cards[1]!.textContent).toContain("2 files changed");
+    expect(document.querySelector("[data-testid=task-dirty-note]")).toBeNull();
     expect(document.body.textContent).toContain("1 task running");
     await click(button("Open chat", cards[1]!));
     expect(opened).toEqual(["ws_task2/ses_2"]);
@@ -173,6 +174,13 @@ describe("parallel tasks board", () => {
     });
     await click(document.querySelector<HTMLButtonElement>("[data-testid=tasks-new-start]")!);
     expect(started).toEqual(["Add a health check route"]);
+    await view.unmount();
+  });
+
+  test("a task started while the checkout had uncommitted changes says they are not in it", async () => {
+    const { client } = fakeClient({ git: true, repo: "app", branch: "main", hasCommit: true, tasks: [task({ startedDirty: true })] });
+    const view = await mount(client);
+    expect(document.querySelector("[data-testid=task-dirty-note]")?.textContent).toBe("It starts from the last commit (0123456); your uncommitted changes are not in it.");
     await view.unmount();
   });
 
