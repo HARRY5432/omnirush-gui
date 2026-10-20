@@ -84,6 +84,6 @@ describe("agent assist", () => {
     const env = agentAssistEngineEnv(config, {});
     expect(JSON.parse(await readFile(env.OMNIRUSH_AGENT_ASSIST_FILE!, "utf8"))).toEqual({ features: ["selfCheck", "diagnostics"] });
     expect(shared.featuresFromEnv(env)).toEqual(flags);
-    expect(Object.keys(agentAssistHooks({ directory: dir }, { env }))).toContain("experimental.chat.system.transform");
+    expect(Object.keys(agentAssistHooks({ directory: dir }, { env }))).toContain("experimental.chat.messages.transform");
   });
 });
