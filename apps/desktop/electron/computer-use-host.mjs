@@ -163,7 +163,7 @@ export function createMacNativeWorker({ executable, args = ["worker"], captureLo
  * supply the shared modules ({ portable, policy, contract, image }) when they are
  * bundled elsewhere.
  */
-export async function createComputerUseHost({ executable, spool = null, settings, context, approve, onEvent, onState, onFrame, shared = {} }) {
+export async function createComputerUseHost({ executable, spool = null, settings, context, approve, onEvent, onState, onFrame, shared = /** @type {{ portable?: any, policy?: any, contract?: any, image?: any }} */ ({}) }) {
   if (!executable) throw new Error("Computer Use helper unavailable.");
   const portable = shared.portable ?? await import(new URL("portable-host.mjs", SHARED).href);
   const policy = shared.policy ?? await import(new URL("policy.mjs", SHARED).href);
