@@ -7,7 +7,7 @@ import { stripRemoteMethodErrorPrefix } from "@/react-app/domains/settings/state
 
 import { formatMinutesLeft } from "./describe";
 import { ComputerUseAppIdentity, ComputerUseFrame } from "./request-card";
-import { controlComputerUse } from "./status-store";
+import { buttonRect, controlComputerUse } from "./status-store";
 
 /** A running (or paused) computer use session: what it sees, what it did, and Stop. */
 export function ComputerUseLivePanel(props: { session: ComputerUseSessionState }) {
@@ -17,10 +17,10 @@ export function ComputerUseLivePanel(props: { session: ComputerUseSessionState }
   const [error, setError] = useState<string | null>(null);
   const paused = session.phase === "paused";
 
-  const control = (action: ComputerUseControlAction) => {
+  const control = (action: ComputerUseControlAction, event?: { currentTarget: EventTarget | null }) => {
     setBusy(true);
     setError(null);
-    controlComputerUse(session.id, action)
+    controlComputerUse(session.id, action, buttonRect(event?.currentTarget ?? null))
       .catch((reason: unknown) => setError(reason instanceof Error ? stripRemoteMethodErrorPrefix(reason.message) : "That did not work. Try again."))
       .finally(() => setBusy(false));
   };
@@ -28,18 +28,18 @@ export function ComputerUseLivePanel(props: { session: ComputerUseSessionState }
   const buttons = (
     <div className="flex shrink-0 flex-wrap items-center gap-2">
       {paused && session.can_continue ? (
-        <Button type="button" variant="outline" size="xs" disabled={busy} onClick={() => control("continue")} data-computer-use-control="continue">
+        <Button type="button" variant="outline" size="xs" disabled={busy} onClick={(event) => control("continue", event)} data-computer-use-control="continue">
           <Play data-icon="inline-start" />
           Continue
         </Button>
       ) : null}
       {!paused && session.mode === "control" ? (
-        <Button type="button" variant="outline" size="xs" disabled={busy} onClick={() => control("takeover")} data-computer-use-control="takeover">
+        <Button type="button" variant="outline" size="xs" disabled={busy} onClick={(event) => control("takeover", event)} data-computer-use-control="takeover">
           <Hand data-icon="inline-start" />
           Take over
         </Button>
       ) : null}
-      <Button type="button" variant="destructive" size="xs" disabled={busy} onClick={() => control("stop")} data-computer-use-control="stop">
+      <Button type="button" variant="destructive" size="xs" disabled={busy} onClick={(event) => control("stop", event)} data-computer-use-control="stop">
         <Square data-icon="inline-start" />
         Stop
       </Button>

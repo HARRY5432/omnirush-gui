@@ -18,7 +18,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { app } from "electron";
+import { app, screen } from "electron";
 import { testAnswersAllowed } from "./computer-use-answers.mjs";
 import { createComputerUseHost } from "./computer-use-host.mjs";
 import { createComputerPreview } from "./computer-use-preview.mjs";
@@ -38,10 +38,25 @@ const SYNTHETIC_MESSAGE = "Use your own mouse or keyboard to approve.";
 // remote-debugging clicks, in builds run from source only (the e2e rig).
 // Packaged apps ignore it (computer-use-answers.mjs).
 const testAnswers = testAnswersAllowed(process.env, app.isPackaged, (message) => console.warn(`[computer-use] ${message}`));
-async function personAnswered() {
+// The pressed button in screen pixels (the worker's press coordinates): content bounds + CSS box × zoom.
+function screenRectOf(rect) {
+  const window = deps?.getWindow?.();
+  if (!window || window.isDestroyed() || !rect || ![rect.x, rect.y, rect.width, rect.height].every(Number.isFinite)) return null;
+  const content = window.getContentBounds(), zoom = window.webContents.getZoomFactor();
+  const dip = { x: Math.round(content.x + rect.x * zoom), y: Math.round(content.y + rect.y * zoom), width: Math.round(rect.width * zoom), height: Math.round(rect.height * zoom) };
+  if (process.platform === "win32") return screen.dipToScreenRect(window, dip);
+  if (process.platform === "linux") {
+    const factor = screen.getDisplayMatching(dip).scaleFactor || 1;
+    return { x: dip.x * factor, y: dip.y * factor, width: dip.width * factor, height: dip.height * factor };
+  }
+  return dip; // macOS: points, as the helper reports presses
+}
+
+// A physical press within 1.5 s, in this app's window, on the pressed button (or Enter/Space on it).
+async function personAnswered(rect) {
   if (!host) return false;
   if (await host.syntheticInput()) return false;
-  return testAnswers || host.physicalInput(5000, { foregroundPid: process.pid });
+  return testAnswers || host.physicalInput(1500, { foregroundPid: process.pid, rect: screenRectOf(rect) });
 }
 
 let deps = null;
@@ -259,14 +274,14 @@ async function computerUseAnswer(answer) {
   const entry = pending.get(answer?.request_id);
   if (!entry) throw new Error("This request has ended.");
   const allowing = answer.decision !== "deny";
-  if (allowing && !(await personAnswered())) throw new Error(SYNTHETIC_MESSAGE);
+  if (allowing && !(await personAnswered(answer.rect))) throw new Error(SYNTHETIC_MESSAGE);
   const decision = entry.request.kind === "open" ? (["chat", "once", "deny"].includes(answer.decision) ? answer.decision : "deny") : (answer.decision === "allow" ? "allow" : "deny");
   entry.resolve({ decision, ...(typeof answer.window_id === "string" ? { window_id: answer.window_id } : {}) });
 }
 
 async function computerUseControl(value) {
   if (!host) throw new Error("Computer use is not running.");
-  if (value?.action === "continue" && !(await personAnswered())) throw new Error(SYNTHETIC_MESSAGE);
+  if (value?.action === "continue" && !(await personAnswered(value.rect))) throw new Error(SYNTHETIC_MESSAGE);
   await host.control({ session_id: value?.session_id, action: value?.action });
   pushStatus();
 }

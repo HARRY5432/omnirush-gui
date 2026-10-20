@@ -600,10 +600,33 @@ final class NativeWorker {
         }
         if [.leftMouseDown, .rightMouseDown, .otherMouseDown, .keyDown].contains(event.type) {
             let stateID = cg?.getIntegerValueField(.eventSourceStateID) ?? -1
-            lastInput = ["synthetic": WorkerInputSource.isSynthetic(sourcePid: sourcePid, stateID: stateID, sourceIsWindowServer: Self.isWindowServer(pid_t(truncatingIfNeeded: sourcePid))),
-                         "at": Int(Date().timeIntervalSince1970 * 1000), "kind": event.type == .keyDown ? "key" : "pointer"]
+            let synthetic = WorkerInputSource.isSynthetic(sourcePid: sourcePid, stateID: stateID, sourceIsWindowServer: Self.isWindowServer(pid_t(truncatingIfNeeded: sourcePid)))
+            var entry: [String: Any] = ["synthetic": synthetic, "at": Int(Date().timeIntervalSince1970 * 1000), "kind": event.type == .keyDown ? "key" : "pointer"]
+            // The app in front at the press, where the pointer was (global points, top-left origin) and the key as a terminal names it.
+            entry["foreground_pid"] = NSWorkspace.shared.frontmostApplication.map { Int($0.processIdentifier) } ?? NSNull()
+            if let at = cg?.location, event.type != .keyDown { entry["x"] = Double(at.x); entry["y"] = Double(at.y) }
+            entry["key"] = event.type == .keyDown ? (Self.keyName(event) ?? NSNull()) : NSNull()
+            lastInput = entry
         }
         personInput(force: false)
+    }
+
+    /** One lower-case letter or digit for printable keys, else Enter / Escape / Space / Tab / Backspace / arrows; nil otherwise. */
+    static func keyName(_ event: NSEvent) -> String? {
+        switch event.keyCode {
+        case 36, 76: return "Enter"
+        case 53: return "Escape"
+        case 49: return "Space"
+        case 48: return "Tab"
+        case 51: return "Backspace"
+        case 123: return "Left"
+        case 124: return "Right"
+        case 125: return "Down"
+        case 126: return "Up"
+        default:
+            guard let chars = event.charactersIgnoringModifiers?.lowercased(), chars.count == 1, let c = chars.first, c.isLetter || c.isNumber else { return nil }
+            return String(c)
+        }
     }
 
     private static func isWindowServer(_ pid: pid_t) -> Bool {

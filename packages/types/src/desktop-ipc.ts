@@ -936,7 +936,9 @@ export type ComputerUseRequest =
     chat: string | null;
   };
 
-export type ComputerUseAnswer = { request_id: string; decision: "chat" | "once" | "deny" | "allow"; window_id?: string };
+/** The pressed button's box (CSS pixels of the main window): the person's own press must land in it. */
+export type ComputerUseButtonRect = { x: number; y: number; width: number; height: number };
+export type ComputerUseAnswer = { request_id: string; decision: "chat" | "once" | "deny" | "allow"; window_id?: string; rect?: ComputerUseButtonRect };
 export type ComputerUseControlAction = "stop" | "takeover" | "continue" | "hide" | "show";
 
 export type ComputerUseStatus = {
@@ -1037,7 +1039,7 @@ export type DesktopCommandMap = {
   getComputerUseMcpEnvironment: { args: []; result: Record<string, string> };
   getComputerUseState: { args: []; result: ComputerUseStatus };
   computerUseAnswer: { args: [answer: ComputerUseAnswer]; result: void };
-  computerUseControl: { args: [value: { session_id: string; action: ComputerUseControlAction }]; result: void };
+  computerUseControl: { args: [value: { session_id: string; action: ComputerUseControlAction; rect?: ComputerUseButtonRect }]; result: void };
   getOmniRushUiMcpEnvironment: { args: []; result: Record<string, string> };
 
   // Computer use

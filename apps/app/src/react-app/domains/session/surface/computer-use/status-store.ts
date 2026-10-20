@@ -5,7 +5,14 @@
 import { useEffect, useSyncExternalStore } from "react";
 import { create } from "zustand";
 
-import type { ComputerUseAnswer, ComputerUseControlAction, ComputerUseStatus } from "@omnirush/types/desktop-ipc";
+import type { ComputerUseAnswer, ComputerUseButtonRect, ComputerUseControlAction, ComputerUseStatus } from "@omnirush/types/desktop-ipc";
+
+/** The pressed button's box, for main's check that the person pressed it themselves. */
+export function buttonRect(target: EventTarget | null): ComputerUseButtonRect | undefined {
+  if (!(target instanceof Element)) return undefined;
+  const r = target.getBoundingClientRect();
+  return { x: r.x, y: r.y, width: r.width, height: r.height };
+}
 
 let current: ComputerUseStatus | null = null;
 const listeners = new Set<() => void>();
@@ -81,8 +88,8 @@ export async function answerComputerUse(answer: ComputerUseAnswer) {
 }
 
 /** Stop, take over or continue a session. */
-export async function controlComputerUse(session_id: string, action: ComputerUseControlAction) {
+export async function controlComputerUse(session_id: string, action: ComputerUseControlAction, rect?: ComputerUseButtonRect) {
   const invoke = window.__OMNIRUSH_ELECTRON__?.invokeDesktop;
   if (!invoke) throw new Error("Computer use needs the desktop app.");
-  await invoke("computerUseControl", { session_id, action });
+  await invoke("computerUseControl", { session_id, action, ...(rect ? { rect } : {}) });
 }

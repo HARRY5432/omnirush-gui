@@ -656,11 +656,18 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
    * Whether a physical key or button press (not injected by a program, not a remote-debugging
    * click that makes no OS input) came within `withinMs`: the person's own answer.
    */
-  async function physicalInput(withinMs = 5000, { foregroundPid = null } = {}) {
+  async function physicalInput(withinMs = 1500, { foregroundPid = null, rect = null, keys = ["Enter", "Space"] } = {}) {
     const value = await native.call("input-source").catch(() => null);
     if (!value || !value.at || value.synthetic || Date.now() - value.at >= withinMs) return false;
     // In the answering app's window (when the worker knows which app was in front).
-    return !(foregroundPid && Number.isInteger(value.foreground_pid) && value.foreground_pid !== foregroundPid);
+    if (foregroundPid && Number.isInteger(value.foreground_pid) && value.foreground_pid !== foregroundPid) return false;
+    // A pointer press must land on the pressed button (screen pixels); a key press must be one that presses a button.
+    if (value.kind === "pointer" && rect) {
+      if (!Number.isFinite(value.x) || !Number.isFinite(value.y)) return false;
+      return value.x >= rect.x - 4 && value.x <= rect.x + rect.width + 4 && value.y >= rect.y - 4 && value.y <= rect.y + rect.height + 4;
+    }
+    if (value.kind === "key") return keys.includes(value.key);
+    return !rect;
   }
 
   async function syntheticInput(withinMs = 5000) {

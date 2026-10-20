@@ -32,12 +32,12 @@ const presses = [];
 function notePress(entry) {
   Object.assign(lastInput, { synthetic: entry.synthetic, at: entry.at, kind: entry.kind });
   if (entry.synthetic) return;
-  presses.push({ at: entry.at, kind: entry.kind, key: entry.key ?? null, foreground_pid: entry.foreground_pid ?? null });
+  presses.push({ at: entry.at, kind: entry.kind, key: entry.key ?? null, foreground_pid: entry.foreground_pid ?? null, x: entry.x ?? null, y: entry.y ?? null });
   if (presses.length > 16) presses.shift();
 }
 function inputSource() {
   const physical = presses.at(-1) ?? null;
-  return { ...lastInput, key: physical?.key ?? null, foreground_pid: physical?.foreground_pid ?? null, physical_at: physical?.at ?? 0, presses: presses.slice() };
+  return { ...lastInput, key: physical?.key ?? null, foreground_pid: physical?.foreground_pid ?? null, x: physical?.x ?? null, y: physical?.y ?? null, physical_at: physical?.at ?? 0, presses: presses.slice() };
 }
 const changed = () => { generation += 1; post({ event: "person-input", generation }); };
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
@@ -169,7 +169,8 @@ function windows() {
           if (down) {
             const fg = [0];
             try { pidOf(foreground(), fg); } catch { /* unknown */ }
-            notePress({ synthetic: (value.flags & injectedFlag) !== 0, at: Date.now(), kind: type === hookKey ? "key" : "pointer", key: type === hookKey ? keyFromVirtualKey(Number(value.vkCode)) : null, foreground_pid: fg[0] || null });
+            const at = type === hookMouse ? { x: value.pt.x, y: value.pt.y } : {};
+            notePress({ synthetic: (value.flags & injectedFlag) !== 0, at: Date.now(), kind: type === hookKey ? "key" : "pointer", key: type === hookKey ? keyFromVirtualKey(Number(value.vkCode)) : null, foreground_pid: fg[0] || null, ...at });
           }
           if (interrupting) { changed(); release(); }
         }
@@ -570,12 +571,13 @@ function x11() {
           if (ours) continue;
           if (cookie.evtype === 13 || cookie.evtype === 15) {
             const synthetic = testDevices.has(raw.sourceid);
-            let key = null, fg = null;
+            let key = null, fg = null, where = {};
             if (!synthetic) {
+              try { if (cookie.evtype === 15) { const r = [0], c = [0], rx = [0], ry = [0], wx = [0], wy = [0], mk = [0]; if (queryPointer(display, root, r, c, rx, ry, wx, wy, mk)) where = { x: rx[0], y: ry[0] }; } } catch { /* unknown */ }
               try { if (cookie.evtype === 13) key = keyFromKeysymName(keysymName(keycodeKeysym(display, raw.detail, 0, 0))); } catch { /* unknown */ }
               try { fg = Number(prop(activeWindow(), "_NET_WM_PID")[0] ?? 0) || null; } catch { /* unknown */ }
             }
-            notePress({ synthetic, at: Date.now(), kind: cookie.evtype === 13 ? "key" : "pointer", key, foreground_pid: fg });
+            notePress({ synthetic, at: Date.now(), kind: cookie.evtype === 13 ? "key" : "pointer", key, foreground_pid: fg, ...where });
           }
           if (interrupting) changed();
         }

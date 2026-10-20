@@ -24,7 +24,7 @@ function fakeNative() {
   const listeners = new Set<(v: Record<string, unknown>) => void>();
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   let generation = 0;
-  const state: { occluded: boolean; synthetic: boolean; retitle: ((title: string) => string) | null; texts: Array<{ x: number; y: number; width: number; height: number; text: string }> | null } = { occluded: false, synthetic: false, retitle: null, texts: null };
+  const state: { occluded: boolean; synthetic: boolean; retitle: ((title: string) => string) | null; texts: Array<{ x: number; y: number; width: number; height: number; text: string }> | null; pressAge?: number; pressKind?: string; pressKey?: string; pressAt?: { x: number; y: number }; pressPid?: number } = { occluded: false, synthetic: false, retitle: null, texts: null };
   const frame = (w: Window): Frame => {
     const width = Math.min(w.bounds.width, 640), height = Math.round((width * w.bounds.height) / w.bounds.width);
     const data = new Uint8Array(width * height * 4).fill(shade);
@@ -52,7 +52,7 @@ function fakeNative() {
       if (method === "state") return { generation, available: true };
       if (method === "start") return { generation };
       if (method === "hit") return { inside: (params.points as unknown[]).map(() => !state.occluded) };
-      if (method === "input-source") return { synthetic: state.synthetic, at: Date.now(), kind: "pointer" };
+      if (method === "input-source") return { synthetic: state.synthetic, at: Date.now() - (state.pressAge ?? 0), kind: state.pressKind ?? "pointer", key: state.pressKey ?? null, x: state.pressAt?.x ?? null, y: state.pressAt?.y ?? null, foreground_pid: state.pressPid ?? null };
       if (method === "act") {
         if (params.generation !== generation) throw Object.assign(new Error("Your input paused computer use."), { code: "paused_by_person" });
         if (state.retitle) windows[0]!.title = state.retitle(windows[0]!.title);
@@ -365,6 +365,27 @@ describe("portable host: titles that follow the agent's own typing, and a worker
     }
     expect(workers.length).toBe(3);
     expect((await call(c, "computer_discover", {})).state.code).toBe("native_unavailable");
+    await host.close();
+  });
+});
+
+describe("portable host: the person's own press answers a question", () => {
+  test("within 1.5 s, in the app's window, on the pressed button or with Enter/Space", async () => {
+    const r = rig("normal");
+    const host = await r.hostPromise;
+    const rect = { x: 100, y: 200, width: 80, height: 30 };
+    r.native.state.pressAt = { x: 120, y: 210 }; r.native.state.pressPid = 4242;
+    expect(await host.physicalInput(1500, { foregroundPid: 4242, rect })).toBe(true);
+    r.native.state.pressAt = { x: 400, y: 210 };
+    expect(await host.physicalInput(1500, { foregroundPid: 4242, rect })).toBe(false);
+    r.native.state.pressAt = { x: 120, y: 210 };
+    expect(await host.physicalInput(1500, { foregroundPid: 999, rect })).toBe(false);
+    r.native.state.pressAge = 2000;
+    expect(await host.physicalInput(1500, { foregroundPid: 4242, rect })).toBe(false);
+    r.native.state.pressAge = 0; r.native.state.pressKind = "key"; r.native.state.pressKey = "Enter";
+    expect(await host.physicalInput(1500, { foregroundPid: 4242, rect })).toBe(true);
+    r.native.state.pressKey = "y";
+    expect(await host.physicalInput(1500, { foregroundPid: 4242, rect })).toBe(false);
     await host.close();
   });
 });

@@ -80,7 +80,8 @@ export type PortableHost = {
   stopAll(by?: SessionEvent["by"], event?: SessionEvent["event"]): Promise<void>;
   syntheticInput(withinMs?: number): Promise<boolean>;
   /** A physical key or button press within `withinMs` (not injected, not a remote-debugging click). */
-  physicalInput(withinMs?: number, options?: { foregroundPid?: number | null }): Promise<boolean>;
+  /** Default 1.5 s; a pointer press must be inside `rect` (screen pixels) when given; a key press must be one of `keys` (default Enter, Space). */
+  physicalInput(withinMs?: number, options?: { foregroundPid?: number | null; rect?: { x: number; y: number; width: number; height: number } | null; keys?: string[] }): Promise<boolean>;
   watchInput(): Promise<void>;
   state(): HostSessionState[];
   close(): Promise<void>;

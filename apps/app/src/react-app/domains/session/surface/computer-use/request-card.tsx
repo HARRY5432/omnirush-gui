@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { stripRemoteMethodErrorPrefix } from "@/react-app/domains/settings/state/electron-updater-state";
 
 import { describeComputerUseAction, scalePoints, typedText, type ComputerUsePoint } from "./describe";
-import { answerComputerUse } from "./status-store";
+import { answerComputerUse, buttonRect } from "./status-store";
 
 const APPROVE_WITH_OWN_INPUT = "Use your own mouse or keyboard to approve.";
 
@@ -88,10 +88,11 @@ export function ComputerUseRequestCard(props: { request: ComputerUseRequest }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const answer = (decision: ComputerUseAnswer["decision"]) => {
+  const answer = (decision: ComputerUseAnswer["decision"], event?: { currentTarget: EventTarget | null }) => {
     setBusy(true);
     setError(null);
-    answerComputerUse({ request_id: request.request_id, decision, ...(request.kind === "open" ? { window_id: windowId } : {}) })
+    const rect = buttonRect(event?.currentTarget ?? null);
+    answerComputerUse({ request_id: request.request_id, decision, ...(request.kind === "open" ? { window_id: windowId } : {}), ...(rect ? { rect } : {}) })
       .catch((reason: unknown) => {
         const message = reason instanceof Error ? stripRemoteMethodErrorPrefix(reason.message) : "";
         setError(message || APPROVE_WITH_OWN_INPUT);
@@ -140,18 +141,18 @@ export function ComputerUseRequestCard(props: { request: ComputerUseRequest }) {
         </p>
         {errorLine}
         <div className="flex flex-wrap items-center gap-2">
-          <Button type="button" size="sm" disabled={busy} onClick={() => answer("chat")} data-computer-use-answer="chat" className="h-auto py-1.5">
+          <Button type="button" size="sm" disabled={busy} onClick={(event) => answer("chat", event)} data-computer-use-answer="chat" className="h-auto py-1.5">
             <Check data-icon="inline-start" />
             <span className="flex flex-col items-start leading-4">
               <span>Allow for this chat</span>
               <span className="text-[10px] font-normal opacity-80">Same app, up to {Math.round(request.chat_seconds / 60)} minutes</span>
             </span>
           </Button>
-          <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => answer("once")} data-computer-use-answer="once">
+          <Button type="button" variant="outline" size="sm" disabled={busy} onClick={(event) => answer("once", event)} data-computer-use-answer="once">
             <Clock3 data-icon="inline-start" />
             Allow once
           </Button>
-          <Button type="button" variant="destructive" size="sm" disabled={busy} onClick={() => answer("deny")} data-computer-use-answer="deny">
+          <Button type="button" variant="destructive" size="sm" disabled={busy} onClick={(event) => answer("deny", event)} data-computer-use-answer="deny">
             <XCircle data-icon="inline-start" />
             Deny
           </Button>
@@ -185,11 +186,11 @@ export function ComputerUseRequestCard(props: { request: ComputerUseRequest }) {
       <ComputerUseFrame frame={request.frame} points={request.points} alt={`${request.app.app_name} window`} />
       {errorLine}
       <div className="flex flex-wrap items-center gap-2">
-        <Button type="button" size="sm" disabled={busy} onClick={() => answer("allow")} data-computer-use-answer="allow">
+        <Button type="button" size="sm" disabled={busy} onClick={(event) => answer("allow", event)} data-computer-use-answer="allow">
           <Check data-icon="inline-start" />
           Allow
         </Button>
-        <Button type="button" variant="destructive" size="sm" disabled={busy} onClick={() => answer("deny")} data-computer-use-answer="deny">
+        <Button type="button" variant="destructive" size="sm" disabled={busy} onClick={(event) => answer("deny", event)} data-computer-use-answer="deny">
           <XCircle data-icon="inline-start" />
           Deny
         </Button>
