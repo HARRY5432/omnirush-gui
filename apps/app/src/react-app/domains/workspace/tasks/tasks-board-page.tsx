@@ -4,6 +4,7 @@ import { useSearchParams } from "react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
+  ArrowDownToLine,
   FileDiff,
   GitBranch,
   GitMerge,
@@ -12,7 +13,6 @@ import {
   Plus,
   Square,
   Trash2,
-  Undo2,
 } from "lucide-react";
 
 import type { OmniRushWorkspaceTask } from "@/app/lib/omnirush-server";
@@ -385,7 +385,7 @@ function TaskCard({ task, busy, ...actions }: TaskCardProps) {
         {task.finished ? (
           <>
             <Button size="sm" variant="outline" onClick={actions.onApply} disabled={busy || !canBringBack} data-testid="task-apply">
-              <Undo2 /> Apply here
+              <ArrowDownToLine /> Apply here
             </Button>
             <Button size="sm" variant="outline" onClick={actions.onMerge} disabled={busy || !canBringBack} data-testid="task-merge">
               <GitMerge /> Merge

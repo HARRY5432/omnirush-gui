@@ -302,6 +302,43 @@ describe("parallel tasks (desktop)", () => {
     expect(existsSync(String(task.path))).toBe(false);
   });
 
+  test("a stopped task whose chat was continued is not brought back while that chat works", async () => {
+    const created = await h.call("POST", `/workspaces/${mainId}/tasks`, { prompt: "Continued later" });
+    const task = created.json.task as Record<string, string>;
+    const workspace = h.config.workspaces.find((entry) => entry.task?.taskId === task.id)!;
+    await noteTaskPrompt(workspace, "ses_task5", () => undefined, Date.now() - 10_000);
+    h.busy.set("ses_task5", true);
+    await h.call("POST", `/workspaces/${mainId}/tasks/${task.id}/stop`);
+    await writeFile(join(task.path, "later.txt"), "written after the stop\n");
+    for (const mode of ["apply", "merge"]) {
+      const refused = await h.call("POST", `/workspaces/${mainId}/tasks/${task.id}/${mode}`);
+      expect(refused).toMatchObject({ status: 409, json: { code: "task_running" } });
+    }
+    const shown = await h.call("GET", `/workspaces/${mainId}/tasks/${task.id}`);
+    expect(shown.json.stat).toBe("");
+    expect(git(task.path, "diff", "--cached", "--name-only")).toBe("");
+    expect(existsSync(join(repo, "later.txt"))).toBe(false);
+    h.busy.set("ses_task5", false);
+    const applied = await h.call("POST", `/workspaces/${mainId}/tasks/${task.id}/apply`);
+    expect(applied.status).toBe(200);
+    expect(existsSync(join(repo, "later.txt"))).toBe(true);
+    git(repo, "add", "-A");
+    git(repo, "commit", "-q", "-m", "later");
+    await h.call("DELETE", `/workspaces/${mainId}/tasks/${task.id}`);
+  });
+
+  test("a record that names another repository is not this workspace's task", async () => {
+    const created = await h.call("POST", `/workspaces/${mainId}/tasks`, { prompt: "Foreign record" });
+    const task = created.json.task as Record<string, string>;
+    const file = join(tasksDir(repo), ".omnirush-tasks", `${task.id}.json`);
+    const record = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>;
+    await writeFile(file, JSON.stringify({ ...record, repo: join(root, "elsewhere") }));
+    const shown = await h.call("GET", `/workspaces/${mainId}/tasks/${task.id}`);
+    expect(shown).toMatchObject({ status: 404, json: { code: "task_not_found" } });
+    await writeFile(file, JSON.stringify(record));
+    await h.call("DELETE", `/workspaces/${mainId}/tasks/${task.id}`);
+  });
+
   test("a task whose prompt never arrived stops counting as starting", async () => {
     const created = await h.call("POST", `/workspaces/${mainId}/tasks`, { prompt: "Never sent" });
     const task = created.json.task as Record<string, string>;

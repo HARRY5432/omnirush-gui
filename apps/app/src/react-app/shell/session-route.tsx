@@ -3270,7 +3270,8 @@ export function SessionRoute() {
    */
   const startParallelTask = useCallback(async (workspaceId: string, prompt: string) => {
     if (!client || !baseUrl || !token) throw new Error("omnirush.ai server is unavailable.");
-    const created = await client.createWorkspaceTask(workspaceId, { prompt, parentSessionId: selectedSessionId });
+    // The board has no chat open: a task started there has no parent chat.
+    const created = await client.createWorkspaceTask(workspaceId, { prompt, parentSessionId: tasksRouteActive ? null : selectedSessionId });
     const taskWorkspace = created.workspace;
     await refreshRouteState();
     void queryClient.invalidateQueries({ queryKey: workspaceTasksQueryKey(workspaceId) });
@@ -3297,7 +3298,7 @@ export function SessionRoute() {
     writeLastSessionFor(taskWorkspace.id, session.id);
     void queryClient.invalidateQueries({ queryKey: workspaceTasksQueryKey(workspaceId) });
     return created.task;
-  }, [baseUrl, client, environmentRuntimeKey, local.prefs.defaultModel, modelVariantValue, queryClient, refreshRouteState, selectedAgent, selectedSessionId, token]);
+  }, [baseUrl, client, environmentRuntimeKey, local.prefs.defaultModel, modelVariantValue, queryClient, refreshRouteState, selectedAgent, selectedSessionId, tasksRouteActive, token]);
 
   // The new task's folder, picked above its composer: switch to another
   // workspace, or open a folder as a new one (the sidebar's "+" in one step).
@@ -3592,6 +3593,13 @@ export function SessionRoute() {
           }}
           onWorkspacesChanged={() => void refreshRouteState()}
         />
+      ) : tasksRouteActive && selectedWorkspace?.workspaceType === "remote" ? (
+        <div className="mx-auto max-w-xl p-6 pt-16 text-center" data-testid="tasks-remote">
+          <h2 className="text-base font-medium">Parallel tasks run on this computer</h2>
+          <p className="mt-2 text-sm text-muted-foreground">
+            This workspace is on a remote worker. Open a project folder on this computer to start tasks in their own copies of it.
+          </p>
+        </div>
       ) : appsRouteActive ? (
         <AppsPage onNewApp={startAppConversation} />
       ) : automationsRouteActive ? (

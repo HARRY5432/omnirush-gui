@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import { ApiError } from "../errors.js";
 import type { ServerConfig, WorkspaceInfo } from "../types.js";
 import { workspaceIdForPath } from "../workspaces.js";
@@ -84,7 +86,7 @@ export type TaskView = {
 
 function taskWorkspaceOf(config: ServerConfig, record: TaskRecord): WorkspaceInfo | null {
   const id = workspaceIdForPath(record.path);
-  return config.workspaces.find((entry) => entry.task?.taskId === record.id || entry.id === id) ?? null;
+  return config.workspaces.find((entry) => entry.id === id && entry.task?.taskId === record.id) ?? null;
 }
 
 function sinceMs(iso: string | null, now: number): number {
@@ -134,7 +136,10 @@ export async function taskView(config: ServerConfig, record: TaskRecord, now = D
     startedAt: record.startedAt,
     finishedAt: record.finishedAt,
     age: relativeAge(Date.parse(record.startedAt || record.createdAt), now),
-    files: await taskFileCount(record).catch(() => null),
+    // A task brought back or gone has nothing left to count (its result says how many).
+    files: record.state === "applied" || record.state === "merged" ? record.result?.files ?? null
+      : record.state === "missing" ? null
+      : await taskFileCount(record).catch(() => null),
     finished: isFinished(record),
     result: record.result,
   };
@@ -155,6 +160,9 @@ function taskApiError(error: unknown): never {
  * and that it runs, and that chat's trace gets "worktree.task_started" once.
  * Only for task workspaces; every other prompt is untouched.
  */
+/** Tasks whose first prompt was noted already: later prompts in their chats skip the record read. */
+const startedTasks = new Set<string>();
+
 export async function noteTaskPrompt(
   workspace: WorkspaceInfo,
   sessionId: string,
@@ -162,15 +170,19 @@ export async function noteTaskPrompt(
   now = Date.now(),
 ): Promise<void> {
   const link = workspace.task;
-  if (!link) return;
+  if (!link || startedTasks.has(link.taskId)) return;
   const record = await readTask(workspace.path, link.taskId).catch(() => null);
-  if (!record || record.sessionId) return;
+  if (!record || record.sessionId) {
+    if (record) startedTasks.add(link.taskId);
+    return;
+  }
   let first = false;
   const started = await updateTask(record, (current) => {
     if (current.sessionId) return {};
     first = true;
     return { sessionId, state: "running", startedAt: new Date(now).toISOString() };
   }).catch(() => null);
+  if (started) startedTasks.add(link.taskId);
   if (started && first) recordTrace(sessionId, TASK_STARTED_EVENT, taskStartedData(started));
 }
 
@@ -185,7 +197,17 @@ export function registerWorkspaceTaskRoutes(options: RegisterWorkspaceTaskRoutes
 
   const findRecord = async (workspace: WorkspaceInfo, taskId: string) => {
     const record = await readTask(workspace.path, taskId).catch(taskApiError);
+    // Only a record of this workspace's own repository (a copied or edited record names another).
+    const repo = await repoOf(workspace.path);
+    if (!repo || path.resolve(record.repo) !== repo.top) throw new ApiError(404, "task_not_found", "No such task in this repository.");
     return liveTask(record, taskWorkspaceOf(config, record), engine);
+  };
+
+  /** Whether the task's chat works now (continued after it finished): its files are then still changing. */
+  const chatWorking = async (record: TaskRecord) => {
+    const taskWorkspace = taskWorkspaceOf(config, record);
+    if (!taskWorkspace || !record.sessionId) return false;
+    return (await engine.sessionBusy(taskWorkspace, record.sessionId).catch(() => null)) === true;
   };
 
   /** Stops the task's work (and waits for its chat to end), removes its folder, branch and record, and its workspace. */
@@ -256,7 +278,7 @@ export function registerWorkspaceTaskRoutes(options: RegisterWorkspaceTaskRoutes
       ? (await engine.lastReply(taskWorkspace, record.sessionId).catch(() => "")).slice(0, REPLY_MAX_CHARS)
       : "";
     // Reading the changes stages them in the task's own index: never while it works.
-    const stat = record.state === "running" || record.state === "created" ? "" : await taskStat(record).catch(() => "");
+    const stat = record.state === "running" || record.state === "created" || (await chatWorking(record)) ? "" : await taskStat(record).catch(() => "");
     return jsonResponse({ task: await taskView(config, record), stat, reply });
   });
 
@@ -265,6 +287,7 @@ export function registerWorkspaceTaskRoutes(options: RegisterWorkspaceTaskRoutes
       ensureWritable(config);
       const workspace = await repoWorkspace(ctx.params.id);
       const record = await findRecord(workspace, ctx.params.taskId);
+      if (await chatWorking(record)) throw new ApiError(409, "task_running", "The task's chat is still working; wait for it or stop it.");
       const done = await bringBack(record, { mode }).catch(taskApiError);
       if (done.record.sessionId) options.recordTrace(done.record.sessionId, TASK_MERGED_EVENT, taskMergedData(done.record, done));
       return jsonResponse({ mode, files: done.files, task: await taskView(config, done.record) });
