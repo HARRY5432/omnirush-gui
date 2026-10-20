@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -80,6 +80,13 @@ describe("user skill folders", () => {
     await writeFile(file, bytes);
     expect(await userGlobalSkillPaths(process.env)).toEqual(["~/my-skills", "/abs/team"]);
     expect(await readFile(file, "utf8")).toBe(bytes);
+    // A config kept elsewhere and linked in (a dotfile manager) is read, as the engine reads it.
+    await rm(file);
+    const linked = join(home, "dotfiles", "opencode.json");
+    await mkdir(join(home, "dotfiles"), { recursive: true });
+    await writeFile(linked, JSON.stringify({ skills: { paths: ["/linked"] } }));
+    await symlink(linked, join(dir, "opencode.json"));
+    expect(await userGlobalSkillPaths(process.env)).toEqual(["/linked"]);
     expect(mergeSkillPaths(["/app"], ["/app", "/a"], undefined, ["/b"])).toEqual(["/app", "/a", "/b"]);
   });
 

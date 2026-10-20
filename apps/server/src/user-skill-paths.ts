@@ -12,9 +12,13 @@
  * own.
  * The user's files are only read, never written.
  */
+import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { readJsoncFile } from "./jsonc.js";
+
+/** Larger global config files are not read for skill folders. */
+const MAX_CONFIG_BYTES = 1024 * 1024;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -40,7 +44,11 @@ export async function userGlobalSkillPaths(env: NodeJS.ProcessEnv = process.env)
   const dir = engineGlobalConfigDir(env);
   let paths: string[] = [];
   for (const name of ["config.json", "opencode.json", "opencode.jsonc"]) {
-    const read = await readJsoncFile<unknown>(join(dir, name), undefined, { allowInvalid: true, regularFileOnly: true }).catch(() => null);
+    const file = join(dir, name);
+    // Followed like the engine follows it (a dotfile manager's link), and only a file of a sane size.
+    const info = await stat(file).catch(() => null);
+    if (!info?.isFile() || info.size > MAX_CONFIG_BYTES) continue;
+    const read = await readJsoncFile<unknown>(file, undefined, { allowInvalid: true }).catch(() => null);
     const listed = configSkillPaths(read?.data);
     if (listed) paths = listed;
   }
