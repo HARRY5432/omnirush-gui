@@ -165,7 +165,7 @@
         "Permission modes: Careful asks before every change and command, Normal asks only before risky actions, Auto never asks. Pick one in the composer or in Settings.",
         "Answer approvals from the keyboard: Y allows once, A for this chat, N denies.",
         "Notifications when a task finishes or needs your approval while the window is in the background.",
-        "What's new in the Help menu and the command palette."
+        "What's new in the sidebar, the Help menu and the command palette."
       ],
       "improved": [
         "The chat works better when narrow: header actions fold into a menu, approval buttons wrap and the session check stays readable."
