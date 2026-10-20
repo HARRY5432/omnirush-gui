@@ -6,7 +6,8 @@
       "version": "2.6.3",
       "date": "2026-10-20",
       "new": [
-        "See what changed in each release with `/changelog` or `omnirush changelog`, and a short note after each update."
+        "See what changed in each release with `/changelog` or `omnirush changelog`, and a short note after each update.",
+        "Pick a colour theme for the terminal app with `/theme` or `omnirush theme`. By default it follows your terminal's light or dark setting."
       ],
       "improved": [],
       "fixed": []
@@ -174,7 +175,8 @@
       "version": "3.6.4",
       "date": "2026-10-20",
       "new": [
-        "What's new: see what changed in each release from the sidebar, the Help menu or the command palette, and a short note after each update."
+        "What's new: see what changed in each release from the sidebar, the Help menu or the command palette, and a short note after each update.",
+        "Themes: eight presets with light and dark versions, and your own theme in Settings › Appearance with a live preview and contrast checks. Share it as a code or a file; the editor, terminal and chat all follow it."
       ],
       "improved": [],
       "fixed": []
