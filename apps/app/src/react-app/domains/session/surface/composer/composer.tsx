@@ -1333,6 +1333,7 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
       <div className={props.flush ? "" : "max-w-[800px] mx-auto"}>
         {/* Main composer panel */}
         <div
+          data-composer-panel
           className={`@container/composer relative overflow-visible rounded-[18px] border border-dls-border bg-dls-surface transition-all ${panelRoundedClass}`}
         >
           {props.topAccessory ? <div className="relative z-10">{props.topAccessory}</div> : null}

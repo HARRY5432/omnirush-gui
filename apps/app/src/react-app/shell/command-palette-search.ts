@@ -1,6 +1,6 @@
 import fuzzysort from "fuzzysort";
 
-export type PaletteGroup = "recent" | "actions" | "settings" | "sessions";
+export type PaletteGroup = "recent" | "actions" | "help" | "settings" | "sessions";
 
 export type PaletteItem = {
   id: string;
@@ -13,6 +13,8 @@ export type PaletteItem = {
   breadcrumb?: string;
   shortcut?: string;
   disabled?: boolean;
+  /** A small accent dot after the title (e.g. unread release notes). */
+  dot?: boolean;
   action: () => void;
 };
 
@@ -22,10 +24,11 @@ export type PaletteResultGroup = {
   items: PaletteItem[];
 };
 
-const GROUP_ORDER: PaletteGroup[] = ["recent", "actions", "settings", "sessions"];
+const GROUP_ORDER: PaletteGroup[] = ["recent", "actions", "help", "settings", "sessions"];
 const GROUP_LABELS: Record<PaletteGroup, string> = {
   recent: "Recent",
   actions: "Actions",
+  help: "Help",
   settings: "Settings",
   sessions: "Sessions",
 };
@@ -71,6 +74,7 @@ export function rankPaletteItems(
     const groups = [
       resultGroup("recent", recent),
       resultGroup("actions", nonRecentItems.filter((item) => itemGroup(item) === "actions")),
+      resultGroup("help", nonRecentItems.filter((item) => itemGroup(item) === "help")),
       resultGroup("settings", nonRecentItems.filter((item) => itemGroup(item) === "settings").slice(0, 6)),
       resultGroup("sessions", nonRecentItems.filter((item) => itemGroup(item) === "sessions").slice(0, 5)),
     ];

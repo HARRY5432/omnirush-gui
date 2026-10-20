@@ -11,6 +11,7 @@ const NATIVE_MENU_TOGGLE_SIDEBAR_EVENT = "omnirush:native-menu:toggle-sidebar";
 const NATIVE_MENU_CHECK_UPDATES_EVENT = "omnirush:native-menu:check-updates";
 const NATIVE_MENU_ZOOM_EVENT = "omnirush:native-menu:zoom";
 const NATIVE_MENU_SEND_FEEDBACK_EVENT = "omnirush:native-menu:send-feedback";
+const NATIVE_MENU_WHATS_NEW_EVENT = "omnirush:native-menu:whats-new";
 
 export function createApplicationMenu({ appName, docsUrl, getWindow }) {
   let applicationMenuVisible = process.platform === "darwin";
@@ -39,6 +40,15 @@ export function createApplicationMenu({ appName, docsUrl, getWindow }) {
     win.show();
     win.focus();
     win.webContents.send(NATIVE_MENU_SEND_FEEDBACK_EVENT);
+  }
+
+  // Help > What's New: the window opens its release notes sheet.
+  async function whatsNewFromNativeMenu() {
+    const win = await getWindow();
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+    win.webContents.send(NATIVE_MENU_WHATS_NEW_EVENT);
   }
 
   async function toggleSidebarFromNativeMenu() {
@@ -216,6 +226,13 @@ export function createApplicationMenu({ appName, docsUrl, getWindow }) {
                 },
                 { type: "separator" },
               ]),
+          {
+            label: "What's New",
+            click: () => {
+              runDetachedTask("open what's new from menu", whatsNewFromNativeMenu);
+            },
+          },
+          { type: "separator" },
           {
             label: "Send Feedback…",
             click: () => {

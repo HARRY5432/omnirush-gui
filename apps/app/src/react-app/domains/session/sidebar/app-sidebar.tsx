@@ -36,6 +36,7 @@ import {
   X,
   Workflow,
   MessageCircleMore,
+  Sparkles,
 } from "lucide-react";
 import { LazyMotion, Reorder, domMax, m, useDragControls } from "motion/react";
 
@@ -67,6 +68,7 @@ import { useBrandAppName, useBrandLogoUrl } from "../../cloud/brand-theme";
 import { canCreateWorkspaces } from "../../../../app/lib/workspace-creation-policy";
 import { useShellConfig } from "../../../shell/shell-config";
 import { openFeedbackDialog } from "../../../../app/lib/in-app-feedback";
+import { openWhatsNew, useWhatsNewUnseen } from "../../whats-new/whats-new";
 
 import {
   Sidebar,
@@ -1036,6 +1038,27 @@ function QualitySpinRow({ quality }: { quality: AccountQuality }) {
   );
 }
 
+/** Sidebar footer: opens the release notes; a dot until they were opened on this version. */
+function WhatsNewSidebarItem() {
+  const unseen = useWhatsNewUnseen();
+  const label = t("whats_new.title");
+  return (
+    <SidebarMenuItem>
+      <SidebarMenuButton
+        type="button"
+        onClick={() => openWhatsNew("menu")}
+        tooltip={label}
+        aria-label={unseen ? `${label} (${t("whats_new.unseen")})` : label}
+        data-testid="sidebar-whats-new"
+      >
+        <Sparkles className="size-4" />
+        <span className="flex-1">{label}</span>
+        {unseen ? <span data-testid="whats-new-dot" className="size-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" /> : null}
+      </SidebarMenuButton>
+    </SidebarMenuItem>
+  );
+}
+
 function NativeAccountFooter({ onOpenAccountSettings }: { onOpenAccountSettings: () => void }) {
   // Shared with the quality popup (QualityRewards): one /device/me read for both.
   const status: NativeAccountStatus | null = useAccountStatusStore((store) => store.status);
@@ -1125,6 +1148,7 @@ function NativeAccountFooter({ onOpenAccountSettings }: { onOpenAccountSettings:
             </SidebarMenuButton>
           </SidebarMenuItem>
         ) : null}
+        <WhatsNewSidebarItem />
         <SidebarMenuItem>
           <SidebarMenuButton
             type="button"

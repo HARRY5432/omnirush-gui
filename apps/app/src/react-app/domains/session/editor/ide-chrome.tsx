@@ -6,7 +6,7 @@
  * button, and the app destinations at the foot of the activity rail.
  */
 import type { ReactNode } from "react";
-import { Check, ChevronDown, Code2, Folder, MessageSquare, MessageSquareOff, MoreHorizontal, Plus, Settings } from "lucide-react";
+import { Check, ChevronDown, Code2, Folder, MessageSquare, MessageSquareOff, MoreHorizontal, Plus, Settings, Sparkles } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -20,6 +20,9 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { t } from "@/i18n";
+import { isDesktopRuntime } from "@/app/lib/runtime-env";
+import { openWhatsNew, useWhatsNewUnseen } from "../../whats-new/whats-new";
 import type { LayoutMode } from "./editor-store";
 
 const isMac = () => typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
@@ -199,6 +202,8 @@ export type RailDestination = { id: string; label: string; icon: ReactNode; badg
 /** The app's destinations the sessions sidebar holds, at the foot of the IDE rail. */
 export function RailDestinations(props: { destinations: RailDestination[]; onOpenSettings: () => void }) {
   const badge = props.destinations.reduce((sum, item) => sum + (item.badge ?? 0), 0);
+  const whatsNew = isDesktopRuntime();
+  const whatsNewUnseen = useWhatsNewUnseen() && whatsNew;
   return (
     <>
       <DropdownMenu>
@@ -214,6 +219,8 @@ export function RailDestinations(props: { destinations: RailDestination[]; onOpe
               <MoreHorizontal />
               {badge ? (
                 <span className="absolute right-0.5 top-0.5 min-w-3.5 rounded-full bg-primary px-1 text-center text-[9px] font-semibold leading-3.5 text-primary-foreground">{badge}</span>
+              ) : whatsNewUnseen ? (
+                <span className="absolute right-1 top-1 size-1.5 rounded-full bg-primary" aria-hidden="true" data-rail-whats-new-dot />
               ) : null}
             </button>
           )}
@@ -226,6 +233,19 @@ export function RailDestinations(props: { destinations: RailDestination[]; onOpe
               {item.badge ? <span className="rounded bg-muted px-1 text-[10px] text-muted-foreground">{item.badge}</span> : null}
             </DropdownMenuItem>
           ))}
+          {whatsNew ? (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => openWhatsNew("menu")} data-rail-destination="whats-new">
+                <Sparkles />
+                <span className="min-w-0 flex-1 truncate">
+                  {t("whats_new.title")}
+                  {whatsNewUnseen ? <span className="sr-only"> ({t("whats_new.unseen")})</span> : null}
+                </span>
+                {whatsNewUnseen ? <span className="size-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" /> : null}
+              </DropdownMenuItem>
+            </>
+          ) : null}
         </DropdownMenuContent>
       </DropdownMenu>
       <Tooltip>

@@ -370,6 +370,12 @@ ipcRenderer.on("omnirush:native-menu:send-feedback", () => {
   window.dispatchEvent(new Event("omnirush:native-menu:send-feedback"));
 });
 
+// Help > What's New (app-menu.mjs): the window opens its release notes sheet.
+ipcRenderer.on("omnirush:native-menu:whats-new", () => {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new Event("omnirush:native-menu:whats-new"));
+});
+
 // In-app feedback (feedback-desktop.mjs EVENT_CHANNEL): { name, properties } for the app's analytics (labels only).
 ipcRenderer.on("omnirush:feedback:event", (_event, detail) => {
   if (typeof window === "undefined") return;

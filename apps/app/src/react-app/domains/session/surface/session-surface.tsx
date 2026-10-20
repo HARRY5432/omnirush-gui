@@ -3463,7 +3463,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
         />
       </div>
 
-      <div ref={composerShellRef} className="shrink-0 px-0 pb-2 pt-2">
+      <div ref={composerShellRef} data-composer-shell className="shrink-0 px-0 pb-2 pt-2">
         {(props.providerConnectedCount ?? 0) === 0 ? (
           <button
             type="button"

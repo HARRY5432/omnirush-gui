@@ -9,6 +9,7 @@ import {
   MessageCircleMore,
   MoreHorizontal,
   Settings,
+  Sparkles,
   Stethoscope,
   UserRound,
 } from "lucide-react";
@@ -26,6 +27,8 @@ import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { t } from "@/i18n";
 import { usePlatform } from "../../../kernel/platform";
+import { isDesktopRuntime } from "../../../../app/lib/runtime-env";
+import { openWhatsNew, useWhatsNewUnseen } from "../../whats-new/whats-new";
 import { isDenSessionRestoring, useDenAuth } from "../../cloud/den-auth-provider";
 import { useDenControlPlaneConfigured } from "../../cloud/use-den-control-plane-configured";
 import { useDesktopRestriction } from "../../cloud/desktop-config-provider";
@@ -208,6 +211,7 @@ export function AccountStatusMenu(props: AccountStatusMenuProps) {
 
   const openSettings = props.onOpenAccountSettings;
   const openDocs = useCallback(() => platform.openLink(DOCS_URL), [platform]);
+  const whatsNewUnseen = useWhatsNewUnseen();
   // When the organization blocks settings control, the settings surface is the
   // Cloud account page only, so the entry is labelled for where it lands and
   // the Debug shortcut is hidden.
@@ -464,6 +468,16 @@ export function AccountStatusMenu(props: AccountStatusMenuProps) {
           <DropdownMenuItem onClick={openDocs}>
             <BookOpen className="size-3.5" />
             {t("status.docs")}
+          </DropdownMenuItem>
+        ) : null}
+        {isDesktopRuntime() ? (
+          <DropdownMenuItem onClick={() => openWhatsNew("menu")} data-testid="account-menu-whats-new">
+            <Sparkles className="size-3.5" />
+            <span className="flex-1">
+              {t("whats_new.title")}
+              {whatsNewUnseen ? <span className="sr-only"> ({t("whats_new.unseen")})</span> : null}
+            </span>
+            {whatsNewUnseen ? <span className="size-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" /> : null}
           </DropdownMenuItem>
         ) : null}
         {shellConfig.feedbackButton && props.onSendFeedback ? (
