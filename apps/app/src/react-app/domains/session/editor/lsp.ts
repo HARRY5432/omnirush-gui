@@ -10,7 +10,7 @@
  * Bounds: a file's language servers start only once it has been the active
  * file for a moment, or on the first edit / go to / rename / go to symbol request
  * (not when a file is just glanced at); one request per file at a time; no
- * unsaved text while the chat's agent is working; and the "Language features
+ * unsaved text while any chat's agent is working; and the "Language features
  * in the editor" switch turns all of it off.
  */
 import { create } from "zustand";
@@ -65,7 +65,7 @@ export function activateLsp(path: string) {
   useLspActivation.setState((state) => ({ active: { ...state.active, [key]: true } }));
 }
 
-/** While the chat's agent works, no unsaved text goes to the language servers (its tools read their diagnostics). */
+/** While any chat's agent works, no unsaved text goes to the language servers (shared; its tools read their diagnostics). */
 export function setLspSessionBusy(busy: boolean) {
   sessionBusy = busy;
 }
@@ -139,6 +139,20 @@ function isDirty(path: string): boolean {
   return Boolean(doc && current?.docs.isDirty(doc));
 }
 
+/**
+ * A payload builder for `call` that also tells, after the call, whether the request went out without the
+ * buffer's unsaved text (an agent started while it waited): its positions then fit the disk copy, not the buffer.
+ */
+function tracked(model: MonacoApi.editor.ITextModel, path: string, position?: MonacoApi.Position) {
+  const state = { withoutText: false };
+  const build = () => {
+    const payload = payloadFor(model, path, position);
+    state.withoutText = isDirty(path) && !("text" in payload);
+    return payload;
+  };
+  return { build, state };
+}
+
 function payloadFor(model: MonacoApi.editor.ITextModel, path: string, position?: MonacoApi.Position) {
   const text = isDirty(path) && !sessionBusy ? model.getValue() : undefined;
   return {
@@ -174,7 +188,7 @@ async function supported(ctx: Context): Promise<boolean | null> {
       workspaceId: ctx.workspaceId,
       answer: ctx.client.editorLsp<unknown>(ctx.workspaceId, "diagnostics", {}).then(
         (raw) => Array.isArray(raw),
-        (error: { status?: number }) => (error.status === 404 || error.status === 405 ? false : null),
+        (error: { status?: number; code?: string }) => ((error.status === 404 && error.code !== "workspace_not_found") || error.status === 405 ? false : null),
       ),
     };
   }
@@ -282,8 +296,9 @@ export async function documentSymbols(model: MonacoApi.editor.ITextModel, option
   if (cached && cached.version === model.getVersionId()) return cached.symbols;
   // Unsaved text cannot be sent now: keep what the outline shows.
   if (cached && isDirty(path) && sessionBusy) return cached.symbols;
-  const raw = await call<LspDocumentSymbol[]>("symbols", path, () => payloadFor(model, path));
-  if (isDirty(path) && sessionBusy) return cached?.symbols ?? null;
+  const request = tracked(model, path);
+  const raw = await call<LspDocumentSymbol[]>("symbols", path, request.build);
+  if (request.state.withoutText) return cached?.symbols ?? null;
   const symbols = Array.isArray(raw) ? toDocumentSymbols(current.monaco, raw) : [];
   symbolCache.set(key, { version: model.getVersionId(), symbols });
   return symbols;
@@ -364,11 +379,12 @@ export async function refreshFileDiagnostics(path: string): Promise<void> {
       // Unsaved text cannot be sent while the agent works, and the disk's diagnostics do not fit the buffer: keep the squiggles.
       if (!doc || (isDirty(path) && sessionBusy)) return;
       const version = doc.model.getVersionId();
-      const raw = await call<ProblemFile[]>("diagnostics", path, () => payloadFor(doc.model, path));
+      const request = tracked(doc.model, path);
+      const raw = await call<ProblemFile[]>("diagnostics", path, request.build);
       // An edit since the request: its result is already stale; the run after it applies.
       if (!raw || current !== ctx || (doc.model.getVersionId() !== version && run.pending)) continue;
       // Sent without its unsaved text (an agent started meanwhile): the disk's diagnostics do not fit the buffer.
-      if (isDirty(path) && sessionBusy) return;
+      if (request.state.withoutText) return;
       const file = raw.find((item) => item.path === path) ?? { path, diagnostics: [] };
       applyMarkers(path, file.diagnostics);
       useProblemsStore.getState().merge(ctx.workspaceId, file);
@@ -407,6 +423,8 @@ export function clearLanguageFeatures() {
 export function setLanguageContext(ctx: Context | null) {
   current = ctx;
   unavailable = false;
+  // Opening a workspace (again) asks the engine again: it may have been updated.
+  support = null;
   symbolCache.clear();
   diagnosticsRuns.clear();
   useProblemsStore.getState().setAvailable(true);
@@ -459,7 +477,10 @@ export function installLanguageFeatures(monaco: Monaco) {
       const ctx = current;
       activateLsp(path);
       if (isDirty(path) && sessionBusy) return reject("Save this file or wait for the agent to finish before renaming.");
-      const raw = await call<unknown[]>("rename", path, () => ({ ...payloadFor(model, path, position), newName }));
+      const request = tracked(model, path, position);
+      const raw = await call<unknown[]>("rename", path, () => ({ ...request.build(), newName }));
+      // Sent without the unsaved text (an agent started while it waited): its edits fit the disk copy, not the buffer.
+      if (request.state.withoutText) return reject("Save this file or wait for the agent to finish before renaming.");
       const edits: MonacoApi.languages.IWorkspaceTextEdit[] = [];
       type TextEdit = { range: LspRange; newText: string };
       const addEdits = async (uri: string, list: TextEdit[]) => {
