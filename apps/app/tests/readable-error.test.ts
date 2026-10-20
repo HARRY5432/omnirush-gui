@@ -11,3 +11,14 @@ describe("readableErrorMessage", () => {
     expect(readableErrorMessage(null)).toBeNull();
   });
 });
+
+import { presentOpencodeSessionError } from "../src/react-app/domains/session/sync/session-error";
+
+describe("the engine's provider lock error in the chat", () => {
+  test("shown as the engine says it, with or without the error class before it", () => {
+    const text = "OmniRush models are unavailable: the app's config does not point at the OmniRush gateway (see omnirush_ignored in the engine config). Reinstall or update the app.";
+    for (const message of [text, `ProviderModelNotFoundError: ${text}`]) {
+      expect(presentOpencodeSessionError({ name: "UnknownError", data: { message } }).title).toBe(text);
+    }
+  });
+});
