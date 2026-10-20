@@ -224,7 +224,7 @@ function ShortcutHint(props: { label: string }) {
     <kbd
       aria-hidden="true"
       data-permission-shortcut={props.label}
-      className="ml-1 rounded border border-current/25 px-1 font-sans text-[10px] leading-4 opacity-70"
+      className="ml-1 hidden rounded border border-current/25 px-1 font-sans text-[10px] leading-4 opacity-70 @min-[30rem]/approval:inline"
     >
       {props.label}
     </kbd>
