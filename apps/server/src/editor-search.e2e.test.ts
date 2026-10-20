@@ -81,3 +81,8 @@ test("ripgrep from the desktop engine's data folder", async () => {
   await writeFile(join(userData, "engine-data", "omnirush", "bin", name), "");
   expect(findRipgrep({ PATH: "", OMNIRUSH_DESKTOP_USER_DATA_DIR: userData, HOME: userData })).toBe(join(userData, "engine-data", "omnirush", "bin", name));
 });
+
+test("a search tool that cannot start is an error, not an empty result", async () => {
+  const root = await project();
+  await expect(searchWorkspace(root, options({}), join(root, "no-such-rg"))).rejects.toThrow();
+});

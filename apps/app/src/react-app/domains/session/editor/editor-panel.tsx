@@ -80,6 +80,8 @@ export type EditorPanelProps = {
   workspaceRoot: string;
   sessionId: string | null;
   sessionBusy: boolean;
+  /** Some chat's agent is working (the language servers are shared by every chat): no unsaved text goes to them. */
+  agentBusy: boolean;
   opencodeClient: Client | null;
   terminal: ReactNode | null;
   terminalOpen: boolean;
@@ -528,7 +530,7 @@ function showConflict(path: string, input: { reload: () => void; overwrite: () =
 }
 
 export default function EditorPanel(props: EditorPanelProps) {
-  const { client, workspaceId, workspaceRoot, sessionId, sessionBusy, opencodeClient } = props;
+  const { client, workspaceId, workspaceRoot, sessionId, sessionBusy, agentBusy, opencodeClient } = props;
   const monaco = useMemo<Monaco>(() => setupMonaco(), []);
   const docs = useMemo(() => editorDocuments(monaco, client, workspaceId), [monaco, client, workspaceId]);
   const queryClient = useQueryClient();
@@ -948,8 +950,8 @@ export default function EditorPanel(props: EditorPanelProps) {
   const activeFilePath = surface?.kind === "file" ? surface.doc.path : null;
   const lspActive = useIsLspActive(activeFilePath);
   useEffect(() => {
-    setLspSessionBusy(sessionBusy);
-  }, [sessionBusy]);
+    setLspSessionBusy(agentBusy);
+  }, [agentBusy]);
   useEffect(() => {
     if (!languageFeatures) clearLanguageFeatures();
   }, [languageFeatures]);
@@ -985,7 +987,7 @@ export default function EditorPanel(props: EditorPanelProps) {
       window.clearTimeout(timer);
       subscription.dispose();
     };
-  }, [surface, lspActive, sessionBusy]);
+  }, [surface, lspActive, agentBusy]);
 
   // Breadcrumbs: the symbols around the cursor.
   useEffect(() => {

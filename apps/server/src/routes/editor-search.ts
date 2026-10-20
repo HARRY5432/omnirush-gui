@@ -101,7 +101,9 @@ function byteToIndex(line: string, byteOffset: number): number {
   return buffer.subarray(0, Math.max(0, Math.min(byteOffset, buffer.length))).toString("utf8").length;
 }
 
-function run(cmd: string, args: string[], cwd: string, onLine: (line: string) => boolean): Promise<{ timedOut: boolean; code: number | null; stderr: string }> {
+type RunOutcome = { timedOut: boolean; code: number | null; stderr: string; spawnError?: string };
+
+function run(cmd: string, args: string[], cwd: string, onLine: (line: string) => boolean): Promise<RunOutcome> {
   return new Promise((resolvePromise) => {
     const child = spawn(cmd, args, { cwd, stdio: ["ignore", "pipe", "pipe"], windowsHide: true, env: { ...process.env, LC_ALL: "C.UTF-8" } });
     let buffered = "";
@@ -132,7 +134,7 @@ function run(cmd: string, args: string[], cwd: string, onLine: (line: string) =>
     });
     child.on("error", (error) => {
       clearTimeout(timer);
-      resolvePromise({ timedOut, code: null, stderr: error.message });
+      resolvePromise({ timedOut, code: null, stderr: error.message, spawnError: error.message });
     });
     child.on("close", (code) => {
       clearTimeout(timer);
@@ -193,6 +195,7 @@ export async function searchWorkspace(root: string, options: SearchOptions, rg =
       }
       return true;
     });
+    if (outcome.spawnError) throw new ApiError(500, "search_failed", `ripgrep could not start: ${outcome.spawnError.slice(0, 200)}`);
     if (outcome.code === 2 && !matchCount && /regex|parse/i.test(outcome.stderr)) {
       throw new ApiError(400, "invalid_regex", outcome.stderr.trim().slice(0, 300));
     }
@@ -232,6 +235,7 @@ export async function searchWorkspace(root: string, options: SearchOptions, rg =
     });
   };
   let outcome = await gitGrep(options.regex ? "-P" : "-F");
+  if (outcome.spawnError) throw new ApiError(500, "search_failed", `git could not start: ${outcome.spawnError.slice(0, 200)}`);
   if (options.regex && outcome.code === 128 && !matchCount && /perl|pcre/i.test(outcome.stderr)) outcome = await gitGrep("-E");
   // 0 = matches, 1 = none; anything else (128: bad pattern, no PCRE …) is an error unless matching was cut short on purpose.
   if (outcome.code !== null && outcome.code > 1 && !truncated && !outcome.timedOut) {

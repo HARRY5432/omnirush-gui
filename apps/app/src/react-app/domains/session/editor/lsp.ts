@@ -165,26 +165,47 @@ function inLane<T>(path: string, run: () => Promise<T>): Promise<T> {
  * Whether this engine has the editor routes, checked once per workspace with an empty request before any file
  * text is sent (an engine without them could hand an unknown request to something else).
  */
-let support: Promise<boolean> | null = null;
-function supported(ctx: Context): Promise<boolean> {
-  support ??= ctx.client.editorLsp<unknown>(ctx.workspaceId, "diagnostics", {}).then((raw) => Array.isArray(raw), () => false);
-  return support;
+// Only a definite answer is kept: a JSON array = the routes exist; 404/405 or anything else that is not an
+// array = they do not. A network error, timeout or 5xx (the engine still starting) is asked again next time.
+let support: { workspaceId: string; answer: Promise<boolean | null> } | null = null;
+async function supported(ctx: Context): Promise<boolean | null> {
+  if (!support || support.workspaceId !== ctx.workspaceId) {
+    support = {
+      workspaceId: ctx.workspaceId,
+      answer: ctx.client.editorLsp<unknown>(ctx.workspaceId, "diagnostics", {}).then(
+        (raw) => Array.isArray(raw),
+        (error: { status?: number }) => (error.status === 404 || error.status === 405 ? false : null),
+      ),
+    };
+  }
+  const asked = support;
+  const answer = await asked.answer;
+  if (answer === null && support === asked) support = null;
+  return answer;
 }
 
-async function call<T>(op: Parameters<OmniRushServerClient["editorLsp"]>[1], payload: Parameters<OmniRushServerClient["editorLsp"]>[2]): Promise<T | null> {
+type Payload = Parameters<OmniRushServerClient["editorLsp"]>[2];
+
+/**
+ * One language request. `build` makes the payload when the request is sent (its turn in the file's lane), so
+ * whether unsaved text goes with it is decided then, not when it was queued.
+ */
+async function call<T>(op: Parameters<OmniRushServerClient["editorLsp"]>[1], path: string | null, build: () => Payload): Promise<T | null> {
   if (!current || unavailable || !useEditorStore.getState().languageFeatures) return null;
   const ctx = current;
-  const path = typeof payload.path === "string" ? payload.path : null;
-  if (!(await supported(ctx))) {
-    if (current === ctx) {
+  const support = await supported(ctx);
+  if (support !== true) {
+    if (support === false && current === ctx) {
       unavailable = true;
       useProblemsStore.getState().setAvailable(false);
     }
     return null;
   }
   try {
-    const run = () => ctx.client.editorLsp<T>(ctx.workspaceId, op, payload);
-    return await (path ? inLane(path, run) : run());
+    const run = () => (useEditorStore.getState().languageFeatures ? ctx.client.editorLsp<T>(ctx.workspaceId, op, build()) : Promise.resolve(null));
+    const result = await (path ? inLane(path, run) : run());
+    // Turned off or another workspace since: the answer is not shown.
+    return current === ctx && useEditorStore.getState().languageFeatures ? result : null;
   } catch (error) {
     // An engine without the editor routes (older build): language features stay off quietly.
     if ((error as { status?: number }).status === 404) {
@@ -261,7 +282,8 @@ export async function documentSymbols(model: MonacoApi.editor.ITextModel, option
   if (cached && cached.version === model.getVersionId()) return cached.symbols;
   // Unsaved text cannot be sent now: keep what the outline shows.
   if (cached && isDirty(path) && sessionBusy) return cached.symbols;
-  const raw = await call<LspDocumentSymbol[]>("symbols", payloadFor(model, path));
+  const raw = await call<LspDocumentSymbol[]>("symbols", path, () => payloadFor(model, path));
+  if (isDirty(path) && sessionBusy) return cached?.symbols ?? null;
   const symbols = Array.isArray(raw) ? toDocumentSymbols(current.monaco, raw) : [];
   symbolCache.set(key, { version: model.getVersionId(), symbols });
   return symbols;
@@ -342,15 +364,17 @@ export async function refreshFileDiagnostics(path: string): Promise<void> {
       // Unsaved text cannot be sent while the agent works, and the disk's diagnostics do not fit the buffer: keep the squiggles.
       if (!doc || (isDirty(path) && sessionBusy)) return;
       const version = doc.model.getVersionId();
-      const raw = await call<ProblemFile[]>("diagnostics", payloadFor(doc.model, path));
+      const raw = await call<ProblemFile[]>("diagnostics", path, () => payloadFor(doc.model, path));
       // An edit since the request: its result is already stale; the run after it applies.
       if (!raw || current !== ctx || (doc.model.getVersionId() !== version && run.pending)) continue;
+      // Sent without its unsaved text (an agent started meanwhile): the disk's diagnostics do not fit the buffer.
+      if (isDirty(path) && sessionBusy) return;
       const file = raw.find((item) => item.path === path) ?? { path, diagnostics: [] };
       applyMarkers(path, file.diagnostics);
       useProblemsStore.getState().merge(ctx.workspaceId, file);
     }
   } finally {
-    diagnosticsRuns.delete(key);
+    if (diagnosticsRuns.get(key) === run) diagnosticsRuns.delete(key);
   }
 }
 
@@ -358,7 +382,7 @@ export async function refreshFileDiagnostics(path: string): Promise<void> {
 export async function refreshAllDiagnostics(): Promise<void> {
   if (!current) return;
   const ctx = current;
-  const raw = await call<ProblemFile[]>("diagnostics", {});
+  const raw = await call<ProblemFile[]>("diagnostics", null, () => ({}));
   if (!raw || current !== ctx) return;
   // Files with unsaved changes keep what their own text gave (the servers hold the disk copy's).
   const before = useProblemsStore.getState().byWorkspace[ctx.workspaceId] ?? [];
@@ -383,7 +407,6 @@ export function clearLanguageFeatures() {
 export function setLanguageContext(ctx: Context | null) {
   current = ctx;
   unavailable = false;
-  support = null;
   symbolCache.clear();
   diagnosticsRuns.clear();
   useProblemsStore.getState().setAvailable(true);
@@ -399,7 +422,7 @@ export function installLanguageFeatures(monaco: Monaco) {
       // The mouse resting on a file just glanced at starts nothing: hover works once the file's features started.
       const path = modelPath(model);
       if (!path || !isLspActive(path)) return null;
-      const contents = hoverContents(await call("hover", payloadFor(model, path, position)));
+      const contents = hoverContents(await call("hover", path, () => payloadFor(model, path, position)));
       return contents.length ? { contents } : null;
     },
   });
@@ -408,7 +431,7 @@ export function installLanguageFeatures(monaco: Monaco) {
       const path = modelPath(model);
       if (!path) return null;
       activateLsp(path);
-      return toLocations(await call("definition", payloadFor(model, path, position)));
+      return toLocations(await call("definition", path, () => payloadFor(model, path, position)));
     },
   });
   monaco.languages.registerReferenceProvider(selector, {
@@ -416,7 +439,7 @@ export function installLanguageFeatures(monaco: Monaco) {
       const path = modelPath(model);
       if (!path) return null;
       activateLsp(path);
-      return toLocations(await call("references", payloadFor(model, path, position)));
+      return toLocations(await call("references", path, () => payloadFor(model, path, position)));
     },
   });
   monaco.languages.registerDocumentSymbolProvider(selector, {
@@ -436,7 +459,7 @@ export function installLanguageFeatures(monaco: Monaco) {
       const ctx = current;
       activateLsp(path);
       if (isDirty(path) && sessionBusy) return reject("Save this file or wait for the agent to finish before renaming.");
-      const raw = await call<unknown[]>("rename", { ...payloadFor(model, path, position), newName });
+      const raw = await call<unknown[]>("rename", path, () => ({ ...payloadFor(model, path, position), newName }));
       const edits: MonacoApi.languages.IWorkspaceTextEdit[] = [];
       type TextEdit = { range: LspRange; newText: string };
       const addEdits = async (uri: string, list: TextEdit[]) => {
