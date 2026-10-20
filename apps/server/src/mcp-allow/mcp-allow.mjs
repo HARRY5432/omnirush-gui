@@ -295,6 +295,21 @@ export function launchCommand(entry, launch, version, npmPrefix) {
 }
 
 /**
+ * The program words that start `runner` (an absolute path from resolveRunner). On Windows npx is a batch
+ * file (npx.cmd): cmd.exe re-reads its arguments, and the batch first runs npm's prefix lookup in the current
+ * folder (the project, whose .npmrc could point it at a copy of npx inside the project). So the batch never
+ * runs: npm's own `node.exe` beside it runs `node_modules/npm/bin/npx-cli.js` directly. null when they are
+ * not there. Anything else is started as found.
+ */
+export function windowsDirect(found, platform = process.platform, exists = existsSync) {
+  if (platform !== "win32" || !/\.(cmd|bat)$/i.test(found)) return [found];
+  const dir = path.win32.dirname(found);
+  const node = path.win32.join(dir, "node.exe");
+  const cli = path.win32.join(dir, "node_modules", "npm", "bin", `${path.win32.basename(found).replace(/\.(cmd|bat)$/i, "")}-cli.js`);
+  return exists(node) && exists(cli) ? [node, cli] : null;
+}
+
+/**
  * `runner` (npx, uvx) as an absolute path from PATH: only absolute PATH
  * folders outside the project (after links) count, never the current
  * folder; on Windows the .exe or .cmd file. null when there is none.
@@ -540,8 +555,13 @@ export function evaluateMcp(mcpMap, policy, ctx = {}) {
       // By absolute path: the engine starts the server in the project folder, and on Windows a bare name
       // is looked up there before PATH (a repo's own npx.cmd would run instead).
       const found = (ctx.resolveRunner ?? resolveRunner)(argv[0], { root, platform });
-      if (!found) { decisions.push(blocked(name, "runner_missing", { ...base, version })); continue; }
-      argv[0] = found;
+      const program = found ? windowsDirect(found, platform, ctx.exists ?? existsSync) : null;
+      if (!program) { decisions.push(blocked(name, "runner_missing", { ...base, version })); continue; }
+      if (platform === "win32" && argv.slice(1).some((a) => /["\r\n%]/.test(a))) {
+        decisions.push(blocked(name, "invalid", { ...base, version, reason: `${MCP_REASONS.invalid} (an argument holds a quote, % or a line break)` }));
+        continue;
+      }
+      argv.splice(0, 1, ...program);
     }
     const next = { ...raw, type: "local" };
     if (box) {
@@ -680,7 +700,7 @@ export function readReport(dir, root) {
 export function projectCodeIgnored(cfg) {
   const list = isRecord(cfg) && Array.isArray(cfg.omnirush_ignored) ? cfg.omnirush_ignored : [];
   return list
-    .filter((x) => isRecord(x) && ["plugin", "lsp", "formatter"].includes(x.kind) && typeof x.name === "string")
+    .filter((x) => isRecord(x) && ["plugin", "lsp", "formatter", "provider"].includes(x.kind) && typeof x.name === "string")
     .slice(0, 50)
     .map((x) => ({ kind: x.kind, name: x.name.slice(0, 200), source: typeof x.source === "string" ? x.source.slice(0, 400) : null }));
 }
@@ -694,10 +714,12 @@ export function describeIgnored(items) {
   const plugins = what("plugin");
   const lsp = what("lsp");
   const fmt = what("formatter");
+  const providers = what("provider");
   if (plugins.length) parts.push(`plugins ${plugins.slice(0, 3).join(", ")}${plugins.length > 3 ? " ..." : ""}`);
   if (lsp.length) parts.push(`language servers ${lsp.slice(0, 3).join(", ")}`);
   if (fmt.length) parts.push(`formatters ${fmt.slice(0, 3).join(", ")}`);
-  return `Not loaded from this project's config: ${parts.join("; ")}. A project's own plugins and commands could run code just by opening it; the built-in language servers and formatters still work, and your own settings in ~/.config/omnirush apply as usual.`;
+  if (providers.length) parts.push("model provider settings");
+  return `Not loaded from this project's config: ${parts.join("; ")}. A project's own plugins, tools, commands and providers could run code just by opening it; the built-in language servers and formatters still work, and your own (user-level) settings apply as usual.`;
 }
 
 /** One line per decision, for a terminal or a notice. */

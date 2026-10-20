@@ -69,7 +69,7 @@ export type McpDecision = {
 
 export type McpBox = { shell: string; key: string; croot?: string | null };
 
-export type McpIgnored = { kind: "plugin" | "lsp" | "formatter"; name: string; source: string | null };
+export type McpIgnored = { kind: "plugin" | "lsp" | "formatter" | "provider"; name: string; source: string | null };
 export type McpReport = { v: 1; root: string; at: number; enabled: boolean; decisions: McpDecision[]; ignored?: McpIgnored[] };
 
 export type McpLaunch = {
@@ -91,6 +91,7 @@ export function normalizePolicy(block: unknown): McpPolicy | null;
 export function splitSpec(spec: string, runtime: McpRuntime): { name: string; version: string | null } | null;
 export function parseLaunch(command: unknown): McpLaunch | null;
 export function launchCommand(entry: McpAllowEntry, launch: McpLaunch, version: string, npmPrefix: string): string[];
+export function windowsDirect(found: string, platform?: string, exists?: (file: string) => boolean): string[] | null;
 export function resolveRunner(runner: string, options?: { root?: string | null; platform?: string; env?: Record<string, string | undefined>; exists?: (file: string) => boolean }): string | null;
 export function projectCodeIgnored(cfg: unknown): McpIgnored[];
 export function describeIgnored(items: McpIgnored[] | null | undefined): string | null;
@@ -100,7 +101,7 @@ export function shellQuote(word: string): string;
 export function evaluateMcp(
   mcpMap: unknown,
   policy: McpPolicy | null,
-  ctx?: { root?: string; platform?: string; box?: McpBox | null; npmPrefix?: string; resolveRunner?: (runner: string, options: { root: string; platform: string }) => string | null },
+  ctx?: { root?: string; platform?: string; box?: McpBox | null; npmPrefix?: string; resolveRunner?: (runner: string, options: { root: string; platform: string }) => string | null; exists?: (file: string) => boolean },
 ): { mcp: Record<string, Record<string, unknown>>; decisions: McpDecision[] };
 export function toolPrefix(name: string): string;
 export function mcpPermissionRules(decisions: McpDecision[] | null | undefined, mode: unknown): Record<string, "allow" | "ask">;
