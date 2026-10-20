@@ -277,6 +277,11 @@ html[data-omnirush-palette] :is(.markdown-content [data-omnirush-code-block] .sh
   color: var(--destructive) !important;
 }
 
+/* xterm 6 paints its viewport black under the rows; with a theme it takes the terminal background. */
+html[data-omnirush-palette] .xterm .xterm-viewport {
+  background-color: var(--omnirush-terminal-bg) !important;
+}
+
 /* KaTeX sets its own absolute font-size; keep formulas at the surrounding text size
    so inline math does not tower over the sentence it sits in. */
 .markdown-content .katex {

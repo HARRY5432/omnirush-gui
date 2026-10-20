@@ -160,14 +160,12 @@ function defineThemes(): string {
   themeGeneration += 1;
   const name = `omnirush-${data.base === "vs-dark" ? "dark" : "light"}-${themeGeneration}`;
   monaco.editor.defineTheme(name, data);
-  currentThemeName = name;
   return name;
 }
 
-let currentThemeName = "";
-
+/** Defines the editor theme from the current app theme (an editor created later must not reuse a stale one). */
 export function monacoThemeName(): string {
-  return currentThemeName || defineThemes();
+  return defineThemes();
 }
 
 /** Re-reads the active theme and switches the editor theme (mode, preset or custom theme changed). */

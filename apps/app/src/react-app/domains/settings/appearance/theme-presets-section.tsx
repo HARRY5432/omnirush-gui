@@ -139,7 +139,7 @@ export function ThemePresetsSection(props: Props) {
           <span className="flex h-16 w-full items-center justify-center rounded-lg border border-dashed border-border">
             <Plus className="size-4" />
           </span>
-          <span className="px-1 pb-0.5 font-medium">{props.customTheme ? "Edit custom theme" : "New custom theme"}</span>
+          <span className="px-1 pb-0.5 font-medium">{props.customTheme && props.selectedId === "custom" ? "Edit custom theme" : "New custom theme"}</span>
         </button>
       </div>
       <p className="flex items-center gap-1.5 text-xs text-muted-foreground" data-testid="theme-mode-note" role="status">

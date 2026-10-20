@@ -116,10 +116,11 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
   // The editors, once.
   useEffect(() => {
     if (!codeHostRef.current || !diffHostRef.current) return;
-    const code = monaco.editor.create(codeHostRef.current, { ...BASE_OPTIONS, model: null, theme: monacoThemeName() });
+    const themeName = monacoThemeName();
+    const code = monaco.editor.create(codeHostRef.current, { ...BASE_OPTIONS, model: null, theme: themeName });
     const diff = monaco.editor.createDiffEditor(diffHostRef.current, {
       ...BASE_OPTIONS,
-      theme: monacoThemeName(),
+      theme: themeName,
       renderSideBySide: false,
       useInlineViewWhenSpaceIsLimited: true,
       renderMarginRevertIcon: false,

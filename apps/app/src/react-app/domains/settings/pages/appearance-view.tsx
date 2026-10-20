@@ -139,6 +139,7 @@ export function AppearanceView(props: AppearanceViewProps) {
             initial={editor.initial}
             startedFrom={editor.startedFrom}
             unsavedFromStart={editor.unsavedFromStart}
+            replaces={Boolean(customTheme) && editor.unsavedFromStart}
             preferredMode={active.mode}
             onPreview={(theme) => setThemePreview(theme)}
             onApply={keepTheme}

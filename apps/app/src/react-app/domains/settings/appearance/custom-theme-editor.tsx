@@ -208,6 +208,8 @@ export type CustomThemeEditorProps = {
   startedFrom: string;
   /** Whether Apply should be enabled without edits (new or imported theme). */
   unsavedFromStart: boolean;
+  /** Applying replaces an existing custom theme (one slot). */
+  replaces?: boolean;
   preferredMode: ThemeVariantMode;
   onPreview: (theme: CustomTheme) => void;
   onApply: (theme: CustomTheme) => void;
@@ -428,6 +430,7 @@ export function CustomThemeEditor(props: CustomThemeEditorProps) {
           {changed > 0 ? ` · ${changed} colour${changed === 1 ? "" : "s"} changed in the ${mode} version` : ""}
           {changedOther > 0 ? ` · ${changedOther} in the ${otherMode} version` : ""}
           {allWarnings > 0 ? ` · ${allWarnings} contrast warning${allWarnings === 1 ? "" : "s"}` : ""}
+          {props.replaces ? " · Apply replaces your current custom theme" : ""}
         </span>
         <Button variant="outline" size="sm" onClick={props.onRevert} data-testid="theme-revert">
           Revert
