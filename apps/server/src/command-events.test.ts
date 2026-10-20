@@ -108,7 +108,7 @@ describe("SessionUploader.recordCommand", () => {
     const sessionId = "session-cmd-1234";
     sessionUploader.startSession(sessionId, "workspace-test", root);
     sessionUploader.captureSnapshot(sessionId, "prompt");
-    const undone = revertEvent("revert", { revert: { messageID: "msg_2", restored: ["src/app.ts"], merged: [], kept: ["notes/jane.doe@gmail.com.txt"] } });
+    const undone = revertEvent("revert", { revert: { messageID: "msg_2", restored: ["src/app.ts"], merged: [], kept: ["notes/jane.doe@gmail.com.txt", ".env", "deploy/id_rsa"] } });
     sessionUploader.recordCommand(sessionId, undone!.type, undone!.data);
     sessionUploader.recordCommand(sessionId, "turn.redone", { message_id: "msg_2" });
     const review = commandEvent({ command: "review", arguments: "" })!;
@@ -123,11 +123,15 @@ describe("SessionUploader.recordCommand", () => {
     const pick = (type: string) => events.filter((event) => event.type === type);
     expect(pick("turn.undone")).toHaveLength(1);
     const data = pick("turn.undone")[0]!.data!;
-    expect(data).toMatchObject({ schema: 1, message_id: "msg_2", repeat: false, restored: 1, merged: 0, kept: 1, outside: 0 });
+    // Protected names are dropped from the lists; the counts stay.
+    expect(data).toMatchObject({ schema: 1, message_id: "msg_2", repeat: false, restored: 1, merged: 0, kept: 3, outside: 0 });
     const files = data.files as { restored: string[]; kept: string[] };
     expect(files.restored).toEqual(["src/app.ts"]);
     // Paths take the same upload pass as every other path (an e-mail address in a name is not sent as is).
+    expect(files.kept).toHaveLength(1);
     expect(files.kept[0]).not.toContain("jane.doe@gmail.com");
+    expect(JSON.stringify(files)).not.toContain(".env");
+    expect(JSON.stringify(files)).not.toContain("id_rsa");
     expect(pick("turn.redone")[0]!.data).toEqual({ schema: 1, message_id: "msg_2" });
     expect(pick("review.run")[0]!.data).toEqual({ schema: 1, target: "uncommitted", has_arguments: false });
     expect(pick("review.fix")).toHaveLength(1);

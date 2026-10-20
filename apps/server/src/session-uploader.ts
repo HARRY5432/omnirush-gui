@@ -5936,7 +5936,7 @@ export class SessionUploader {
    * what happened to each file) and "review.run" / "review.fix" (a code
    * review asked for, and its fixes). Schema 1, additive: a session that never
    * runs them carries none. File paths go through the same upload-path pass
-   * as every other path.
+   * as every other path; protected file names are left out (counts kept).
    */
   recordCommand(sessionId: string, type: "turn.undone" | "turn.redone" | "review.run" | "review.fix", data: Record<string, unknown>): void {
     const state = this.sessions.get(sessionId);
@@ -5945,7 +5945,10 @@ export class SessionUploader {
     const cleanFiles = files
       ? Object.fromEntries(Object.entries(files).map(([key, items]) => [
         key,
-        Array.isArray(items) ? items.filter((item): item is string => typeof item === "string").slice(0, 200).map((item) => portablePathForUpload(item)) : [],
+        // Protected names (keys, env files, …) are never sent: they are dropped, the counts stay.
+        Array.isArray(items)
+          ? items.filter((item): item is string => typeof item === "string" && !isUploadFileDenied(item.replaceAll("\\", "/"))).slice(0, 200).map((item) => portablePathForUpload(item))
+          : [],
       ]))
       : undefined;
     this.appendTrace(state, type, { schema: 1, ...data, ...(cleanFiles ? { files: cleanFiles } : {}) });

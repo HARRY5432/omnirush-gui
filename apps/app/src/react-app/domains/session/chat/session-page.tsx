@@ -4,7 +4,7 @@ import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } fro
 import { usePanelRef } from "react-resizable-panels";
 import { DesktopUpdateButton } from "../../settings/state/desktop-updater-provider";
 import { BuildathonChip } from "../../buildathon/buildathon";
-import { ArrowLeft, Cloud, Code2, FileDiff, FileText, Globe, ListChecks, Maximize2, MoreHorizontal, PanelRight, TextSearch, X, Zap } from "lucide-react";
+import { ArrowLeft, Cloud, Code2, FileDiff, FileText, Gauge, Redo2, Undo2, Globe, ListChecks, Maximize2, MoreHorizontal, PanelRight, TextSearch, X, Zap } from "lucide-react";
 import { SessionCommandControls } from "../commands/session-command-controls";
 import { useSessionCommandBridge, useSessionCommandsStore } from "../commands/session-commands-store";
 
@@ -1196,6 +1196,8 @@ export function SessionPage(props: SessionPageProps) {
   const commandSessionId = canRenderReactSurface && !props.primarySlot && !hasMainContentTakeover ? props.selectedSessionId : null;
   const commandBridge = useSessionCommandBridge(commandSessionId);
   const openChangesPanel = useSessionCommandsStore((state) => state.openChanges);
+  const openStatusDialog = useSessionCommandsStore((state) => state.openStatus);
+  const headerActions = useSessionCommandsStore((state) => (commandSessionId ? state.headerActions[commandSessionId] ?? null : null));
   const canGoBackInConversationHistory = !pendingConversationHistoryNavigation && canNavigateSelectedConversationHistory(
     conversationHistory,
     props.selectedWorkspaceId,
@@ -1739,6 +1741,24 @@ export function SessionPage(props: SessionPageProps) {
                     >
                       <TextSearch className="size-4" />
                       Find in conversation
+                    </DropdownMenuItem>
+                  ) : null}
+                  {commandSessionId && headerActions ? (
+                    <DropdownMenuItem disabled={!headerActions.canUndo} onClick={() => void headerActions.undo()}>
+                      <Undo2 className="size-4" />
+                      Undo last turn
+                    </DropdownMenuItem>
+                  ) : null}
+                  {commandSessionId && headerActions?.canRedo ? (
+                    <DropdownMenuItem onClick={() => void headerActions.redo()}>
+                      <Redo2 className="size-4" />
+                      Redo
+                    </DropdownMenuItem>
+                  ) : null}
+                  {commandSessionId ? (
+                    <DropdownMenuItem onClick={() => openStatusDialog(commandSessionId)}>
+                      <Gauge className="size-4" />
+                      Status
                     </DropdownMenuItem>
                   ) : null}
                   {commandSessionId ? (

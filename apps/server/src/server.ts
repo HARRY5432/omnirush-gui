@@ -2384,11 +2384,11 @@ export async function proxyOpencodeRequest(input: {
       capture.archiveSessionStarted(uploadedSessionId, workspace.path, engineTarget(baseUrl, headers, search));
     }
   }
-  // A review or its fixes (command-events.ts), typed or from a button: an additive event of the chat's trace.
-  if (capture && captured && uploadedSessionId && isSessionCommandProxyRequest(method, proxyPath) && capture.hasSession(uploadedSessionId)) {
-    const event = commandEvent(body);
-    if (event) capture.recordCommand(uploadedSessionId, event.type, event.data);
-  }
+  // A review or its fixes (command-events.ts), typed or from a button: an additive event of the chat's
+  // trace, recorded once the engine answers the command with a 2xx.
+  const reviewEvent = capture && captured && uploadedSessionId && isSessionCommandProxyRequest(method, proxyPath)
+    ? commandEvent(body)
+    : null;
   // Undo of the last turn and its redo (command-events.ts) of a chat the uploader tracks: the revert
   // point before it is read first; the engine's answer says what happened to each file.
   const revertCall = capture?.uploadEnabled && workspace && workspace.workspaceType !== "remote"
@@ -2486,6 +2486,9 @@ export async function proxyOpencodeRequest(input: {
       body,
     }).finally(() => release?.()).then((response) => {
       enginePoolForConfig(input.config)?.reportRequestSuccess(baseUrl);
+      if (reviewEvent && response.ok && capture && uploadedSessionId && capture.hasSession(uploadedSessionId)) {
+        capture.recordCommand(uploadedSessionId, reviewEvent.type, reviewEvent.data);
+      }
       if (capture?.uploadEnabled && uploadedSessionId && steer) {
         if (response.ok) steered(capture, uploadedSessionId, engineTarget(baseUrl, headers, search));
       } else if (capture?.uploadEnabled && uploadedSessionId) {

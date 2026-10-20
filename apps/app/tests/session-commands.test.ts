@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
 import { NOT_TRACKED_MESSAGE, projectTracksFiles, undoNotice } from "../src/react-app/domains/session/commands/undo-notice";
-import { commandTemplateLabel, parseReviewReply } from "../src/react-app/domains/session/commands/review-message";
+import { commandTemplateLabel, parseReviewReply, reviewForTurn } from "../src/react-app/domains/session/commands/review-message";
 import { contextUse, sandboxLabel, uploadsLine } from "../src/react-app/domains/session/commands/context-usage";
-import { changeTotals, normalizeChanges, patchLines } from "../src/react-app/domains/session/commands/changes";
+import { MAX_DIFF_LINES, changeTotals, normalizeChanges, patchLineCount, patchLines } from "../src/react-app/domains/session/commands/changes";
 import { chatUndoKey } from "../src/react-app/domains/session/commands/undo-key";
 
 describe("undoNotice", () => {
@@ -79,6 +79,26 @@ describe("parseReviewReply", () => {
   });
 });
 
+describe("reviewForTurn", () => {
+  const REVIEW_PROMPT = "You are a code reviewer. Your job is...\n\nInput: \n";
+  test("only a reply to the review command, opening with Reviewed:, offers Fix these", () => {
+    expect(reviewForTurn(REVIEW_PROMPT, REVIEW)?.fixable).toBe(true);
+    expect(reviewForTurn("/review", REVIEW)?.fixable).toBe(true);
+    const plan = [
+      "Here is the plan, most important first:",
+      "### High",
+      "1. src/server.ts:42 - Add the retry",
+      "### Low",
+      "2. README.md:3 - Mention it",
+      "Reply **fix these** to fix them all (or for example **fix 1, 3**), or run /fix.",
+    ].join("\n");
+    expect(reviewForTurn("make a prioritized plan for the retry work", plan)).toBeNull();
+    expect(reviewForTurn("make a prioritized plan", REVIEW)).toBeNull();
+    expect(reviewForTurn(REVIEW_PROMPT, plan)).toBeNull();
+    expect(reviewForTurn(undefined, REVIEW)).toBeNull();
+  });
+});
+
 describe("commandTemplateLabel", () => {
   test("names the review and fix commands their prompts came from", () => {
     expect(commandTemplateLabel("You are a code reviewer. Your job is...\n\n---\n\nInput: \n\n---")).toBe("/review");
@@ -139,6 +159,13 @@ describe("changes", () => {
     expect(normalizeChanges(null)).toEqual([]);
   });
 
+  test("long patches are counted cheaply against the render cap", () => {
+    expect(patchLineCount("")).toBe(0);
+    expect(patchLineCount("a\nb\nc")).toBe(3);
+    const big = Array.from({ length: MAX_DIFF_LINES + 10 }, (_, i) => `+line ${i}`).join("\n");
+    expect(patchLineCount(big)).toBeGreaterThan(MAX_DIFF_LINES);
+  });
+
   test("patch lines carry old and new line numbers", () => {
     const lines = patchLines("Index: a.ts\n===\n--- a.ts\n+++ a.ts\n@@ -3,3 +3,3 @@\n keep\n-old\n+new\n tail\n");
     expect(lines.map((line) => [line.kind, line.oldLine, line.newLine, line.text])).toEqual([
@@ -164,10 +191,11 @@ describe("chatUndoKey", () => {
     expect(chatUndoKey(key({ metaKey: true, key: "y" }), true)).toBeNull();
   });
 
-  test("a text field keeps its own undo; an empty composer does not", () => {
+  test("any editable element keeps its own undo, the empty composer too", () => {
     expect(chatUndoKey(key({ metaKey: true, target: { tagName: "TEXTAREA", isContentEditable: false, textContent: "" } }), true)).toBeNull();
     expect(chatUndoKey(key({ metaKey: true, target: { tagName: "DIV", isContentEditable: true, textContent: "draft" } }), true)).toBeNull();
-    expect(chatUndoKey(key({ metaKey: true, target: { tagName: "DIV", isContentEditable: true, textContent: "  " } }), true)).toBe("undo");
+    expect(chatUndoKey(key({ metaKey: true, target: { tagName: "DIV", isContentEditable: true, textContent: "  " } }), true)).toBeNull();
+    expect(chatUndoKey(key({ metaKey: true, target: { tagName: "BUTTON", isContentEditable: false, textContent: "Send", closest: () => null } }), true)).toBe("undo");
     const inEditor = { tagName: "DIV", isContentEditable: false, textContent: "", closest: (selector: string) => (selector.includes(".monaco-editor") ? {} : null) };
     expect(chatUndoKey(key({ ctrlKey: true, target: inEditor }), false)).toBeNull();
   });

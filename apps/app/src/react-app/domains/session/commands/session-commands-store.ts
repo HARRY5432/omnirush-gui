@@ -11,18 +11,40 @@ export type SessionCommandBridge = {
   busy: boolean;
 };
 
+/** The header's undo / redo for the header menu of narrow windows (session-command-controls.tsx). */
+export type SessionHeaderActions = {
+  canUndo: boolean;
+  canRedo: boolean;
+  undo: () => void | Promise<void>;
+  redo: () => void | Promise<void>;
+};
+
 type SessionCommandsStore = {
   bridges: Record<string, SessionCommandBridge>;
   /** The chat whose Changes panel is open, or null. */
   changesOpenFor: string | null;
+  /** The chat whose Status dialog (header menu) is open, or null. */
+  statusOpenFor: string | null;
+  headerActions: Record<string, SessionHeaderActions>;
   register: (sessionId: string, bridge: SessionCommandBridge) => () => void;
+  setHeaderActions: (sessionId: string, actions: SessionHeaderActions | null) => void;
   openChanges: (sessionId: string) => void;
   closeChanges: () => void;
+  openStatus: (sessionId: string) => void;
+  closeStatus: () => void;
 };
 
 export const useSessionCommandsStore = create<SessionCommandsStore>((set, get) => ({
   bridges: {},
   changesOpenFor: null,
+  statusOpenFor: null,
+  headerActions: {},
+  setHeaderActions: (sessionId, actions) => set((state) => {
+    const next = { ...state.headerActions };
+    if (actions) next[sessionId] = actions;
+    else delete next[sessionId];
+    return { headerActions: next };
+  }),
   register: (sessionId, bridge) => {
     set((state) => ({ bridges: { ...state.bridges, [sessionId]: bridge } }));
     return () => {
@@ -36,6 +58,8 @@ export const useSessionCommandsStore = create<SessionCommandsStore>((set, get) =
   },
   openChanges: (sessionId) => set({ changesOpenFor: sessionId }),
   closeChanges: () => set({ changesOpenFor: null }),
+  openStatus: (sessionId) => set({ statusOpenFor: sessionId }),
+  closeStatus: () => set({ statusOpenFor: null }),
 }));
 
 export function useSessionCommandBridge(sessionId: string | null | undefined): SessionCommandBridge | null {

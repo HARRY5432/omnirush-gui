@@ -3,6 +3,8 @@ import { useEffect, useState } from "react";
 import { FileDiff, Gauge, Redo2, Undo2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { toast } from "@/components/ui/sonner";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
@@ -52,22 +54,33 @@ export function SessionCommandControls(props: SessionCommandControlsProps) {
   const openChanges = useSessionCommandsStore((state) => state.openChanges);
   const { undo, redo, canUndo, canRedo } = commands;
 
+  const running = commands.running;
+  // The same undo / redo for the header menu (narrow windows hide these buttons).
+  const setHeaderActions = useSessionCommandsStore((state) => state.setHeaderActions);
+  useEffect(() => {
+    setHeaderActions(props.sessionId, { canUndo, canRedo, undo, redo });
+    return () => setHeaderActions(props.sessionId, null);
+  }, [canRedo, canUndo, props.sessionId, redo, setHeaderActions, undo]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const action = chatUndoKey(event, isMac());
       if (!action) return;
       // Only with the chat on screen: no dialog or menu in front of it.
-      if (document.querySelector("[role=dialog][data-open], [role=alertdialog]")) return;
+      if (document.querySelector("[role=dialog][data-open], [role=alertdialog], [role=menu]")) return;
       if (action === "undo" && !canUndo) return;
       if (action === "redo" && !canRedo) return;
       event.preventDefault();
       event.stopPropagation();
+      // The keyboard never stops a turn (a stray Ctrl+Z must not cut the agent off).
+      if (running) {
+        toast.info("Stop the turn first (Esc), then undo", { duration: 4000 });
+        return;
+      }
       void (action === "undo" ? undo() : redo());
     };
-    // Capture phase: the composer's editor keeps its own undo for text, so an empty composer must be seen first.
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [canRedo, canUndo, redo, undo]);
+  }, [canRedo, canUndo, redo, running, undo]);
 
   const mod = isMac() ? "⌘" : "Ctrl+";
   return (
@@ -128,6 +141,7 @@ export function SessionCommandControls(props: SessionCommandControlsProps) {
         <TooltipContent>Changes</TooltipContent>
       </Tooltip>
       <StatusPopover {...props} />
+      <StatusDialog {...props} />
       <ChangesPanel
         workspaceId={props.workspaceId}
         sessionId={props.sessionId}
@@ -136,6 +150,20 @@ export function SessionCommandControls(props: SessionCommandControlsProps) {
         workspaceRoot={props.workspaceRoot}
       />
     </>
+  );
+}
+
+/** Status from the header menu (narrow windows, where the header button is hidden). */
+function StatusDialog(props: SessionCommandControlsProps) {
+  const open = useSessionCommandsStore((state) => state.statusOpenFor === props.sessionId);
+  const closeStatus = useSessionCommandsStore((state) => state.closeStatus);
+  return (
+    <Dialog open={open} onOpenChange={(next) => { if (!next) closeStatus(); }}>
+      <DialogContent className="max-w-sm gap-0 p-0" data-testid="session-status-dialog">
+        <DialogTitle className="sr-only">Status</DialogTitle>
+        {open ? <StatusRows {...props} /> : null}
+      </DialogContent>
+    </Dialog>
   );
 }
 

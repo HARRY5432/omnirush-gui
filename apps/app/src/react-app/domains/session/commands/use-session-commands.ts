@@ -94,11 +94,12 @@ async function tracksFiles(client: OpencodeClient, root: string): Promise<boolea
   if (known !== undefined) return known;
   try {
     const project = unwrap(await client.project.current({ directory: root || undefined })) as { worktree?: string } | null;
+    if (!project) return true;
     const tracked = projectTracksFiles(project);
     trackedByRoot.set(root, tracked);
     return tracked;
   } catch {
-    // Unknown: say what the engine reported about the files.
+    // Unknown (not cached, asked again next time): say what the engine reported about the files.
     return true;
   }
 }

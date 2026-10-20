@@ -85,6 +85,19 @@ export function commandTemplateLabel(text: string | null | undefined): string | 
   return null;
 }
 
+/**
+ * The review a turn's reply holds, only when the turn was the review command
+ * (its user message is the review template) and the reply opens with the
+ * template's `Reviewed:` line; null for any other reply, however it is laid out.
+ */
+export function reviewForTurn(userText: string | null | undefined, replyText: string | null | undefined): ReviewSummary | null {
+  const typed = (userText ?? "").trimStart();
+  if (!commandTemplateLabel(userText)?.startsWith("/review") && !/^\/review(\s|$)/.test(typed)) return null;
+  const firstLine = (replyText ?? "").split(/\r?\n/).find((line) => line.trim())?.trim() ?? "";
+  if (!firstLine.startsWith("Reviewed:")) return null;
+  return parseReviewReply(replyText);
+}
+
 const SEVERITY_LABEL: Record<ReviewSeverity, string> = { critical: "Critical", high: "High", medium: "Medium", low: "Low" };
 
 export function severityLabel(severity: ReviewSeverity): string {

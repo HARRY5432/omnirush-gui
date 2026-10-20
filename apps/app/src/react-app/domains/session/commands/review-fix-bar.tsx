@@ -1,4 +1,5 @@
 /** @jsxImportSource react */
+import { useState } from "react";
 import { Wrench } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -15,6 +16,8 @@ const CHIP: Record<ReviewSeverity, string> = {
 /** Under a review reply with issues: how many of each severity, and "Fix these" (the engine's fix command). */
 export function ReviewFixBar(props: { review: ReviewSummary; disabled?: boolean; onFix: () => void }) {
   const total = props.review.issues.length;
+  // One click sends one fix command; the bar goes away once its turn starts.
+  const [sent, setSent] = useState(false);
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-wrap items-center gap-2 px-2 md:px-10" data-testid="review-fix-bar">
       {REVIEW_SEVERITIES.filter((severity) => props.review.counts[severity] > 0).map((severity) => (
@@ -30,8 +33,12 @@ export function ReviewFixBar(props: { review: ReviewSummary; disabled?: boolean;
         size="sm"
         className="h-7 rounded-full px-3 text-xs"
         data-testid="review-fix-these"
-        disabled={props.disabled}
-        onClick={props.onFix}
+        disabled={props.disabled || sent}
+        onClick={() => {
+          if (sent) return;
+          setSent(true);
+          props.onFix();
+        }}
         title={total > 0 ? `Ask the agent to fix ${total === 1 ? "this issue" : `these ${total} issues`}` : "Ask the agent to fix the issues"}
       >
         <Wrench className="size-3.5" />

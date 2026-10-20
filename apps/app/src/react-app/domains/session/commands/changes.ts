@@ -83,3 +83,14 @@ export function patchLines(patch: string): PatchLine[] {
   while (lines.length && lines[lines.length - 1]?.kind === "context" && lines[lines.length - 1]?.text === "") lines.pop();
   return lines;
 }
+
+/** A diff longer than this many lines is cut (a "Show all" button renders the rest) and never opens on its own. */
+export const MAX_DIFF_LINES = 1500;
+
+/** How many lines a patch has (cheap: counts newlines, no parsing). */
+export function patchLineCount(patch: string): number {
+  if (!patch) return 0;
+  let count = 1;
+  for (let at = patch.indexOf("\n"); at !== -1; at = patch.indexOf("\n", at + 1)) count += 1;
+  return count;
+}

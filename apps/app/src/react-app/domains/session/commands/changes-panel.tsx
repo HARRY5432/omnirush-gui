@@ -14,6 +14,8 @@ import {
   CHANGES_SOURCE_LABEL,
   changeTotals,
   normalizeChanges,
+  MAX_DIFF_LINES,
+  patchLineCount,
   patchLines,
   type ChangedFile,
   type ChangesSource,
@@ -30,7 +32,9 @@ const STATUS_BADGE: Record<ChangedFile["status"], string> = {
 };
 
 function DiffBody({ patch }: { patch: string }) {
-  const lines = useMemo(() => patchLines(patch), [patch]);
+  const [showAll, setShowAll] = useState(false);
+  const all = useMemo(() => patchLines(patch), [patch]);
+  const lines = showAll ? all : all.slice(0, MAX_DIFF_LINES);
   if (!lines.length) {
     return <div className="px-3 py-2 text-xs text-muted-foreground">No line changes to show (a binary file, or only its mode changed).</div>;
   }
@@ -53,6 +57,13 @@ function DiffBody({ patch }: { patch: string }) {
           <span className="whitespace-pre pr-4">{line.kind === "hunk" ? line.text : line.text || " "}</span>
         </div>
       ))}
+      {lines.length < all.length ? (
+        <div className="sticky left-0 px-3 py-2">
+          <Button size="sm" variant="secondary" data-testid="changes-show-all" onClick={() => setShowAll(true)}>
+            Show all {all.length.toLocaleString("en-US")} lines
+          </Button>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -169,7 +180,7 @@ function ChangesBody(props: SessionCommandTarget & { onClose: () => void }) {
               variant="secondary"
               data-testid="changes-review"
               disabled={reviewDisabled}
-              title={running ? "Wait for the agent to finish first" : "Ask the agent to review the uncommitted changes in this chat"}
+              title={running ? "Wait for the agent to finish first" : "Ask the agent to review the project's uncommitted changes (the whole working tree)"}
               onClick={() => {
                 if (!bridge) return;
                 void bridge.runCommand("/review");
@@ -217,7 +228,7 @@ function ChangesBody(props: SessionCommandTarget & { onClose: () => void }) {
         ) : (
           <div className="flex flex-col gap-2">
             {files.map((file) => (
-              <FileRow key={`${source}:${file.path}`} file={file} defaultOpen={files.length <= 3} />
+              <FileRow key={`${source}:${file.path}`} file={file} defaultOpen={files.length <= 3 && patchLineCount(file.patch) <= MAX_DIFF_LINES} />
             ))}
           </div>
         )}
