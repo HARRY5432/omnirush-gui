@@ -51,7 +51,7 @@ export type LegacyExecutionPermissions = {
   edit?: PermissionAction;
   doom_loop?: PermissionAction;
   external_directory?: "allow";
-  /** Careful's catch-all, plain tool names and per-MCP-server rules (`<server>_*`). */
+  /** Careful's catch-all and plain tool names. */
   [permission: string]: PermissionAction | Record<string, PermissionAction> | undefined;
 };
 
@@ -60,11 +60,6 @@ const SHARED_MODES = permissionModes.rules as unknown as { careful: SharedModeRu
 
 function cloneRules(rules: SharedModeRules): SharedModeRules {
   return JSON.parse(JSON.stringify(rules)) as SharedModeRules;
-}
-
-/** The engine's MCP tool-name sanitizer: a server's tools are `<sanitized server>_<tool>`. */
-export function mcpToolPermissionKey(server: string): string {
-  return `${server.replace(/[^a-zA-Z0-9_-]/g, "_")}_*`;
 }
 
 /**
@@ -79,8 +74,8 @@ export function mcpToolPermissionKey(server: string): string {
  *            (permissions/permission-modes.json, the CLI's file), then the
  *            built-in git and PR workflow rules (read-only commands run,
  *            write commands ask once per session per command family,
- *            destructive commands always ask), plus an ask rule for every
- *            configured MCP server not on the shared allowlist. The shared
+ *            destructive commands always ask). MCP tools get their rules
+ *            from the MCP plugin (mcp-allow). The shared
  *            top-level catch-all and external_directory rules are left out:
  *            the engine's own external_directory handling and the
  *            authorized-folder grants stay in charge of other folders.
@@ -96,7 +91,6 @@ export function mcpToolPermissionKey(server: string): string {
 export function legacyExecutionPermissions(
   policy: DesktopExecutionPolicy | undefined,
   mode: ApprovalMode = "guarded",
-  mcpServers: readonly string[] = [],
 ): LegacyExecutionPermissions {
   let permissions: LegacyExecutionPermissions;
   if (mode === "full") {
@@ -114,10 +108,6 @@ export function legacyExecutionPermissions(
       bash[pattern] = action;
     }
     permissions = { bash, read: normal.read as Record<string, PermissionAction> };
-    const allowlist = new Set<string>(permissionModes.mcpAllowlist as string[]);
-    for (const server of mcpServers) {
-      if (!allowlist.has(server)) permissions[mcpToolPermissionKey(server)] = "ask";
-    }
   }
   for (const rule of executionRules(policy)) {
     if (rule.action === "shell") {

@@ -732,8 +732,15 @@ async function focusMainWindowFromNotification(target = null) {
   if (win.isMinimized()) win.restore();
   win.show();
   win.focus();
-  // The renderer opens the chat the notification was about.
-  if (target && !win.webContents.isDestroyed()) win.webContents.send(NOTIFICATION_OPEN_SESSION_EVENT, target);
+  // The renderer opens the chat the notification was about. A window that is
+  // still loading (one this click created) gets it once its page has loaded:
+  // the preload keeps it until the app has mounted (takePendingOpenSession).
+  if (!target || win.webContents.isDestroyed()) return;
+  const send = () => {
+    if (!win.webContents.isDestroyed()) win.webContents.send(NOTIFICATION_OPEN_SESSION_EVENT, target);
+  };
+  if (win.webContents.isLoading()) win.webContents.once("did-finish-load", send);
+  else send();
 }
 
 /**

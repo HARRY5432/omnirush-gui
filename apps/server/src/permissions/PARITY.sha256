@@ -1,3 +1,3 @@
 # permission-modes.json is the same file in omnirush-cli (src/permissions/) and omnirush-gui (apps/server/src/permissions/).
 # A change to one must be ported to the other and this list updated in both.
-253b9498654f6a9e293a4028f72bb3ebe3d891d6c4b59e931a6acf9ca46b4ac8  permission-modes.json
+d522241e2c4771024e3b5309a708b3d84b2a7973df28b9fcbfb4636fa350c3f3  permission-modes.json

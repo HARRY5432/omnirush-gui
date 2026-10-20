@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import { Check, ChevronRight, Clock3, HardDrive, RefreshCcw, ShieldCheck, XCircle } from "lucide-react";
-import { useEffect, useMemo, useRef, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 
 import {
   AlertDialog,
@@ -166,6 +166,11 @@ function isFocusableElement(element: HTMLElement) {
 
 type PermissionReply = "once" | "always" | "reject";
 
+/** Keys count only this long after the card appeared and after the last key. */
+export const PERMISSION_SHORTCUT_ARM_MS = 600;
+/** After "A", the confirming key counts this long after it. */
+export const PERMISSION_SHORTCUT_CONFIRM_MS = 150;
+
 /** Keyboard shortcuts of the inline approval card. */
 export const PERMISSION_SHORTCUTS: Record<PermissionReply, { key: string; label: string }> = {
   once: { key: "Y", label: "Y" },
@@ -197,7 +202,7 @@ export function permissionShortcutReply(event: {
   isComposing?: boolean;
   defaultPrevented?: boolean;
   target: EventTarget | null;
-}, activeElement: Element | null = typeof document === "undefined" ? null : document.activeElement): PermissionReply | null {
+}, activeElement: Element | null = typeof document === "undefined" ? null : document.activeElement, options: { confirming?: boolean } = {}): PermissionReply | null {
   if (event.defaultPrevented || event.repeat || event.isComposing) return null;
   if (event.altKey || event.ctrlKey || event.metaKey) return null;
   if (isEditableTarget(event.target) || isEditableTarget(activeElement)) return null;
@@ -207,6 +212,7 @@ export function permissionShortcutReply(event: {
     && (element as Element).closest('[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]') !== null;
   if (inOverlay(event.target) || inOverlay(activeElement)) return null;
   const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+  if (options.confirming && key === "Enter") return "once";
   if (key === "y") return "once";
   if (key === "a") return "always";
   if (key === "n" || key === "Escape") return "reject";
@@ -447,19 +453,51 @@ export function PermissionApprovalPanel(props: PermissionApprovalModalProps) {
   // One reply per request: a held key or a second press before the card goes away is ignored.
   const repliedRef = useRef<string | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  // A card that appears while you type must not take a key as an answer: keys
+  // count only once PERMISSION_SHORTCUT_ARM_MS has passed since the card
+  // appeared and since your last key. "A" (allow for this chat) asks for a
+  // confirming Y (or Enter); N or Esc cancels that.
+  const armedAtRef = useRef(0);
+  const [confirmAlways, setConfirmAlways] = useState(false);
+  const confirmAlwaysRef = useRef(false);
+  useEffect(() => {
+    armedAtRef.current = Date.now() + PERMISSION_SHORTCUT_ARM_MS;
+    confirmAlwaysRef.current = false;
+    setConfirmAlways(false);
+  }, [permissionId]);
 
   useEffect(() => {
     if (busy || !respondPermission) return;
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      const reply = permissionShortcutReply(event);
+      const confirming = confirmAlwaysRef.current;
+      const reply = permissionShortcutReply(event, undefined, { confirming });
       if (!reply || repliedRef.current === permissionId) return;
       // With several chats side by side, the one holding focus answers its own card.
       const surface = '[data-session-surface-id]';
       const focusedSurface = document.activeElement?.closest(surface) ?? null;
       const ownSurface = rootRef.current?.closest(surface) ?? null;
       if (focusedSurface && ownSurface && focusedSurface !== ownSurface) return;
+      const now = Date.now();
+      if (now < armedAtRef.current) {
+        armedAtRef.current = now + PERMISSION_SHORTCUT_ARM_MS;
+        return;
+      }
       event.preventDefault();
       event.stopImmediatePropagation();
+      if (confirming) {
+        confirmAlwaysRef.current = false;
+        setConfirmAlways(false);
+        if (reply === "reject") return;
+        repliedRef.current = permissionId;
+        respondPermission(permissionId, "always");
+        return;
+      }
+      if (reply === "always") {
+        confirmAlwaysRef.current = true;
+        setConfirmAlways(true);
+        armedAtRef.current = now + PERMISSION_SHORTCUT_CONFIRM_MS;
+        return;
+      }
       repliedRef.current = permissionId;
       respondPermission(permissionId, reply);
     };
@@ -493,6 +531,11 @@ export function PermissionApprovalPanel(props: PermissionApprovalModalProps) {
               ) : null}
               {presentation.note ? (
                 <div className="mt-1 text-[12px] leading-5 text-dls-secondary">{presentation.note}</div>
+              ) : null}
+              {confirmAlways ? (
+                <div data-permission-confirm="always" role="status" className="mt-1 text-[12px] font-medium leading-5 text-amber-11">
+                  {t("session.permission_confirm_always")}
+                </div>
               ) : null}
             </div>
           </div>

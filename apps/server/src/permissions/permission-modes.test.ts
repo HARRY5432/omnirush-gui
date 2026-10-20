@@ -8,7 +8,7 @@ import path from "node:path";
 
 import { parseApprovalMode, type ApprovalMode } from "../approval-mode.js";
 import { rulesFromPermissionConfig, winningRule } from "../effective-permissions.js";
-import { legacyExecutionPermissions, mcpToolPermissionKey } from "../managed-policy-rules.js";
+import { legacyExecutionPermissions } from "../managed-policy-rules.js";
 import { buildOmniRushRuntimeConfigObjectFromSnapshot } from "../omnirush-runtime-config.js";
 import type { RuntimeOpencodeConfig } from "../runtime-opencode-config-store.js";
 import { OMNIRUSH_SWARM_TOOL_NAME } from "../omnirush-swarm.js";
@@ -41,6 +41,7 @@ function decider(mode: ApprovalMode, runtime: RuntimeOpencodeConfig = {}) {
 
 // Shell commands as the engine splits them (one pattern per command of a pipeline); the same lists as the CLI's test.
 const RISKY_SHELL: Record<string, string[]> = {
+  "prefixed, quoted or wrapped": ["HUSKY=0 git push", "env rm -rf ~", "timeout 60 rm -rf build", "xargs rm -rf", "/usr/bin/sudo ls", "git -P push", "bash -c 'rm -rf ~'", "rm -dfvr x", "rm -Irf x", "'rm' -rf ~", "\"rm\" -rf ~", "'sudo' ls", "rm -rf $TMPDIR/*"],
   "recursive delete": ["rm -rf build", "rm -r src", "rm -Rf ~/x", "rm -fr node_modules", "rm -f -r dist", "rm --recursive x", "rm x -rf", "/bin/rm -rf /", "find . -delete", "find . -name '*.o' -exec rm {} +", "Remove-Item -Recurse C:\\x", "rm -rf /tmp/a /home/u", "rm -rf /tmp/../home/u", "rm -rf /tmp/$(echo x)"],
   sudo: ["sudo apt-get install -y jq", "sudo", "doas rm x", "su -c id", "pkexec ls"],
   "git push / force / hard reset": ["git push", "git push origin main", "git push --force", "git push -f origin x", "git -C other push", "git reset --hard", "git reset --hard HEAD~1", "git reset HEAD~1 --hard", "git clean -fdx", "git checkout -- src/a.js", "git branch -D feat", "git stash clear"],
@@ -111,14 +112,7 @@ describe("permission modes: Normal (guarded)", () => {
     expect(winningRule(rules, "external_directory", "/etc/*")?.action).toBe("ask");
   });
 
-  test("asks for MCP servers off the shared allowlist", () => {
-    const decideMcp = decider("guarded", { mcp: { github: { type: "remote", url: "https://x" }, "my.server": { type: "local", command: ["x"] } } });
-    expect(decideMcp("github_create_issue", "*")).toBe("ask");
-    expect(decideMcp("my_server_query", "*")).toBe("ask");
-    expect(decideMcp("bash", "ls")).toBe("allow");
-    expect(mcpToolPermissionKey("my.server")).toBe("my_server_*");
-    expect(legacyExecutionPermissions(undefined, "guarded", ["github"])["github_*"]).toBe("ask");
-  });
+
 
   test("organisation rules still come last", () => {
     const denied = legacyExecutionPermissions({ commands: "allow", blockedCommands: ["npm *"], blockBrowserUploads: false }, "guarded");
@@ -146,7 +140,6 @@ describe("permission modes: Careful", () => {
     expect(Object.keys(permission)[0]).toBe("*");
     expect(permission["*"]).toBe("ask");
     expect(permission.external_directory).toEqual({ "/Users/sam/Docs/*": "allow" });
-    expect(permission["mcp.*"]).toBe("deny");
     const agent = (config.agent as Record<string, { permission: Record<string, unknown> }>).omnirush!.permission;
     expect(agent["*"]).toBeUndefined();
     expect(agent.external_directory).toBeUndefined();
@@ -163,11 +156,11 @@ describe("permission modes: Careful", () => {
 });
 
 describe("permission modes: Auto (full)", () => {
-  const FULL_PERMISSION = { bash: { "*": "allow" }, read: { "*": "allow" }, edit: "allow", "mcp.*": "deny", webfetch: "allow", websearch: "allow", doom_loop: "allow", external_directory: "allow" };
+  const FULL_PERMISSION = { bash: { "*": "allow" }, read: { "*": "allow" }, edit: "allow", webfetch: "allow", websearch: "allow", doom_loop: "allow", external_directory: "allow" };
 
-  test("the injected config is unchanged, with or without configured MCP servers", () => {
+  test("the injected config is unchanged", () => {
     const user = { external_directory: { "/Users/sam/Docs": "allow" } };
-    const ownKeys = ["bash", "read", "edit", "webfetch", "websearch", "doom_loop", "external_directory", "mcp.*"];
+    const ownKeys = ["bash", "read", "edit", "webfetch", "websearch", "doom_loop", "external_directory"];
     const cases: Array<[RuntimeOpencodeConfig, string[]]> = [
       [{}, ownKeys],
       [{ mcp: { github: { type: "remote", url: "https://x" } } }, ownKeys],
@@ -186,7 +179,7 @@ describe("permission modes: Auto (full)", () => {
       });
       expect(Object.keys(agent)).toEqual([...ownKeys, "skill", OMNIRUSH_SWARM_TOOL_NAME, "question"]);
     }
-    expect(legacyExecutionPermissions(undefined, "full", ["github"])).toEqual({ bash: { "*": "allow" }, read: { "*": "allow" }, edit: "allow", webfetch: "allow", websearch: "allow", doom_loop: "allow", external_directory: "allow" });
+    expect(legacyExecutionPermissions(undefined, "full")).toEqual({ bash: { "*": "allow" }, read: { "*": "allow" }, edit: "allow", webfetch: "allow", websearch: "allow", doom_loop: "allow", external_directory: "allow" });
   });
 
   test("never asks", () => {

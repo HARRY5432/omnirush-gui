@@ -84,6 +84,13 @@ contextBridge.exposeInMainWorld("__OMNIRUSH_ELECTRON__", {
   invokeDesktop(command, ...args) {
     return ipcRenderer.invoke("omnirush:desktop", command, ...args);
   },
+  notifications: {
+    takePendingOpenSession() {
+      const detail = pendingOpenSession;
+      pendingOpenSession = null;
+      return detail;
+    },
+  },
   automationRunner: {
     onCredentialRejected(callback) {
       const handler = () => callback();
@@ -370,7 +377,11 @@ ipcRenderer.on("omnirush:feedback:event", (_event, detail) => {
 });
 
 // A clicked notification about a chat (main.mjs showDesktopNotification): open that chat.
+// Kept until the app takes it (notifications.takePendingOpenSession): a window
+// the click created may get it before the app has mounted its listener.
+let pendingOpenSession = null;
 ipcRenderer.on("omnirush:notification:open-session", (_event, detail) => {
+  pendingOpenSession = detail ?? null;
   if (typeof window === "undefined") return;
   window.dispatchEvent(new CustomEvent("omnirush:notification:open-session", { detail }));
 });

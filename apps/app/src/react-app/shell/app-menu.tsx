@@ -28,8 +28,11 @@ export function AppMenuProvider({ children }: { children: ReactNode }) {
     };
 
     // A clicked desktop notification: the shell focused the window, open the chat it was about.
-    const openNotifiedSession = (event: Event) => {
-      const detail = event instanceof CustomEvent ? (event.detail as unknown) : null;
+    const takePending = (): unknown => {
+      const bridge = (window as unknown as { __OMNIRUSH_ELECTRON__?: { notifications?: { takePendingOpenSession?: () => unknown } } }).__OMNIRUSH_ELECTRON__;
+      return bridge?.notifications?.takePendingOpenSession?.() ?? null;
+    };
+    const openTarget = (detail: unknown) => {
       if (!detail || typeof detail !== "object") return;
       const sessionId = Reflect.get(detail, "sessionId");
       const workspaceId = Reflect.get(detail, "workspaceId");
@@ -37,6 +40,12 @@ export function AppMenuProvider({ children }: { children: ReactNode }) {
       const route = notificationSessionRoute({ sessionId, workspaceId: typeof workspaceId === "string" ? workspaceId : undefined });
       if (route !== pathname) navigate(route);
     };
+    const openNotifiedSession = (event: Event) => {
+      takePending();
+      openTarget(event instanceof CustomEvent ? (event.detail as unknown) : null);
+    };
+    // A click that created this window arrived before this listener: open it now.
+    openTarget(takePending());
 
     window.addEventListener(NATIVE_MENU_OPEN_SETTINGS_EVENT, openSettings);
     window.addEventListener(NATIVE_MENU_TOGGLE_SIDEBAR_EVENT, toggleSidebar);

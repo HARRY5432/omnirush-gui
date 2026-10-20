@@ -37,7 +37,7 @@ import {
 import { legacyExecutionPermissions } from "./managed-policy-rules.js";
 
 /** The default (Normal) injected permission block: shared Normal bash/read rules, then the git workflow rules. */
-const GUARDED = { ...legacyExecutionPermissions(undefined, "guarded"), "mcp.*": "deny" };
+const GUARDED = legacyExecutionPermissions(undefined, "guarded");
 import { OMNIRUSH_AGENT_PROMPT } from "./omnirush-agent-prompt.js";
 import { BestPracticesEngineReloads, OMNIRUSH_BEST_PRACTICES, omnirushBestPracticesSkillsDir, waitForBestPracticesReady } from "./best-practices.js";
 import type { ServerConfig } from "./types.js";

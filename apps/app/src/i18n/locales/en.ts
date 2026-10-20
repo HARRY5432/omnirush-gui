@@ -1221,6 +1221,7 @@ export default {
   "question_modal.question_counter": "Question {current} of {total}",
   "restrictions.add_custom_providers_disabled_message": "Your organization administrator has disabled adding custom providers.",
   "restrictions.add_custom_providers_disabled_title": "Adding custom providers is disabled",
+  "session.permission_confirm_always": "Allow this for the rest of the chat? Press Y (or Enter) to confirm, N or Esc to cancel.",
   "session.allow_for_session": "Allow for session",
   "session.allow_once": "Allow once",
   "session.cmd_agent_active": "Active",
