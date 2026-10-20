@@ -368,7 +368,9 @@ export class CaptureHost {
       }
     }
     this.promptAt.set(sessionId, Date.now());
-    await this.archive.startGate(sessionId, root);
+    // The turn before ended since its prompt (not a prompt into a running turn): its delta is taken first (lifecycle startGate).
+    const previousEnded = previousStart !== undefined && endedAt !== null && endedAt >= previousStart;
+    await this.archive.startGate(sessionId, root, { previousEnded });
   }
 
   /** An engine was closed and `replacement` took over its sessions: observations reading it move there. */
