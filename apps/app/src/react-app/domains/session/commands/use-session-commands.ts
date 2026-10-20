@@ -16,6 +16,7 @@ import {
 } from "@/react-app/domains/session/sync/session-sync";
 import { getComposerDraft, useComposerStateStore } from "@/react-app/domains/session/surface/composer-state-store";
 import { REDO_NOTICE, projectTracksFiles, undoNotice } from "./undo-notice";
+import { commandTemplateLabel } from "./review-message";
 
 export type SessionCommandTarget = {
   workspaceId: string;
@@ -171,7 +172,9 @@ export function useUndoRedo(target: SessionCommandTarget) {
       const reverted = await revertSession(client, target.sessionId, message.info.id);
       applySessionRevert(target.workspaceId, reverted);
       // The turn's prompt goes back into an empty composer (a draft being written is left alone).
-      const text = userMessageText(message);
+      // A review or fix turn goes back as the command it was typed as, not its expanded prompt.
+      const sent = userMessageText(message);
+      const text = commandTemplateLabel(sent) ?? sent;
       const draft = getComposerDraft(useComposerStateStore.getState(), target.sessionId);
       if (text && !draft.trim()) {
         useComposerStateStore.getState().replaceDraft(target.sessionId, text);

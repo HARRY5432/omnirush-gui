@@ -1594,6 +1594,10 @@ export function SessionSurface(props: SessionSurfaceProps) {
   });
   const revertMessageId = snapshot?.session.revert?.messageID ?? null;
   const revertedMessageCount = snapshot && revertMessageId ? hiddenMessageCount(snapshot, revertMessageId) : 0;
+  // An undo rewinds the transcript below the last send's baseline: nothing is being waited for any more.
+  useEffect(() => {
+    if (revertMessageId) setAwaitingAssistantBaseline(null);
+  }, [revertMessageId]);
   const liveStatus = statusState ?? snapshot?.status ?? IDLE_STATUS;
   const preparingCloudTools = props.cloudMcpSubmissionState.status === "checking" ||
     props.cloudMcpSubmissionState.status === "repairing";

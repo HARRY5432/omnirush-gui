@@ -61,10 +61,12 @@ export function SessionCommandControls(props: SessionCommandControlsProps) {
       if (action === "undo" && !canUndo) return;
       if (action === "redo" && !canRedo) return;
       event.preventDefault();
+      event.stopPropagation();
       void (action === "undo" ? undo() : redo());
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    // Capture phase: the composer's editor keeps its own undo for text, so an empty composer must be seen first.
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, [canRedo, canUndo, redo, undo]);
 
   const mod = isMac() ? "⌘" : "Ctrl+";
