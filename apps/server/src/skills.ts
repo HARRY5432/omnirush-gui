@@ -9,8 +9,13 @@ import { exists } from "./utils.js";
 import { validateDescription, validateSkillName } from "./validators.js";
 import { ApiError } from "./errors.js";
 import { projectSkillsDir } from "./workspace-files.js";
+import { engineGlobalConfigDir, userGlobalSkillPaths } from "./user-skill-paths.js";
+import { LEGACY_SWARM_SKILL_NAME, OMNIRUSH_SWARM_SKILL_NAME } from "./omnirush-swarm.js";
 
 const INVALID_SKILL_DESCRIPTION = "ERROR: Invalid skill frontmatter";
+
+/** Skills the app writes into the engine's global folder (the swarm procedure, now and before 3.6). */
+const APP_WRITTEN_SKILL_NAMES = new Set<string>([OMNIRUSH_SWARM_SKILL_NAME, LEGACY_SWARM_SKILL_NAME]);
 
 /**
  * Directory names the engine scans for `<name>/SKILL.md` under a config root.
@@ -222,10 +227,25 @@ export async function listSkills(workspaceRoot: string, includeGlobal: boolean):
     dirs.push({ dir: join(root, ".claude", "skills"), scope: "project" });
   }
 
+  /** Folders the app writes its own skills into as well: their app skills are not listed. */
+  const sharedDirs = new Set<string>();
   if (includeGlobal) {
     const globalConfigDir = globalSkillConfigDir();
     for (const dirName of OPENCODE_SKILL_DIR_NAMES) {
       dirs.push({ dir: join(globalConfigDir, dirName), scope: "global" });
+    }
+    // The engine's own global folder (~/.config/omnirush/skills, also the
+    // OmniRush CLI's) and the user's `skills.paths` from its config: the
+    // engine loads these too, so the list shows them.
+    const engineConfigDir = engineGlobalConfigDir(process.env);
+    for (const dirName of OPENCODE_SKILL_DIR_NAMES) {
+      const dir = join(engineConfigDir, dirName);
+      sharedDirs.add(resolve(dir));
+      dirs.push({ dir, scope: "global" });
+    }
+    for (const entry of await userGlobalSkillPaths(process.env)) {
+      const expanded = entry.startsWith("~/") ? join(resolveHomeDir(), entry.slice(2)) : entry;
+      dirs.push({ dir: resolve(workspaceRoot, expanded), scope: "global" });
     }
     const home = resolveHomeDir();
     const globalClaude = join(home, ".claude", "skills");
@@ -236,7 +256,10 @@ export async function listSkills(workspaceRoot: string, includeGlobal: boolean):
     dirs.push({ dir: globalAgentLegacy, scope: "global" });
   }
 
-  const groups = await Promise.all(dirs.map(({ dir, scope }) => listSkillsInDir(dir, scope)));
+  const groups = await Promise.all(dirs.map(async ({ dir, scope }) => {
+    const items = await listSkillsInDir(dir, scope);
+    return sharedDirs.has(resolve(dir)) ? items.filter((item) => !APP_WRITTEN_SKILL_NAMES.has(item.name)) : items;
+  }));
   const items = groups.flat();
 
   const seen = new Set<string>();

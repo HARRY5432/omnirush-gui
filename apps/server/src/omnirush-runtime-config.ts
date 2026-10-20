@@ -17,6 +17,7 @@ import { managedPolicyPluginPath } from "./managed-policy-plugin.js";
  */
 import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { mergeSkillPaths, userGlobalSkillPaths } from "./user-skill-paths.js";
 import {
   omnirushExtensionsPreviewPluginPath,
   omnirushCapabilitiesKnowledgePluginPath,
@@ -149,6 +150,8 @@ export async function buildOmniRushRuntimeConfigObject(
     config ? omnirushBestPracticesSkillsDir(config) : undefined,
     // The model's own web search: the server's switch as last seen (web-search.ts).
     config ? webSearchSetting({ env: process.env, stateDir: runtimeStorageDir(config) }) : null,
+    // The user's own skill folders from the engine's global config (user-skill-paths.ts).
+    config ? await userGlobalSkillPaths(process.env) : [],
   );
   // The Linux sandbox (box/): the engine's shell is the box shell and the box plugin is
   // loaded once any workspace may use a box; every other project's commands run natively
@@ -227,6 +230,7 @@ export function buildOmniRushRuntimeConfigObjectFromSnapshot(
   skillsDir?: string,
   bestPracticesDir?: string,
   webSearch: WebSearchSwitch | null = null,
+  userSkillPaths: string[] = [],
 ): Record<string, unknown> {
   const disabledProviders = runtimeDisabledProviderList(runtimeConfig);
   // OMNIRUSH_APPROVALS in the server environment wins over the persisted setting.
@@ -241,10 +245,12 @@ export function buildOmniRushRuntimeConfigObjectFromSnapshot(
   // Code diagnostics: the main languages' servers on, the rest off; the engine default (none) while off.
   const lsp = agentAssistFlags(runtimeConfig, env).diagnostics ? agentAssistLspConfig() : undefined;
   const enabled = bestPracticesEnabled(runtimeConfig);
-  const skillPaths = [
+  // The app's skill folders, then the user's from the engine's global config:
+  // the engine replaces that file's list with this file's (user-skill-paths.ts).
+  const skillPaths = mergeSkillPaths([
     ...(skillsDir ? [skillsDir] : []),
     ...(enabled && bestPracticesDir ? [bestPracticesDir] : []),
-  ];
+  ], userSkillPaths);
   const provider = {
     ...runtimeProviderMap(runtimeConfig),
     ...(internalGateway
@@ -274,7 +280,7 @@ export function buildOmniRushRuntimeConfigObjectFromSnapshot(
     // ours, which all stay in force. The main agent's own block below leaves
     // it out, or it would come after (and override) the user's grants.
     permission: { ...(catchAll ? { "*": catchAll } : {}), ...engineConfig.permission, ...topLevelPermissions },
-    // omnirush.ai's own on-demand skills (the swarm procedure).
+    // omnirush.ai's own on-demand skills (the swarm procedure), then the user's skill folders.
     ...(skillPaths.length ? { skills: { paths: skillPaths } } : {}),
     default_agent: runtimeConfig.default_agent ?? "omnirush",
     // Sub-agent swarms: sub-agents may delegate again, up to this many layers
