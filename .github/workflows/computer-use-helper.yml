@@ -1,0 +1,194 @@
+name: Computer Use helper (macOS)
+# Builds the macOS Computer Use helper app on its own (universal, Developer ID
+# signed, notarized and stapled) so the CLI can download it. Manual only.
+# With publish=true it creates a new prerelease computer-use-helper-<version>;
+# it never replaces an existing tag or release.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Helper version (MAJOR.MINOR.PATCH, e.g. 0.1.0)
+        required: true
+        type: string
+      publish:
+        description: Create the computer-use-helper-<version> prerelease
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: computer-use-helper-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build, sign and notarize
+    runs-on: macos-14
+    timeout-minutes: 120
+    env:
+      VERSION: ${{ inputs.version }}
+      TAG: computer-use-helper-${{ inputs.version }}
+      ASSET: omnirush-computer-use-helper-${{ inputs.version }}-macos-universal.zip
+      APP_NAME: OmniRush.ai Computer Use.app
+      BUNDLE_ID: ai.omnirush.desktop.computer-use
+    steps:
+      - name: Validate inputs
+        env:
+          PUBLISH: ${{ inputs.publish }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "version must be MAJOR.MINOR.PATCH, got '$VERSION'" >&2; exit 1; }
+          if [ "$PUBLISH" = "true" ] && gh api "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists; refusing to publish over it." >&2
+            exit 1
+          fi
+
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Build the universal helper app
+        run: |
+          swift --version
+          node apps/desktop/scripts/prepare-computer-use-helper.mjs --force --universal --no-sign \
+            --version "$VERSION" --outdir "$RUNNER_TEMP/helper"
+          bin="$RUNNER_TEMP/helper/$APP_NAME/Contents/MacOS/ComputerUse"
+          archs=$(lipo -archs "$bin")
+          echo "architectures: $archs"
+          [[ " $archs " == *" arm64 "* && " $archs " == *" x86_64 "* ]] || { echo "helper is not universal" >&2; exit 1; }
+          id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$RUNNER_TEMP/helper/$APP_NAME/Contents/Info.plist")
+          [ "$id" = "$BUNDLE_ID" ] || { echo "unexpected bundle id $id" >&2; exit 1; }
+
+      - name: Prepare signing keychain and notary key
+        env:
+          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: scripts/release/macos-signing-env.sh
+
+      - name: Sign with Developer ID (hardened runtime)
+        run: |
+          app="$RUNNER_TEMP/helper/$APP_NAME"
+          identity=$(security find-identity -v -p codesigning "$MACOS_SIGNING_KEYCHAIN" | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -n1)
+          [ -n "$identity" ] || { echo "no Developer ID Application identity in the keychain" >&2; exit 1; }
+          # One executable and no nested code, so signing the bundle covers it.
+          # No entitlements: Accessibility and Screen Recording are TCC grants.
+          codesign --force --timestamp --options runtime --keychain "$MACOS_SIGNING_KEYCHAIN" \
+            --sign "$identity" "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+      - name: Notarize and staple
+        run: |
+          app="$RUNNER_TEMP/helper/$APP_NAME"
+          submit="$RUNNER_TEMP/notary/helper.zip"
+          mkdir -p "$(dirname "$submit")"
+          ditto -c -k --keepParent "$app" "$submit"
+          # Submit, then poll (notarytool --wait dies on runner network drops).
+          node -e '
+            const n = require(process.argv[1]);
+            n.notarizeFile(process.argv[2]).then(() => n.staple(process.argv[3])).catch((e) => { console.error(e?.message ?? e); process.exit(1); });
+          ' "$GITHUB_WORKSPACE/apps/desktop/scripts/macos-notarize.cjs" "$submit" "$app"
+          rm -rf "$RUNNER_TEMP/notary"
+
+      - name: Verify signature, Gatekeeper and ticket
+        run: |
+          app="$RUNNER_TEMP/helper/$APP_NAME"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          details=$(codesign -dv --verbose=4 "$app" 2>&1)
+          grep -E '^(Identifier|Authority|TeamIdentifier|Timestamp|CodeDirectory)' <<<"$details"
+          grep -q '^Authority=Developer ID Application' <<<"$details" || { echo "not Developer ID signed" >&2; exit 1; }
+          grep -Eq '^CodeDirectory .*flags=0x[0-9a-f]*\(.*runtime' <<<"$details" || { echo "hardened runtime is off" >&2; exit 1; }
+          grep -qx "Identifier=$BUNDLE_ID" <<<"$details" || { echo "signed identifier is not $BUNDLE_ID" >&2; exit 1; }
+          out=$(spctl -a -vv -t exec "$app" 2>&1) || { echo "$out" >&2; exit 1; }
+          echo "$out"
+          grep -q 'source=Notarized Developer ID' <<<"$out" || { echo "Gatekeeper source is not Notarized Developer ID" >&2; exit 1; }
+          xcrun stapler validate "$app"
+
+      - name: Package
+        run: |
+          mkdir -p dist-helper
+          ditto -c -k --keepParent "$RUNNER_TEMP/helper/$APP_NAME" "dist-helper/$ASSET"
+          (cd dist-helper && shasum -a 256 "$ASSET" > SHA256SUMS.txt && cat SHA256SUMS.txt)
+          # The packaged zip must unpack to a still-valid, stapled app.
+          check="$RUNNER_TEMP/unzip-check"
+          rm -rf "$check" && mkdir -p "$check"
+          ditto -x -k "dist-helper/$ASSET" "$check"
+          codesign --verify --deep --strict "$check/$APP_NAME"
+          xcrun stapler validate "$check/$APP_NAME"
+          {
+            echo "### Computer Use helper $VERSION"
+            echo
+            echo "- Asset: \`$ASSET\`"
+            echo "- SHA-256: \`$(cut -d' ' -f1 dist-helper/SHA256SUMS.txt)\`"
+            echo "- Bundle id: \`$BUNDLE_ID\`"
+            echo "- Commit: \`$GITHUB_SHA\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: computer-use-helper-${{ inputs.version }}
+          path: |
+            dist-helper/${{ env.ASSET }}
+            dist-helper/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Remove signing keychain
+        if: always()
+        run: |
+          if [ -n "${MACOS_SIGNING_KEYCHAIN:-}" ]; then security delete-keychain "$MACOS_SIGNING_KEYCHAIN" || true; fi
+          rm -f "${APPLE_API_KEY:-/nonexistent}"
+
+  publish:
+    name: Publish prerelease
+    needs: build
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ inputs.version }}
+      TAG: computer-use-helper-${{ inputs.version }}
+      ASSET: omnirush-computer-use-helper-${{ inputs.version }}-macos-universal.zip
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: computer-use-helper-${{ inputs.version }}
+          path: dist-helper
+
+      - name: Verify checksum
+        run: cd dist-helper && sha256sum -c SHA256SUMS.txt
+
+      - name: Create prerelease (never replaces an existing one)
+        run: |
+          if gh api "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" >/dev/null 2>&1 \
+            || gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Tag or release $TAG already exists; refusing to replace it." >&2
+            exit 1
+          fi
+          sha=$(cut -d' ' -f1 dist-helper/SHA256SUMS.txt)
+          notes=$(printf '%s\n' \
+            "macOS Computer Use helper $VERSION (universal: Apple silicon and Intel)." \
+            "" \
+            "Developer ID signed, notarized and stapled. Bundle id: ai.omnirush.desktop.computer-use." \
+            "" \
+            "SHA-256 of $ASSET:" \
+            "$sha" \
+            "" \
+            "Built from $GITHUB_SHA.")
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --prerelease --latest=false --title "Computer Use helper $VERSION" --notes "$notes" \
+            "dist-helper/$ASSET" dist-helper/SHA256SUMS.txt

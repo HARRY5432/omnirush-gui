@@ -26,6 +26,13 @@ const hasFlag = (name) => process.argv.slice(2).includes(name);
 const outDir = resolve(readArg("--outdir") ?? join(desktopRoot, "resources", "helpers"));
 const force = hasFlag("--force") || process.env.OMNIRUSH_COMPUTER_USE_FORCE_BUILD === "1";
 const appPath = join(outDir, helperAppName);
+// The standalone helper release (computer-use-helper.yml) builds a universal
+// binary, stamps its own version and signs it itself.
+const universal = hasFlag("--universal");
+const skipSign = hasFlag("--no-sign");
+const version = readArg("--version") ?? "0.1.0";
+if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error(`--version must be MAJOR.MINOR.PATCH, got ${version}`);
+const buildNumber = readArg("--version") ? version : "1";
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -103,9 +110,9 @@ function infoPlist() {
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.0</string>
+  <string>${version}</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>${buildNumber}</string>
   <key>LSMinimumSystemVersion</key>
   <string>14.0</string>
 </dict>
@@ -123,8 +130,9 @@ if (!force && existsSync(join(appPath, "Contents", "MacOS", helperExecutableName
   process.exit(0);
 }
 
-run("swift", ["build", "--package-path", packagePath, "-c", "release", "--product", productName], { stdio: "inherit" });
-const binPathResult = run("swift", ["build", "--package-path", packagePath, "-c", "release", "--show-bin-path"]);
+const archArgs = universal ? ["--arch", "arm64", "--arch", "x86_64"] : [];
+run("swift", ["build", "--package-path", packagePath, "-c", "release", ...archArgs, "--product", productName], { stdio: "inherit" });
+const binPathResult = run("swift", ["build", "--package-path", packagePath, "-c", "release", ...archArgs, "--show-bin-path"]);
 const binDir = binPathResult.stdout.trim();
 const builtExecutable = join(binDir, productName);
 if (!existsSync(builtExecutable)) {
@@ -141,6 +149,6 @@ if (existsSync(iconPath)) {
   copyFileSync(iconPath, join(appPath, "Contents", "Resources", "AppIcon.icns"));
 }
 chmodSync(join(appPath, "Contents", "MacOS", helperExecutableName), 0o755);
-signHelperApp();
+if (!skipSign) signHelperApp();
 
 process.stdout.write(JSON.stringify({ ok: true, appPath, executable: join(appPath, "Contents", "MacOS", helperExecutableName) }, null, 2) + "\n");
