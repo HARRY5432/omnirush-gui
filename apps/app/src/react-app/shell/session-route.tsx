@@ -19,6 +19,7 @@ import { trackSessionActive, trackTaskStarted } from "@/app/lib/den-telemetry";
 import { buildDiagnosticsBundleJson } from "@/app/lib/diagnostics-bundle";
 import { downloadTextAsFile } from "@/app/lib/download";
 import { canCreateWorkspaces } from "@/app/lib/workspace-creation-policy";
+import { useQueryClient } from "@tanstack/react-query";
 import { createClient, isPromptAdmissionUnknown, unwrap } from "@/app/lib/opencode";
 import { createClientV2, isOpencodeV2BaseUrl, V2_SESSION_ARCHIVE_UNAVAILABLE } from "@/app/lib/opencode-v2-adapter";
 import { abortSessionSafe, forkSession, listCommands, revertSession, setSessionArchived, shellInSession, unrevertSession } from "@/app/lib/opencode-session";
@@ -263,7 +264,11 @@ import {
   workspaceExtensionsRoute,
   workspaceSessionRoute,
   workspaceSettingsRoute,
+  workspaceTasksRoute,
 } from "./workspace-routes";
+import { TasksBoardPage } from "@/react-app/domains/workspace/tasks/tasks-board-page";
+import { runningTaskCount, useWorkspaceTasks, workspaceTasksQueryKey } from "@/react-app/domains/workspace/tasks/workspace-tasks-query";
+import type { HomeViewContext } from "@/react-app/domains/session/home/home-recent";
 import { WorkspaceProvider } from "./workspace-provider";
 import type { OpenTarget } from "@/react-app/domains/session/artifacts/open-target";
 import { SettingsSurface } from "./settings-route";
@@ -379,9 +384,11 @@ function focusedWorkbenchPaneOwner() {
 export function SessionRoute() {
   const navigate = useNavigate();
   const location = useLocation();
+  const queryClient = useQueryClient();
   const appsRouteActive = /^(?:\/apps|\/dashboard\/apps)(?:\/|$)/.test(location.pathname);
   const automationsRouteRequested = /^\/automations(?:\/|$)/.test(location.pathname);
   const dashboardRouteRequested = /^\/dashboard(?:\/|$)/.test(location.pathname);
+  const tasksRouteActive = /^\/workspace\/[^/]+\/tasks(?:\/|$)/.test(location.pathname);
   const {
     enabled: mcpAppsDashboardEnabled,
     loading: dashboardAvailabilityLoading,
@@ -518,7 +525,7 @@ export function SessionRoute() {
     runRemoteWorkspaceConnectionCheck,
   } = useWorkspaceRouteState({
     developerMode,
-    workspaceRoute: appsRouteActive ? "apps" : automationsRouteActive ? "automations" : dashboardWorkspaceRoute ? "dashboard" : "session",
+    workspaceRoute: appsRouteActive ? "apps" : automationsRouteActive ? "automations" : dashboardWorkspaceRoute ? "dashboard" : tasksRouteActive ? "tasks" : "session",
     onServerSettingsChanged: () => setOmniRushServerSettingsVersion((value) => value + 1),
     onHostInfo: setOmniRushServerHostInfoState,
   });
@@ -769,6 +776,17 @@ export function SessionRoute() {
     [errorsByWorkspaceId, retryingWorkspaceIds, sessionListErrorsByWorkspaceId, sessionsByWorkspaceId, workspaces],
   );
   useSessionGroupSync({ workspaces, endpointForWorkspace });
+  // A parallel task's own workspace is listed on its repository's board, not in the sidebar (unless it is open).
+  const sidebarWorkspaceSessionGroups = useMemo(
+    () => workspaceSessionGroups.filter((group) => !group.workspace.task || group.workspace.id === selectedWorkspaceId),
+    [selectedWorkspaceId, workspaceSessionGroups],
+  );
+  const tasksBoardWorkspaceId = selectedWorkspace?.task && workspaces.some((workspace) => workspace.id === selectedWorkspace.task?.parentWorkspaceId)
+    ? selectedWorkspace.task.parentWorkspaceId
+    : selectedWorkspaceId;
+  const tasksAvailable = Boolean(selectedWorkspace && selectedWorkspace.workspaceType !== "remote" && tasksBoardWorkspaceId);
+  const workspaceTasksQuery = useWorkspaceTasks(client, tasksBoardWorkspaceId, tasksAvailable);
+  const tasksRunningCount = runningTaskCount(workspaceTasksQuery.data);
   const selectedWorkspaceGroupState = sessionManagementStore((state) => (
     selectedWorkspaceId ? state.groupsByWorkspace[selectedWorkspaceId] : undefined
   ));
@@ -2840,6 +2858,41 @@ export function SessionRoute() {
     };
   }, [client, endpointForWorkspace, workspaces]);
 
+  // The home screen (no chat open): recent projects and chats across workspaces, searched on this computer.
+  const homeView = useMemo<HomeViewContext>(() => ({
+    sessions: paletteSessionOptions,
+    workspaces: workspaces.map((workspace) => ({ id: workspace.id, name: workspace.displayNameResolved, task: Boolean(workspace.task) })),
+    fetchMessages: sessionSearchFetcher,
+    onOpenSession: (workspaceId, sessionId) => {
+      setLegacySelectedWorkspaceId(workspaceId);
+      writeActiveWorkspaceId(workspaceId);
+      writeLastSessionFor(workspaceId, sessionId);
+      navigateToWorkspaceSession(workspaceId, sessionId);
+    },
+  }), [navigateToWorkspaceSession, paletteSessionOptions, sessionSearchFetcher, setLegacySelectedWorkspaceId, workspaces]);
+
+  const tasksPaletteItems = useMemo<PaletteItem[]>(() => tasksAvailable ? [{
+    id: "tasks.open",
+    title: "Open parallel tasks",
+    detail: tasksRunningCount ? `${tasksRunningCount} running` : "Tasks that run in their own copy of this repository",
+    meta: "Tasks",
+    searchText: "parallel tasks agents worktree board background",
+    action: () => {
+      setCommandPaletteOpen(false);
+      navigate(workspaceTasksRoute(tasksBoardWorkspaceId));
+    },
+  }, {
+    id: "tasks.new",
+    title: "New parallel task…",
+    detail: "Run a prompt in a separate copy of this repository",
+    meta: "Tasks",
+    searchText: "new parallel task agent worktree branch background",
+    action: () => {
+      setCommandPaletteOpen(false);
+      navigate(`${workspaceTasksRoute(tasksBoardWorkspaceId)}?new=1`);
+    },
+  }] : [], [navigate, tasksAvailable, tasksBoardWorkspaceId, tasksRunningCount]);
+
   const sessionSearchPaletteItem = useMemo<PaletteItem>(() => ({
     id: "session-search.open",
     title: "Search session messages",
@@ -3210,6 +3263,41 @@ export function SessionRoute() {
     }
   }, [baseUrl, client, local, navigateToWorkspaceSession, refreshRouteState, rememberPendingCreatedSession, token]);
 
+  /**
+   * A parallel task: the server makes its worktree and workspace, then its
+   * chat is created there and the prompt sent the way the composer sends one
+   * (same model, agent and context), so it is captured like any chat.
+   */
+  const startParallelTask = useCallback(async (workspaceId: string, prompt: string) => {
+    if (!client || !baseUrl || !token) throw new Error("omnirush.ai server is unavailable.");
+    const created = await client.createWorkspaceTask(workspaceId, { prompt, parentSessionId: selectedSessionId });
+    const taskWorkspace = created.workspace;
+    await refreshRouteState();
+    void queryClient.invalidateQueries({ queryKey: workspaceTasksQueryKey(workspaceId) });
+    const opencodeUrl = `${(buildOmniRushWorkspaceBaseUrl(baseUrl, taskWorkspace.id) ?? baseUrl).replace(/\/+$/, "")}/opencode`;
+    const createEngineClient = isOpencodeV2BaseUrl(opencodeUrl) ? createClientV2 : createClient;
+    const engine = createEngineClient(opencodeUrl, taskWorkspace.path || undefined, { token, mode: "omnirush" });
+    const session = unwrap(await engine.session.create({ directory: taskWorkspace.path || undefined }));
+    const system = await buildOmniRushSessionSystemContext(client, {
+      workspaceId: taskWorkspace.id,
+      cacheKey: session.id,
+      runtimeKey: environmentRuntimeKey,
+    });
+    const model = local.prefs.defaultModel;
+    const result = await engine.session.promptAsync({
+      sessionID: session.id,
+      parts: [{ type: "text", text: prompt }],
+      model: model ?? undefined,
+      agent: selectedAgent ?? undefined,
+      ...(modelVariantValue ? { variant: modelVariantValue } : {}),
+      system,
+    });
+    if (result.error) throw new Error(serializeSDKError(result.error));
+    if (model) useSessionModelStore.getState().setModel(session.id, model, modelVariantValue ?? null);
+    writeLastSessionFor(taskWorkspace.id, session.id);
+    void queryClient.invalidateQueries({ queryKey: workspaceTasksQueryKey(workspaceId) });
+  }, [baseUrl, client, environmentRuntimeKey, local.prefs.defaultModel, modelVariantValue, queryClient, refreshRouteState, selectedAgent, selectedSessionId, token]);
+
   // The new task's folder, picked above its composer: switch to another
   // workspace, or open a folder as a new one (the sidebar's "+" in one step).
   const openProjectFolder = useCallback(async () => {
@@ -3445,6 +3533,7 @@ export function SessionRoute() {
       onChatFirstTask={handleChatFirstTask}
       chatFirstBusy={createWorkspaceBusy}
       newTaskComposer={newTaskComposerWithProjects}
+      home={homeView}
       providerAuthModal={sessionProviderAuthSnapshot.providerAuthModalOpen ? {
         open: true,
         loading: false,
@@ -3487,8 +3576,22 @@ export function SessionRoute() {
           }}
         />
       }
-      primaryTitle={appsRouteActive ? "Dashboard" : automationsRouteActive ? "Automations" : dashboardRouteActive ? "Dashboard" : undefined}
-      primarySlot={appsRouteActive ? (
+      primaryTitle={appsRouteActive ? "Dashboard" : automationsRouteActive ? "Automations" : dashboardRouteActive ? "Dashboard" : tasksRouteActive ? "Parallel tasks" : undefined}
+      primarySlot={tasksRouteActive && tasksAvailable ? (
+        <TasksBoardPage
+          client={client}
+          workspaceId={tasksBoardWorkspaceId}
+          workspaceName={workspaces.find((workspace) => workspace.id === tasksBoardWorkspaceId)?.displayNameResolved ?? ""}
+          onStartTask={(prompt) => startParallelTask(tasksBoardWorkspaceId, prompt)}
+          onOpenChat={(workspaceId, sessionId) => {
+            setLegacySelectedWorkspaceId(workspaceId);
+            writeActiveWorkspaceId(workspaceId);
+            if (sessionId) writeLastSessionFor(workspaceId, sessionId);
+            navigateToWorkspaceSession(workspaceId, sessionId);
+          }}
+          onWorkspacesChanged={() => void refreshRouteState()}
+        />
+      ) : appsRouteActive ? (
         <AppsPage onNewApp={startAppConversation} />
       ) : automationsRouteActive ? (
         <AutomationsPage providerCatalog={providerCatalog} workspaceId={selectedWorkspaceId} />
@@ -3510,7 +3613,7 @@ export function SessionRoute() {
         sessionTabNavRef.current = { ...sessionTabNavRef.current, options: tabs };
       }}
       sidebar={{
-        workspaceSessionGroups,
+        workspaceSessionGroups: sidebarWorkspaceSessionGroups,
         selectedWorkspaceId,
         selectedSessionId,
         developerMode: false,
@@ -3528,6 +3631,9 @@ export function SessionRoute() {
             }
           : undefined,
         dashboardActive: dashboardRouteActive || appsRouteActive,
+        tasksActive: tasksRouteActive,
+        tasksRunningCount,
+        onOpenTasks: tasksAvailable ? () => navigate(workspaceTasksRoute(tasksBoardWorkspaceId)) : undefined,
         onOpenDashboard: mcpAppsDashboardEnabled
           ? () => {
               navigate(dashboardRoute());
@@ -3896,7 +4002,7 @@ export function SessionRoute() {
       currentSessionForGroupMove={currentSessionForGroupMove}
       currentSessionGroupId={currentSessionGroupId}
       onMoveCurrentSessionToGroup={handleMoveCurrentSessionToGroup}
-      extraItems={[...currentSessionActionPaletteItems, ...(sessionFindPaletteItem ? [sessionFindPaletteItem] : []), sessionSearchPaletteItem, ...terminalPaletteItems, ...(checkDesktopRestriction({ restriction: "allowControlSettings" }) ? [] : [developerModePaletteItem]), ...(copySessionIdPaletteItem ? [copySessionIdPaletteItem] : []), diagnosticsCopyPaletteItem, diagnosticsExportPaletteItem, nextSessionTabPaletteItem, prevSessionTabPaletteItem, reloadConfigPaletteItem]}
+      extraItems={[...currentSessionActionPaletteItems, ...(sessionFindPaletteItem ? [sessionFindPaletteItem] : []), sessionSearchPaletteItem, ...tasksPaletteItems, ...terminalPaletteItems, ...(checkDesktopRestriction({ restriction: "allowControlSettings" }) ? [] : [developerModePaletteItem]), ...(copySessionIdPaletteItem ? [copySessionIdPaletteItem] : []), diagnosticsCopyPaletteItem, diagnosticsExportPaletteItem, nextSessionTabPaletteItem, prevSessionTabPaletteItem, reloadConfigPaletteItem]}
       listAgents={listAgents}
       selectedAgent={selectedAgent}
       onSelectAgent={setSelectedAgent}

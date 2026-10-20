@@ -94,13 +94,14 @@ import {
   sessionIdForLegacyWorkspaceInference,
   automationsRoute,
   dashboardRoute,
+  workspaceTasksRoute,
   workspaceExtensionsRoute,
   workspaceSessionRoute,
 } from "./workspace-routes";
 
 export type UseWorkspaceRouteStateInput = {
   developerMode: boolean;
-  workspaceRoute?: "session" | "automations" | "dashboard" | "apps";
+  workspaceRoute?: "session" | "automations" | "dashboard" | "apps" | "tasks";
   /** Invoked when the omnirush-server settings-changed event fires (the route bumps its settings version). */
   onServerSettingsChanged: () => void;
   /** Receives the local omnirush-server host info discovered during refresh. */
@@ -184,6 +185,10 @@ export function useWorkspaceRouteState(input: UseWorkspaceRouteStateInput) {
     if (workspaceRoute === "dashboard") {
       if (/^\/dashboard(?:\/|$)/.test(location.pathname)) return;
       navigate(dashboardRoute(), options);
+      return;
+    }
+    if (workspaceRoute === "tasks") {
+      navigate(workspaceTasksRoute(workspaceId), options);
       return;
     }
     navigateToWorkspaceSession(workspaceId, sessionId, options);

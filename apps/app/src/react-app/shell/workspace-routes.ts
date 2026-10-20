@@ -47,6 +47,11 @@ export function settingsNavigationFromPathname(pathname: string, tab: SettingsTa
   };
 }
 
+/** The parallel-task board of a workspace's repository. */
+export function workspaceTasksRoute(workspaceId: string) {
+  return `/workspace/${encodeURIComponent(workspaceId.trim())}/tasks`;
+}
+
 export function automationsRoute() {
   return "/automations";
 }

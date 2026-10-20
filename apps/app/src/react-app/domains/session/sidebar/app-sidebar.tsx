@@ -14,6 +14,7 @@ import {
   Copy,
   FolderPlus,
   Gift,
+  Layers,
   LayoutGrid,
   MoreHorizontal,
   Pencil,
@@ -955,6 +956,10 @@ export type AppSidebarProps = {
   onOpenAutomations?: () => void;
   dashboardActive?: boolean;
   onOpenDashboard?: () => void;
+  /** The parallel-task board of the selected repository, with how many of its tasks run. */
+  tasksActive?: boolean;
+  tasksRunningCount?: number;
+  onOpenTasks?: () => void;
   /** Opens the cross-session message search dialog (Cmd/Ctrl+Shift+F). */
   onOpenSessionSearch?: () => void;
   auditClient?: OmniRushServerClient | null;
@@ -1451,6 +1456,24 @@ export function AppSidebar(props: AppSidebarProps) {
                 icon={Blocks}
                 label="Dashboard"
                 onSelect={props.onOpenDashboard}
+              />
+            ) : null}
+            {props.onOpenTasks ? (
+              <SidebarDestination
+                active={props.tasksActive === true}
+                icon={Layers}
+                label="Parallel tasks"
+                labelContent={(
+                  <span className="flex min-w-0 flex-1 items-center gap-2" data-testid="sidebar-tasks">
+                    <span className="truncate">Parallel tasks</span>
+                    {props.tasksRunningCount ? (
+                      <span className="ml-auto rounded bg-muted px-1 text-[10px] text-muted-foreground" aria-label={`${props.tasksRunningCount} running`} data-testid="sidebar-tasks-running">
+                        {props.tasksRunningCount}
+                      </span>
+                    ) : null}
+                  </span>
+                )}
+                onSelect={props.onOpenTasks}
               />
             ) : null}
             {props.onOpenAutomations ? (
