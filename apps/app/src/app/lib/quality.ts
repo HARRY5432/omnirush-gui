@@ -49,9 +49,14 @@ export function qualityTierLabel(tier: QualityTier): string {
   return TIER_LABELS[tier] ?? "Standard";
 }
 
-/** The badge's text: "Gold", or "Gold · Preview" while spins pay nothing. */
+/** The badge's text: the tier alone. Preview (spins pay nothing) lives in the tooltip. */
 export function qualityBadgeText(quality: AccountQuality): string {
-  return quality.preview ? `${qualityTierLabel(quality.tier)} · Preview` : qualityTierLabel(quality.tier);
+  return qualityTierLabel(quality.tier);
+}
+
+/** No badge while the account is still New: there is no tier to show yet. */
+export function showsQualityBadge(quality: AccountQuality | null | undefined): quality is AccountQuality {
+  return !!quality && quality.tier !== "new";
 }
 
 /** The badge's tooltip: the hint to the next tier and, while limited, the token cut. */
