@@ -22,7 +22,7 @@ const COMPACTED_TURN = [
   msg("m04", "assistant", [{ type: "tool", tool: "edit" }]),
   msg("m05", "user", [{ type: "compaction", auto: true }]),
   msg("m06", "assistant", [text("summary")], { summary: true, mode: "compaction" }),
-  msg("m07", "user", [text("Continue if you have next steps", { synthetic: true })]),
+  msg("m07", "user", [text("Continue if you have next steps", { synthetic: true, metadata: { compaction_continue: true } })]),
   msg("m08", "assistant", [{ type: "tool", tool: "write" }, text("finished")]),
 ];
 
@@ -33,12 +33,32 @@ describe("turn user messages", () => {
     // A prompt that is only an attachment (no typed text) is still the person's.
     expect(isPersonUserMessage(msg("x", "user", [{ type: "file", url: "file:///a.png" }]))).toBe(true);
     expect(isPersonUserMessage(msg("x", "user", [{ type: "data-compaction" }]))).toBe(false);
-    expect(isPersonUserMessage(msg("x", "user", [text("go on", { providerMetadata: { opencode: { synthetic: true } } })]))).toBe(false);
-    expect(isPersonUserMessage(msg("x", "user", [text("s")], { summary: true }))).toBe(false);
+    // Only synthetic text (an attachment whose read failed) is still the person's prompt.
+    expect(isPersonUserMessage(msg("x", "user", [text("Could not read a.png", { synthetic: true })]))).toBe(true);
     // A user message's diff summary object is not a compaction mark.
     expect(isPersonUserMessage(msg("x", "user", [text("hi")], { summary: { diffs: [] } }))).toBe(true);
     expect(isPersonUserMessage(msg("x", "assistant", [text("hi")]))).toBe(false);
     expect(isPersonUserMessage(null)).toBe(false);
+  });
+
+  test("a prompt the engine replays after an overflow compaction counts as the original", () => {
+    const replayed = [
+      msg("m01", "user", [text("first")]),
+      msg("m02", "assistant", [text("done")]),
+      msg("m03", "user", [text("big prompt")]),
+      msg("m04", "user", [{ type: "compaction", auto: true, overflow: true }]),
+      msg("m05", "assistant", [text("summary")], { summary: true }),
+      msg("m06", "user", [text("big prompt")]),
+      msg("m07", "user", [{ type: "compaction", auto: true, overflow: true }]),
+      msg("m08", "assistant", [text("summary")], { summary: true }),
+      msg("m09", "user", [text("big prompt")]),
+      msg("m10", "assistant", [text("answer")]),
+    ];
+    expect(personUserMessages(replayed).map((message) => message.info.id)).toEqual(["m01", "m03"]);
+    expect(undoTarget({ session: { id: "s", revert: null }, messages: replayed } as never)?.info.id).toBe("m03");
+    // A different prompt after a compaction is a turn of its own.
+    const next = [...replayed.slice(0, 5), msg("m06", "user", [text("something else")])];
+    expect(personUserMessages(next).map((message) => message.info.id)).toEqual(["m01", "m03", "m06"]);
   });
 
   test("undo picks the turn's own prompt in one press", () => {

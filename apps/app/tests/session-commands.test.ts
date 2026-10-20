@@ -22,7 +22,7 @@ describe("undoNotice", () => {
     expect(undoNotice({ kept: ["x", "y"] }, true).message).toBe("Left 2 files as they are: x, y (edited after the turn, and the turn's change could not be taken out cleanly). Redo puts it back.");
     expect(undoNotice({ restored: ["a"], outside: ["log.txt"] }, true)).toEqual({
       title: "Undid the last turn",
-      message: "Restored 1 file: a. Not touched: log.txt (changed during the turn, but not by the agent). Redo puts it back.",
+      message: "Restored 1 file: a. Not touched: log.txt (changed during the turn by something other than the agent's file edits). Redo puts it back.",
       variant: "warning",
     });
   });

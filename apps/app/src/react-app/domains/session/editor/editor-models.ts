@@ -158,7 +158,7 @@ export class EditorDocuments {
         file = await this.client.editorReadFile(this.workspaceId, doc.path);
       } catch (error) {
         // Deleted on disk: a clean document empties and says so; a dirty one keeps the user's text.
-        if ((error as { status?: number }).status === 404 && !doc.missing) {
+        if ((error as { status?: number }).status === 404 && (!doc.missing || options.discard)) {
           if (dirty(doc)) {
             doc.conflict = true;
             return;

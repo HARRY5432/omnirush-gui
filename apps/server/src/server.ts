@@ -2392,7 +2392,8 @@ export async function proxyOpencodeRequest(input: {
     const undoSessionId = decodeEngineRouteParam(undoCall.sessionId) ?? undoCall.sessionId;
     const kept = await revertBodyWithEditorSaves({
       saves: editorSavesFor(input.config),
-      root: workspace.path,
+      // The editor's folder, as the engine names paths (no Windows `\\?\` prefix): keep paths are absolute.
+      root: normalizeOpencodeDirectory(workspace.path),
       body,
       messageCreated: (messageId) => engineMessageCreated(baseUrl, auth, directory, undoSessionId, messageId),
     });
@@ -4835,7 +4836,7 @@ function createRoutes(
     requireApproval,
     requireClientScope,
     resolveWorkspace,
-    onSaved: (workspace, path) => editorSavesFor(config).record(workspace.path, path),
+    onSaved: (workspace, path) => editorSavesFor(config).record(normalizeOpencodeDirectory(workspace.path), path),
     onUserEdit: (edit) => {
       const capture = captureServicesByServer.get(config);
       if (!capture?.uploadEnabled || !capture.hasSession(edit.sessionId) || isUploadFileDenied(edit.path)) return;

@@ -17,7 +17,7 @@ import {
 import { getComposerDraft, useComposerStateStore } from "@/react-app/domains/session/surface/composer-state-store";
 import { REDO_NOTICE, projectTracksFiles, undoNotice } from "./undo-notice";
 import { commandTemplateLabel } from "./review-message";
-import { isPersonUserMessage } from "./turn-messages";
+import { personUserMessages } from "./turn-messages";
 
 export type SessionCommandTarget = {
   workspaceId: string;
@@ -58,7 +58,7 @@ export function visibleMessages(snapshot: OmniRushSessionSnapshot | null | undef
 
 /** The user message an undo rewinds to: the newest one the person sent that the chat still shows (a compaction's own are skipped). */
 export function undoTarget(snapshot: OmniRushSessionSnapshot | null | undefined): OmniRushSessionMessage | null {
-  return visibleMessages(snapshot).findLast((message) => isPersonUserMessage(message)) ?? null;
+  return personUserMessages(visibleMessages(snapshot)).at(-1) ?? null;
 }
 
 /** The text a user message was sent with (what goes back into the composer after an undo). */
