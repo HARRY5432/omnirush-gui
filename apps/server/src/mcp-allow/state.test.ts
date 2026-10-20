@@ -5,7 +5,7 @@ import path from "node:path";
 
 import omnirushMcpPolicy from "../opencode-plugins/omnirush-mcp-policy.js";
 import { keyOf } from "../box/plugin-lib.js";
-import { readPolicyFile } from "./mcp-allow.mjs";
+import { describeIgnored, readPolicyFile } from "./mcp-allow.mjs";
 import {
   decideMcpEntry,
   mcpEngineEnv,
@@ -28,7 +28,7 @@ function temp(prefix: string): string {
 
 afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-  for (const key of ["OMNIRUSH_MCP_POLICY_FILE", "OMNIRUSH_MCP_REPORT_DIR", "OMNIRUSH_MCP_WORKSPACE_DIR", "OMNIRUSH_BOX_HOME"]) {
+  for (const key of ["OMNIRUSH_MCP_POLICY_FILE", "OMNIRUSH_MCP_REPORT_DIR", "OMNIRUSH_MCP_WORKSPACE_DIR", "OMNIRUSH_BOX_HOME", "PATH"]) {
     if (saved[key] === undefined) delete process.env[key];
     else process.env[key] = saved[key];
   }
@@ -51,6 +51,13 @@ describe("the remembered MCP list", () => {
     // A backend that sends no block: MCP off.
     expect(rememberMcpPolicy(state, { schema_versions: [1, 2] } as { mcp?: unknown })).toBe(true);
     expect(mcpPolicyEnabled(state)).toBe(false);
+  });
+
+  test("the engine never takes plugins or commands from a project's config, unless the app itself says so", () => {
+    const state = temp("mcp-state-");
+    expect(mcpEngineEnv(state, {}).OMNIRUSH_PROJECT_CODE).toBe("0");
+    expect(mcpEngineEnv(state, { OMNIRUSH_PROJECT_CODE: "true" }).OMNIRUSH_PROJECT_CODE).toBe("0");
+    expect(mcpEngineEnv(state, { OMNIRUSH_PROJECT_CODE: "1" }).OMNIRUSH_PROJECT_CODE).toBe("1");
   });
 
   test("decides one entry before it is saved", () => {
@@ -81,7 +88,11 @@ describe("the engine plugin (omnirush-mcp-policy)", () => {
     const env = mcpEngineEnv(state);
     Object.assign(process.env, env);
     process.env.OMNIRUSH_BOX_HOME = path.join(state, "box-home");
-    return { state, root };
+    // The runners resolve to absolute paths on PATH, outside the project.
+    const bin = temp("mcp-bin-");
+    for (const name of ["npx", "uvx"]) writeFileSync(path.join(bin, process.platform === "win32" ? `${name}.cmd` : name), "", { mode: 0o755 });
+    process.env.PATH = bin;
+    return { state, root, bin };
   }
 
   test("without a list: no MCP at all, and the session environment gets no field", async () => {
@@ -97,7 +108,7 @@ describe("the engine plugin (omnirush-mcp-policy)", () => {
   });
 
   test("with the list: config and app-added entries are filtered, renamed to their id and pinned", async () => {
-    const { state, root } = setup();
+    const { state, root, bin } = setup();
     rememberMcpPolicy(state, { mcp: policyFixture });
     writeWorkspaceMcp(state, root, { files: FILESYSTEM, notion: { type: "remote", url: "https://mcp.notion.com/mcp" } });
     const hooks = await omnirushMcpPolicy({ directory: root });
@@ -105,9 +116,10 @@ describe("the engine plugin (omnirush-mcp-policy)", () => {
     await hooks.config({}, output);
     const mcp = output.mcp as Record<string, { command: string[] }>;
     expect(Object.keys(mcp).sort()).toEqual(["filesystem", "time"]);
-    const npx = ["npx", "--prefix", path.join(process.env.OMNIRUSH_MCP_REPORT_DIR!, "..", "npx-prefix"), "-y"];
+    const runner = (name: string) => path.join(bin, process.platform === "win32" ? `${name}.cmd` : name);
+    const npx = [runner("npx"), "--prefix", path.join(process.env.OMNIRUSH_MCP_REPORT_DIR!, "..", "npx-prefix"), "-y"];
     expect(mcp.filesystem!.command).toEqual([...npx, "@modelcontextprotocol/server-filesystem@2026.8.31", "."]);
-    expect(mcp.time!.command).toEqual(["uvx", "--no-config", "mcp-server-time@2026.8.18"]);
+    expect(mcp.time!.command).toEqual([runner("uvx"), "--no-config", "mcp-server-time@2026.8.18"]);
     const report = workspaceMcpReport(state, root);
     const byName = Object.fromEntries((report?.decisions ?? []).map((decision) => [decision.name, decision]));
     expect(byName.script).toMatchObject({ status: "blocked", code: "unknown_command" });
@@ -129,6 +141,30 @@ describe("the engine plugin (omnirush-mcp-policy)", () => {
     const report = workspaceMcpReport(state, root);
     expect(report?.decisions[0]?.enabled).toBe(false);
     expect(mcpServersInUse(report)).toEqual([{ id: "filesystem", package: "@modelcontextprotocol/server-filesystem", version: "2026.8.31", runtime: "npm", sandbox: false, enabled: false }]);
+  });
+
+  test("no npx outside the project: the server is blocked, never started from the project", async () => {
+    const { state, root } = setup();
+    rememberMcpPolicy(state, { mcp: policyFixture });
+    const empty = temp("mcp-nobin-");
+    // A runner planted in the project is never used.
+    writeFileSync(path.join(root, "npx"), "", { mode: 0o755 });
+    process.env.PATH = `${root}${path.delimiter}${empty}`;
+    const hooks = await omnirushMcpPolicy({ directory: root });
+    const output = { mcp: { filesystem: FILESYSTEM } } as Record<string, unknown>;
+    await hooks.config({}, output);
+    expect(output.mcp).toEqual({});
+    expect(workspaceMcpReport(state, root)?.decisions[0]).toMatchObject({ name: "filesystem", status: "blocked", code: "runner_missing" });
+  });
+
+  test("the report lists what the engine left out of the project's config", async () => {
+    const { state, root } = setup();
+    const hooks = await omnirushMcpPolicy({ directory: root });
+    const ignored = [{ kind: "plugin", name: "file:///repo/.opencode/plugins/evil.ts", source: "/repo/.opencode/plugins" }, { kind: "lsp", name: "custom", source: "/repo/opencode.json" }];
+    await hooks.config({}, { mcp: {}, omnirush_ignored: ignored });
+    const report = workspaceMcpReport(state, root);
+    expect(report?.ignored?.map((item) => item.kind)).toEqual(["plugin", "lsp"]);
+    expect(describeIgnored(report?.ignored)).toContain("Not loaded from this project's config: plugins evil.ts; language servers custom.");
   });
 
   test("a project whose sandbox is on runs its servers through the box shell", async () => {

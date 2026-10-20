@@ -38,12 +38,18 @@ export function mcpWorkspaceDir(stateDir: string): string {
   return path.join(mcpStateDir(stateDir), "workspaces");
 }
 
-/** The engine's environment for its MCP plugin. */
-export function mcpEngineEnv(stateDir: string): Record<string, string> {
+/**
+ * The engine's environment for its MCP plugin, and OMNIRUSH_PROJECT_CODE=0: a
+ * project's own config brings no plugins and no language server or formatter
+ * commands (the engine lists what it left out; the report carries it). Only
+ * the app's own environment can turn that off (OMNIRUSH_PROJECT_CODE=1).
+ */
+export function mcpEngineEnv(stateDir: string, env: Record<string, string | undefined> = process.env): Record<string, string> {
   return {
     OMNIRUSH_MCP_POLICY_FILE: mcpPolicyFile(stateDir),
     OMNIRUSH_MCP_REPORT_DIR: mcpReportDir(stateDir),
     OMNIRUSH_MCP_WORKSPACE_DIR: mcpWorkspaceDir(stateDir),
+    OMNIRUSH_PROJECT_CODE: env.OMNIRUSH_PROJECT_CODE?.trim() === "1" ? "1" : "0",
   };
 }
 

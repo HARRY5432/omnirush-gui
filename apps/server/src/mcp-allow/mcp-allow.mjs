@@ -43,6 +43,7 @@ export const MCP_REASONS = {
   flag: "This MCP server setting is not supported: it reaches outside the project.",
   duplicate: "Another entry already starts this MCP server.",
   invalid: "This MCP server entry is not valid.",
+  runner_missing: "npx or uvx was not found on this computer outside the project folder, so the server does not start.",
 };
 
 const ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
@@ -293,6 +294,27 @@ export function launchCommand(entry, launch, version, npmPrefix) {
   return ["uvx", "--no-config", ...(launch.bin ? ["--from", `${entry.package}==${version}`, launch.bin] : [`${entry.package}@${version}`])];
 }
 
+/**
+ * `runner` (npx, uvx) as an absolute path from PATH: only absolute PATH
+ * folders outside the project (after links) count, never the current
+ * folder; on Windows the .exe or .cmd file. null when there is none.
+ */
+export function resolveRunner(runner, { root = null, platform = process.platform, env = process.env, exists = existsSync } = {}) {
+  const lib = platform === "win32" ? path.win32 : path.posix;
+  const raw = platform === "win32" ? (env.Path ?? env.PATH ?? env.path ?? "") : (env.PATH ?? "");
+  const exts = platform === "win32" ? [".exe", ".cmd"] : [""];
+  for (const dir of String(raw).split(platform === "win32" ? ";" : ":")) {
+    const folder = dir.trim().replace(/^"(.*)"$/, "$1");
+    if (!folder || !lib.isAbsolute(folder) || (platform === "win32" && !/^[A-Za-z]:[\\/]|^\\\\/.test(folder))) continue;
+    if (root && insideRootReal(root, folder, platform)) continue;
+    for (const ext of exts) {
+      const file = lib.join(folder, `${runner}${ext}`);
+      if (exists(file)) return file;
+    }
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------- paths
 
 function samePlatformPath(p, platform) {
@@ -511,6 +533,13 @@ export function evaluateMcp(mcpMap, policy, ctx = {}) {
     const npmPrefix = box ? BOX_NPM_PREFIX : ctx.npmPrefix || path.join(os.homedir(), ".cache", "omnirush-mcp-npx");
     const argv = [...launchCommand(entry, launch, version, npmPrefix), ...rest];
     if (launch.runner !== (entry.runtime === "npm" ? "npx" : "uvx")) notes.push(`runs with ${argv[0]}`);
+    if (!box) {
+      // By absolute path: the engine starts the server in the project folder, and on Windows a bare name
+      // is looked up there before PATH (a repo's own npx.cmd would run instead).
+      const found = (ctx.resolveRunner ?? resolveRunner)(argv[0], { root, platform });
+      if (!found) { decisions.push(blocked(name, "runner_missing", { ...base, version })); continue; }
+      argv[0] = found;
+    }
     const next = { ...raw, type: "local" };
     if (box) {
       const envWords = Object.entries(environment).map(([k, v]) => `${k}=${shellQuote(v)}`);
@@ -640,6 +669,34 @@ export function readReport(dir, root) {
   }
 }
 
+/**
+ * What the engine left out of the project's own config because it runs code
+ * (`omnirush_ignored`, set by the engine with OMNIRUSH_PROJECT_CODE=0): its
+ * plugins, and lsp / formatter entries that name a command.
+ */
+export function projectCodeIgnored(cfg) {
+  const list = isRecord(cfg) && Array.isArray(cfg.omnirush_ignored) ? cfg.omnirush_ignored : [];
+  return list
+    .filter((x) => isRecord(x) && ["plugin", "lsp", "formatter"].includes(x.kind) && typeof x.name === "string")
+    .slice(0, 50)
+    .map((x) => ({ kind: x.kind, name: x.name.slice(0, 200), source: typeof x.source === "string" ? x.source.slice(0, 400) : null }));
+}
+
+/** One line for a notice: what of the project's own config did not load, and why; null when nothing. */
+export function describeIgnored(items) {
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) return null;
+  const what = (kind) => list.filter((x) => x.kind === kind).map((x) => (kind === "plugin" ? path.basename(String(x.name).replace(/^file:\/\//, "")) : x.name));
+  const parts = [];
+  const plugins = what("plugin");
+  const lsp = what("lsp");
+  const fmt = what("formatter");
+  if (plugins.length) parts.push(`plugins ${plugins.slice(0, 3).join(", ")}${plugins.length > 3 ? " ..." : ""}`);
+  if (lsp.length) parts.push(`language servers ${lsp.slice(0, 3).join(", ")}`);
+  if (fmt.length) parts.push(`formatters ${fmt.slice(0, 3).join(", ")}`);
+  return `Not loaded from this project's config: ${parts.join("; ")}. A project's own plugins and commands could run code just by opening it; the built-in language servers and formatters still work, and your own settings in ~/.config/omnirush apply as usual.`;
+}
+
 /** One line per decision, for a terminal or a notice. */
 export function describeDecision(d) {
   if (d.status === "allowed") {
@@ -677,7 +734,7 @@ export function createMcpPolicyHooks(options = {}) {
     if (!box) {
       try { mkdirSync(npmPrefix, { recursive: true }); } catch { /* npx makes it */ }
     }
-    const { mcp, decisions } = evaluateMcp(target.mcp, policy, { root, platform: options.platform, box, npmPrefix });
+    const { mcp, decisions } = evaluateMcp(target.mcp, policy, { root, platform: options.platform, box, npmPrefix, ...(options.resolveRunner ? { resolveRunner: options.resolveRunner } : {}) });
     target.mcp = mcp;
     const mode = typeof options.permissionMode === "function" ? options.permissionMode() : options.permissionMode ?? process.env.OMNIRUSH_PERMISSION_MODE;
     const rules = mcpPermissionRules(decisions, mode);
@@ -692,7 +749,7 @@ export function createMcpPolicyHooks(options = {}) {
         const file = reportPath(options.reportDir, root);
         mkdirSync(options.reportDir, { recursive: true });
         const tmp = `${file}.${process.pid}.tmp`;
-        writeFileSync(tmp, JSON.stringify({ v: MCP_POLICY_FILE_VERSION, root, at: (options.now ?? Date.now)(), enabled: Boolean(policy?.enabled), decisions }), { mode: 0o600 });
+        writeFileSync(tmp, JSON.stringify({ v: MCP_POLICY_FILE_VERSION, root, at: (options.now ?? Date.now)(), enabled: Boolean(policy?.enabled), decisions, ignored: projectCodeIgnored(target) }), { mode: 0o600 });
         renameSync(tmp, file);
       } catch { /* the report is for display only */ }
     }

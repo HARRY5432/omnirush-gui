@@ -8,7 +8,7 @@ export const MCP_REASONS: Record<McpDecisionCode, string>;
 export type McpRuntime = "npm" | "pypi";
 export type McpDecisionCode =
   | "allowed" | "disabled" | "remote" | "unknown_command" | "not_allowed" | "denied"
-  | "version" | "outside_project" | "missing_flag" | "missing_arg" | "flag" | "duplicate" | "invalid";
+  | "version" | "outside_project" | "missing_flag" | "missing_arg" | "flag" | "duplicate" | "invalid" | "runner_missing";
 
 export type McpRules = {
   path_args?: "positional";
@@ -69,7 +69,8 @@ export type McpDecision = {
 
 export type McpBox = { shell: string; key: string; croot?: string | null };
 
-export type McpReport = { v: 1; root: string; at: number; enabled: boolean; decisions: McpDecision[] };
+export type McpIgnored = { kind: "plugin" | "lsp" | "formatter"; name: string; source: string | null };
+export type McpReport = { v: 1; root: string; at: number; enabled: boolean; decisions: McpDecision[]; ignored?: McpIgnored[] };
 
 export type McpLaunch = {
   runtime: McpRuntime;
@@ -90,13 +91,16 @@ export function normalizePolicy(block: unknown): McpPolicy | null;
 export function splitSpec(spec: string, runtime: McpRuntime): { name: string; version: string | null } | null;
 export function parseLaunch(command: unknown): McpLaunch | null;
 export function launchCommand(entry: McpAllowEntry, launch: McpLaunch, version: string, npmPrefix: string): string[];
+export function resolveRunner(runner: string, options?: { root?: string | null; platform?: string; env?: Record<string, string | undefined>; exists?: (file: string) => boolean }): string | null;
+export function projectCodeIgnored(cfg: unknown): McpIgnored[];
+export function describeIgnored(items: McpIgnored[] | null | undefined): string | null;
 export function insideRoot(root: string, p: string, platform?: string): boolean;
 export function insideRootReal(root: string, p: string, platform?: string): boolean;
 export function shellQuote(word: string): string;
 export function evaluateMcp(
   mcpMap: unknown,
   policy: McpPolicy | null,
-  ctx?: { root?: string; platform?: string; box?: McpBox | null; npmPrefix?: string },
+  ctx?: { root?: string; platform?: string; box?: McpBox | null; npmPrefix?: string; resolveRunner?: (runner: string, options: { root: string; platform: string }) => string | null },
 ): { mcp: Record<string, Record<string, unknown>>; decisions: McpDecision[] };
 export function toolPrefix(name: string): string;
 export function mcpPermissionRules(decisions: McpDecision[] | null | undefined, mode: unknown): Record<string, "allow" | "ask">;
@@ -116,6 +120,7 @@ export function createMcpPolicyHooks(options?: {
   reportDir?: string | null;
   box?: McpBox | null | ((root: string) => McpBox | null);
   npmPrefix?: string;
+  resolveRunner?: (runner: string, options: { root: string; platform: string }) => string | null;
   permissionMode?: string | null | (() => string | null | undefined);
   platform?: string;
   now?: () => number;
