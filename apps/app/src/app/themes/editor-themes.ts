@@ -22,6 +22,26 @@ export type MonacoThemeData = {
   colors: Record<string, string>;
 };
 
+/** Monaco's own menus and widgets (right-click menu, hover, suggest, peek) in the theme's surfaces. */
+function widgetColours(w: { surface: string; text: string; border: string; selection: string; accent: string; peekEditor: string; peekList: string }): Record<string, string> {
+  return {
+    "menu.background": w.surface,
+    "menu.foreground": w.text,
+    "menu.selectionBackground": w.selection,
+    "menu.selectionForeground": w.text,
+    "menu.separatorBackground": w.border,
+    "menu.border": w.border,
+    "editorHoverWidget.background": w.surface,
+    "editorHoverWidget.border": w.border,
+    "editorSuggestWidget.background": w.surface,
+    "editorSuggestWidget.border": w.border,
+    "peekView.border": w.accent,
+    "peekViewEditor.background": w.peekEditor,
+    "peekViewResult.background": w.peekList,
+    "peekViewTitle.background": w.peekList,
+  };
+}
+
 /** Today's editor look (Default preset): background/foreground from the app stylesheet. */
 export function legacyMonacoTheme(dark: boolean, background: string, foreground: string): MonacoThemeData {
   return {
@@ -44,6 +64,15 @@ export function legacyMonacoTheme(dark: boolean, background: string, foreground:
       "diffEditor.removedTextBackground": dark ? "#ff959233" : "#e5484d33",
       "scrollbarSlider.background": dark ? "#ffffff1a" : "#0000001a",
       "scrollbarSlider.hoverBackground": dark ? "#ffffff29" : "#00000029",
+      ...widgetColours({
+        surface: dark ? "#18191b" : "#ffffff",
+        text: dark ? "#edeef0" : "#1c2024",
+        border: dark ? "#2e3135" : "#e0e1e6",
+        selection: dark ? "#2e3135" : "#f0f0f3",
+        accent: dark ? "#3b9eff" : "#0090ff",
+        peekEditor: dark ? "#111113" : "#f9fbff",
+        peekList: dark ? "#18191b" : "#f9f9fb",
+      }),
     },
   };
 }
@@ -110,6 +139,15 @@ export function monacoThemeFor(active: Pick<ActiveTheme, "variant" | "mode">): M
       "diffEditor.removedTextBackground": alpha(v.danger, "33"),
       "scrollbarSlider.background": alpha(c.fg, "1a"),
       "scrollbarSlider.hoverBackground": alpha(c.fg, "29"),
+      ...widgetColours({
+        surface: v.surfaceRaised,
+        text: v.text,
+        border: v.border,
+        selection: mix(v.surfaceRaised, v.text, 0.1),
+        accent: v.accent,
+        peekEditor: c.bg,
+        peekList: v.surface,
+      }),
     },
   };
 }
