@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 
 import { TERMINAL_TABS_STORAGE_KEY, useTerminalTabsStore } from "../src/react-app/domains/session/terminal/terminal-tabs-store";
-import { isNewTerminalShortcut } from "../src/react-app/shell/use-shell-shortcuts";
+import { isNewTerminalShortcut, isToggleTerminalShortcut } from "../src/react-app/shell/use-shell-shortcuts";
 import { removeRouteWorkspace } from "../src/react-app/shell/route-workspaces";
 
 class MemoryStorage {
@@ -109,6 +109,14 @@ describe("terminal tabs", () => {
     store().requestNewTab();
     expect(store().takeNewTabRequest()).toBe(true);
     expect(store().takeNewTabRequest()).toBe(false);
+  });
+
+  test("Ctrl+` (no Shift) shows the terminal; Ctrl+Shift+` stays the new-tab key", () => {
+    const key = { ctrlKey: true, shiftKey: false, altKey: false, metaKey: false, code: "Backquote" } as KeyboardEvent;
+    expect(isToggleTerminalShortcut(key)).toBe(true);
+    expect(isToggleTerminalShortcut({ ...key, shiftKey: true } as KeyboardEvent)).toBe(false);
+    expect(isNewTerminalShortcut(key)).toBe(false);
+    expect(isToggleTerminalShortcut({ ...key, metaKey: true } as KeyboardEvent)).toBe(false);
   });
 
   test("removing a workspace ends its terminals before the server removes the folder", async () => {
