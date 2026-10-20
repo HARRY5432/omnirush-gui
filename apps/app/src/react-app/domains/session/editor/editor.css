@@ -1,0 +1,28 @@
+/* The desktop editor's Accept / Reject bar above each agent change (editor-surface.tsx). */
+.omnirush-hunk-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px 0 8px;
+  font: 11px/1 var(--font-sans, system-ui, sans-serif);
+  color: var(--muted-foreground);
+  background: color-mix(in srgb, var(--primary) 7%, transparent);
+  border-top: 1px solid color-mix(in srgb, var(--primary) 22%, transparent);
+  box-sizing: border-box;
+  pointer-events: auto;
+}
+.omnirush-hunk-label { margin-left: 4px; white-space: nowrap; }
+.omnirush-hunk-btn {
+  height: 19px;
+  padding: 0 9px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+  cursor: pointer;
+}
+.omnirush-hunk-btn:hover { background: var(--muted); }
+.omnirush-hunk-btn-primary { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground, #fff); }
+.omnirush-hunk-btn-primary:hover { background: color-mix(in srgb, var(--primary) 88%, black); }

@@ -3505,6 +3505,7 @@ export function SessionRoute() {
       ) : undefined}
       terminalOpen={terminalOpen}
       onTerminalOpenChange={setTerminalOpen}
+      opencodeClient={opencodeClient}
       onSessionTabsChange={(tabs) => {
         sessionTabNavRef.current = { ...sessionTabNavRef.current, options: tabs };
       }}

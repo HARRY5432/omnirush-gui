@@ -95,7 +95,7 @@ export const omnirushContextSnapshotSchema = z.object({
   sidePanel: z.object({
     open: z.boolean(),
     ownerSessionId: z.string().nullable(),
-    kind: z.enum(["panel", "extensions"]).nullable(),
+    kind: z.enum(["panel", "extensions", "editor"]).nullable(),
     tabs: z.array(omnirushPanelTabSchema),
     activeTabId: z.string().nullable(),
   }),

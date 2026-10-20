@@ -252,6 +252,9 @@ importers:
       mermaid:
         specifier: ^11.17.1
         version: 11.17.1
+      monaco-editor:
+        specifier: 0.57.0
+        version: 0.57.0
       motion:
         specifier: ^12.38.0
         version: 12.38.0(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -6191,6 +6194,9 @@ packages:
   dompurify@3.4.13:
     resolution: {integrity: sha512-2vmYIoqjze2d+kakP8S/nS5shfsl587kzwEjcGlTdiksUVgFHnFCsLYDVj/JNqJVOQZGSYBTmuycv0PodwmnMQ==}
 
+  dompurify@3.4.15:
+    resolution: {integrity: sha512-EUBjM+B+lkDE41iE82DDSCfkoPGfXx8IxFxPMjNzm/Uk4xDet77rTN9wqlxlVg71kK7XGuUMv6wUxJUwwv+Xyw==}
+
   domutils@3.2.2:
     resolution: {integrity: sha512-6kZKyUajlDuqlHKVX1w7gyslj9MPIXzIFiz/rGu35uC1wMi+kMhQwGhl4lt9unC9Vb9INnY9Z3/ZA3+FhASLaw==}
 
@@ -7460,6 +7466,11 @@ packages:
       katex: '>=0.16 <0.18'
       marked: '>=4 <19'
 
+  marked@14.0.0:
+    resolution: {integrity: sha512-uIj4+faQ+MgHgwUW1l2PsPglZLOLOT1uErt06dAPtx2kjteLAkbsd/0FiYg/MGS+i7ZKLb7w2WClxHkzOOuryQ==}
+    engines: {node: '>= 18'}
+    hasBin: true
+
   marked@15.0.12:
     resolution: {integrity: sha512-8dD6FusOQSrpv9Z1rdNMdlSgQOIP880DHqnohobOmYLElGEqAL/JvxvuxZO16r4HtjTlfPRDC1hbvxC9dPN2nA==}
     engines: {node: '>= 18'}
@@ -7750,6 +7761,9 @@ packages:
 
   module-details-from-path@1.0.4:
     resolution: {integrity: sha512-EGWKgxALGMgzvxYF1UyGTy0HXX/2vHLkw6+NvDKW2jypWbHpjQuj4UMcqQWXHERJhVGKikolT06G3bcKe4fi7w==}
+
+  monaco-editor@0.57.0:
+    resolution: {integrity: sha512-5BkI9KGoqrNvBGUe15/QlZq3OooZ8WLg1AxTpaqHRCP3HNpzPPZKE2EDz8M7c+VRmCeUw1Brp4cx/PWm3kI/5A==}
 
   motion-dom@12.35.1:
     resolution: {integrity: sha512-7n6r7TtNOsH2UFSAXzTkfzOeO5616v9B178qBIjmu/WgEyJK0uqwytCEhwKBTuM/HJA40ptAw7hLFpxtPAMRZQ==}
@@ -14684,6 +14698,10 @@ snapshots:
     optionalDependencies:
       '@types/trusted-types': 2.0.7
 
+  dompurify@3.4.15:
+    optionalDependencies:
+      '@types/trusted-types': 2.0.7
+
   domutils@3.2.2:
     dependencies:
       dom-serializer: 2.0.0
@@ -15956,6 +15974,8 @@ snapshots:
       katex: 0.18.1
       marked: 17.0.1
 
+  marked@14.0.0: {}
+
   marked@15.0.12: {}
 
   marked@16.4.2: {}
@@ -16389,6 +16409,11 @@ snapshots:
       ufo: 1.6.3
 
   module-details-from-path@1.0.4: {}
+
+  monaco-editor@0.57.0:
+    dependencies:
+      dompurify: 3.4.15
+      marked: 14.0.0
 
   motion-dom@12.35.1:
     dependencies:

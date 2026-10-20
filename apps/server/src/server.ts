@@ -118,6 +118,7 @@ import { serveStaticUi } from "./static-ui.js";
 import { externalFetch, loopbackFetch } from "./server-fetch.js";
 import { registerCoreRoutes } from "./routes/core.js";
 import { registerFileRoutes } from "./routes/files.js";
+import { registerEditorRoutes } from "./routes/editor.js";
 import { registerOperationRoutes } from "./routes/operations.js";
 import { addRoute, matchRoute, type AuthMode, type RequestContext, type Route } from "./routes/registry.js";
 import { registerSessionGroupRoutes } from "./routes/session-groups.js";
@@ -201,7 +202,8 @@ import { findManagedEngineWorkspace } from "./workspaces.js";
 import { startThreadApprovalReplayer, type ThreadApprovalReplayer } from "./thread-approvals.js";
 import { CloudProviderSync, parseCloudProviderDenSession } from "./cloud-provider-sync.js";
 import { createEngineV2Preview, type EngineV2Preview } from "./engine-v2-preview.js";
-import { sessionUploaderEnabled } from "./session-uploader.js";
+import { isUploadFileDenied, sessionUploaderEnabled } from "./session-uploader.js";
+import { editorUserEditEvent, editorUserReviewEvent } from "./editor-events.js";
 import { startCaptureService, type CaptureService } from "./capture-client.js";
 import type { LateWritesGate } from "./capture-host.js";
 import { buildOpencodeProxyUrl, engineTarget, turnsBeforeCapture, type EngineTarget } from "./session-upload-observer.js";
@@ -4662,6 +4664,31 @@ function createRoutes(
     resolveOutboxEnabled,
     resolveInboxMaxBytes,
     scopeRank,
+  });
+
+  // The desktop editor. A save or a hunk review that names a chat the session
+  // uploader is tracking adds a "user_edit" / "user_review" trace event to it;
+  // nothing else in a chat's upload changes (editor-events.ts).
+  registerEditorRoutes({
+    routes,
+    config,
+    jsonResponse,
+    readJsonBody,
+    ensureWritable,
+    requireApproval,
+    requireClientScope,
+    resolveWorkspace,
+    onUserEdit: (edit) => {
+      const capture = captureServicesByServer.get(config);
+      if (!capture?.uploadEnabled || !capture.hasSession(edit.sessionId) || isUploadFileDenied(edit.path)) return;
+      const event = editorUserEditEvent(edit);
+      if (event) capture.recordTrace(edit.sessionId, "user_edit", event);
+    },
+    onUserReview: (review) => {
+      const capture = captureServicesByServer.get(config);
+      if (!capture?.uploadEnabled || !capture.hasSession(review.sessionId) || isUploadFileDenied(review.path)) return;
+      capture.recordTrace(review.sessionId, "user_review", editorUserReviewEvent(review));
+    },
   });
 
   addRoute(routes, "GET", "/workspace/:id/plugins", "client", async (ctx) => {
