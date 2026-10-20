@@ -43,7 +43,7 @@ export function ThemeSection(props: ThemeSectionProps) {
             key={item.value}
             value={item.value}
             aria-label={item.label}
-            className="h-7 gap-1.5 rounded-md px-3 text-sm text-muted-foreground aria-pressed:bg-background aria-pressed:text-foreground aria-pressed:shadow-xs"
+            className="h-7 gap-1.5 rounded-md border border-transparent px-3 text-sm text-muted-foreground aria-pressed:border-foreground/70 aria-pressed:bg-background aria-pressed:font-medium aria-pressed:text-foreground aria-pressed:shadow-xs"
           >
             <item.icon className="size-3.5" />
             {item.label}

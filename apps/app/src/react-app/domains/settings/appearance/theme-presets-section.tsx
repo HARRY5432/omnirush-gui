@@ -70,12 +70,12 @@ function Card(props: {
         )}
       >
         <div className="h-16 w-full overflow-hidden rounded-lg border border-border">{props.children}</div>
-        <div className="flex items-center justify-between gap-2 px-1 pb-0.5 text-xs">
+        <div className="flex flex-wrap items-baseline justify-between gap-x-2 px-1 pb-0.5 text-xs">
           <span className="flex min-w-0 items-center gap-1 font-medium text-foreground">
             {props.selected ? <Check className="size-3 shrink-0" /> : null}
-            <span className="truncate">{props.label}</span>
+            <span className="break-words">{props.label}</span>
           </span>
-          <span className="shrink-0 text-muted-foreground">{props.meta}</span>
+          <span className="text-muted-foreground">{props.meta}</span>
         </div>
       </button>
       {props.action}
@@ -92,7 +92,7 @@ export function ThemePresetsSection(props: Props) {
           Each preset has a light and a dark version (Midnight is dark only); the mode above picks which one you see.
         </LayoutSectionItemDescription>
       </LayoutSectionItemHeader>
-      <div role="radiogroup" aria-label="Theme" className="grid grid-cols-2 gap-3 @2xl/settings:grid-cols-4">
+      <div role="radiogroup" aria-label="Theme" className="grid grid-cols-2 gap-3 @xl/settings:grid-cols-3 @3xl/settings:grid-cols-4">
         {THEME_PRESETS.map((preset) => (
           <Card
             key={preset.id}

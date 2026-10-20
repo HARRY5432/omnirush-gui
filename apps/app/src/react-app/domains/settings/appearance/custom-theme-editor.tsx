@@ -138,7 +138,7 @@ function ColourInput(props: {
         onKeyDown={(event) => {
           if (event.key === "Enter") commit((event.target as HTMLInputElement).value);
         }}
-        className="w-full min-w-0 bg-transparent font-mono text-xs text-foreground outline-none"
+        className="w-full min-w-0 scroll-mb-24 bg-transparent font-mono text-xs text-foreground outline-none"
         data-testid={props.testId}
       />
     </div>
@@ -188,7 +188,7 @@ function WarningBox(props: { warning: ContrastWarning; onUse: (token: string, co
 
 function Row(props: { label: string; children: ReactNode; note?: ReactNode; sub?: string }) {
   return (
-    <div className="grid grid-cols-[8.5rem_1fr] items-center gap-3 border-b border-border/60 py-2 last:border-b-0">
+    <div className="grid scroll-mb-24 grid-cols-[8.5rem_1fr] items-center gap-3 border-b border-border/60 py-2 last:border-b-0">
       <div className="text-sm text-foreground">
         {props.label}
         {props.sub ? <div className="text-xs text-muted-foreground">{props.sub}</div> : null}
@@ -313,7 +313,7 @@ export function CustomThemeEditor(props: CustomThemeEditorProps) {
       </div>
 
       <div className="grid gap-6 @3xl/settings:grid-cols-[minmax(0,1fr)_17rem]">
-        <div className="min-w-0">
+        <div className="min-w-0 pb-16">
           <Row label="Name">
             <input
               id={nameId}

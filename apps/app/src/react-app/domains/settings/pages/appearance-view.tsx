@@ -118,7 +118,7 @@ export function AppearanceView(props: AppearanceViewProps) {
   };
 
   return (
-    <LayoutStack className="max-w-5xl">
+    <LayoutStack>
       <ThemeSection {...props} />
       <Separator />
       <ThemePresetsSection
