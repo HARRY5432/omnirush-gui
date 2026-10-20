@@ -361,8 +361,8 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
   return (
     <div className="relative min-h-0 flex-1" data-editor-surface={mode ?? "empty"}>
       {/* display:none, not visibility: Monaco's layers set their own visibility and would show through. */}
-      <div ref={codeHostRef} className="absolute inset-0" style={{ display: mode === "file" ? "block" : "none" }} />
-      <div ref={diffHostRef} className="absolute inset-0" style={{ display: mode === "diff" ? "block" : "none" }} />
+      <div ref={codeHostRef} className="monaco-component absolute inset-0" style={{ display: mode === "file" ? "block" : "none" }} />
+      <div ref={diffHostRef} className="monaco-component absolute inset-0" style={{ display: mode === "diff" ? "block" : "none" }} />
     </div>
   );
 }

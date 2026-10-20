@@ -62,9 +62,13 @@ export function SearchView(props: {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
+  // Next frame: the shortcut's keydown is still reaching the editor, which would take focus back.
   useEffect(() => {
-    inputRef.current?.focus();
-    inputRef.current?.select();
+    const frame = window.requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, [props.focusNonce]);
 
   // Search as you type (debounced); a new search cancels the one running.
