@@ -17,6 +17,7 @@ import {
 import { getComposerDraft, useComposerStateStore } from "@/react-app/domains/session/surface/composer-state-store";
 import { REDO_NOTICE, projectTracksFiles, undoNotice } from "./undo-notice";
 import { commandTemplateLabel } from "./review-message";
+import { personUserMessages } from "./turn-messages";
 
 export type SessionCommandTarget = {
   workspaceId: string;
@@ -47,7 +48,6 @@ export function useOpencodeClient(target: Pick<SessionCommandTarget, "opencodeBa
   );
 }
 
-const role = (message: OmniRushSessionMessage) => (message.info as { role?: string }).role;
 
 /** The messages the chat shows: those before its revert point (an undo hides the rest until redo). */
 export function visibleMessages(snapshot: OmniRushSessionSnapshot | null | undefined): OmniRushSessionMessage[] {
@@ -56,9 +56,9 @@ export function visibleMessages(snapshot: OmniRushSessionSnapshot | null | undef
   return revertId ? snapshot.messages.filter((message) => message.info.id < revertId) : snapshot.messages;
 }
 
-/** The user message an undo rewinds to: the newest one the chat still shows. */
+/** The user message an undo rewinds to: the newest one the person sent that the chat still shows (a compaction's own are skipped). */
 export function undoTarget(snapshot: OmniRushSessionSnapshot | null | undefined): OmniRushSessionMessage | null {
-  return visibleMessages(snapshot).findLast((message) => role(message) === "user") ?? null;
+  return personUserMessages(visibleMessages(snapshot)).at(-1) ?? null;
 }
 
 /** The text a user message was sent with (what goes back into the composer after an undo). */

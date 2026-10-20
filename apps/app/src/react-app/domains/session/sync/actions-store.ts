@@ -35,6 +35,7 @@ import { clearSessionDraft, LOCAL_SESSION_DRAFT_SCOPE, saveSessionDraft } from "
 import { firstLineLocalFileParts, isReadInlineablePath } from "./prompt-file-parts";
 import { composerAttachmentToFilePart } from "./attachment-file-part";
 import { mentionPromptParts } from "./mention-parts";
+import { personUserMessages } from "../commands/turn-messages";
 
 type SessionModelConfig = {
   applyPendingSessionChoice: (sessionId: string) => void;
@@ -701,10 +702,8 @@ export function createSessionActionsStore(options: {
       reason: "abort active run before undoing last user message",
     });
 
-    const users = options.messages().filter((message) => {
-      const role = (message.info as { role?: string }).role;
-      return role === "user";
-    });
+    // The messages that start turns: a compaction's own user messages are skipped (one undo, the whole turn).
+    const users = personUserMessages(options.messages());
     const target = users[users.length - 1];
     if (!target) return;
 
@@ -736,10 +735,8 @@ export function createSessionActionsStore(options: {
     const revertMessageID = options.selectedSession()?.revert?.messageID ?? null;
     if (!revertMessageID) return;
 
-    const users = options.messages().filter((message) => {
-      const role = (message.info as { role?: string }).role;
-      return role === "user";
-    });
+    // The messages that start turns: a compaction's own user messages are skipped (one undo, the whole turn).
+    const users = personUserMessages(options.messages());
 
     const next = users.find((message) => {
       const id = options.messageIdFromInfo(message);

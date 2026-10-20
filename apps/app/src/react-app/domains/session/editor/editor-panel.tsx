@@ -36,6 +36,7 @@ import { toast } from "@/components/ui/sonner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
+import { onFilesRewound } from "@/app/lib/files-rewound";
 import { editorDocuments, type EditorDocuments, type FileDoc } from "./editor-models";
 import { editorWorkspaceState, tabId, useEditorStore, type EditorSideView, type EditorTab, type ReviewScope } from "./editor-store";
 import { EditorSurface, type SurfaceDoc } from "./editor-surface";
@@ -478,6 +479,23 @@ function GitView(props: {
   );
 }
 
+/**
+ * A file with unsaved changes changed on disk (an undo, the agent, another
+ * program): Reload (the disk text) is the first choice; Overwrite writes
+ * the editor's text over it.
+ */
+function showConflict(path: string, input: { reload: () => void; overwrite: () => void; reason: "save" | "undo" }) {
+  const message = input.reason === "undo"
+    ? `${path} changed on disk (undo or redo). Your unsaved changes are still in the editor.`
+    : `${path} changed on disk since you opened it.`;
+  toast.warning(message, {
+    id: `editor-conflict:${path}`,
+    duration: 20_000,
+    action: { label: "Reload", onClick: input.reload },
+    cancel: { label: "Overwrite", onClick: input.overwrite },
+  });
+}
+
 export default function EditorPanel(props: EditorPanelProps) {
   const { client, workspaceId, workspaceRoot, sessionId, sessionBusy, opencodeClient } = props;
   const monaco = useMemo<Monaco>(() => setupMonaco(), []);
@@ -536,6 +554,34 @@ export default function EditorPanel(props: EditorPanelProps) {
     }
     wasBusy.current = sessionBusy;
   }, [docs, queryClient, sessionBusy, workspaceId]);
+
+  // An undo or redo changed files: open files without unsaved changes take the disk text; one with
+  // unsaved changes is flagged and Reload is offered first (an Overwrite would take the undo back).
+  useEffect(() => {
+    docs.shown += 1;
+    const unsubscribe = onFilesRewound(() => {
+      void docs.refreshAfterRewind().then((conflicts) => {
+        setDocsTick((value) => value + 1);
+        for (const path of conflicts) {
+          showConflict(path, {
+            reload: () => void docs.revert(path).then(() => setDocsTick((value) => value + 1)),
+            overwrite: () => void docs.save(path, { sessionId, source: "editor", force: true }).then((result) => {
+              if (!result.ok) toast.error(result.message);
+              void queryClient.invalidateQueries({ queryKey: ["editor-git", workspaceId] });
+            }),
+            reason: "undo",
+          });
+        }
+      }).catch(() => undefined);
+      void queryClient.invalidateQueries({ queryKey: ["editor-tree", workspaceId] });
+      void queryClient.invalidateQueries({ queryKey: ["editor-git", workspaceId] });
+      void queryClient.invalidateQueries({ queryKey: ["editor-changes", workspaceId] });
+    });
+    return () => {
+      docs.shown -= 1;
+      unsubscribe();
+    };
+  }, [docs, queryClient, sessionId, workspaceId]);
 
   // Back in the window: files may have changed outside the app.
   useEffect(() => {
@@ -798,12 +844,7 @@ export default function EditorPanel(props: EditorPanelProps) {
       return;
     }
     if (result.conflict) {
-      toast.error(`${path} changed on disk since you opened it.`, {
-        id: `editor-conflict:${path}`,
-        duration: 20_000,
-        action: { label: "Overwrite", onClick: () => void save({ force: true }) },
-        cancel: { label: "Reload", onClick: () => void docs.revert(path) },
-      });
+      showConflict(path, { reload: () => void docs.revert(path), overwrite: () => void save({ force: true }), reason: "save" });
       return;
     }
     toast.error(result.message);

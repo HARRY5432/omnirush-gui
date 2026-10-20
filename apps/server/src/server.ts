@@ -213,6 +213,7 @@ import { buildOpencodeProxyUrl, engineTarget, turnsBeforeCapture, type EngineTar
 import { claimSteerId, claimedSteerIds, createSteerTracker, steerRecord } from "./turn-steer.js";
 import { FOLDER_NOT_WRITABLE, folderWriteGate, readOnlyPrompt } from "./folder-write-check.js";
 import { commandEvent, revertEvent, revertRequest } from "./command-events.js";
+import { EditorSaveLog, revertBodyWithEditorSaves } from "./editor-saves.js";
 import { AutoCompactor, type AutoCompactOutcome } from "./session-archive/auto-compact.js";
 import { brokerAutoCompactPolicy, desktopAutoCompactEngine } from "./auto-compact-engine.js";
 import { OmniRushGatewayBroker } from "./omnirush-gateway-broker.js";
@@ -245,6 +246,16 @@ const agentDiagnosticsLastRunByServer = new WeakMap<ServerConfig, Map<string, nu
 const agentDiagnosticsInFlightByServer = new WeakMap<ServerConfig, Set<string>>();
 const commandAdmissionsByServer = new WeakMap<ServerConfig, Map<string, { fingerprint: string; admittedAt: number }>>();
 const captureServicesByServer = new WeakMap<ServerConfig, CaptureService>();
+/** The files the person saved through the desktop editor: an undo of the turns they were saved in keeps them (editor-saves.ts). */
+const editorSavesByServer = new WeakMap<ServerConfig, EditorSaveLog>();
+function editorSavesFor(config: ServerConfig): EditorSaveLog {
+  let log = editorSavesByServer.get(config);
+  if (!log) {
+    log = new EditorSaveLog();
+    editorSavesByServer.set(config, log);
+  }
+  return log;
+}
 /** Automatic compaction (session-archive/auto-compact.ts), one per server: its counts live as long as the app. */
 const autoCompactorsByServer = new WeakMap<ServerConfig, AutoCompactor>();
 /**
@@ -1091,6 +1102,29 @@ async function engineRevertPoint(baseUrl: string, auth: string | null, directory
     }
     const session = await response.json() as { revert?: { messageID?: unknown } | null } | null;
     return typeof session?.revert?.messageID === "string" ? session.revert.messageID : null;
+  } catch {
+    return null;
+  }
+}
+
+/** When the engine created a chat's message (ms), or null when it cannot say. */
+async function engineMessageCreated(baseUrl: string, auth: string | null, directory: string | null, sessionId: string, messageId: string): Promise<number | null> {
+  const headers = new Headers();
+  if (auth) headers.set("Authorization", auth);
+  const scoped = scopeWorkspaceOpencodeRequest(headers, "", directory);
+  try {
+    const response = await loopbackFetch(buildOpencodeProxyUrl(baseUrl, `/session/${encodeURIComponent(sessionId)}/message/${encodeURIComponent(messageId)}`, scoped.search), {
+      method: "GET",
+      headers: scoped.headers,
+      signal: AbortSignal.timeout(ENGINE_SESSION_CHECK_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      return null;
+    }
+    const message = await response.json() as { info?: { time?: { created?: unknown } } } | null;
+    const created = message?.info?.time?.created;
+    return typeof created === "number" && Number.isFinite(created) ? created : null;
   } catch {
     return null;
   }
@@ -2349,9 +2383,26 @@ export async function proxyOpencodeRequest(input: {
   // Buffer the request body so it can be forwarded reliably across Node.js
   // stream boundaries (Readable.toWeb streams from the HTTP adapter aren't
   // always accepted directly by Node's global fetch as a body).
-  const body = method === "GET" || method === "HEAD"
+  let body = method === "GET" || method === "HEAD"
     ? undefined
     : await input.request.arrayBuffer().then((buf) => (buf.byteLength > 0 ? buf : undefined));
+  // An undo keeps the files the person saved in the editor during or after the turns it takes back.
+  const undoCall = workspace && workspace.workspaceType !== "remote" ? revertRequest(method, normalizeOpencodeProxyPath(proxyPath)) : null;
+  if (undoCall?.kind === "revert" && workspace) {
+    const undoSessionId = decodeEngineRouteParam(undoCall.sessionId) ?? undoCall.sessionId;
+    const kept = await revertBodyWithEditorSaves({
+      saves: editorSavesFor(input.config),
+      // The editor's folder, as the engine names paths (no Windows `\\?\` prefix): keep paths are absolute.
+      root: normalizeOpencodeDirectory(workspace.path),
+      body,
+      messageCreated: (messageId) => engineMessageCreated(baseUrl, auth, directory, undoSessionId, messageId),
+    });
+    if (kept !== body) {
+      body = kept;
+      headers.delete("content-length");
+      headers.set("content-type", "application/json");
+    }
+  }
   const capture = workspace ? captureServicesByServer.get(input.config) : undefined;
   const uploadedSessionId = uploadSessionId(proxyPath, method);
   // The agent works from here (the prompt is on its way) until the engine runs no session.
@@ -2437,9 +2488,7 @@ export async function proxyOpencodeRequest(input: {
     : null;
   // Undo of the last turn and its redo (command-events.ts) of a chat the uploader tracks: the revert
   // point before it is read first; the engine's answer says what happened to each file.
-  const revertCall = capture?.uploadEnabled && workspace && workspace.workspaceType !== "remote"
-    ? revertRequest(method, normalizeOpencodeProxyPath(proxyPath))
-    : null;
+  const revertCall = capture?.uploadEnabled ? undoCall : null;
   const revertSessionId = revertCall ? decodeEngineRouteParam(revertCall.sessionId) : null;
   const revertTracked = Boolean(revertSessionId && capture?.hasSession(revertSessionId));
   const revertBefore = revertTracked && revertSessionId ? await engineRevertPoint(baseUrl, auth, directory, revertSessionId) : null;
@@ -4787,6 +4836,7 @@ function createRoutes(
     requireApproval,
     requireClientScope,
     resolveWorkspace,
+    onSaved: (workspace, path) => editorSavesFor(config).record(normalizeOpencodeDirectory(workspace.path), path),
     onUserEdit: (edit) => {
       const capture = captureServicesByServer.get(config);
       if (!capture?.uploadEnabled || !capture.hasSession(edit.sessionId) || isUploadFileDenied(edit.path)) return;

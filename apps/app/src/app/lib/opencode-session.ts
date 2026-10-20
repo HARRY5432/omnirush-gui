@@ -10,6 +10,7 @@
 import type { Session } from "@opencode-ai/sdk/v2/client";
 import type { Client, ModelRef } from "../types";
 import { unwrap } from "./opencode";
+import { notifyFilesRewound, rewoundFiles } from "./files-rewound";
 
 export type AbortSessionLogContext = {
   source: string;
@@ -97,7 +98,9 @@ export async function revertSession(
   sessionID: string,
   messageID: string,
 ): Promise<Session> {
-  return unwrap(await client.session.revert({ sessionID, messageID })) as Session;
+  const session = unwrap(await client.session.revert({ sessionID, messageID })) as Session;
+  notifyFilesRewound({ kind: "undo", sessionId: sessionID, files: rewoundFiles(session) });
+  return session;
 }
 
 /**
@@ -118,7 +121,9 @@ export async function unrevertSession(
   client: Client,
   sessionID: string,
 ): Promise<Session> {
-  return unwrap(await client.session.unrevert({ sessionID })) as Session;
+  const session = unwrap(await client.session.unrevert({ sessionID })) as Session;
+  notifyFilesRewound({ kind: "redo", sessionId: sessionID, files: [] });
+  return session;
 }
 
 /**

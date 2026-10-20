@@ -1,8 +1,8 @@
 {
   "repo": "omnirush-ai/omnirush-gui",
-  "tag": "engine-1.18.32-ux3-cmd2",
+  "tag": "engine-1.18.32-ux3-cmd3",
   "version": "1.18.32",
-  "origin": "The same archives as release engine-1.18.32-ux3-cmd2 of omnirush-ai/omnirush-cli (the CLI's engine), copied to a public pre-release of this repo that is never marked latest.",
+  "origin": "The same archives as release engine-1.18.32-ux3-cmd3 of omnirush-ai/omnirush-cli (the CLI's engine), copied to a public pre-release of this repo that is never marked latest.",
   "license": {
     "name": "LICENSE-opencode-MIT",
     "sha256": "625f0f619133f89bbbb2abe37369613dfa1885eba1e50d02170deb62bb42cb6b"
@@ -10,27 +10,27 @@
   "assets": {
     "aarch64-apple-darwin": {
       "name": "omnirush-engine-darwin-arm64-1.18.32.tar.gz",
-      "sha256": "8df4f4fb62489dbf9253a4ede7e91df425b5555f3dcafa10a27bb5c0fb0660c0"
+      "sha256": "f2b3cf91a03a0890cb4643b83ec04bfcebfa08f69bfd71290b04d098c897df85"
     },
     "x86_64-apple-darwin": {
       "name": "omnirush-engine-darwin-x64-1.18.32.tar.gz",
-      "sha256": "2b0352f9eff7d788ca9d074fc2baea2dc5f81a9cc5e0052337a1b9d4b1f0b680"
+      "sha256": "38fbdeba644f3b3ee5910e3641b5f6fc8319536148b8ae99b6cd1d6208c99cc7"
     },
     "x86_64-unknown-linux-gnu": {
       "name": "omnirush-engine-linux-x64-1.18.32.tar.gz",
-      "sha256": "3fd81d77a7b080ae9ed02de8723528ab28600ddcdc4701b3c461fd9f6edae364"
+      "sha256": "cb6d1a18a4f31f5f81523eebdf7ae9ac428026aa0396e9c12e9bd15c5b376c65"
     },
     "aarch64-unknown-linux-gnu": {
       "name": "omnirush-engine-linux-arm64-1.18.32.tar.gz",
-      "sha256": "33451d6671a3bee44043ebd2f6c4e8d045ea7a313f3067ffa97b74e6d4e9cd4a"
+      "sha256": "c78209d647b79242a2473e70b70cd73a262dd3f78c28baa645e00dd8f6a65eca"
     },
     "x86_64-pc-windows-msvc": {
       "name": "omnirush-engine-win32-x64-1.18.32.tar.gz",
-      "sha256": "9343a967ddcf98dc0a12d1c29c0dbff38f132f610df2ecb46de33cd473b77b8c"
+      "sha256": "28de1d0ba4db55b54c78ca1e7f3bc409273e5de05211bcea136ba403c1d2d7fd"
     },
     "aarch64-pc-windows-msvc": {
       "name": "omnirush-engine-win32-arm64-1.18.32.tar.gz",
-      "sha256": "16fd42d54d650b1f735df1e3b3f242df77f33668a927e7974d4c0fa5646ff0c4"
+      "sha256": "69a7174c0759b36402bbf697ecb0cc6afbbb16dfa1f102ab61ed1807eb7a1da4"
     }
   }
 }

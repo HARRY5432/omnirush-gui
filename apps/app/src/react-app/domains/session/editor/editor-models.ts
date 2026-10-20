@@ -6,6 +6,7 @@
  */
 import type * as MonacoApi from "monaco-editor/editor/editor.api.js";
 
+import { onFilesRewound } from "@/app/lib/files-rewound";
 import type { OmniRushServerClient } from "@/app/lib/omnirush-server";
 import { languageForPath, type Monaco } from "./monaco";
 import { useEditorStore } from "./editor-store";
@@ -33,6 +34,8 @@ export class EditorDocuments {
   private docs = new Map<string, FileDoc>();
   private loading = new Map<string, Promise<OpenResult>>();
   private baselines = new Map<string, MonacoApi.editor.ITextModel>();
+  /** Editor panels showing these documents (they re-read them after an undo themselves, and say what conflicts). */
+  shown = 0;
 
   constructor(
     readonly monaco: Monaco,
@@ -145,22 +148,25 @@ export class EditorDocuments {
    * Reads open files again (after a turn, on focus): a clean document takes
    * the disk text (one undo step), a dirty one is flagged as a conflict.
    */
-  async refresh(paths?: string[]): Promise<void> {
+  async refresh(paths?: string[], options: { discard?: boolean } = {}): Promise<void> {
     const targets = (paths ?? [...this.docs.keys()]).map((path) => this.docs.get(path)).filter((doc): doc is FileDoc => Boolean(doc));
+    // Discarding: the document counts as clean, whatever was typed into it.
+    const dirty = (doc: FileDoc) => !options.discard && this.isDirty(doc);
     await Promise.all(targets.map(async (doc) => {
       let file;
       try {
         file = await this.client.editorReadFile(this.workspaceId, doc.path);
       } catch (error) {
         // Deleted on disk: a clean document empties and says so; a dirty one keeps the user's text.
-        if ((error as { status?: number }).status === 404 && !doc.missing) {
-          if (this.isDirty(doc)) {
+        if ((error as { status?: number }).status === 404 && (!doc.missing || options.discard)) {
+          if (dirty(doc)) {
             doc.conflict = true;
             return;
           }
           if (doc.model.getValueLength() > 0) doc.model.pushEditOperations([], [{ range: doc.model.getFullModelRange(), text: "" }], () => null);
           doc.updatedAt = null;
           doc.missing = true;
+          doc.conflict = false;
           doc.savedVersion = doc.model.getAlternativeVersionId();
           useEditorStore.getState().setDirty(this.workspaceId, doc.path, false);
         }
@@ -177,25 +183,34 @@ export class EditorDocuments {
         useEditorStore.getState().setDirty(this.workspaceId, doc.path, false);
         return;
       }
-      if (file.updatedAt === doc.updatedAt) return;
-      if (this.isDirty(doc)) {
+      if (!options.discard && file.updatedAt === doc.updatedAt) return;
+      if (dirty(doc)) {
         doc.conflict = true;
         return;
       }
       doc.model.pushEditOperations([], [{ range: doc.model.getFullModelRange(), text: file.content }], () => null);
       doc.updatedAt = file.updatedAt;
+      doc.conflict = false;
       doc.savedVersion = doc.model.getAlternativeVersionId();
       useEditorStore.getState().setDirty(this.workspaceId, doc.path, false);
     }));
+  }
+
+  /**
+   * After an undo or redo: every open file read again. Returns the files with
+   * unsaved changes that changed on disk (newly flagged as a conflict).
+   */
+  async refreshAfterRewind(): Promise<string[]> {
+    const before = new Set([...this.docs.values()].filter((doc) => doc.conflict).map((doc) => doc.path));
+    await this.refresh();
+    return [...this.docs.values()].filter((doc) => doc.conflict && !before.has(doc.path)).map((doc) => doc.path);
   }
 
   /** Discards unsaved changes: the disk text again. */
   async revert(path: string): Promise<void> {
     const doc = this.docs.get(path);
     if (!doc) return;
-    doc.savedVersion = -1;
-    doc.updatedAt = -1;
-    await this.refresh([path]).catch(() => undefined);
+    await this.refresh([path], { discard: true }).catch(() => undefined);
   }
 
   /** The read-only "before" model of a review or git diff. */
@@ -240,6 +255,11 @@ export class EditorDocuments {
 }
 
 const byWorkspace = new Map<string, EditorDocuments>();
+
+// An undo or redo changed files: documents no editor panel shows are read again here (a shown one's panel does it).
+onFilesRewound(() => {
+  for (const docs of byWorkspace.values()) if (docs.shown === 0) void docs.refresh().catch(() => undefined);
+});
 
 export function editorDocuments(monaco: Monaco, client: OmniRushServerClient, workspaceId: string): EditorDocuments {
   const existing = byWorkspace.get(workspaceId);

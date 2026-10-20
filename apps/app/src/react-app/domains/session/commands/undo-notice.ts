@@ -44,7 +44,7 @@ export function undoNotice(revert: RevertOutcome | null | undefined, tracked: bo
       `Left ${plural(kept.length, "file")} as ${kept.length === 1 ? "it is" : "they are"}: ${list(kept)} (edited after the turn, and the turn's change could not be taken out cleanly).`,
     );
   }
-  if (outside.length) lines.push(`Not touched: ${list(outside)} (changed during the turn, but not by the agent).`);
+  if (outside.length) lines.push(`Not touched: ${list(outside)} (changed during the turn by something other than the agent's file edits).`);
   if (!lines.length) lines.push("The last turn changed no files.");
   lines.push("Redo puts it back.");
   return { title: "Undid the last turn", message: lines.join(" "), variant: kept.length || outside.length ? "warning" : "success" };

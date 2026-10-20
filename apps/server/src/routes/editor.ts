@@ -60,6 +60,8 @@ type RegisterEditorRoutesOptions = {
   resolveWorkspace: (config: ServerConfig, id: string) => Promise<WorkspaceInfo>;
   onUserEdit?: (edit: EditorUserEdit) => void;
   onUserReview?: (review: EditorUserReview) => void;
+  /** Every save or delete the editor made, with or without a chat (editor-saves.ts). */
+  onSaved?: (workspace: WorkspaceInfo, path: string) => void;
 };
 
 type GitResult = { code: number | null; stdout: Buffer; stderr: string };
@@ -396,6 +398,11 @@ export function registerEditorRoutes(options: RegisterEditorRoutesOptions): void
       await writeFile(absolute, content, "utf8");
     }
     const after = remove ? null : await stat(absolute);
+    try {
+      options.onSaved?.(workspace, path);
+    } catch {
+      // Remembering a save never fails it.
+    }
     // A file whose old text could not be read (binary, too large) is not reported.
     if (sessionId && options.onUserEdit && (!current || before !== null)) {
       const source = body.source === "review" ? "review" : "editor";
