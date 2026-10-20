@@ -5,6 +5,7 @@
  * and caps matches and time. Replacing is done by the editor itself (it
  * edits the open documents and saves them through the editor's file route).
  */
+import { gitChildEnv } from "../git-env.js";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
@@ -113,7 +114,8 @@ type RunOutcome = { timedOut: boolean; code: number | null; stderr: string; spaw
 
 function run(cmd: string, args: string[], cwd: string, onLine: (line: string) => boolean): Promise<RunOutcome> {
   return new Promise((resolvePromise) => {
-    const child = spawn(cmd, args, { cwd, stdio: ["ignore", "pipe", "pipe"], windowsHide: true, env: { ...process.env, LC_ALL: "C.UTF-8" } });
+    // git grep (and ripgrep) get the filtered environment: no app tokens or other keys (git-env.ts).
+    const child = spawn(cmd, args, { cwd, stdio: ["ignore", "pipe", "pipe"], windowsHide: true, env: gitChildEnv({ LC_ALL: "C.UTF-8" }) });
     let buffered = "";
     let stderr = "";
     let stopped = false;
