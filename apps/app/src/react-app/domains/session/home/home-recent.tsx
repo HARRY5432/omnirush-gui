@@ -66,7 +66,7 @@ export function HomeContinue({ context }: { context: HomeViewContext }) {
 
   return (
     <nav aria-label="Recent chats" className="-mt-2 flex h-6 items-center gap-2 pb-1 text-[12px] text-muted-foreground" data-testid="home-continue">
-      <span className="shrink-0 opacity-80">Continue</span>
+      <span className="shrink-0">Continue</span>
       <div ref={listRef} className="flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
         {chats.map((session, index) => {
           const title = homeChatTitle(session.title);
@@ -85,7 +85,7 @@ export function HomeContinue({ context }: { context: HomeViewContext }) {
             >
               <span className="max-w-[112px] truncate group-hover:text-foreground">{title}</span>
               <span aria-hidden="true" className="shrink-0 opacity-50">·</span>
-              <span className="shrink-0 opacity-70">{session.workspaceTitle}</span>
+              <span className="shrink-0">{session.workspaceTitle}</span>
             </button>
           );
         })}
