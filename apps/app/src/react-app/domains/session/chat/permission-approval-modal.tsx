@@ -512,8 +512,8 @@ export function PermissionApprovalPanel(props: PermissionApprovalModalProps) {
   const Icon = presentation.isDoomLoop ? RefreshCcw : ShieldCheck;
 
   return (
-    <div ref={rootRef} data-permission-panel={permissionId} className="overflow-hidden border-b border-dls-border bg-transparent">
-        <div className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+    <div ref={rootRef} data-permission-panel={permissionId} className="@container/approval overflow-hidden border-b border-dls-border bg-transparent">
+        <div className="flex flex-col gap-3 px-4 py-3 @min-[36rem]/approval:flex-row @min-[36rem]/approval:items-center @min-[36rem]/approval:justify-between">
           <div className="flex min-w-0 items-start gap-3">
             <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-xl border border-dls-border bg-dls-hover text-dls-secondary">
               <Icon size={16} strokeWidth={1.9} />
@@ -540,7 +540,7 @@ export function PermissionApprovalPanel(props: PermissionApprovalModalProps) {
             </div>
           </div>
 
-          <div className="flex shrink-0 flex-wrap items-center gap-2 sm:justify-end">
+          <div className="flex shrink-0 flex-wrap items-center gap-2 @min-[36rem]/approval:justify-end">
             <Button
               type="button"
               variant="outline"
@@ -584,7 +584,7 @@ export function PermissionApprovalPanel(props: PermissionApprovalModalProps) {
         </div>
 
         <div className="border-t border-dls-border px-4 py-3">
-          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
+          <div className="grid gap-3 @min-[36rem]/approval:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
             <div>
               <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-dls-secondary">
                 {t("session.permission_label")}

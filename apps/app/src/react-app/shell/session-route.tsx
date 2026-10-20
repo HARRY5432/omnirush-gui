@@ -1,4 +1,6 @@
 /** @jsxImportSource react */
+import { useEditorStore } from "../domains/session/editor/editor-store";
+import { isElectronRuntime } from "../../app/utils";
 import {
   useCallback,
   useEffect,
@@ -2920,6 +2922,33 @@ export function SessionRoute() {
     };
   }, [selectedSessionId]);
 
+  const layoutModeName = useEditorStore((state) => (selectedWorkspaceId ? state.modeByWorkspace[selectedWorkspaceId] : undefined) ?? "chat");
+  const layoutAvailable = isElectronRuntime() && Boolean(selectedWorkspace) && selectedWorkspace?.workspaceType !== "remote";
+  const layoutPaletteItems = useMemo<PaletteItem[]>(() => layoutAvailable ? [
+    {
+      id: "layout.toggle",
+      title: layoutModeName === "ide" ? "Switch to Chat layout" : "Switch to IDE layout",
+      detail: "Chat: sessions and the conversation. IDE: files, editor and terminal, with the chat on the right",
+      meta: "Cmd/Ctrl+Shift+Y",
+      searchText: "layout ide editor chat mode code files switch toggle",
+      action: () => {
+        setCommandPaletteOpen(false);
+        useEditorStore.getState().requestModeToggle();
+      },
+    },
+    ...(layoutModeName === "ide" ? [{
+      id: "layout.chat-panel",
+      title: "Show or hide the chat",
+      detail: "Fold the chat panel of the IDE layout away, or bring it back",
+      meta: "Cmd/Ctrl+Shift+H",
+      searchText: "chat panel hide show collapse ide",
+      action: () => {
+        setCommandPaletteOpen(false);
+        useEditorStore.getState().requestChatToggle();
+      },
+    }] : []),
+  ] : [], [layoutAvailable, layoutModeName]);
+
   const terminalPaletteItems = useMemo<PaletteItem[]>(() => platform.capabilities.terminal ? [
     {
       id: "terminal.toggle",
@@ -3642,6 +3671,7 @@ export function SessionRoute() {
         dashboardActive: dashboardRouteActive || appsRouteActive,
         tasksActive: tasksRouteActive,
         tasksRunningCount,
+        onOpenTasksForWorkspace: (workspaceId: string) => navigate(workspaceTasksRoute(workspaceId)),
         onOpenTasks: tasksAvailable ? () => navigate(workspaceTasksRoute(tasksBoardWorkspaceId)) : undefined,
         onOpenDashboard: mcpAppsDashboardEnabled
           ? () => {
@@ -4011,7 +4041,7 @@ export function SessionRoute() {
       currentSessionForGroupMove={currentSessionForGroupMove}
       currentSessionGroupId={currentSessionGroupId}
       onMoveCurrentSessionToGroup={handleMoveCurrentSessionToGroup}
-      extraItems={[...currentSessionActionPaletteItems, ...(sessionFindPaletteItem ? [sessionFindPaletteItem] : []), sessionSearchPaletteItem, ...tasksPaletteItems, ...terminalPaletteItems, ...(checkDesktopRestriction({ restriction: "allowControlSettings" }) ? [] : [developerModePaletteItem]), ...(copySessionIdPaletteItem ? [copySessionIdPaletteItem] : []), diagnosticsCopyPaletteItem, diagnosticsExportPaletteItem, nextSessionTabPaletteItem, prevSessionTabPaletteItem, reloadConfigPaletteItem]}
+      extraItems={[...currentSessionActionPaletteItems, ...(sessionFindPaletteItem ? [sessionFindPaletteItem] : []), sessionSearchPaletteItem, ...tasksPaletteItems, ...layoutPaletteItems, ...terminalPaletteItems, ...(checkDesktopRestriction({ restriction: "allowControlSettings" }) ? [] : [developerModePaletteItem]), ...(copySessionIdPaletteItem ? [copySessionIdPaletteItem] : []), diagnosticsCopyPaletteItem, diagnosticsExportPaletteItem, nextSessionTabPaletteItem, prevSessionTabPaletteItem, reloadConfigPaletteItem]}
       listAgents={listAgents}
       selectedAgent={selectedAgent}
       onSelectAgent={setSelectedAgent}

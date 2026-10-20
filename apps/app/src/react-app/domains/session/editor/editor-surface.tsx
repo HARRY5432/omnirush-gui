@@ -89,12 +89,15 @@ function hunkBar(
   return bar;
 }
 
+const VIEW_STATES = new Map<string, MonacoApi.editor.ICodeEditorViewState | MonacoApi.editor.IDiffEditorViewState | null>();
+
 export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navigate }: EditorSurfaceProps) {
   const codeHostRef = useRef<HTMLDivElement | null>(null);
   const diffHostRef = useRef<HTMLDivElement | null>(null);
   const codeRef = useRef<MonacoApi.editor.IStandaloneCodeEditor | null>(null);
   const diffRef = useRef<MonacoApi.editor.IStandaloneDiffEditor | null>(null);
-  const viewStates = useRef(new Map<string, MonacoApi.editor.ICodeEditorViewState | MonacoApi.editor.IDiffEditorViewState | null>());
+  // Module-wide: a tab keeps its scroll and cursor when the editor unmounts (switching to Chat and back).
+  const viewStates = useRef(VIEW_STATES);
   const currentKey = useRef<string | null>(null);
   const zoneIds = useRef<string[]>([]);
   const overlays = useRef<MonacoApi.editor.IOverlayWidget[]>([]);
@@ -106,6 +109,8 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
   const onHunksRef = useRef(onHunks);
   onHunksRef.current = onHunks;
   const [mode, setMode] = useState<"file" | "diff" | null>(null);
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
 
   // The editors, once.
   useEffect(() => {
@@ -141,6 +146,8 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
     });
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class", "data-theme"] });
     return () => {
+      const key = currentKey.current;
+      if (key) VIEW_STATES.set(key, modeRef.current === "diff" ? diff.saveViewState() : code.saveViewState());
       observer.disconnect();
       for (const disposable of disposables) disposable.dispose();
       code.dispose();

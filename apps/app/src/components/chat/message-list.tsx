@@ -527,7 +527,7 @@ const AssistantMessage = React.memo(
 
     return (
       <Message
-        className="mx-auto flex w-full max-w-3xl flex-col items-start gap-2 px-2 md:px-10"
+        className="mx-auto flex w-full max-w-3xl flex-col items-start gap-2 px-2 @min-[40rem]/chatpane:px-10"
         data-message-id={message.id}
         data-message-role={message.role}
       >
@@ -722,7 +722,7 @@ const UserMessage = React.memo(
 
     return (
       <Message
-        className="mx-auto flex w-full max-w-3xl flex-col items-end gap-2 px-2 md:px-10"
+        className="mx-auto flex w-full max-w-3xl flex-col items-end gap-2 px-2 @min-[40rem]/chatpane:px-10"
         data-message-id={message.id}
         data-message-role={message.role}
       >
@@ -899,7 +899,7 @@ const MessageComponent = React.memo(
 MessageComponent.displayName = "MessageComponent"
 
 const LoadingMessage = React.memo(({ elapsedSeconds }: { elapsedSeconds: number }) => (
-    <Message className="mx-auto flex w-full max-w-3xl flex-col items-start gap-2 px-2 md:px-10">
+    <Message className="mx-auto flex w-full max-w-3xl flex-col items-start gap-2 px-2 @min-[40rem]/chatpane:px-10">
       <div data-loading-message="working" className="py-1 text-sm text-muted-foreground">
         <span className="ow-text-shimmer tabular-nums">Working {formatElapsedSeconds(elapsedSeconds)}</span>
       </div>
@@ -938,7 +938,7 @@ const ReconnectingMessage = React.memo(({ lastConfirmedAt }: { lastConfirmedAt: 
   }, [])
   const lastConfirmedLabel = reconnectingLastConfirmedLabel(lastConfirmedAt, now)
   return (
-    <Message className="mx-auto flex w-full max-w-3xl flex-col items-start gap-2 px-2 md:px-10">
+    <Message className="mx-auto flex w-full max-w-3xl flex-col items-start gap-2 px-2 @min-[40rem]/chatpane:px-10">
       <div
         data-loading-message="reconnecting"
         className="flex min-w-0 items-center gap-2 py-1 text-sm text-muted-foreground"
@@ -1042,7 +1042,7 @@ function ErrorMessage({ error, description, showDescriptionOnResume, resumePromp
   // quiet status line (like "Working 12s"), with Resume as the emphasis.
   if (resumePrompt && onResumeInterrupted) {
     return (
-      <Message className="not-prose mx-auto flex w-full max-w-3xl flex-col items-start gap-1 px-2 md:px-10">
+      <Message className="not-prose mx-auto flex w-full max-w-3xl flex-col items-start gap-1 px-2 @min-[40rem]/chatpane:px-10">
         <div
           data-testid="session-error-interrupted"
           className="flex min-w-0 items-center gap-2 py-1 text-sm text-muted-foreground"
@@ -1070,7 +1070,7 @@ function ErrorMessage({ error, description, showDescriptionOnResume, resumePromp
   }
 
   return (
-    <Message className="not-prose mx-auto flex w-full max-w-3xl flex-col items-start gap-2 px-0 md:px-10">
+    <Message className="not-prose mx-auto flex w-full max-w-3xl flex-col items-start gap-2 px-0 @min-[40rem]/chatpane:px-10">
       <div className="group flex w-full flex-col items-start gap-0">
         <div className="flex min-w-0 flex-1 flex-col gap-1.5 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm">
           <div className="flex flex-row items-start gap-2">
@@ -1141,7 +1141,7 @@ const RetryMessage = React.memo(({ status }: RetryMessageProps) => {
   const freeModelLimit = action?.reason === "free_tier_limit"
 
   return (
-    <Message className="not-prose mx-auto flex w-full max-w-3xl flex-col items-start gap-2 px-0 md:px-10">
+    <Message className="not-prose mx-auto flex w-full max-w-3xl flex-col items-start gap-2 px-0 @min-[40rem]/chatpane:px-10">
       <div className="group flex w-full flex-col items-start gap-0">
         <div className="flex min-w-0 flex-1 flex-col gap-1.5 rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-sm text-amber-12">
           <div className="flex items-start gap-2">
@@ -1208,7 +1208,7 @@ function CompletedStepRun({ label, children }: { label: string; children: React.
 
   return (
     <Collapsible open={open} onOpenChange={setOpen} className="flex w-full flex-col gap-2">
-      <div className="mx-auto flex w-full max-w-3xl px-2 md:px-10">
+      <div className="mx-auto flex w-full max-w-3xl px-2 @min-[40rem]/chatpane:px-10">
         <CollapsibleTrigger
           className="group flex cursor-pointer items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
           aria-label={open ? `${label}. Hide steps` : `${label}. Show steps`}
@@ -1347,7 +1347,7 @@ function MessageGroup({
     ? proseReasoning.map((reasoning) => (
       <Message
         key={`folded-reasoning-${reasoning.key}`}
-        className="mx-auto flex w-full max-w-3xl flex-col items-start gap-2 px-2 md:px-10"
+        className="mx-auto flex w-full max-w-3xl flex-col items-start gap-2 px-2 @min-[40rem]/chatpane:px-10"
       >
         <ReasoningBlock text={reasoning.text} isStreaming={reasoning.isStreaming} />
       </Message>
@@ -1380,7 +1380,7 @@ function MessageGroup({
       if (!run) return
       nodes.push(
         <div key={`aggregate-${run.key}`}>
-          <Message className="mx-auto flex w-full max-w-3xl flex-col items-start gap-2 px-2 md:px-10">
+          <Message className="mx-auto flex w-full max-w-3xl flex-col items-start gap-2 px-2 @min-[40rem]/chatpane:px-10">
             <ToolAggregateGroup parts={run.parts} className="w-full" />
           </Message>
         </div>
@@ -1427,7 +1427,7 @@ function MessageGroup({
       {mcpAppParts.map((part) => (
         <Message
           key={`mcp-app-${part.toolCallId}`}
-          className="mx-auto flex w-full max-w-3xl flex-col px-2 empty:hidden md:px-10"
+          className="mx-auto flex w-full max-w-3xl flex-col px-2 empty:hidden @min-[40rem]/chatpane:px-10"
         >
           <McpAppFrame part={part} />
         </Message>

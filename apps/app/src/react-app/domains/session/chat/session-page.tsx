@@ -4,7 +4,7 @@ import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } fro
 import { usePanelRef } from "react-resizable-panels";
 import { DesktopUpdateButton } from "../../settings/state/desktop-updater-provider";
 import { BuildathonChip } from "../../buildathon/buildathon";
-import { ArrowLeft, Cloud, Code2, FileDiff, FileText, Gauge, Redo2, Undo2, Globe, ListChecks, Maximize2, MoreHorizontal, PanelRight, TextSearch, X, Zap } from "lucide-react";
+import { ArrowLeft, Cloud, Code2, FileDiff, Layers, MessageSquare, LayoutGrid, Library, MessageSquareOff, PanelLeft, FileText, Gauge, Redo2, Undo2, Globe, ListChecks, Maximize2, MoreHorizontal, PanelRight, TextSearch, X, Zap } from "lucide-react";
 import { SessionCommandControls } from "../commands/session-command-controls";
 import { useSessionCommandBridge, useSessionCommandsStore } from "../commands/session-commands-store";
 
@@ -90,7 +90,8 @@ import { getSidePanelSessionKey } from "../panel/side-panel-session";
 import { useCreateTab } from "../panel/use-side-panel-tabs";
 import { TerminalDock } from "../terminal/terminal-dock";
 import { LazyEditorPanel } from "../editor/editor-entry";
-import { useEditorStore } from "../editor/editor-store";
+import { DEFAULT_IDE_CHAT_WIDTH, useEditorStore, type LayoutMode } from "../editor/editor-store";
+import { ChatPanelButton, ChatSwitcher, LayoutModeToggle, RailDestinations, shortcutLabel, WorkspaceSwitcher, type RailDestination } from "../editor/ide-chrome";
 import { useActivePanelTab, usePanelTabStore, useSessionPanelState } from "../panel/panel-tab-store";
 import { useWorkspaceShellLayout } from "../../../shell/workspace-shell-layout";
 import { useControlAction, type OmniRushControlAction } from "../../../shell/control/control-provider";
@@ -193,6 +194,7 @@ export type SessionPageSidebarProps = {
   onOpenDashboard?: () => void;
   tasksActive?: boolean;
   tasksRunningCount?: number;
+  onOpenTasksForWorkspace?: (workspaceId: string) => void;
   onOpenTasks?: () => void;
   /** Opens the cross-session message search dialog (Cmd/Ctrl+Shift+F). */
   onOpenSessionSearch?: () => void;
@@ -495,11 +497,20 @@ export function SessionPage(props: SessionPageProps) {
   const activeSidePanel = sessionSidePanel;
   const sidePanelOpen = activeSidePanel !== null;
   const panelRailActive = activeSidePanel === "panel";
-  const editorOpen = activeSidePanel === "editor";
   // The editor needs the local server's file routes: desktop, local workspaces.
   const editorAvailable = isElectronRuntime()
     && Boolean(props.omnirushServerClient && props.runtimeWorkspaceId)
     && props.selectedWorkspaceDisplay.workspaceType !== "remote";
+  // The layout: Chat (sessions sidebar + chat) or IDE (files, editor, terminal; chat docked right), per workspace.
+  const storedLayoutMode = useEditorStore((state) => state.modeByWorkspace[props.selectedWorkspaceId] ?? "chat");
+  // Full-page views (parallel tasks, library, dashboard, automations) always show in the Chat layout.
+  const ideMode = editorAvailable && !isMobile && storedLayoutMode === "ide" && !props.primarySlot && !props.mainContentTakeover;
+  const layoutMode: LayoutMode = ideMode ? "ide" : "chat";
+  const ideChatCollapsed = useEditorStore((state) => state.ideChatCollapsed);
+  const setLayoutMode = useCallback((mode: LayoutMode) => {
+    if (mode === "ide" && !editorAvailable) return;
+    useEditorStore.getState().setMode(props.selectedWorkspaceId, mode);
+  }, [editorAvailable, props.selectedWorkspaceId]);
   const denControlPlaneConfigured = useDenControlPlaneConfigured();
   const showCloudSignIn =
     shellConfig.cloudSignin && denControlPlaneConfigured && !denAuth.isSignedIn && denAuth.status !== "checking";
@@ -562,6 +573,7 @@ export function SessionPage(props: SessionPageProps) {
   const [createGroupLabel, setCreateGroupLabel] = useState("");
   const [createGroupWorkspaceId, setCreateGroupWorkspaceId] = useState<string | null>(null);
   const browserPanelRef = usePanelRef();
+  const ideChatPanelRef = usePanelRef();
 
   const selectNarrowPane = useCallback((pane: NarrowSessionPane) => {
     setNarrowPane(pane);
@@ -797,32 +809,38 @@ export function SessionPage(props: SessionPageProps) {
   const closeRightPane = useCallback(() => {
     setCurrentSidePanel(null);
   }, [setCurrentSidePanel]);
-  // The editor stays open when the chat changes (a new chat starting, another chat picked):
-  // a chat that never had a side panel of its own gets the editor the last one had.
-  const lastSidePanel = useRef<{ key: string; panel: SidePanelItem | null }>({ key: sidePanelSessionKey, panel: sessionSidePanel });
-  useEffect(() => {
-    const last = lastSidePanel.current;
-    if (last.key !== sidePanelSessionKey && last.panel === "editor") {
-      const own = useUiStateStore.getState().sidePanelState[sidePanelSessionKey];
-      if (own === undefined) setSidePanelState(sidePanelSessionKey, "editor");
-    }
-    lastSidePanel.current = { key: sidePanelSessionKey, panel: useUiStateStore.getState().sidePanelState[sidePanelSessionKey] ?? (last.key !== sidePanelSessionKey && last.panel === "editor" ? "editor" : null) };
-  }, [sessionSidePanel, setSidePanelState, sidePanelSessionKey]);
-
-  // Cmd/Ctrl+Shift+E toggles the editor; Cmd/Ctrl+P opens it with quick open (use-shell-shortcuts.ts).
+  // Shortcuts (use-shell-shortcuts.ts): Cmd/Ctrl+Shift+E and Cmd/Ctrl+P open IDE mode (P with quick open),
+  // Cmd/Ctrl+Shift+Y switches Chat/IDE, Cmd/Ctrl+Shift+H shows or hides the chat in IDE mode.
   const editorShowRequest = useEditorStore((state) => state.showRequest);
   const editorToggleRequest = useEditorStore((state) => state.toggleRequest);
-  const lastEditorRequests = useRef({ show: editorShowRequest, toggle: editorToggleRequest });
+  const modeToggleRequest = useEditorStore((state) => state.modeToggleRequest);
+  const chatToggleRequest = useEditorStore((state) => state.chatToggleRequest);
+  const lastEditorRequests = useRef({ show: editorShowRequest, toggle: editorToggleRequest, mode: modeToggleRequest, chat: chatToggleRequest });
   useEffect(() => {
     const last = lastEditorRequests.current;
-    lastEditorRequests.current = { show: editorShowRequest, toggle: editorToggleRequest };
+    lastEditorRequests.current = { show: editorShowRequest, toggle: editorToggleRequest, mode: modeToggleRequest, chat: chatToggleRequest };
     if (!editorAvailable) {
       if (editorShowRequest !== last.show) useEditorStore.getState().setQuickOpen(false);
       return;
     }
-    if (editorShowRequest !== last.show) setCurrentSidePanel("editor");
-    else if (editorToggleRequest !== last.toggle) toggleCurrentSidePanel("editor");
-  }, [editorAvailable, editorShowRequest, editorToggleRequest, setCurrentSidePanel, toggleCurrentSidePanel]);
+    if (editorShowRequest !== last.show || editorToggleRequest !== last.toggle) {
+      setLayoutMode("ide");
+      if (editorToggleRequest !== last.toggle) useEditorStore.getState().setView(props.runtimeWorkspaceId ?? "", "files");
+    } else if (modeToggleRequest !== last.mode) {
+      setLayoutMode(ideMode ? "chat" : "ide");
+    } else if (chatToggleRequest !== last.chat && ideMode) {
+      useEditorStore.getState().setIdeChatCollapsed(!useEditorStore.getState().ideChatCollapsed);
+    }
+  }, [chatToggleRequest, editorAvailable, editorShowRequest, editorToggleRequest, ideMode, modeToggleRequest, props.runtimeWorkspaceId, setLayoutMode]);
+  // The editor no longer opens as a side panel (it is the IDE layout): a stale "editor" panel just closes.
+  useEffect(() => {
+    if (activeSidePanel === "editor") setCurrentSidePanel(null);
+  }, [activeSidePanel, setCurrentSidePanel]);
+  // An approval must never wait in a hidden chat: it brings the chat panel back.
+  useEffect(() => {
+    if (ideMode && props.activePermission && useEditorStore.getState().ideChatCollapsed) useEditorStore.getState().setIdeChatCollapsed(false);
+  }, [ideMode, props.activePermission]);
+
   const openGeneralSidePanel = useCallback(() => {
     setCurrentSidePanel("panel");
   }, [setCurrentSidePanel]);
@@ -1451,26 +1469,6 @@ export function SessionPage(props: SessionPageProps) {
     <div className="flex h-full min-h-0 flex-col overflow-y-auto bg-background">
       {props.settingsSlot}
     </div>
-  ) : activeSidePanel === "editor" && editorAvailable && props.omnirushServerClient && props.runtimeWorkspaceId ? (
-    <LazyEditorPanel
-      client={props.omnirushServerClient}
-      workspaceId={props.runtimeWorkspaceId}
-      workspaceRoot={props.selectedWorkspaceRoot}
-      sessionId={props.selectedSessionId}
-      sessionBusy={sessionTurnRunning(props.selectedSessionId)}
-      opencodeClient={props.opencodeClient ?? null}
-      terminalOpen={Boolean(props.terminalOpen)}
-      onToggleTerminal={() => props.onTerminalOpenChange?.(!props.terminalOpen)}
-      terminal={props.terminalOpen ? (
-        <TerminalDock
-          workspaceId={props.selectedWorkspaceId}
-          workspaceRoot={props.selectedWorkspaceRoot}
-          isRemoteWorkspace={props.selectedWorkspaceDisplay.workspaceType === "remote"}
-          onClose={() => props.onTerminalOpenChange?.(false)}
-        />
-      ) : null}
-      onClose={closeRightPane}
-    />
   ) : activeSidePanel === "panel" ? (
     <SidePanel
       sessionId={sidePanelSessionKey}
@@ -1483,112 +1481,31 @@ export function SessionPage(props: SessionPageProps) {
     />
   ) : null;
 
-  return (
-    <div className="flex h-full min-h-0 flex-col bg-[radial-gradient(circle_at_top,rgba(74,111,255,0.12),transparent_42%),var(--app-bg,#0b1020)] text-dls-text max-lg:pt-[env(safe-area-inset-top)] mac:bg-transparent">
-      <SidebarProvider
-        open={sidebarOpen}
-        onOpenChange={setSidebarOpen}
-        className={cn(
-          "relative min-h-0 flex-1 mac:bg-transparent",
-          leftSidebarResizing &&
-            "**:data-[slot=sidebar-container]:transition-none **:data-[slot=sidebar-gap]:transition-none",
-          !shellConfig.sidebar && "**:data-[slot=sidebar-container]:hidden **:data-[slot=sidebar-gap]:hidden",
-        )}
-        style={sidebarProviderStyle}
-      >
-        <AppSidebar
-          sessionNumberShortcuts={props.sessionNumberShortcuts}
-          workspaceSessionGroups={props.sidebar.workspaceSessionGroups}
-          selectedWorkspaceId={props.sidebar.selectedWorkspaceId}
-          developerMode={props.sidebar.developerMode}
-          selectedSessionId={props.sidebar.selectedSessionId}
-          showSessionActions={Boolean(props.onRenameSession || props.onDeleteSession || props.onArchiveSession)}
-          sessionStatusById={props.sidebar.sessionStatusById}
-          connectingWorkspaceId={props.sidebar.connectingWorkspaceId}
-          workspaceConnectionStateById={props.sidebar.workspaceConnectionStateById}
-          newTaskDisabled={props.sidebar.newTaskDisabled}
-          onSelectWorkspace={props.sidebar.onSelectWorkspace}
-          onOpenSession={openSessionTab}
-          onPrefetchSession={props.sidebar.onPrefetchSession}
-          onCreateTaskInWorkspace={props.sidebar.onCreateTaskInWorkspace}
-          onCreateSplitTaskInWorkspace={props.sidebar.onCreateSplitTaskInWorkspace}
-          onOpenRenameSession={props.onRenameSession ? openRenameModal : undefined}
-          onOpenDeleteSession={props.onDeleteSession ? (sessionId) => {
-            const openDelete = () => {
-              setSessionActionId(sessionId);
-              setDeleteOpen(true);
-            };
-            guardLeave(leavingRunningTurn({ action: "delete", turnRunning: sessionTurnRunning(sessionId) }), openDelete, sessionId);
-          } : undefined}
-          onArchiveSession={props.onArchiveSession ? (sessionId, archived) => {
-            void props.onArchiveSession?.(sessionId, archived);
-          } : undefined}
-          archiveDisabledReason={props.archiveDisabledReason}
-          onOpenCreateGroupModal={(workspaceId) => {
-            setCreateGroupWorkspaceId(workspaceId);
-            setCreateGroupLabel("");
-            setCreateGroupOpen(true);
-          }}
-          onOpenRenameWorkspace={props.sidebar.onOpenRenameWorkspace}
-          onShareWorkspace={props.sidebar.onShareWorkspace}
-          onRevealWorkspace={props.sidebar.onRevealWorkspace}
-          onRecoverWorkspace={props.sidebar.onRecoverWorkspace}
-          onTestWorkspaceConnection={props.sidebar.onTestWorkspaceConnection}
-          onRetryWorkspaceTasks={props.sidebar.onRetryWorkspaceTasks}
-          onEditWorkspaceConnection={props.sidebar.onEditWorkspaceConnection}
-          onForgetWorkspace={props.sidebar.onForgetWorkspace}
-          onOpenCreateWorkspace={props.sidebar.onOpenCreateWorkspace}
-          onOpenSessionSearch={props.sidebar.onOpenSessionSearch}
-          auditClient={props.omnirushServerClient}
-          automationsActive={props.sidebar.automationsActive}
-          automationsNeedAttention={props.sidebar.automationsNeedAttention}
-          onOpenAutomations={props.sidebar.onOpenAutomations}
-          dashboardActive={props.sidebar.dashboardActive}
-          onOpenDashboard={props.sidebar.onOpenDashboard}
-          tasksActive={props.sidebar.tasksActive}
-          tasksRunningCount={props.sidebar.tasksRunningCount}
-          onOpenTasks={props.sidebar.onOpenTasks}
-          conversationHistory={{
-            canGoBack: canGoBackInConversationHistory,
-            canGoForward: canGoForwardInConversationHistory,
-            onNavigate: navigateConversationHistory,
-          }}
-          onReorderWorkspaces={props.sidebar.onReorderWorkspaces}
-          onStartResize={startLeftSidebarResize}
-          onOpenAccountSettings={props.onOpenSettings}
-          onOpenExtensions={props.onOpenExtensions}
-          extensionsActive={props.extensionsActive}
-          status={{
-            clientConnected: props.clientConnected,
-            omnirushServerStatus: props.omnirushServerStatus,
-            developerMode: props.developerMode,
-            showConnectionStatus: Boolean(props.selectedWorkspaceId),
-            providerConnectedIds: props.providerConnectedIds,
-            mcpConnectedCount: props.mcpConnectedCount,
-            showSettingsButton: props.statusBar?.showSettingsButton,
-            reloadBusy: props.statusBar?.reloadBusy,
-            reloadError: props.statusBar?.reloadError,
-            omniRushConnectState: props.statusBar?.omniRushConnectState,
-            onSendFeedback: props.onSendFeedback,
-          }}
-        />
-        <SidebarInset
-          className={cn(
-            "min-h-0 overflow-hidden bg-sidebar mac:bg-transparent mac:[&_header]:transition-[padding-left] mac:[&_header]:duration-200 mac:[&_header]:ease-linear mac:peer-data-[state=collapsed]:[&_header]:pl-34 mac:max-md:[&_header]:pl-34",
-            !shellConfig.sidebar && "mac:[&_header]:pl-34",
-          )}
-        >
-          <div className={cn(
-            "flex min-h-0 flex-1 max-lg:p-0 lg:py-2 lg:pl-2",
-            !sidebarOpen && "mac:lg:pt-0 mac:lg:pl-0",
-          )}>
-          <ResizablePanelGroup
-            orientation="horizontal"
-            onLayoutChanged={sidePanelOpen ? commitBrowserPanelWidth : undefined}
-            className="min-h-0 flex-1 max-lg:rounded-none lg:rounded-[14px]"
-          >
-            <ResizablePanel minSize={isMobile ? "0px" : "360px"} className="min-w-0">
-              <main data-session-pane className="flex h-full min-w-0 flex-col overflow-hidden bg-dls-surface max-lg:rounded-none max-lg:border-0 max-lg:shadow-none lg:rounded-[14px] lg:border lg:border-border lg:shadow-[0_8px_24px_rgba(15,23,42,0.06)] dark:lg:shadow-[0_10px_30px_rgba(0,0,0,0.45)] mac:bg-dls-surface/85 mac:backdrop-blur-2xl mac:backdrop-saturate-150">
+  // This project's chats for the IDE chat switcher, newest first as the sidebar lists them.
+  const ideChats = (props.sidebar.workspaceSessionGroups.find((group) => group.workspace.id === props.selectedWorkspaceId)?.sessions ?? [])
+    .filter((session) => !session.parentID)
+    .map((session) => {
+      const status = props.sidebar.sessionStatusById[session.id];
+      return {
+        id: session.id,
+        title: getDisplaySessionTitle(session.title) || t("session.default_title"),
+        status: status === "waiting" ? "approval" as const : status === "thinking" || status === "responding" || status === "compacting" ? "running" as const : "idle" as const,
+      };
+    });
+
+  // IDE mode hides the sessions sidebar: its destinations move to the foot of the activity rail.
+  const railDestinations: RailDestination[] = [
+    ...(props.sidebar.onOpenTasks ? [{ id: "tasks", label: "Parallel tasks", icon: <Layers className="size-4" />, badge: props.sidebar.tasksRunningCount || undefined, onSelect: props.sidebar.onOpenTasks }] : []),
+    ...(props.sidebar.onOpenSessionSearch ? [{ id: "search", label: "Search sessions", icon: <TextSearch className="size-4" />, onSelect: props.sidebar.onOpenSessionSearch }] : []),
+    ...(props.sidebar.onOpenAutomations ? [{ id: "automations", label: "Automations", icon: <Zap className="size-4" />, badge: props.sidebar.automationsNeedAttention ? 1 : undefined, onSelect: props.sidebar.onOpenAutomations }] : []),
+    ...(props.sidebar.onOpenDashboard ? [{ id: "dashboard", label: "Dashboard", icon: <LayoutGrid className="size-4" />, onSelect: props.sidebar.onOpenDashboard }] : []),
+    { id: "library", label: "Library", icon: <Library className="size-4" />, onSelect: props.onOpenExtensions },
+    { id: "chat-layout", label: "Audit trail and workflows (Chat layout)", icon: <PanelLeft className="size-4" />, onSelect: () => setLayoutMode("chat") },
+  ];
+
+  // The chat itself: beside the sessions sidebar in Chat mode, docked on the right in IDE mode.
+  const chatPane = (
+              <main data-session-pane className="@container/chatpane flex h-full min-w-0 flex-col overflow-hidden bg-dls-surface max-lg:rounded-none max-lg:border-0 max-lg:shadow-none lg:rounded-[14px] lg:border lg:border-border lg:shadow-[0_8px_24px_rgba(15,23,42,0.06)] dark:lg:shadow-[0_10px_30px_rgba(0,0,0,0.45)] mac:bg-dls-surface/85 mac:backdrop-blur-2xl mac:backdrop-saturate-150">
           {/* The pane `<main>` above already carries the macOS vibrancy blur. A
               second backdrop filter on the header (or on the transcript surface
               below) is invisible — nothing scrolls beneath either — but each
@@ -1596,7 +1513,18 @@ export function SessionPage(props: SessionPageProps) {
               repaints. Keep the pane as the only backdrop surface. */}
           <header className="z-10 flex h-9 shrink-0 items-center justify-between border-b border-border px-3 max-lg:h-12 lg:px-6 mac:titlebar-drag @container/titlebar">
             <div className="flex min-w-0 items-center gap-3">
-              {shellConfig.sidebar ? <SidebarTrigger className="mac:hidden" /> : null}
+              {ideMode ? (
+                <ChatSwitcher
+                  chats={ideChats}
+                  selectedId={props.selectedSessionId}
+                  title={selectedSessionTitle || t("session.default_title")}
+                  onOpen={(sessionId) => openSessionTab(props.selectedWorkspaceId, sessionId)}
+                  onNew={() => void props.sidebar.onCreateTaskInWorkspace(props.selectedWorkspaceId)}
+                  newDisabled={props.sidebar.newTaskDisabled}
+                />
+              ) : null}
+              {shellConfig.sidebar && !ideMode ? <SidebarTrigger className="mac:hidden" /> : null}
+              {editorAvailable && !ideMode && !isMobile && !props.primarySlot && !hasMainContentTakeover ? <LayoutModeToggle mode={layoutMode} onChange={setLayoutMode} /> : null}
               {parentSessionLink && !props.primarySlot && !hasMainContentTakeover ? (
                 <Tooltip>
                   <TooltipTrigger
@@ -1619,7 +1547,7 @@ export function SessionPage(props: SessionPageProps) {
                   <TooltipContent>Back to parent chat</TooltipContent>
                 </Tooltip>
               ) : null}
-              <h1 className="truncate text-[13px] font-medium text-dls-text">
+              <h1 className={cn("truncate text-[13px] font-medium text-dls-text", ideMode && "sr-only")}>
                 {props.primaryTitle
                   ? props.primaryTitle
                   : props.mainContentTitle
@@ -1628,7 +1556,7 @@ export function SessionPage(props: SessionPageProps) {
                   ? t("session.create_or_connect_workspace")
                   : selectedSessionTitle || t("session.default_title")}
               </h1>
-              {!props.primaryTitle && !props.mainContentTitle && !showWorkspaceSetupEmptyState ? (
+              {!props.primaryTitle && !props.mainContentTitle && !showWorkspaceSetupEmptyState && !ideMode ? (
                 // Pinned and archived sessions are listed across workspaces, so
                 // the header names the workspace the open session belongs to.
                 <span
@@ -1636,7 +1564,7 @@ export function SessionPage(props: SessionPageProps) {
                   data-session-header-workspace={workspaceName}
                 >
                   <span aria-hidden="true">·</span>
-                  <span className="max-w-40 truncate">{workspaceName}</span>
+                  <span className="max-w-40 truncate @max-[30rem]/titlebar:max-w-20">{workspaceName}</span>
                 </span>
               ) : null}
               {props.developerMode ? (
@@ -1655,6 +1583,8 @@ export function SessionPage(props: SessionPageProps) {
               <BuildathonChip />
               <DesktopUpdateButton />
               {commandSessionId && props.runtimeWorkspaceId ? (
+                // Undo, redo, status: in the "More actions" menu when the chat is narrow.
+                <div className="hidden items-center gap-1.5 @min-[40rem]/titlebar:flex" data-session-command-controls>
                 <SessionCommandControls
                   workspaceId={props.runtimeWorkspaceId}
                   sessionId={commandSessionId}
@@ -1672,6 +1602,7 @@ export function SessionPage(props: SessionPageProps) {
                     onModelVariantChange: props.surface.onModelVariantChange,
                   } : null}
                 />
+                </div>
               ) : null}
               {!props.primarySlot && findButtonSessionId && !hasMainContentTakeover ? (
                 <Tooltip>
@@ -1680,7 +1611,7 @@ export function SessionPage(props: SessionPageProps) {
                       <Button
                         variant="ghost"
                         size="icon-sm"
-                        className="hidden rounded-xl text-gray-10 transition-colors hover:bg-muted hover:text-foreground lg:inline-flex"
+                        className="hidden rounded-xl text-gray-10 transition-colors hover:bg-muted hover:text-foreground @min-[40rem]/titlebar:inline-flex"
                         aria-label="Find in conversation"
                         onClick={() => useSessionFindStore.getState().openFind({ sessionId: findButtonSessionId })}
                       >
@@ -1698,7 +1629,7 @@ export function SessionPage(props: SessionPageProps) {
                       variant="ghost"
                       size="icon-sm"
                       className={cn(
-                        "hidden rounded-xl text-gray-10 transition-colors hover:bg-muted hover:text-foreground lg:inline-flex",
+                        "hidden rounded-xl text-gray-10 transition-colors hover:bg-muted hover:text-foreground @min-[40rem]/titlebar:inline-flex",
                         sidePanelOpen && "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary",
                       )}
                       aria-label={sidePanelOpen ? "Close side panel" : "Open side panel"}
@@ -1721,7 +1652,7 @@ export function SessionPage(props: SessionPageProps) {
                 <Button
                   variant="secondary"
                   size="sm"
-                  className="hidden lg:inline-flex"
+                  className="hidden @min-[40rem]/titlebar:inline-flex"
                   onClick={openCloudSignIn}
                   title={t("den.signin_title")}
                   aria-label={t("den.signin_title")}
@@ -1736,14 +1667,28 @@ export function SessionPage(props: SessionPageProps) {
                     <Button
                       variant="ghost"
                       size="icon-sm"
-                      className="rounded-xl text-gray-10 transition-colors hover:bg-muted hover:text-foreground lg:hidden"
+                      className={cn("rounded-xl text-gray-10 transition-colors hover:bg-muted hover:text-foreground", !ideMode && "@min-[40rem]/titlebar:hidden")}
                       aria-label="More actions"
                     >
                       <MoreHorizontal size={18} />
                     </Button>
                   }
                 />
-                <DropdownMenuContent align="end" className="w-56">
+                <DropdownMenuContent align="end" className="w-60">
+                  {editorAvailable && !isMobile ? (
+                    <DropdownMenuItem onClick={() => setLayoutMode(ideMode ? "chat" : "ide")} data-menu-layout-toggle>
+                      {ideMode ? <MessageSquare className="size-4" /> : <Code2 className="size-4" />}
+                      <span className="flex-1">{ideMode ? "Switch to Chat layout" : "Switch to IDE layout"}</span>
+                      <span className="text-[11px] text-muted-foreground">{shortcutLabel("Y")}</span>
+                    </DropdownMenuItem>
+                  ) : null}
+                  {ideMode ? (
+                    <DropdownMenuItem onClick={() => useEditorStore.getState().setIdeChatCollapsed(true)}>
+                      <MessageSquareOff className="size-4" />
+                      <span className="flex-1">Hide chat</span>
+                      <span className="text-[11px] text-muted-foreground">{shortcutLabel("H")}</span>
+                    </DropdownMenuItem>
+                  ) : null}
                   {!props.primarySlot && findButtonSessionId && !hasMainContentTakeover ? (
                     <DropdownMenuItem
                       onClick={() => useSessionFindStore.getState().openFind({ sessionId: findButtonSessionId })}
@@ -1797,6 +1742,9 @@ export function SessionPage(props: SessionPageProps) {
                   ) : null}
                 </DropdownMenuContent>
               </DropdownMenu>
+              {ideMode ? (
+                <ChatPanelButton open attention={null} onToggle={() => useEditorStore.getState().setIdeChatCollapsed(true)} />
+              ) : null}
               {props.developerMode ? (
                 <Button
                   variant="ghost"
@@ -2124,7 +2072,7 @@ export function SessionPage(props: SessionPageProps) {
               ) : null}
             </div>
             </ResizablePanel>
-            {props.terminalOpen && !isMobile && !(editorOpen && editorAvailable) ? (
+            {props.terminalOpen && !isMobile && !ideMode ? (
               <>
                 <ResizableHandle />
                 <ResizablePanel defaultSize="280px" minSize="160px" maxSize="55%" className="min-h-0">
@@ -2141,6 +2089,222 @@ export function SessionPage(props: SessionPageProps) {
           )}
 
               </main>
+  );
+
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-[radial-gradient(circle_at_top,rgba(74,111,255,0.12),transparent_42%),var(--app-bg,#0b1020)] text-dls-text max-lg:pt-[env(safe-area-inset-top)] mac:bg-transparent">
+      <SidebarProvider
+        open={sidebarOpen}
+        onOpenChange={setSidebarOpen}
+        className={cn(
+          "relative min-h-0 flex-1 mac:bg-transparent",
+          leftSidebarResizing &&
+            "**:data-[slot=sidebar-container]:transition-none **:data-[slot=sidebar-gap]:transition-none",
+          (!shellConfig.sidebar || ideMode) && "**:data-[slot=sidebar-container]:hidden **:data-[slot=sidebar-gap]:hidden",
+        )}
+        style={sidebarProviderStyle}
+      >
+        <AppSidebar
+          sessionNumberShortcuts={props.sessionNumberShortcuts}
+          workspaceSessionGroups={props.sidebar.workspaceSessionGroups}
+          selectedWorkspaceId={props.sidebar.selectedWorkspaceId}
+          developerMode={props.sidebar.developerMode}
+          selectedSessionId={props.sidebar.selectedSessionId}
+          showSessionActions={Boolean(props.onRenameSession || props.onDeleteSession || props.onArchiveSession)}
+          sessionStatusById={props.sidebar.sessionStatusById}
+          connectingWorkspaceId={props.sidebar.connectingWorkspaceId}
+          workspaceConnectionStateById={props.sidebar.workspaceConnectionStateById}
+          newTaskDisabled={props.sidebar.newTaskDisabled}
+          onSelectWorkspace={props.sidebar.onSelectWorkspace}
+          onOpenSession={openSessionTab}
+          onPrefetchSession={props.sidebar.onPrefetchSession}
+          onCreateTaskInWorkspace={props.sidebar.onCreateTaskInWorkspace}
+          onCreateSplitTaskInWorkspace={props.sidebar.onCreateSplitTaskInWorkspace}
+          onOpenRenameSession={props.onRenameSession ? openRenameModal : undefined}
+          onOpenDeleteSession={props.onDeleteSession ? (sessionId) => {
+            const openDelete = () => {
+              setSessionActionId(sessionId);
+              setDeleteOpen(true);
+            };
+            guardLeave(leavingRunningTurn({ action: "delete", turnRunning: sessionTurnRunning(sessionId) }), openDelete, sessionId);
+          } : undefined}
+          onArchiveSession={props.onArchiveSession ? (sessionId, archived) => {
+            void props.onArchiveSession?.(sessionId, archived);
+          } : undefined}
+          archiveDisabledReason={props.archiveDisabledReason}
+          onOpenCreateGroupModal={(workspaceId) => {
+            setCreateGroupWorkspaceId(workspaceId);
+            setCreateGroupLabel("");
+            setCreateGroupOpen(true);
+          }}
+          onOpenRenameWorkspace={props.sidebar.onOpenRenameWorkspace}
+          onShareWorkspace={props.sidebar.onShareWorkspace}
+          onRevealWorkspace={props.sidebar.onRevealWorkspace}
+          onRecoverWorkspace={props.sidebar.onRecoverWorkspace}
+          onTestWorkspaceConnection={props.sidebar.onTestWorkspaceConnection}
+          onRetryWorkspaceTasks={props.sidebar.onRetryWorkspaceTasks}
+          onEditWorkspaceConnection={props.sidebar.onEditWorkspaceConnection}
+          onForgetWorkspace={props.sidebar.onForgetWorkspace}
+          onOpenCreateWorkspace={props.sidebar.onOpenCreateWorkspace}
+          onOpenSessionSearch={props.sidebar.onOpenSessionSearch}
+          auditClient={props.omnirushServerClient}
+          automationsActive={props.sidebar.automationsActive}
+          automationsNeedAttention={props.sidebar.automationsNeedAttention}
+          onOpenAutomations={props.sidebar.onOpenAutomations}
+          dashboardActive={props.sidebar.dashboardActive}
+          onOpenDashboard={props.sidebar.onOpenDashboard}
+          tasksActive={props.sidebar.tasksActive}
+          tasksRunningCount={props.sidebar.tasksRunningCount}
+          onOpenTasksForWorkspace={props.sidebar.onOpenTasksForWorkspace}
+          onOpenTasks={props.sidebar.onOpenTasks}
+          conversationHistory={{
+            canGoBack: canGoBackInConversationHistory,
+            canGoForward: canGoForwardInConversationHistory,
+            onNavigate: navigateConversationHistory,
+          }}
+          onReorderWorkspaces={props.sidebar.onReorderWorkspaces}
+          onStartResize={startLeftSidebarResize}
+          onOpenAccountSettings={props.onOpenSettings}
+          onOpenExtensions={props.onOpenExtensions}
+          extensionsActive={props.extensionsActive}
+          status={{
+            clientConnected: props.clientConnected,
+            omnirushServerStatus: props.omnirushServerStatus,
+            developerMode: props.developerMode,
+            showConnectionStatus: Boolean(props.selectedWorkspaceId),
+            providerConnectedIds: props.providerConnectedIds,
+            mcpConnectedCount: props.mcpConnectedCount,
+            showSettingsButton: props.statusBar?.showSettingsButton,
+            reloadBusy: props.statusBar?.reloadBusy,
+            reloadError: props.statusBar?.reloadError,
+            omniRushConnectState: props.statusBar?.omniRushConnectState,
+            onSendFeedback: props.onSendFeedback,
+          }}
+        />
+        <SidebarInset
+          className={cn(
+            "min-h-0 overflow-hidden bg-sidebar mac:bg-transparent",
+            // The traffic lights over a collapsed sidebar: room in the chat header. The IDE layout pads its own rail.
+            !ideMode && "mac:[&_header]:transition-[padding-left] mac:[&_header]:duration-200 mac:[&_header]:ease-linear mac:peer-data-[state=collapsed]:[&_header]:pl-34 mac:max-md:[&_header]:pl-34",
+            !shellConfig.sidebar && !ideMode && "mac:[&_header]:pl-34",
+          )}
+        >
+          <div className={cn(
+            "flex min-h-0 flex-1 max-lg:p-0 lg:py-2 lg:pl-2",
+            !sidebarOpen && "mac:lg:pt-0 mac:lg:pl-0",
+            ideMode && "lg:pr-2",
+          )}>
+          {ideMode && props.omnirushServerClient && props.runtimeWorkspaceId ? (
+            // IDE mode: the editor (rail, files, tabs, terminal) on the left, the chat docked on the right.
+            <ResizablePanelGroup
+              key="ide-layout"
+              orientation="horizontal"
+              onLayoutChanged={() => {
+                // Remembered, never fed back into the panel while it is open (that loops on sub-pixel sizes).
+                if (useEditorStore.getState().ideChatCollapsed) return;
+                const size = ideChatPanelRef.current?.getSize();
+                if (size?.inPixels && size.inPixels >= 320 && Math.abs(size.inPixels - useEditorStore.getState().ideChatWidth) >= 2) {
+                  useEditorStore.getState().setIdeChatWidth(size.inPixels);
+                }
+              }}
+              className="min-h-0 flex-1 overflow-hidden lg:rounded-[14px] lg:border lg:border-border lg:shadow-[0_8px_24px_rgba(15,23,42,0.06)] dark:lg:shadow-[0_10px_30px_rgba(0,0,0,0.45)]"
+              data-layout="ide"
+            >
+              <ResizablePanel minSize="420px" className="min-h-0 min-w-0">
+                <LazyEditorPanel
+                  client={props.omnirushServerClient}
+                  workspaceId={props.runtimeWorkspaceId}
+                  workspaceRoot={props.selectedWorkspaceRoot}
+                  sessionId={props.selectedSessionId}
+                  sessionBusy={sessionTurnRunning(props.selectedSessionId)}
+                  opencodeClient={props.opencodeClient ?? null}
+                  terminalOpen={Boolean(props.terminalOpen)}
+                  onToggleTerminal={() => props.onTerminalOpenChange?.(!props.terminalOpen)}
+                  terminal={props.terminalOpen ? (
+                    <TerminalDock
+                      workspaceId={props.selectedWorkspaceId}
+                      workspaceRoot={props.selectedWorkspaceRoot}
+                      isRemoteWorkspace={false}
+                      onClose={() => props.onTerminalOpenChange?.(false)}
+                    />
+                  ) : null}
+                  headerStart={(
+                    <>
+                      <LayoutModeToggle mode={layoutMode} onChange={setLayoutMode} />
+                      <WorkspaceSwitcher
+                        workspaces={props.sidebar.workspaceSessionGroups
+                          .filter((group) => !group.workspace.task)
+                          .map((group) => ({ id: group.workspace.id, name: workspaceTitleForId(props.sidebar.workspaceSessionGroups, group.workspace.id) }))}
+                        selectedId={props.selectedWorkspaceId}
+                        onSelect={(id) => void props.sidebar.onSelectWorkspace(id)}
+                      />
+                    </>
+                  )}
+                  headerEnd={ideChatCollapsed ? (
+                    <ChatPanelButton
+                      open={!ideChatCollapsed}
+                      attention={props.activePermission ? "approval" : sessionTurnRunning(props.selectedSessionId) ? "running" : null}
+                      onToggle={() => useEditorStore.getState().setIdeChatCollapsed(false)}
+                    />
+                  ) : null}
+                  railFoot={<RailDestinations destinations={railDestinations} onOpenSettings={props.onOpenSettings} />}
+                />
+              </ResizablePanel>
+              {ideChatCollapsed ? (
+                // The folded chat: a thin strip on the right edge brings it back.
+                <button
+                  type="button"
+                  aria-label="Show chat"
+                  title={`Show chat (${shortcutLabel("H")})`}
+                  data-chat-strip
+                  onClick={() => useEditorStore.getState().setIdeChatCollapsed(false)}
+                  className={cn(
+                    "w-2 shrink-0 cursor-pointer border-s border-border transition-colors hover:bg-primary/20",
+                    props.activePermission ? "bg-amber-9/60" : "bg-muted/40",
+                  )}
+                />
+              ) : (
+                <>
+                  <ResizableHandle
+                    onDoubleClick={() => {
+                      ideChatPanelRef.current?.resize(`${DEFAULT_IDE_CHAT_WIDTH}px`);
+                      useEditorStore.getState().setIdeChatWidth(DEFAULT_IDE_CHAT_WIDTH);
+                    }}
+                    title="Drag to resize; double-click to reset"
+                  />
+                  <ResizablePanel
+                    panelRef={ideChatPanelRef}
+                    defaultSize={`${useEditorStore.getState().ideChatWidth}px`}
+                    minSize="340px"
+                    maxSize="65%"
+                    className="min-h-0 min-w-0"
+                    data-ide-chat
+                  >
+                    {chatPane}
+                  </ResizablePanel>
+                </>
+              )}
+              {sidePanelOpen ? (
+                // Browser tabs and files the agent opens: beside the chat, as in the Chat layout.
+                <>
+                  <ResizableHandle />
+                  <ResizablePanel defaultSize="420px" minSize="320px" maxSize="50%" className="min-h-0 min-w-0" data-ide-side-panel>
+                    <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden border-s border-border bg-dls-surface">
+                      {sidePanelContent}
+                    </div>
+                  </ResizablePanel>
+                </>
+              ) : null}
+            </ResizablePanelGroup>
+          ) : (
+          <>
+          <ResizablePanelGroup
+            orientation="horizontal"
+            onLayoutChanged={sidePanelOpen ? commitBrowserPanelWidth : undefined}
+            className="min-h-0 flex-1 max-lg:rounded-none lg:rounded-[14px]"
+          >
+            <ResizablePanel minSize={isMobile ? "0px" : "360px"} className="min-w-0">
+              {chatPane}
             </ResizablePanel>
               {sidePanelOpen && !isMobile ? (
               <>
@@ -2164,14 +2328,10 @@ export function SessionPage(props: SessionPageProps) {
               <Button
                 variant="ghost"
                 size="icon-sm"
-                className={cn(
-                  "rounded-xl transition-colors hover:bg-muted hover:text-foreground",
-                  editorOpen && "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary",
-                )}
-                onClick={() => toggleCurrentSidePanel("editor")}
-                title={`Editor (${/Mac/i.test(navigator.platform) ? "⌘⇧E" : "Ctrl+Shift+E"})`}
-                aria-label="Editor"
-                aria-pressed={editorOpen}
+                className="rounded-xl transition-colors hover:bg-muted hover:text-foreground"
+                onClick={() => setLayoutMode("ide")}
+                title={`Open the IDE layout (${shortcutLabel("Y")})`}
+                aria-label="Open the IDE layout"
                 data-editor-rail
               >
                 <Code2 size={15} />
@@ -2214,9 +2374,11 @@ export function SessionPage(props: SessionPageProps) {
               ) : null}
             </Button>
           </aside>
+          </>
+          )}
           </div>
         </SidebarInset>
-        {shellConfig.sidebar ? <SidebarTrigger className="hidden mac:absolute mac:left-[88px] mac:size-8! top-[3px] z-50 mac:flex titlebar-no-drag" /> : null}
+        {shellConfig.sidebar && !ideMode ? <SidebarTrigger className="hidden mac:absolute mac:left-[88px] mac:size-8! top-[3px] z-50 mac:flex titlebar-no-drag" /> : null}
       </SidebarProvider>
 
       {props.providerAuthModal ? <ProviderAuthModal {...props.providerAuthModal} /> : null}

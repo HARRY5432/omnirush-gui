@@ -118,7 +118,9 @@ export function useShellShortcuts(input: UseShellShortcutsInput) {
   //   Cmd/Ctrl+K        -> toggle command palette
   //   Cmd/Ctrl+J        -> toggle terminal panel (matches VS Code)
   //   Cmd/Ctrl+P        -> editor: go to file (opens the editor)
-  //   Cmd/Ctrl+Shift+E  -> show / hide the editor
+  //   Cmd/Ctrl+Shift+E  -> open the IDE layout (files view)
+  //   Cmd/Ctrl+Shift+Y  -> switch layout: Chat / IDE
+  //   Cmd/Ctrl+Shift+H  -> IDE layout: show / hide the chat
   //   Ctrl+Shift+`      -> new terminal tab (matches VS Code; Ctrl on macOS too)
   //   Cmd/Ctrl+F        -> find in current conversation (handled by session surface)
   //   Cmd/Ctrl+Shift+F  -> search every session (titles + messages)
@@ -158,6 +160,16 @@ export function useShellShortcuts(input: UseShellShortcutsInput) {
     if (event.shiftKey && !event.altKey && event.key?.toLowerCase() === "e") {
       event.preventDefault();
       if (!event.repeat) useEditorStore.getState().requestToggle();
+      return;
+    }
+    if (event.shiftKey && !event.altKey && event.key?.toLowerCase() === "y" && isElectronRuntime()) {
+      event.preventDefault();
+      if (!event.repeat) useEditorStore.getState().requestModeToggle();
+      return;
+    }
+    if (event.shiftKey && !event.altKey && event.key?.toLowerCase() === "h" && isElectronRuntime()) {
+      event.preventDefault();
+      if (!event.repeat) useEditorStore.getState().requestChatToggle();
       return;
     }
     if (event.shiftKey && !event.altKey && event.key?.toLowerCase() === "t") {
