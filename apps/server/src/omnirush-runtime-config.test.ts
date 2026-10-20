@@ -41,6 +41,7 @@ const GUARDED = legacyExecutionPermissions(undefined, "guarded");
 import { OMNIRUSH_AGENT_PROMPT } from "./omnirush-agent-prompt.js";
 import { BestPracticesEngineReloads, OMNIRUSH_BEST_PRACTICES, omnirushBestPracticesSkillsDir, waitForBestPracticesReady } from "./best-practices.js";
 import type { ServerConfig } from "./types.js";
+import { providerLockPolicy } from "./provider-lock/provider-lock.mjs";
 
 const roots: string[] = [];
 const cleanups: Array<() => void> = [];
@@ -102,10 +103,14 @@ describe("omnirush runtime config file", () => {
   });
 
   test("every plugin omnirush.ai configures is named as its own, so the engine never holds a project for their install", () => {
-    const parsed = buildOmniRushRuntimeConfigObjectFromSnapshot({ plugin: ["user-plugin@1.0.0"] }, undefined, {}, undefined, undefined, undefined);
+    // Unlocked by the server, the user's plugin is the only one not ours; locked, the app's own only (provider-lock.ts).
+    const unlocked = providerLockPolicy({ providers: { locked: false } });
+    const parsed = buildOmniRushRuntimeConfigObjectFromSnapshot({ plugin: ["user-plugin@1.0.0"] }, undefined, {}, undefined, undefined, undefined, null, [], unlocked);
     const plugins = Array.isArray(parsed.plugin) ? parsed.plugin.map(String) : [];
     const own = new Set(omnirushOwnPluginPaths());
     expect(plugins.filter((plugin) => !own.has(plugin))).toEqual(["user-plugin@1.0.0"]);
+    const locked = buildOmniRushRuntimeConfigObjectFromSnapshot({ plugin: ["user-plugin@1.0.0"] });
+    expect((locked.plugin as string[]).filter((plugin) => !own.has(plugin))).toEqual([]);
     expect([...own].some((plugin) => /omnirush-box\.(?:ts|js)$/.test(plugin))).toBe(true);
   });
 

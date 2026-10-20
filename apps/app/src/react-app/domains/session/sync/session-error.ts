@@ -322,7 +322,9 @@ export function presentOpencodeSessionError(error: unknown, fallback = "Session 
   const kind = sessionErrorKind(fields.name, fields.message, fields.code, fields.responseBody);
   const consoleLink = consoleLinkAction(fields.message);
   const omnirush = sessionOmniRushDetails(error);
-  const fallbackTitle = normalizeSessionError(consoleLink?.text ?? fields.message ?? defaultErrorMessage(fields.name, fallback));
+  // The engine's provider lock text reads as it is, without an error class name before it.
+  const message = fields.message?.replace(/^[A-Za-z]+Error: (?=OmniRush models are unavailable)/, "");
+  const fallbackTitle = normalizeSessionError(consoleLink?.text ?? message ?? defaultErrorMessage(fields.name, fallback));
   return {
     kind,
     title: errorTitle(kind, fallbackTitle),

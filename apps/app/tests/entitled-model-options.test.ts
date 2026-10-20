@@ -4,6 +4,14 @@ import type { DesktopAppRestrictionChecker } from "../src/app/cloud/desktop-app-
 import type { ModelOption } from "../src/app/types";
 import { filterEntitledModelOptions } from "../src/react-app/domains/connections/provider-auth/provider-policy";
 
+import { afterAll as afterAllUnlocked, beforeAll as beforeAllUnlocked } from "bun:test";
+import { setProviderLockState } from "../src/app/lib/provider-lock";
+
+// These cover the app while the server leaves model providers unlocked
+// (providers.locked false); tests/provider-lock.test.ts covers the lock.
+beforeAllUnlocked(() => setProviderLockState({ locked: false }));
+afterAllUnlocked(() => setProviderLockState(null));
+
 function modelOption(providerID: string): ModelOption {
   return {
     providerID,

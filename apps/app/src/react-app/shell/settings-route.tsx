@@ -1,4 +1,5 @@
 /** @jsxImportSource react */
+import { isProviderAllowedByLock, isProviderLocked, providerLockMessage } from "@/app/lib/provider-lock";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, useLocation, useNavigate, useParams } from "react-router";
 import { toast } from "@/components/ui/sonner";
@@ -942,7 +943,7 @@ function SettingsRouteContent(props: SettingsSurfaceProps = {}) {
     if (providerAuthStore.isProviderAddRestricted()) {
       restrictionNotice.show({
         title: t("restrictions.add_custom_providers_disabled_title"),
-        message: t("restrictions.add_custom_providers_disabled_message"),
+        message: isProviderLocked() ? providerLockMessage() : t("restrictions.add_custom_providers_disabled_message"),
       });
       return;
     }
@@ -1233,6 +1234,11 @@ function SettingsRouteContent(props: SettingsSurfaceProps = {}) {
     }
     if (!modelId) {
       setLocalProviderError("Model ID is required.");
+      return;
+    }
+    // The server locks model providers (app/lib/provider-lock.ts): it would refuse this one.
+    if (!isProviderAllowedByLock(input.providerId)) {
+      setLocalProviderError(providerLockMessage());
       return;
     }
 

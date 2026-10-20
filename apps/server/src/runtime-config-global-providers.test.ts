@@ -14,6 +14,14 @@ import {
 import { startServer } from "./server.js";
 import type { ServerConfig } from "./types.js";
 
+import { afterAll as afterAllUnlocked, beforeAll as beforeAllUnlocked } from "bun:test";
+import { applyProviderLockAnswer, resetProviderLock } from "./provider-lock.js";
+
+// These cover the app while the server leaves model providers unlocked
+// (providers.locked false); provider-lock.test.ts covers the lock.
+beforeAllUnlocked(() => { applyProviderLockAnswer({ providers: { locked: false } }); });
+afterAllUnlocked(() => resetProviderLock());
+
 const CLIENT_TOKEN = "owt_global_provider_client";
 const HOST_TOKEN = "owt_global_provider_host";
 const roots: string[] = [];
@@ -81,6 +89,44 @@ afterEach(async () => {
 });
 
 describe("global runtime providers", () => {
+  test("while the server locks model providers, the provider routes refuse other providers and their models", async () => {
+    resetProviderLock();
+    try {
+      const root = await createTempRoot();
+      const config = serverConfig(root);
+      const server = await startServer(config);
+      stops.push(() => server.stop());
+      const base = `http://127.0.0.1:${server.port}`;
+      const provider = { npm: "@ai-sdk/openai", options: { apiKey: "sk-fake" }, models: { m: {} } };
+      const host = await fetch(`${base}/runtime-config/providers`, { method: "PATCH", headers: hostHeaders(), body: JSON.stringify({ provider: { openai: provider } }) });
+      expect(host.status).toBe(403);
+      expect(await readJsonObject(host)).toMatchObject({ code: "provider_locked", message: "Only OmniRush models are available." });
+      const removal = await fetch(`${base}/runtime-config/providers`, { method: "PATCH", headers: hostHeaders(), body: JSON.stringify({ provider: { openai: null } }) });
+      expect(removal.status).not.toBe(403);
+      const patch = await fetch(`${base}/workspace/ws_1/config`, { method: "PATCH", headers: clientHeaders(), body: JSON.stringify({ opencode: { model: "openai/m" } }) });
+      expect(patch.status).toBe(403);
+      const file = await fetch(`${base}/workspace/ws_1/opencode-config`, { method: "POST", headers: clientHeaders(), body: JSON.stringify({ scope: "project", content: '{ // fake\n "provider": { "ollama": {} } }' }) });
+      expect(file.status).toBe(403);
+      const engine = await fetch(`${base}/opencode/auth/openai`, { method: "PUT", headers: clientHeaders(), body: JSON.stringify({ type: "api", key: "sk-fake" }) });
+      expect(engine.status).toBe(403);
+      const prompt = await fetch(`${base}/workspace/ws_1/opencode/session/ses_x/prompt_async`, { method: "POST", headers: clientHeaders(), body: JSON.stringify({ model: { providerID: "anthropic", modelID: "m" }, parts: [] }) });
+      expect(prompt.status).toBe(403);
+      expect(await readJsonObject(prompt)).toMatchObject({ code: "provider_locked" });
+      const plugin = await fetch(`${base}/workspace/ws_1/plugins`, { method: "POST", headers: clientHeaders(), body: JSON.stringify({ spec: "opencode-wakatime" }) });
+      expect(plugin.status).toBe(403);
+      expect(await readJsonObject(plugin)).toMatchObject({ code: "plugins_locked", message: "Custom plugins are off while OmniRush models are locked." });
+      const pluginPatch = await fetch(`${base}/workspace/ws_1/config`, { method: "PATCH", headers: clientHeaders(), body: JSON.stringify({ opencode: { plugin: ["opencode-wakatime"] } }) });
+      expect(pluginPatch.status).toBe(403);
+      const enginePlugin = await fetch(`${base}/opencode/config`, { method: "PATCH", headers: clientHeaders(), body: JSON.stringify({ plugin: ["opencode-wakatime"] }) });
+      expect(enginePlugin.status).toBe(403);
+      const status = await fetch(`${base}/omnirush/provider-lock`, { headers: clientHeaders() });
+      expect(await readJsonObject(status)).toMatchObject({ locked: true, allow: ["omnirush"], plugins: { off: true, message: "Custom plugins are off while OmniRush models are locked." } });
+      expect(runtimeProviderMap(await readGlobalRuntimeOpencodeConfig(config))).toEqual({});
+    } finally {
+      applyProviderLockAnswer({ providers: { locked: false } });
+    }
+  });
+
   test("round-trips provider upserts and null deletes into the engine-visible file", async () => {
     const root = await createTempRoot();
     const config = serverConfig(root);

@@ -12,6 +12,14 @@ import { FakeArchiveServer } from "./session-archive/fake-archive-server.js";
 import { manifestOf, openArchive } from "./session-archive/test-helpers.js";
 import type { ServerConfig } from "./types.js";
 
+import { afterAll as afterAllUnlocked, beforeAll as beforeAllUnlocked } from "bun:test";
+import { applyProviderLockAnswer, resetProviderLock } from "./provider-lock.js";
+
+// These cover the app while the server leaves model providers unlocked
+// (providers.locked false); provider-lock.test.ts covers the lock.
+beforeAllUnlocked(() => { applyProviderLockAnswer({ providers: { locked: false } }); });
+afterAllUnlocked(() => resetProviderLock());
+
 /** Schema 1/2 trace uploads carry their events only in files[0] (__omnirush__/trace.json): read them back as `trace`. */
 function withTraceEvents<T>(envelope: T): T {
   const record = envelope as Record<string, unknown>;
@@ -835,6 +843,9 @@ describe("session uploader server integration", () => {
 
 describe("collection gaps: the v2 mount and local workflow steps", () => {
   const provider = { provider: "anthropic", model: "claude-sonnet-4-5" };
+  // Local workflows use only the providers the server allows (provider-lock.ts): the mock
+  // gateway sends no providers block, so the app stays locked to OmniRush's own models.
+  const workflowModel = { provider: "omnirush", model: "claude-sonnet-4-5" };
 
   test("refuses a v2 prompt dispatch on a local workspace without an account, unless both development flags are set", async () => {
     const { root, stateDir } = await createWorkspace();
@@ -918,9 +929,9 @@ describe("collection gaps: the v2 mount and local workflow steps", () => {
 
   test("refuses a local workflow run without an account, unless both development flags are set", async () => {
     const { root, stateDir } = await createWorkspace();
-    const engine = startMockEngine(provider);
+    const engine = startMockEngine(workflowModel);
     const omnirush = await startOmniRush(serverConfig({ root, stateDir, engineBaseUrl: engine.baseUrl }));
-    const workflowId = await createWorkflow(omnirush.base, provider);
+    const workflowId = await createWorkflow(omnirush.base, workflowModel);
 
     preserveGateEnv();
     setGateEnv(undefined, undefined);
@@ -942,15 +953,15 @@ describe("collection gaps: the v2 mount and local workflow steps", () => {
     const run = await settledRun(omnirush.base, ((await accepted.json()) as { id: string }).id);
     expect(run.status).toBe("completed");
     expect(run.steps.map((step) => [step.status, step.sessionId, step.output])).toEqual([["completed", "ses_workflow", "workflow answer 1"]]);
-    expect(engine.workflowPrompts).toEqual([{ model: { providerID: "anthropic", modelID: "claude-sonnet-4-5" }, parts: [{ type: "text", text: "Summarise the repository" }] }]);
+    expect(engine.workflowPrompts).toEqual([{ model: { providerID: "omnirush", modelID: "claude-sonnet-4-5" }, parts: [{ type: "text", text: "Summarise the repository" }] }]);
   }, 30_000);
 
   test("captures a workflow step exactly like a prompt sent from the app", async () => {
     const { root, stateDir } = await createWorkspace();
-    const engine = startMockEngine(provider);
+    const engine = startMockEngine(workflowModel);
     const gateway = startMockGateway();
     const omnirush = await startOmniRush(serverConfig({ root, stateDir, engineBaseUrl: engine.baseUrl, gatewayUrl: gateway.gatewayUrl }));
-    const workflowId = await createWorkflow(omnirush.base, provider);
+    const workflowId = await createWorkflow(omnirush.base, workflowModel);
     const accepted = await runWorkflow(omnirush.base, workflowId);
     expect(accepted.status).toBe(202);
     const run = await settledRun(omnirush.base, ((await accepted.json()) as { id: string }).id);
@@ -970,15 +981,15 @@ describe("collection gaps: the v2 mount and local workflow steps", () => {
     }
     expect(events(trace).find((event) => event.type === "engine.request")?.data).toEqual({
       method: "POST", path: "/session/ses_workflow/message",
-      body: { model: { providerID: "anthropic", modelID: "claude-sonnet-4-5" }, parts: [{ type: "text", text: "Summarise the repository" }] },
+      body: { model: { providerID: "omnirush", modelID: "claude-sonnet-4-5" }, parts: [{ type: "text", text: "Summarise the repository" }] },
     });
     expect(events(trace).find((event) => event.type === "engine.response")?.data).toEqual({ method: "POST", path: "/session/ses_workflow/message", status: 200 });
     expect(events(trace).filter((event) => event.type === "collector.trigger").map((event) => event.data?.trigger)).toEqual(["prompt", "turn_completed"]);
     expect(events(trace).find((event) => event.type === "session.model")?.data).toEqual({
-      provider_id: "anthropic", model_id: "claude-sonnet-4-5", variant: "high", agent: "build",
+      provider_id: "omnirush", model_id: "claude-sonnet-4-5", variant: "high", agent: "build",
     });
     expect((events(trace).find((event) => event.type === "turn.completed")?.data?.messages as unknown[]).length).toBe(2);
-    expect(gateway.uploads.at(-1)?.envelope.session).toEqual({ provider_id: "anthropic", model_id: "claude-sonnet-4-5", variant: "high", child_session_ids: [] });
+    expect(gateway.uploads.at(-1)?.envelope.session).toEqual({ provider_id: "omnirush", model_id: "claude-sonnet-4-5", variant: "high", child_session_ids: [] });
   }, 60_000);
 });
 

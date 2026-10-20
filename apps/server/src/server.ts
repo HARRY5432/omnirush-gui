@@ -186,6 +186,19 @@ import { rememberServerDefault, watchServerDefault } from "./box/launch.js";
 import { rememberWebSearchSwitch, watchWebSearchSwitch } from "./web-search.js";
 import { createChatTracker, rememberComputerUseSwitch } from "./computer-use/desktop.js";
 import { registerComputerUseRoutes } from "./computer-use/routes.js";
+import {
+  applyProviderLockAnswer,
+  assertConfigWithinLock,
+  assertPluginsUnlocked,
+  assertProviderWritable,
+  assertEngineStartedWithinLock,
+  assertProxiedEngineRequestWithinProviderLock,
+  currentProviderLockPolicy,
+  engineStartedUnlocked,
+  parseJsoncContent,
+  providerLockStatus,
+  watchProviderLock,
+} from "./provider-lock.js";
 import { normalizeBackend } from "./box/backends/index.js";
 import { buildOmniRushRuntimeConfigObject, omnirushGatewayConfigured, omnirushRuntimeConfigFilePath, writeOmniRushRuntimeConfigFile } from "./omnirush-runtime-config.js";
 import { assertMcpAllowed, mcpAllowed, mcpDisabledMessage, mcpPolicyForConfig, refuseAccountLinkedMcp } from "./mcp-policy.js";
@@ -1357,6 +1370,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
   let stopWebSearchWatch: () => void = () => {};
   let stopMcpPolicyWatch: () => void = () => {};
   let stopComputerUseWatch: () => void = () => {};
+  let stopProviderLockWatch: () => void = () => {};
   if (gatewayBroker.enabled) {
     // Read before the first plan and the engine's first config (at most 1.5 s, else the last answer is
     // used until it comes): a switch flipped or rolled back on the server applies at this start.
@@ -1368,9 +1382,20 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
     // The model's own web search (web-search.ts), from the same answer. Strict: a failed read keeps
     // the last answer, while an answer without the block (an older server) turns it off.
     const readWebSearch = gatewayBroker.sessionUploadCapabilities({ strict: true }).then((capabilities) => rememberWebSearchSwitch(runtimeStorageDir(config), capabilities)).catch(() => false);
-    const inTime = await Promise.race([Promise.all([read, readWebSearch]).then(() => true), new Promise<false>((resolvePromise) => setTimeout(() => resolvePromise(false), 1_500).unref?.())]);
+    // The model provider lock (provider-lock.ts), from the same answer. Strict: a failed read (or no
+    // account) keeps it locked; only an answer saying `locked: false` unlocks it, in memory only.
+    const readProviderLock = gatewayBroker.sessionUploadCapabilities({ strict: true }).catch(() => null).then((capabilities) => applyProviderLockAnswer(capabilities));
+    const inTime = await Promise.race([Promise.all([read, readWebSearch, readProviderLock]).then(() => true), new Promise<false>((resolvePromise) => setTimeout(() => resolvePromise(false), 1_500).unref?.())]);
     if (!inTime) void read.then((changed) => (changed ? applyServerBoxDefault(config, boxes) : undefined)).catch(() => undefined);
     if (!inTime) void readWebSearch.then((changed) => (changed ? applyBoxEngineConfig(config, "web_search") : undefined)).catch(() => undefined);
+    if (!inTime) void readProviderLock.then((changed) => (changed ? applyBoxEngineConfig(config, "provider_lock", { restart: true }) : undefined)).catch(() => undefined);
+    // Read again while the app runs: a switch flipped on the server applies without a restart (the
+    // engine config is rewritten and the engine replaced, since its environment carries the lock too).
+    stopProviderLockWatch = watchProviderLock({
+      read: () => gatewayBroker.sessionUploadCapabilities({ strict: true }),
+      apply: () => applyBoxEngineConfig(config, "provider_lock", { restart: true }),
+      everyMs: BOX_DEFAULT_REFRESH_MS,
+    });
     stopWebSearchWatch = watchWebSearchSwitch({
       stateDir: runtimeStorageDir(config),
       read: () => gatewayBroker.sessionUploadCapabilities({ strict: true }),
@@ -1531,7 +1556,9 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
           const actor = await requireClient(request, config, tokens);
           assertOpencodeProxyAllowed(actor, request.method, mount.restPath);
           await managedDesktopPolicy(config).assertRequest(request, mount.restPath, true);
+          await assertProxiedEngineRequestWithinProviderLock(request, mount.restPath);
           const workspace = await resolveWorkspaceWithoutBootstrap(config, mount.workspaceId);
+          assertEngineStartedWithinLock(resolveWorkspaceOpencodeConnection(config, workspace).baseUrl, request.method, mount.restPath);
           await assertWorkspaceOwnsProxiedSessionRead(config, workspace, request.method, mount.restPath);
           proxyService = "opencode";
           proxyBaseUrl = workspace.baseUrl?.trim() || undefined;
@@ -1560,11 +1587,13 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
           const actor = await requireClient(request, config, tokens);
           assertOpencodeProxyAllowed(actor, request.method, mount.restPath);
           await managedDesktopPolicy(config).assertRequest(request, mount.restPath, true);
+          await assertProxiedEngineRequestWithinProviderLock(request, mount.restPath);
           const workspace = await resolveWorkspaceWithoutBootstrap(config, mount.workspaceId);
           const connection = engineV2Preview.connection();
           if (!connection) {
             return finalize(jsonResponse({ error: "engine_v2_preview_not_running" }, 503));
           }
+          assertEngineStartedWithinLock(connection.url, request.method, mount.restPath);
           proxyService = "opencode";
           proxyBaseUrl = connection.url;
           await engineV2Preview.ensureWorkspaceReady(workspace.path);
@@ -1663,8 +1692,10 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
           const actor = await requireClient(request, config, tokens);
           assertOpencodeProxyAllowed(actor, request.method, url.pathname);
           await managedDesktopPolicy(config).assertRequest(request, url.pathname, true);
+          await assertProxiedEngineRequestWithinProviderLock(request, url.pathname);
           proxyService = "opencode";
           const workspace = config.workspaces[0];
+          if (workspace) assertEngineStartedWithinLock(resolveWorkspaceOpencodeConnection(config, workspace).baseUrl, request.method, url.pathname);
           if (workspace) {
             await assertWorkspaceOwnsProxiedSessionRead(config, workspace, request.method, url.pathname);
           }
@@ -1766,6 +1797,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
     stopWebSearchWatch();
     stopMcpPolicyWatch();
     stopComputerUseWatch();
+    stopProviderLockWatch();
     bestPracticesReloads.stop();
     // First, and synchronously: archive part uploads in flight are aborted now, not after the other shutdown steps.
     const captureStopped = capture.stop();
@@ -1859,6 +1891,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
       stopWebSearchWatch();
       stopMcpPolicyWatch();
       stopComputerUseWatch();
+      stopProviderLockWatch();
       const archiveFinals = accountStillStored();
       if (boxes.hasChats() && await Promise.race([archiveFinals.catch(() => false), new Promise<false>((resolvePromise) => setTimeout(() => resolvePromise(false), 1_000).unref?.())])) {
         await boxes.finals({ budgetMs: 10_000 }).catch(() => []);
@@ -2403,6 +2436,12 @@ export async function proxyOpencodeRequest(input: {
   const route = pool?.routeRequest(method, decodeEngineRoutePath(proxyPath)) ?? null;
   const baseUrl = route?.target.baseUrl ??
     (workspace ? resolveWorkspaceOpencodeConnection(input.config, workspace).baseUrl?.trim() ?? "" : "");
+  // The engine the request actually goes to (a draining one owns its sessions), and its fallback.
+  for (const target of [baseUrl, route?.fallback?.baseUrl]) {
+    if (!target) continue;
+    const switching = pool !== null && !pool.isPrimaryUrl(target) && !engineStartedUnlocked(pool.primaryUrl() ?? "");
+    assertEngineStartedWithinLock(target, method, proxyPath, currentProviderLockPolicy(), { switching });
+  }
   if (!baseUrl) {
     throw new ApiError(400, "opencode_unconfigured", "OmniRush base URL is missing for this workspace");
   }
@@ -3139,15 +3178,31 @@ async function applyServerBoxDefault(config: ServerConfig, boxes: ReturnType<typ
  * changed: the engine config file is written again and, when it changed,
  * the managed engine rolls over to it (as for a best-practices change).
  */
-async function applyBoxEngineConfig(config: ServerConfig, reason: string): Promise<{ status: "unchanged" | "applied" | "deferred" | "failed" | "unmanaged" }> {
+async function applyBoxEngineConfig(config: ServerConfig, reason: string, options: { restart?: boolean } = {}): Promise<{ status: "unchanged" | "applied" | "deferred" | "failed" | "unmanaged" }> {
   try {
     const written = await writeOmniRushRuntimeConfigFile(config);
-    if (!written.changed) return { status: "unchanged" };
+    // `restart`: the engine's environment changed too (the provider lock), so a new engine even when the file did not.
+    if (!written.changed && !options.restart) return { status: "unchanged" };
     const pool = enginePoolForConfig(config);
     const workspaces = config.workspaces.filter((workspace) => resolveWorkspaceOpencodeConnection(config, workspace).baseUrl?.trim());
     const workspace = findManagedEngineWorkspace(workspaces) ?? workspaces[0];
+    if (!pool && workspace && options.restart) {
+      // No managed pool (an engine the app does not start): the lock still reaches it through the
+      // rewritten config file and the dispose reload, on every workspace's engine.
+      for (const entry of workspaces) await reloadOpencodeEngine(config, entry).catch(() => undefined);
+      return { status: "applied" };
+    }
     if (!pool || !workspace) return { status: "unmanaged" };
-    const outcome = await pool.requestRollover({ reason, workspace, manual: true });
+    // `restart`: the engine's environment changes too (the provider lock), so a new engine process, never
+    // an in-place reload. If it cannot start, the old engine's prompts are refused (assertEngineStartedWithinLock).
+    // Under the lock, an engine started without it is closed, its running turns aborted, rather than drained.
+    const outcome = await pool.requestRollover({
+      reason,
+      workspace,
+      manual: true,
+      ...(options.restart ? { forceStandby: true } : {}),
+      ...(options.restart && currentProviderLockPolicy().locked ? { retireDrainingIf: engineStartedUnlocked } : {}),
+    });
     return { status: outcome.action === "coalesced" ? "deferred" : outcome.action === "skipped" ? "failed" : "applied" };
   } catch {
     return { status: "failed" };
@@ -4397,6 +4452,17 @@ function createRoutes(
   // The route's pre-2.2.2 path, kept so an engine plugin built before the rename still reports.
   addRoute(routes, "POST", LEGACY_SESSION_UPLOAD_EVENTS_ROUTE, "policy", sessionUploadEvents);
 
+  // The model provider lock (provider-lock.ts): what the app's model pickers and provider screens show.
+  addRoute(routes, "GET", "/omnirush/provider-lock", "client", async () => {
+    // How many plugins of the user's own the lock keeps off (the app tells the user once).
+    let userPlugins = 0;
+    const workspace = config.workspaces.find((entry) => entry.workspaceType !== "remote");
+    if (workspace && currentProviderLockPolicy().locked) {
+      userPlugins = await listPlugins(config, workspace.id, workspace.path, true).then((result) => result.items.length, () => 0);
+    }
+    return jsonResponse(providerLockStatus(currentProviderLockPolicy(), userPlugins));
+  });
+
   // Sub-agent model and effort (omnirush-subagent-model.ts). The app reads
   // and writes the setting; the swarm engine plugin resolves every sub-agent
   // prompt against it with the evaluation token it already holds.
@@ -4584,6 +4650,8 @@ function createRoutes(
     const workspace = resolveEngineRuntimeWorkspace(config);
     const body = await readJsonBody(ctx.request);
     const providerPatch = parseRuntimeProviderPatchPayload(body);
+    // The model provider lock (provider-lock.ts): only removals, or the allowed providers.
+    for (const [providerId, value] of Object.entries(providerPatch)) if (value !== null) assertProviderWritable(providerId);
     const result = await writeGlobalRuntimeOpencodeConfig(config, (current) => ({
       ...current,
       provider: mergeRuntimeProviderUpdate(current.provider, providerPatch),
@@ -4698,6 +4766,8 @@ function createRoutes(
     }
 
     const configPath = resolveOpencodeConfigFilePath(scope, workspace.path);
+    // The model provider lock (provider-lock.ts): a file that adds another provider or names its model is refused.
+    assertConfigWithinLock(parseJsoncContent(content));
     await requireApproval(ctx, {
       workspaceId: workspace.id,
       action: scope === "global" ? "config.global.write" : "config.write",
@@ -4782,6 +4852,9 @@ function createRoutes(
       // rendered from the ENGINE_GLOBAL row only, so a workspace-row write
       // would never reach the engine.
       const providerUpdate = isRecord(provider) ? provider : {};
+      // The model provider lock (provider-lock.ts): no other provider and no model of one.
+      for (const [providerId, value] of Object.entries(providerUpdate)) if (value !== null) assertProviderWritable(providerId);
+      assertConfigWithinLock(topLevelUpdates);
       if (Object.keys(providerUpdate).length) await managedDesktopPolicy(config).assert("provider");
       if (Object.keys(providerUpdate).length) {
         const providerResult = await writeGlobalRuntimeOpencodeConfig(config, (current) => ({
@@ -4936,6 +5009,8 @@ function createRoutes(
     ensureWritable(config);
     requireClientScope(ctx, "collaborator");
     const workspace = await resolveWorkspace(config, ctx.params.id);
+    // User plugins are off while model providers are locked (provider-lock.ts).
+    assertPluginsUnlocked();
     const body = await readJsonBody(ctx.request);
     const spec = String(body.spec ?? "");
     const normalized = normalizePluginSpec(spec);

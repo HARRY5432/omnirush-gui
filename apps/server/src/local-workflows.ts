@@ -10,6 +10,7 @@ import type { Actor, ServerConfig, WorkspaceInfo } from "./types.js";
 import { managedDesktopPolicy } from "./managed-desktop-policy.js";
 import type { createOpencodeClient } from "@opencode-ai/sdk/v2/client";
 import { writeFileAtomic } from "./atomic-write.js";
+import { assertProviderAllowed, providerAllowed } from "./provider-lock.js";
 
 type Engine = ReturnType<typeof createOpencodeClient>;
 type EngineFactory = (config: ServerConfig, workspace: WorkspaceInfo, options?: { sessionId?: string }) => Engine;
@@ -136,7 +137,7 @@ export class LocalWorkflowService {
       if (result.error || !result.data) throw new Error("Model catalog unavailable");
       const all = result.data.all;
       const connected = new Set(result.data.connected); const output: LocalAvailableModel[] = [];
-      for (const provider of all) if (connected.has(provider.id)) for (const [modelID, model] of Object.entries(provider.models ?? {})) output.push({ providerID: provider.id, modelID, name: typeof model.name === "string" ? model.name : modelID, providerName: provider.name });
+      for (const provider of all) if (connected.has(provider.id) && providerAllowed(provider.id)) for (const [modelID, model] of Object.entries(provider.models ?? {})) output.push({ providerID: provider.id, modelID, name: typeof model.name === "string" ? model.name : modelID, providerName: provider.name });
       const value = { models: output.sort((a, b) => `${a.providerName}${a.modelID}`.localeCompare(`${b.providerName}${b.modelID}`)), error: null };
       this.modelCache.set(workspace.id, { at: Date.now(), value });
       return value;
@@ -244,6 +245,8 @@ export class LocalWorkflowService {
         this.checkActive(active);
         await managedDesktopPolicy(this.config).assert("sync");
         await managedDesktopPolicy(this.config).assert("model", { ...decision.model });
+        // The model provider lock (provider-lock.ts): only the allowed providers' models.
+        assertProviderAllowed(decision.model.providerID);
         this.checkActive(active);
         await this.updateStep(workspace, run.id, index, { decision });
         // The gate can close mid-run (sign-out); check again before creating a session it would orphan.

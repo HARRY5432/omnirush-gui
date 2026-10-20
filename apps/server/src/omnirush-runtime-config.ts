@@ -59,6 +59,7 @@ import {
 } from "./omnirush-model-catalog.js";
 import { writeFileAtomic } from "./atomic-write.js";
 import { webSearchSetting, type WebSearchSwitch } from "./web-search.js";
+import { currentProviderLockPolicy, lockEngineConfig, type ProviderLockPolicy } from "./provider-lock.js";
 import { boxServiceFor } from "./box/desktop.js";
 import { engineConfig as withBoxEngineConfig } from "./box/launch.js";
 import {
@@ -69,6 +70,7 @@ import {
   removeLegacyBestPracticesSkills,
   writeBestPracticesSkills,
 } from "./best-practices.js";
+import { gatewayUrlAllowed } from "./release-guard.js";
 
 const INTERNAL_PROVIDER_ID = "omnirush";
 
@@ -80,6 +82,8 @@ function resolveInternalGatewayRuntime(
   env: NodeJS.ProcessEnv = process.env,
 ): InternalGatewayRuntime | undefined {
   const baseUrl = (env.OMNIRUSH_ENGINE_GATEWAY_URL ?? env.OMNIRUSH_GATEWAY_URL)?.trim().replace(/\/+$/, "");
+  // A release build's engine talks to omnirush.ai only (release-guard.ts); another address is not used.
+  if (baseUrl && !gatewayUrlAllowed(baseUrl)) return undefined;
   const accessToken = env.OMNIRUSH_ACCESS_TOKEN?.trim();
   if (!baseUrl || !accessToken) return undefined;
 
@@ -231,6 +235,7 @@ export function buildOmniRushRuntimeConfigObjectFromSnapshot(
   bestPracticesDir?: string,
   webSearch: WebSearchSwitch | null = null,
   userSkillPaths: string[] = [],
+  providerLock: ProviderLockPolicy = currentProviderLockPolicy(),
 ): Record<string, unknown> {
   const disabledProviders = runtimeDisabledProviderList(runtimeConfig);
   // OMNIRUSH_APPROVALS in the server environment wins over the persisted setting.
@@ -241,7 +246,7 @@ export function buildOmniRushRuntimeConfigObjectFromSnapshot(
   // The global row's MCP entries are the account-linked Connect server, which
   // this app does not run; a project's own servers reach the engine through
   // its config files and the MCP plugin (opencode-plugins/omnirush-mcp-policy.ts).
-  const { managedPolicy: _managedPolicy, approvals: _approvals, bestPractices: _bestPractices, agentAssist: _agentAssist, mcp: _mcp, ...engineConfig } = runtimeConfig;
+  const { managedPolicy: _managedPolicy, approvals: _approvals, bestPractices: _bestPractices, agentAssist: _agentAssist, mcp: _mcp, provider: _rowProvider, ...engineConfig } = runtimeConfig;
   // Code diagnostics: the main languages' servers on, the rest off; the engine default (none) while off.
   const lsp = agentAssistFlags(runtimeConfig, env).diagnostics ? agentAssistLspConfig() : undefined;
   const enabled = bestPracticesEnabled(runtimeConfig);
@@ -251,22 +256,26 @@ export function buildOmniRushRuntimeConfigObjectFromSnapshot(
     ...(skillsDir ? [skillsDir] : []),
     ...(enabled && bestPracticesDir ? [bestPracticesDir] : []),
   ], userSkillPaths);
+  // The app's own provider comes from the internal gateway only: an `omnirush` entry in the stored row is never used.
+  const { [INTERNAL_PROVIDER_ID]: _storedOwnProvider, ...storedProviders } = runtimeProviderMap(runtimeConfig);
   const provider = {
-    ...runtimeProviderMap(runtimeConfig),
+    ...storedProviders,
     ...(internalGateway
       ? { [INTERNAL_PROVIDER_ID]: internalGatewayProvider(internalGateway, catalog, webSearch) }
       : {}),
   };
   const ownProviders = Object.keys(provider).filter((id) => /^(?:lpr_|omnirush$)/i.test(id));
-  // Signed in, the model picker lists only omnirush.ai (and org-assigned)
-  // models: the engine would otherwise also load providers from the user's
-  // own opencode config, whose models bypass the gateway and whose errors
-  // name upstream relays. OMNIRUSH_ALLOW_OTHER_PROVIDERS=1 or an org policy
-  // with allowCustomProviders: true lets them back in.
+  // Only when the server unlocked providers (provider-lock.ts): signed in,
+  // the model picker lists only omnirush.ai (and org-assigned) models: the
+  // engine would otherwise also load providers from the user's own opencode
+  // config, whose models bypass the gateway and whose errors name upstream
+  // relays. OMNIRUSH_ALLOW_OTHER_PROVIDERS=1 or an org policy with
+  // allowCustomProviders: true lets them back in. While locked, none of them
+  // does: lockEngineConfig() below keeps only the allowed providers.
   const onlyOwnProviders = ownProviders.length > 0
     && env.OMNIRUSH_ALLOW_OTHER_PROVIDERS !== "1"
     && runtimeConfig.managedPolicy?.allowCustomProviders !== true;
-  return {
+  return withoutEmptyProviderMap(lockEngineConfig({
     ...engineConfig,
     ...(internalGateway
       ? { model: `${INTERNAL_PROVIDER_ID}/${omnirushDefaultModelId(catalog)}` }
@@ -332,7 +341,9 @@ export function buildOmniRushRuntimeConfigObjectFromSnapshot(
     },
     plugin: [
       ...omnirushLeadingPluginPaths(),
-      ...runtimePluginList(runtimeConfig),
+      // The user's plugins only while model providers are unlocked (provider-lock.ts): locked, the
+      // engine loads the app's own plugins and built-ins only.
+      ...(providerLock.locked ? [] : runtimePluginList(runtimeConfig)),
       // This must be last: it applies the server's MCP list to the final
       // configuration, after every other plugin.
       omnirushMcpPolicyPluginPath(),
@@ -340,7 +351,14 @@ export function buildOmniRushRuntimeConfigObjectFromSnapshot(
     ...(disabledProviders.length ? { disabled_providers: disabledProviders } : {}),
     ...(lsp ? { lsp } : {}),
     ...(Object.keys(provider).length ? { provider } : {}),
-  };
+  }, providerLock).config);
+}
+
+/** A provider map the lock emptied is left out, as when there was none. */
+function withoutEmptyProviderMap(config: Record<string, unknown>): Record<string, unknown> {
+  if (!isRecord(config.provider) || Object.keys(config.provider).length) return config;
+  const { provider: _provider, ...rest } = config;
+  return rest;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

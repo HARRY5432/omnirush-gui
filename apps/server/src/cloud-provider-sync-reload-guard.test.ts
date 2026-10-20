@@ -7,6 +7,14 @@ import { clearEnginePoolForConfig, setEnginePoolForConfig, type EnginePool } fro
 import { startServer } from "./server.js";
 import type { ServerConfig } from "./types.js";
 
+import { afterAll as afterAllUnlocked, beforeAll as beforeAllUnlocked } from "bun:test";
+import { applyProviderLockAnswer, resetProviderLock } from "./provider-lock.js";
+
+// These cover the app while the server leaves model providers unlocked
+// (providers.locked false); provider-lock.test.ts covers the lock.
+beforeAllUnlocked(() => { applyProviderLockAnswer({ providers: { locked: false } }); });
+afterAllUnlocked(() => resetProviderLock());
+
 /**
  * Regression tests for the "aborted messages / provider header-timeout storm"
  * class of bugs (support reports 2026-08-07):

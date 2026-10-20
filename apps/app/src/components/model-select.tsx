@@ -1,5 +1,6 @@
 "use client";
 
+import { useProviderLock } from "@/app/lib/provider-lock";
 import * as React from "react";
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Settings2, Star } from "lucide-react";
 
@@ -275,7 +276,8 @@ export function ModelSelect({
     [behaviorLabel, behaviorOptions, behaviorValue, catalogOptions, value],
   );
   const checkDesktopRestriction = useCheckDesktopRestriction();
-  const canAddProviders = !checkDesktopRestriction({ restriction: "allowCustomProviders" });
+  const providerLock = useProviderLock();
+  const canAddProviders = !providerLock.locked && !checkDesktopRestriction({ restriction: "allowCustomProviders" });
   const shortcutOs = resolveThinkingModeShortcutOs(
     platform.os,
     typeof navigator === "undefined" ? "" : navigator.platform,

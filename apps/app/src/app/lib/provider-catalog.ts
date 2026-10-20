@@ -1,3 +1,5 @@
+import { isProviderAllowedByLock, isProviderLocked } from "./provider-lock";
+
 const DIRECT_PROVIDER_IDS = [
   "openai",
   "anthropic",
@@ -23,6 +25,8 @@ export function isDirectModelProvider(providerID: string) {
 const OTHER_PROVIDERS_ALLOWED = import.meta.env.VITE_OMNIRUSH_ALLOW_OTHER_PROVIDERS === "1";
 
 export function isSupportedModelProvider(providerID: string, allowOtherProviders = OTHER_PROVIDERS_ALLOWED) {
+  // While the server locks model providers (provider-lock.ts), only the ones it allows, whatever the build says.
+  if (isProviderLocked()) return isProviderAllowedByLock(providerID);
   return isInternalModelProvider(providerID) || (allowOtherProviders && isDirectModelProvider(providerID));
 }
 

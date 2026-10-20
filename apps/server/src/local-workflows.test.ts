@@ -7,6 +7,14 @@ import { ApiError } from "./errors.js";
 import { LocalWorkflowService, type LocalWorkflowPromptBody, type LocalWorkflowPromptDispatcher } from "./local-workflows.js";
 import type { ServerConfig, WorkspaceInfo } from "./types.js";
 
+import { afterAll as afterAllUnlocked, beforeAll as beforeAllUnlocked } from "bun:test";
+import { applyProviderLockAnswer, resetProviderLock } from "./provider-lock.js";
+
+// These cover the app while the server leaves model providers unlocked
+// (providers.locked false); provider-lock.test.ts covers the lock.
+beforeAllUnlocked(() => { applyProviderLockAnswer({ providers: { locked: false } }); });
+afterAllUnlocked(() => resetProviderLock());
+
 /**
  * A workflow step is a prompt dispatch: it must reach the engine only through
  * the injected dispatcher (the server's gated, captured engine proxy), never

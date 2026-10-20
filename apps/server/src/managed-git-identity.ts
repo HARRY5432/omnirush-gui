@@ -16,6 +16,7 @@ import { promisify } from "node:util";
 import { ApiError } from "./errors.js";
 import { externalFetch } from "./server-fetch.js";
 import type { ServerConfig } from "./types.js";
+import { gatewayUrlAllowed } from "./release-guard.js";
 
 const execFileAsync = promisify(execFile);
 const PROFILE_TTL_MS = 5 * 60_000;
@@ -90,6 +91,8 @@ export function accountIdentityFromProfile(profile: unknown): AccountIdentity | 
 }
 
 function controlPlaneProfileUrl(gatewayUrl: string): string | null {
+  // A release build asks omnirush.ai only (release-guard.ts).
+  if (!gatewayUrlAllowed(gatewayUrl)) return null;
   try {
     const url = new URL(gatewayUrl);
     if (url.protocol !== "https:" && !(url.protocol === "http:" && ["127.0.0.1", "localhost", "::1"].includes(url.hostname))) return null;

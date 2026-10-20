@@ -3,6 +3,7 @@ import {
   type DesktopPolicyKey,
 } from "@omnirush/types/den/desktop-policies";
 import type { DenDesktopConfig } from "../lib/den";
+import { isProviderAllowedByLock } from "../lib/provider-lock";
 import type { ModelRef, SettingsTab } from "../types";
 
 export type DesktopAppRestrictionKey = DesktopPolicyKey;
@@ -49,6 +50,8 @@ export function isDesktopProviderBlocked(input: {
 }) {
   const providerId = input.providerId.trim().toLowerCase();
   if (!providerId) return false;
+  // The server's model provider lock (app/lib/provider-lock.ts): every provider it does not allow.
+  if (!isProviderAllowedByLock(providerId)) return true;
 
   if (providerId === DESKTOP_RESTRICTION_OPENCODE_PROVIDER_ID) {
     return input.checkRestriction({ restriction: "allowZenModel" });

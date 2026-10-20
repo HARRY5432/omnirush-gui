@@ -1,0 +1,4 @@
+# The model-provider lock module: the same files in omnirush-cli (src/provider-lock/) and omnirush-gui (apps/server/src/provider-lock/).
+# A change to one must be ported to the other and this list updated in both.
+c9a83c525b2273e9d6ef0265c684e6c98726371b91778db1d031caf42eb3e213  provider-lock.mjs
+c44dcf519ebaff78013e192961f987db1ebf15f36f6dabbf7091f290f1e0dd32  provider-lock.d.mts

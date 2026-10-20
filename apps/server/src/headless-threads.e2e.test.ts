@@ -8,6 +8,14 @@ import { createHeadlessThreadClient } from "@omnirush/headless-threads";
 import { startServer } from "./server.js";
 import type { ServerConfig } from "./types.js";
 
+import { afterAll as afterAllUnlocked, beforeAll as beforeAllUnlocked } from "bun:test";
+import { applyProviderLockAnswer, resetProviderLock } from "./provider-lock.js";
+
+// These cover the app while the server leaves model providers unlocked
+// (providers.locked false); provider-lock.test.ts covers the lock.
+beforeAllUnlocked(() => { applyProviderLockAnswer({ providers: { locked: false } }); });
+afterAllUnlocked(() => resetProviderLock());
+
 // These tests dispatch prompts through a local workspace without an omnirush.ai
 // account. The server's sign-in gate refuses that unless both development
 // flags are set; the gate itself is covered by session-uploader.server.e2e.test.ts.

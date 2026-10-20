@@ -3,9 +3,12 @@ import { realpathSync } from "node:fs";
 import net from "node:net";
 import { randomUUID } from "node:crypto";
 import { globalOpencodeConfigDir } from "@omnirush/paths";
+import { currentProviderLockPolicy, finishEngineEnv, noteEngineStarted } from "./provider-lock.js";
+import { providerLockEnv, withProviderLockEnv } from "./provider-lock/provider-lock.mjs";
 import { engineDataEnv } from "./engine-data-home.js";
 import { repairEngineStoreBeforeStart } from "./engine-store-repair.js";
 import { engineInstallLogEnv } from "./install-log-host.js";
+import { releaseEngineBinary } from "./release-guard.js";
 
 export type ManagedChildProcess = {
   pid?: number;
@@ -210,7 +213,8 @@ async function startManagedOpencodeServer(
   const username = randomSecret();
   const password = randomSecret();
   const args = ["serve", "--hostname", hostname, "--port", String(port), "--cors", "*"];
-  const command = options.bin?.trim() || "opencode";
+  // A release build runs only the engine it bundles (release-guard.ts): no other path, no PATH lookup.
+  const command = (await releaseEngineBinary(options.bin?.trim() || undefined)) || "opencode";
   // The engine's in-process npm installs use Arborist, which audits by default.
   // That audit POST depends on npm's advisories endpoint, which has been observed
   // to hang for the full five-minute registry timeout, so first-run must not wait.
@@ -220,12 +224,17 @@ async function startManagedOpencodeServer(
   // OmniRush.ai's engine build keeps its own global config in
   // ~/.config/omnirush; the app's global skills, agents and config live in
   // the opencode global config directory, so the engine reads that one too.
-  const baseEnv = { ...process.env, ...options.env };
+  // Model providers (provider-lock.ts): while locked, the inherited
+  // environment loses its config injection keys first (the app's own values
+  // below stay), and the engine gets the lock's keys last.
+  const providerLock = currentProviderLockPolicy();
+  const inheritedEnv = withProviderLockEnv(process.env, providerLock);
+  const baseEnv = { ...inheritedEnv, ...options.env };
   if (!baseEnv.OPENCODE_CONFIG_DIR?.trim()) engineEnvDefaults.OPENCODE_CONFIG_DIR = globalOpencodeConfigDir({ env: baseEnv });
   // The desktop's engine keeps its sessions apart from the CLI's (engine-data-home.ts).
   const dataEnv = engineDataEnv(baseEnv) ?? {};
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
+  const env: NodeJS.ProcessEnv = finishEngineEnv({
+    ...inheritedEnv,
     ...engineEnvDefaults,
     ...options.env,
     ...dataEnv,
@@ -237,7 +246,7 @@ async function startManagedOpencodeServer(
     OPENCODE_AUTO_SHARE: "false",
     OPENCODE_SERVER_USERNAME: username,
     OPENCODE_SERVER_PASSWORD: password,
-  };
+  }, providerLock);
   // The managed engine needs its own provider environment, but never the key
   // that decrypts OmniRush.ai-owned OAuth credentials.
   delete env.OMNIRUSH_ENCRYPTION_KEY;
@@ -248,10 +257,11 @@ async function startManagedOpencodeServer(
     ...engineEnvDefaults,
     ...(options.env ?? {}),
     ...dataEnv,
+    ...providerLockEnv(providerLock).set,
     OPENCODE_SERVER_USERNAME: username,
     OPENCODE_SERVER_PASSWORD: password,
   })
-    .filter((entry): entry is [string, string] => entry[0] !== "OPENCODE_PURE" && typeof entry[1] === "string")
+    .filter((entry): entry is [string, string] => entry[0] !== "OPENCODE_PURE" && typeof entry[1] === "string" && env[entry[0]] === entry[1])
     .map(([name, value]) => ({
       name,
       value: SECRET_ENV_PATTERN.test(name) ? "<redacted>" : value,
@@ -263,7 +273,7 @@ async function startManagedOpencodeServer(
   await repairEngineStoreBeforeStart(env, (level, message, attributes) => {
     console[level === "warn" ? "warn" : "info"](`[engine-store] ${message}`, attributes ?? {});
   });
-  const child: ChildProcess = spawn(options.bin?.trim() || "opencode", args, {
+  const child: ChildProcess = spawn(command, args, {
     cwd: options.cwd,
     env,
     stdio: ["ignore", "pipe", "pipe"],
@@ -311,6 +321,8 @@ async function startManagedOpencodeServer(
     throw error;
   }
 
+  // Model providers (provider-lock.ts): whether this engine started locked.
+  noteEngineStarted(url, providerLock);
   return {
     url,
     username,

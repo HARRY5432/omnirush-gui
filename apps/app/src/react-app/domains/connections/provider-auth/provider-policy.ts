@@ -3,6 +3,7 @@ import {
   isDesktopProviderBlocked,
   type DesktopAppRestrictionChecker,
 } from "@/app/cloud/desktop-app-restrictions";
+import { isProviderAllowedByLock, isProviderLocked } from "@/app/lib/provider-lock";
 import type { ModelOption, ModelRef } from "@/app/types";
 import { isCloudManagedProviderKey } from "./cloud-provider-config";
 
@@ -29,6 +30,8 @@ export type ModelEntitlementOption = Pick<ModelOption, "providerID" | "modelID">
 export function isProviderAllowedByDesktopPolicy(input: ProviderDesktopPolicyInput) {
   const providerId = input.providerId.trim();
   if (!providerId) return false;
+  // The server's model provider lock (app/lib/provider-lock.ts) comes before any organization setting.
+  if (!isProviderAllowedByLock(providerId)) return false;
 
   if (
     isDesktopProviderBlocked({
@@ -45,6 +48,8 @@ export function isProviderAllowedByDesktopPolicy(input: ProviderDesktopPolicyInp
 }
 
 export function isProviderAddRestrictedByDesktopPolicy(input: ProviderAddRestrictionInput) {
+  // While locked no provider is added: the allowed ones are OmniRush's own and need no sign-in here.
+  if (isProviderLocked()) return true;
   const restrictToCloud = input.checkRestriction({ restriction: "allowCustomProviders" });
   if (!restrictToCloud) return false;
 

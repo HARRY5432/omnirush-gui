@@ -4,6 +4,14 @@ import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { resolveOpencodeModelsEnv, resolveOpencodeModelsUrl } from "./opencode-models-url.js";
 
+import { afterAll as afterAllUnlocked, beforeAll as beforeAllUnlocked } from "bun:test";
+import { applyProviderLockAnswer, resetProviderLock } from "./provider-lock.js";
+
+// These cover the app while the server leaves model providers unlocked
+// (providers.locked false); provider-lock.test.ts covers the lock.
+beforeAllUnlocked(() => { applyProviderLockAnswer({ providers: { locked: false } }); });
+afterAllUnlocked(() => resetProviderLock());
+
 function restoreProcessEnv(name: string, value: string | undefined): void {
   if (value === undefined) {
     delete process.env[name];

@@ -33,9 +33,11 @@ import { v1Messages, v1Session, type V1Message } from "./shapes.js";
 import { isEngine2Store, listEngine2Sessions, readEngine2Session, type Engine2StoredSession } from "./store.js";
 import { isRecord, num, record, str, type JsonRecord } from "./util.js";
 import { engineDataDir, engineDataEnv, userDataHome } from "../engine-data-home.js";
+import { finishEngineEnv } from "../provider-lock.js";
 
 export { ENGINE2_IMPORT_MANIFEST } from "./imported.js";
 import { ENGINE2_IMPORT_MANIFEST } from "./imported.js";
+import { releaseEngineBinary } from "../release-guard.js";
 const MAX_ATTEMPTS = 3;
 const IMPORT_TIMEOUT_MS = 120_000;
 const LOCK_STALE_MS = 30 * 60_000;
@@ -235,6 +237,8 @@ function importEnv(env: NodeJS.ProcessEnv, configDir: string): NodeJS.ProcessEnv
   const out: NodeJS.ProcessEnv = {};
   for (const [name, value] of Object.entries(env)) if (typeof value === "string" && !SECRET_ENV.test(name)) out[name] = value;
   delete out.OPENCODE_CONFIG_CONTENT;
+  // Model providers (provider-lock.ts): the lock's keys; the import's own config folder below stays.
+  finishEngineEnv(out);
   out.OPENCODE_CONFIG = join(configDir, "opencode.json");
   out.OPENCODE_CONFIG_DIR = configDir;
   out.OPENCODE_DISABLE_PROJECT_CONFIG = "1";
@@ -347,7 +351,8 @@ export async function importEngine2Sessions(options: Engine2ImportOptions): Prom
       }
       const file = join(work, `${id}.json`);
       writeFileSync(file, JSON.stringify(document), "utf8");
-      const run = await runImport(options.bin, file, directory, env, options.timeoutMs ?? IMPORT_TIMEOUT_MS);
+      // A release build runs only the engine it bundles (release-guard.ts).
+      const run = await runImport((await releaseEngineBinary(options.bin)) ?? options.bin, file, directory, env, options.timeoutMs ?? IMPORT_TIMEOUT_MS);
       rmSync(file, { force: true });
       if (run.ok && run.output.includes(`Imported session: ${id}`)) {
         manifest.imported[id] = { at: Date.now(), messages: document.messages.length, from: `opencode ${String(document.info.version ?? "2.x")}` };

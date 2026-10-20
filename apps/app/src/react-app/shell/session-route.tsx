@@ -1,4 +1,5 @@
 /** @jsxImportSource react */
+import { isProviderLocked, providerLockMessage } from "@/app/lib/provider-lock";
 import { useEditorStore } from "../domains/session/editor/editor-store";
 import { isElectronRuntime } from "../../app/utils";
 import {
@@ -2705,7 +2706,7 @@ export function SessionRoute() {
         : undefined;
       const preferred = typeof providerId === "string" ? providerId.trim() : undefined;
       if (sessionProviderAuthStore.isProviderAddRestricted(preferred)) {
-        return { ok: false, error: t("providers.custom_providers_disabled") };
+        return { ok: false, error: isProviderLocked() ? providerLockMessage() : t("providers.custom_providers_disabled") };
       }
       await sessionProviderAuthStore.openProviderAuthModal(
         preferred ? { preferredProviderId: preferred } : undefined,
@@ -2719,7 +2720,7 @@ export function SessionRoute() {
     if (sessionProviderAuthStore.isProviderAddRestricted()) {
       restrictionNotice.show({
         title: t("restrictions.add_custom_providers_disabled_title"),
-        message: t("restrictions.add_custom_providers_disabled_message"),
+        message: isProviderLocked() ? providerLockMessage() : t("restrictions.add_custom_providers_disabled_message"),
       });
       return;
     }

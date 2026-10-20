@@ -4,6 +4,7 @@ import { Cpu } from "lucide-react";
 import { t } from "../../../../i18n";
 import { Button } from "@/components/ui/button";
 import { TextInput } from "../../../design-system/text-input";
+import { PLUGINS_LOCKED_MESSAGE, useProviderLock } from "@/app/lib/provider-lock";
 
 // Explicit, prop-driven shape of the extensions store. The Solid
 // PluginsView pulled this from useExtensions(); in React we pass it
@@ -59,6 +60,8 @@ export type PluginsViewProps = {
 
 export function PluginsView(props: PluginsViewProps) {
   const { extensions } = props;
+  // No user plugin is added while OmniRush models are locked (app/lib/provider-lock.ts); removing stays possible.
+  const pluginsLocked = useProviderLock().locked;
   const scope = extensions.pluginScope;
   return (
     <section className="space-y-6 max-w-3xl w-full">
@@ -69,6 +72,9 @@ export function PluginsView(props: PluginsViewProps) {
               {t("plugins.title")}
             </div>
             <div className="text-xs text-gray-10">{t("plugins.desc")}</div>
+            {pluginsLocked ? (
+              <div className="text-xs text-gray-11" data-testid="plugins-locked-notice">{PLUGINS_LOCKED_MESSAGE}</div>
+            ) : null}
           </div>
           <div className="flex items-center gap-2">
             <Button
@@ -168,6 +174,7 @@ export function PluginsView(props: PluginsViewProps) {
                         disabled={
                           props.busy ||
                           isInstalled ||
+                          pluginsLocked ||
                           !props.canEditPlugins ||
                           (scope === "project" &&
                             !props.selectedWorkspaceRoot.trim())
@@ -297,6 +304,7 @@ export function PluginsView(props: PluginsViewProps) {
               onClick={() => extensions.addPlugin()}
               disabled={
                 props.busy ||
+                pluginsLocked ||
                 !extensions.pluginInput().trim() ||
                 !props.canEditPlugins
               }

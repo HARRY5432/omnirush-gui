@@ -452,6 +452,7 @@ export class EnginePool {
     manual: boolean;
     awaitPostRefreshSync: boolean;
     forceStandby: boolean;
+    retireDrainingIf?: (baseUrl: string) => boolean;
   } | null = null;
   private lastSpawnAt = 0;
   private consecutiveConnectionFailures = 0;
@@ -730,6 +731,34 @@ export class EnginePool {
     return { sessions: [...sessions], unknown };
   }
 
+  /** Whether `baseUrl` is the engine new work goes to (not a draining one). */
+  isPrimaryUrl(baseUrl: string): boolean {
+    return this.isPrimaryEndpoint(baseUrl);
+  }
+
+  /**
+   * Close draining engines now instead of letting their runs finish: their
+   * running turns are aborted first. For a change the old engine must not keep
+   * serving under (the provider lock); `shouldRetire` picks the engines by URL.
+   */
+  async retireDraining(shouldRetire: (baseUrl: string) => boolean, reason: string): Promise<number> {
+    const targets = this.generations.filter(
+      (entry): entry is Generation & { status: "draining" } => entry.status === "draining" && shouldRetire(entry.handle.url),
+    );
+    for (const generation of targets) {
+      const sessions = new Set([
+        ...(this.activeSessionsByGeneration.get(generation.id) ?? []),
+        ...await this.nonIdleSessionIds(generation).catch(() => [] as string[]),
+      ]);
+      for (const sessionId of sessions) {
+        await this.abortSession(generation, sessionId, { source: "engine_pool.retire_draining", reason }).catch(() => undefined);
+      }
+      if (sessions.size > 0) await new Promise((resolve) => setTimeout(resolve, abortSettleMs()));
+      await this.retire(generation, "forced");
+    }
+    return targets.length;
+  }
+
   /** Provider sync treats an active drain as busy so it defers instead of parking on waitForDrain(). */
   hasDrainingGeneration(): boolean {
     return this.generations.some((entry) => entry.status === "draining");
@@ -747,6 +776,8 @@ export class EnginePool {
     awaitPostRefreshSync?: boolean;
     /** Apply a config change through a healthy standby even when the primary is idle. */
     forceStandby?: boolean;
+    /** Draining engines this matches are closed (runs aborted) instead of drained. */
+    retireDrainingIf?: (baseUrl: string) => boolean;
   }): Promise<RolloverOutcome> {
     if (this.disposed) return { action: "skipped", reason: "unchanged" };
     const request = {
@@ -755,6 +786,7 @@ export class EnginePool {
       manual: input.manual === true,
       awaitPostRefreshSync: input.awaitPostRefreshSync !== false,
       forceStandby: input.forceStandby === true,
+      ...(input.retireDrainingIf ? { retireDrainingIf: input.retireDrainingIf } : {}),
     };
     if (this.inFlight) {
       // Latest wins: a manual request keeps its manual flag so it still
@@ -764,6 +796,9 @@ export class EnginePool {
         manual: request.manual || this.pendingRollover?.manual === true,
         awaitPostRefreshSync: request.awaitPostRefreshSync || this.pendingRollover?.awaitPostRefreshSync === true,
         forceStandby: request.forceStandby || this.pendingRollover?.forceStandby === true,
+        ...((request.retireDrainingIf ?? this.pendingRollover?.retireDrainingIf)
+          ? { retireDrainingIf: request.retireDrainingIf ?? this.pendingRollover?.retireDrainingIf }
+          : {}),
       };
       this.hooks.logger?.log("info", "Engine rollover coalesced into the in-flight request.", {
         "engine.rollover.reason": request.reason,
@@ -790,8 +825,10 @@ export class EnginePool {
     manual: boolean;
     awaitPostRefreshSync: boolean;
     forceStandby: boolean;
+    retireDrainingIf?: (baseUrl: string) => boolean;
   }): Promise<RolloverOutcome> {
-    const { workspace, reason, manual, awaitPostRefreshSync, forceStandby } = request;
+    const { workspace, reason, manual, awaitPostRefreshSync, forceStandby, retireDrainingIf } = request;
+    if (retireDrainingIf) await this.retireDraining(retireDrainingIf, `engine rollover: ${reason}`);
     // The standby reads config from disk at spawn, so make sure the file is
     // current before deciding anything.
     await this.hooks.writeRuntimeConfigFile(this.config).catch(() => undefined);
@@ -830,7 +867,7 @@ export class EnginePool {
       }
       // Cap: one primary plus one draining. Park this change; it lands when
       // the current drain finishes.
-      this.pendingRollover = { reason, workspace, manual, awaitPostRefreshSync, forceStandby };
+      this.pendingRollover = { reason, workspace, manual, awaitPostRefreshSync, forceStandby, ...(retireDrainingIf ? { retireDrainingIf } : {}) };
       this.hooks.logger?.log("info", "Engine rollover parked behind an active drain.", {
         "engine.rollover.reason": reason,
       });
@@ -839,7 +876,7 @@ export class EnginePool {
 
     const sinceLastSpawn = Date.now() - this.lastSpawnAt;
     if (!manual && !forceStandby && sinceLastSpawn < minSpawnIntervalMs()) {
-      this.pendingRollover = { reason, workspace, manual, awaitPostRefreshSync, forceStandby };
+      this.pendingRollover = { reason, workspace, manual, awaitPostRefreshSync, forceStandby, ...(retireDrainingIf ? { retireDrainingIf } : {}) };
       this.hooks.logger?.log("info", "Engine rollover throttled by the minimum spawn interval.", {
         "engine.rollover.reason": reason,
         "engine.rollover.since_last_spawn_ms": sinceLastSpawn,
@@ -847,7 +884,9 @@ export class EnginePool {
       return { action: "coalesced" };
     }
 
-    return await this.rollOver({ reason, workspace, fingerprint, primary });
+    const outcome = await this.rollOver({ reason, workspace, fingerprint, primary });
+    if (retireDrainingIf && outcome.action === "rolled_over") await this.retireDraining(retireDrainingIf, `engine rollover: ${reason}`);
+    return outcome;
   }
 
   private async rollOver(input: {
@@ -1596,11 +1635,18 @@ export class EnginePool {
     for (const controller of controllers) controller.abort(new Error("OmniRush engine generation changed"));
   }
 
-  private async abortSession(generation: Generation, sessionId: string): Promise<void> {
+  private async abortSession(
+    generation: Generation,
+    sessionId: string,
+    cause: { source: string; reason: string } = {
+      source: "engine_pool.drain_timeout",
+      reason: "draining engine saw no session activity for the grace period",
+    },
+  ): Promise<void> {
     this.hooks.logger?.log("info", "Aborting OmniRush session from engine pool.", {
-      "abort.source": "engine_pool.drain_timeout",
+      "abort.source": cause.source,
       "abort.initiator": "system",
-      "abort.reason": "draining engine saw no session activity for the grace period",
+      "abort.reason": cause.reason,
       "session.id": sessionId,
       "engine.generation_id": generation.id,
     });
@@ -1611,14 +1657,14 @@ export class EnginePool {
         signal: AbortSignal.timeout(5_000),
       });
       this.hooks.logger?.log("info", "OmniRush session abort from engine pool completed.", {
-        "abort.source": "engine_pool.drain_timeout",
+        "abort.source": cause.source,
         "abort.initiator": "system",
         "session.id": sessionId,
         "engine.generation_id": generation.id,
       });
     } catch (error) {
       this.hooks.logger?.log("error", "OmniRush session abort from engine pool failed.", {
-        "abort.source": "engine_pool.drain_timeout",
+        "abort.source": cause.source,
         "abort.initiator": "system",
         "session.id": sessionId,
         "engine.generation_id": generation.id,

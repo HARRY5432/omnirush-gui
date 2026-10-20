@@ -1,4 +1,5 @@
 /** @jsxImportSource react */
+import { isProviderLocked } from "@/app/lib/provider-lock";
 import {
   useCallback,
   useEffect,
@@ -107,7 +108,8 @@ export function resolveModelPickerEmptyState(input: {
   }
   return {
     messageKey: "models.no_models_available",
-    showConnectProvider: !input.restrictToCloud,
+    // No provider is added while the server locks them (app/lib/provider-lock.ts).
+    showConnectProvider: !input.restrictToCloud && !isProviderLocked(),
     showRefreshOrganizationModels: false,
     showOrganizationModelsSettings: false,
   };

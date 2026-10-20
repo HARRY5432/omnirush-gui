@@ -16,6 +16,14 @@ import {
 import { startServer } from "./server.js";
 import type { ServerConfig } from "./types.js";
 
+import { afterAll as afterAllUnlocked, beforeAll as beforeAllUnlocked } from "bun:test";
+import { applyProviderLockAnswer, resetProviderLock } from "./provider-lock.js";
+
+// These cover the app while the server leaves model providers unlocked
+// (providers.locked false); provider-lock.test.ts covers the lock.
+beforeAllUnlocked(() => { applyProviderLockAnswer({ providers: { locked: false } }); });
+afterAllUnlocked(() => resetProviderLock());
+
 const clientToken = "owt_cloud_provider_client";
 const hostToken = "owt_cloud_provider_host";
 const roots: string[] = [];

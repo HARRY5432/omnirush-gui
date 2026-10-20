@@ -8,6 +8,7 @@ import {
   PageTitlebarRegion,
 } from "@/components/page";
 import { Button } from "@/components/ui/button";
+import { useProviderLock } from "@/app/lib/provider-lock";
 import { KeyRoundIcon, SkipForwardIcon } from "lucide-react";
 
 type ProviderSelectionStepProps = {
@@ -19,6 +20,8 @@ export function ProviderSelectionStep({
   onBringYourOwn,
   onSkip,
 }: ProviderSelectionStepProps) {
+  // While the server locks model providers (app/lib/provider-lock.ts) there is no key to bring.
+  const providerLock = useProviderLock();
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-background">
       <PageBackground />
@@ -33,7 +36,7 @@ export function ProviderSelectionStep({
         </PageHeader>
 
         <div className="space-y-3">
-          <button
+          {providerLock.locked ? null : <button
             type="button"
             className="flex w-full items-start gap-4 rounded-xl border border-border bg-card p-4 text-left transition-colors hover:bg-accent"
             onClick={onBringYourOwn}
@@ -47,7 +50,7 @@ export function ProviderSelectionStep({
                 Connect OpenAI, Anthropic, Google, or another provider, then run your first task.
               </div>
             </div>
-          </button>
+          </button>}
 
           <div className="pt-1 text-center">
             <Button variant="ghost" size="sm" onClick={onSkip}>

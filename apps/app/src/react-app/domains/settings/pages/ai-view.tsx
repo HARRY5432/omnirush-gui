@@ -1,4 +1,5 @@
 /** @jsxImportSource react */
+import { useProviderLock } from "@/app/lib/provider-lock";
 import { Button } from "@/components/ui/button";
 import type { ReactNode } from "react";
 import { KeyRound, ShieldCheck } from "lucide-react";
@@ -72,6 +73,7 @@ function providerStatusTone(label: string): "ready" | "warning" | "neutral" {
 }
 
 export function AiSettingsView(props: AiSettingsViewProps) {
+  const providerLock = useProviderLock();
   const organizationProviderLabel = props.organizationName?.trim() || t("settings.provider_source_organization");
   const internalModelsReady = props.connectedProviders.some((provider) => isInternalModelProvider(provider.id));
   const externalProviderCount = props.connectedProviders.filter((provider) => isDirectModelProvider(provider.id)).length;
@@ -191,6 +193,9 @@ export function AiSettingsView(props: AiSettingsViewProps) {
           </div>
         ) : null}
 
+        {providerLock.locked ? (
+          <SettingsNotice>{providerLock.message}</SettingsNotice>
+        ) : null}
         {props.providerConnectError ? (
           <SettingsNotice tone="error">{props.providerConnectError}</SettingsNotice>
         ) : null}

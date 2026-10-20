@@ -21,6 +21,7 @@ import {
 import type { ServerConfig } from "./types.js";
 import { omnirushConfigPath } from "./workspace-files.js";
 import { findManagedEngineWorkspace } from "./workspaces.js";
+import { providerAllowed } from "./provider-lock.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -58,7 +59,7 @@ export type CloudProviderSyncSkippedProvider = {
   providerId: string;
   name: string;
   /** Why materialization skipped this provider (e.g. declared env vars but no credential to fill them). */
-  reason: "missing_credentials" | "needs_key";
+  reason: "missing_credentials" | "needs_key" | "provider_locked";
 };
 
 export type CloudProviderSyncRunDetail = {
@@ -928,7 +929,16 @@ export class CloudProviderSync {
       const localEnvNames = storedEnv
         .filter((entry) => entry.value.trim().length > 0 && !this.ownedEnvKeys.has(entry.key))
         .map((entry) => entry.key);
-      const prepared = prepareMaterialization(providers, localEnvNames);
+      // The model provider lock (provider-lock.ts): an organization's provider the lock does not
+      // allow is never added (one added before is removed by this pass), and is listed as skipped.
+      const lockedOut = providers.filter((provider) => !providerAllowed(runtimeProviderId(provider)));
+      const prepared = prepareMaterialization(providers.filter((provider) => !lockedOut.includes(provider)), localEnvNames);
+      prepared.skipped.push(...lockedOut.map((provider) => ({
+        cloudProviderId: provider.id,
+        providerId: runtimeProviderId(provider),
+        name: provider.name,
+        reason: "provider_locked" as const,
+      })));
       if (request.generation !== this.contextGeneration) return { status: "no_session" };
       const { changed, detail, reloadError } = await this.apply(prepared);
       // The materialization itself succeeded (config + env writes landed), so

@@ -11,6 +11,9 @@ export { installOpencodeV2Binary } from "./opencode-v2-binary.js";
 
 import { loopbackFetch } from "./server-fetch.js";
 import { writeFileAtomic } from "./atomic-write.js";
+import { currentProviderLockPolicy, noteEngineStarted, providerAllowed } from "./provider-lock.js";
+import { providerLockEnv } from "./provider-lock/provider-lock.mjs";
+import { isReleaseBuild, RELEASE_ENGINE_ERROR } from "./release-guard.js";
 
 export interface OpencodeV2ModelSpec {
   id: string;
@@ -78,6 +81,8 @@ function diagnostics(exitCode: number | null, stdout: string, stderr: string): E
 export async function createManagedOpencodeV2Server(
   options: ManagedOpencodeV2ServerOptions,
 ): Promise<ManagedOpencodeV2Server> {
+  // A release build runs only the engine it bundles (release-guard.ts); this preview downloads another.
+  if (isReleaseBuild()) throw new Error(RELEASE_ENGINE_ERROR);
   const hostname = options.hostname ?? "127.0.0.1";
   const port = options.port ?? 0;
   const bootTimeoutMs = options.bootTimeoutMs ?? 60_000;
@@ -86,7 +91,9 @@ export async function createManagedOpencodeV2Server(
   const username = "opencode";
   let url = "";
   const providers = new Map<string, OpencodeV2ProviderSpec>();
-  const opencodeModelsUrl = (options.env?.OPENCODE_MODELS_URL ?? process.env.OPENCODE_MODELS_URL)?.replace(/\/+$/, "");
+  // Model providers (provider-lock.ts): while locked no model list source and the lock's keys.
+  const providerLock = currentProviderLockPolicy();
+  const opencodeModelsUrl = providerLock.locked ? undefined : (options.env?.OPENCODE_MODELS_URL ?? process.env.OPENCODE_MODELS_URL)?.replace(/\/+$/, "");
   const disableModelsFetch = options.env?.OPENCODE_DISABLE_MODELS_FETCH ?? process.env.OPENCODE_DISABLE_MODELS_FETCH;
   // The engine needs OS paths and locale settings, not the server's provider,
   // cloud, database, or control-plane credentials. Unknown keys stay private.
@@ -123,6 +130,7 @@ export async function createManagedOpencodeV2Server(
       OPENCODE_AUTO_SHARE: "false",
       ...(opencodeModelsUrl === undefined ? {} : { OPENCODE_MODELS_URL: opencodeModelsUrl }),
       ...(disableModelsFetch === undefined ? {} : { OPENCODE_DISABLE_MODELS_FETCH: disableModelsFetch }),
+      ...providerLockEnv(providerLock).set,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -186,6 +194,8 @@ export async function createManagedOpencodeV2Server(
   async function writeProviders(): Promise<void> {
     const providerConfig: Record<string, unknown> = {};
     for (const provider of providers.values()) {
+      // Only the providers the lock allows (provider-lock.ts) reach the v2 engine.
+      if (!providerAllowed(provider.id)) continue;
       const models: Record<string, unknown> = {};
       for (const model of provider.models) {
         const config = model.config ?? {};
@@ -292,6 +302,8 @@ export async function createManagedOpencodeV2Server(
           throw new Error("OmniRush v2 announced an unexpected listener");
         }
         url = endpoint.origin;
+        // Model providers (provider-lock.ts): whether this engine started locked.
+        noteEngineStarted(url, providerLock);
       }
     }
     try {

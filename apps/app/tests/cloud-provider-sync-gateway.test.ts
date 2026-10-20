@@ -5,6 +5,14 @@ import { createClient } from "../src/app/lib/opencode";
 import type { ProviderListItem, WorkspaceDisplay } from "../src/app/types";
 import { createProviderAuthStore } from "../src/react-app/domains/connections/provider-auth/store";
 
+import { afterAll as afterAllUnlocked, beforeAll as beforeAllUnlocked } from "bun:test";
+import { setProviderLockState } from "../src/app/lib/provider-lock";
+
+// These cover the app while the server leaves model providers unlocked
+// (providers.locked false); tests/provider-lock.test.ts covers the lock.
+beforeAllUnlocked(() => setProviderLockState({ locked: false }));
+afterAllUnlocked(() => setProviderLockState(null));
+
 const originalWindow = globalThis.window;
 const originalFetch = globalThis.fetch;
 const originalConsoleInfo = console.info;

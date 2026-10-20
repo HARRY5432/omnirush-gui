@@ -26,6 +26,14 @@ import {
 import { SETTINGS_TAB_VALUES } from "../src/app/types";
 import { libraryAddAction } from "../src/react-app/domains/settings/library";
 
+import { afterAll as afterAllUnlocked, beforeAll as beforeAllUnlocked } from "bun:test";
+import { setProviderLockState } from "../src/app/lib/provider-lock";
+
+// These cover the app while the server leaves model providers unlocked
+// (providers.locked false); tests/provider-lock.test.ts covers the lock.
+beforeAllUnlocked(() => setProviderLockState({ locked: false }));
+afterAllUnlocked(() => setProviderLockState(null));
+
 const allowEverything: DesktopAppRestrictionChecker = () => false;
 const restrictedChecker: DesktopAppRestrictionChecker = ({ restriction }) =>
   checkDesktopAppRestriction({ config: restrictedDesktopPolicyValue, restriction });
