@@ -5,7 +5,8 @@
  *
  * The setting is kept at <runtimeStorageDir>/omnirush-subagent-model.json.
  * An explicit "same as main" setting (both fields null) keeps the engine's
- * inheritance. A missing setting uses GPT-5.6 Sol with the main agent's
+ * inheritance, and gives a sub-agent on its own model (no inherited variant)
+ * the main session's effort. A missing setting uses GPT-5.6 Sol with the main agent's
  * inherited effort; users can still select another model in Preferences.
  *
  * Who does what:
@@ -237,7 +238,18 @@ export function resolveSubagentModel(input: {
   refused?: (model: string) => boolean;
 }): SubagentModelResolution {
   const { setting, catalog, inherited } = input;
-  if (!setting.model && !setting.effort) return {};
+  if (!setting.model && !setting.effort) {
+    // "Same as main": the engine already carries the delegating agent's
+    // effort, unless the sub-agent agent has its own model (the engine then
+    // sends no variant and the model default would apply). Then the main
+    // session's effort, mapped to the nearest level the model offers.
+    const mainEffort = input.main?.variant;
+    if (inherited.variant || !mainEffort || levelsOf(catalog, inherited) === null) return {};
+    return {
+      model: { providerID: inherited.providerID, modelID: inherited.modelID },
+      variant: effortFor(catalog, inherited, null, mainEffort),
+    };
+  }
   const defaultModel = catalog.find((model) => model.default) ?? catalog[0];
   const main: EngineModelRef & { variant?: string | null } = input.main
     ?? (setting.model && inherited.providerID === OMNIRUSH_PROVIDER_ID && inherited.modelID === setting.model && defaultModel

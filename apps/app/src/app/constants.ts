@@ -56,6 +56,14 @@ export function isOmniRushModelID(modelID: string): boolean {
  */
 export const OMNIRUSH_REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
+/**
+ * The effort an omnirush.ai model runs at when the chat picked none, where the
+ * model offers it (High, what the picker has always shown for Astra and Sol).
+ * PARITY: apps/server/src/omnirush-model-catalog.ts OMNIRUSH_DEFAULT_EFFORT,
+ * the engine's model-level default.
+ */
+export const OMNIRUSH_DEFAULT_REASONING_EFFORT = "high";
+
 export const SUGGESTED_PLUGINS: SuggestedPlugin[] = [];
 
 export type ExtensionKind = "mcp" | "plugin" | "skill" | "ui-control" | "extension";

@@ -6,7 +6,7 @@
 import { useMemo } from "react";
 import { create } from "zustand";
 
-import { formatGenericBehaviorLabel, getModelBehaviorSummary } from "@/app/lib/model-behavior";
+import { formatGenericBehaviorLabel, getModelBehaviorSummary, resolveModelBehaviorValue } from "@/app/lib/model-behavior";
 import type { ModelRef } from "@/app/types";
 
 type BehaviorOption = { value: string | null; label: string };
@@ -99,6 +99,29 @@ export const useSessionModelStore = create<SessionModelStore>((set) => ({
 
 export function getSessionModelSelection(sessionId: string): SessionModelSelection | null {
   return useSessionModelStore.getState().bySessionId[sessionId] ?? null;
+}
+
+// The provider catalog the picker last rendered from (useModelBehavior keeps
+// it current), so send paths outside React (the queue drainer) resolve the
+// effort from the same model details the picker shows.
+let providerCatalogSnapshot: ProviderCatalog = {};
+
+export function rememberProviderCatalog(catalog: ProviderCatalog) {
+  providerCatalogSnapshot = catalog;
+}
+
+/**
+ * The effort a send with `model` carries for the stored choice `variant`: the
+ * value the picker shows for them (resolveModelBehaviorValue), never null
+ * while the picker shows an effort.
+ */
+export function resolveSendVariant(
+  model: ModelRef | null | undefined,
+  variant: string | null | undefined,
+  catalog: ProviderCatalog = providerCatalogSnapshot,
+): string | null {
+  if (!model) return variant ?? null;
+  return resolveModelBehaviorValue(model.providerID, catalog[model.providerID]?.[model.modelID], variant ?? null);
 }
 
 export type UseSessionModelSelectionInput = {

@@ -16,6 +16,13 @@
  *
  * The header never leaves the machine: the broker only forwards an explicit
  * allow-list of headers to omnirush.ai.
+ *
+ * Each model also carries a model-level default `reasoningEffort` (the effort
+ * the picker shows when none is chosen), which the engine merges into every
+ * request of that model, side requests included. The engine's small side
+ * requests (titles, the project-copy name) keep the effort they had before
+ * the default existed: the model's first variant, which is what the engine's
+ * small-request options pick.
  */
 const PROVIDER_ID = "omnirush";
 /** Read by OmniRushGatewayBroker; keep the two definitions identical. */
@@ -23,11 +30,13 @@ const EFFORT_HEADER = "x-omnirush-reasoning-effort";
 const EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "ultra", "max"]);
 /** Cheap side requests never carry the conversation's effort selection. */
 const SKIPPED_AGENTS = new Set(["title"]);
+/** Small side requests: they run at the model's first variant (engine small-request options). */
+const SMALL_AGENTS = new Set(["title", "project-copy-name"]);
 const MAX_PENDING = 512;
 
 type HookInput = {
   agent?: string;
-  model: { id: string; providerID: string };
+  model: { id: string; providerID: string; variants?: Record<string, Record<string, unknown>> };
   message?: { id?: string; model?: { variant?: string } };
 };
 
@@ -42,9 +51,17 @@ function normalizeEffort(value: unknown): string | null {
   return EFFORTS.has(effort) ? effort : null;
 }
 
+function isOmniRushModel(input: HookInput): boolean {
+  return input.model.providerID.trim().toLowerCase() === PROVIDER_ID;
+}
+
 function isInternalModel(input: HookInput): boolean {
-  return input.model.providerID.trim().toLowerCase() === PROVIDER_ID
-    && !SKIPPED_AGENTS.has(input.agent ?? "");
+  return isOmniRushModel(input) && !SKIPPED_AGENTS.has(input.agent ?? "");
+}
+
+function firstVariantEffort(input: HookInput): string | null {
+  const first = Object.values(input.model.variants ?? {})[0];
+  return first ? optionEffort(first) : null;
 }
 
 function optionEffort(options: Record<string, unknown>): string | null {
@@ -68,6 +85,12 @@ function recall(input: HookInput): string | null {
 // module as a plugin factory, so helpers must stay module-private.
 export const OmniRushReasoningEffort = async () => ({
   "chat.params": async (input: HookInput, output: { options: Record<string, unknown> }) => {
+    if (isOmniRushModel(input) && SMALL_AGENTS.has(input.agent ?? "")) {
+      // The model-level default must not override the small request's own effort.
+      const first = firstVariantEffort(input);
+      if (first) output.options.reasoningEffort = first;
+      else delete output.options.reasoningEffort;
+    }
     if (!isInternalModel(input)) return;
     const effort = optionEffort(output.options) ?? normalizeEffort(input.message?.model?.variant);
     if (!effort) return;

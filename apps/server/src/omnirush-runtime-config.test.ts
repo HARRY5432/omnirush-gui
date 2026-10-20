@@ -227,10 +227,10 @@ describe("omnirush runtime config file", () => {
     const providers = parsed.provider as Record<string, { models: Record<string, Record<string, unknown>> }>;
     const models = providers.omnirush!.models;
     const variants = {
-      low: { reasoning_effort: "low" },
-      high: { reasoning_effort: "high" },
-      xhigh: { reasoning_effort: "xhigh" },
-      max: { reasoning_effort: "max" },
+      low: { reasoningEffort: "low" },
+      high: { reasoningEffort: "high" },
+      xhigh: { reasoningEffort: "xhigh" },
+      max: { reasoningEffort: "max" },
       // The engine merges its own OpenAI reasoning defaults into a model's
       // variants and only drops entries marked disabled; these keep the
       // resolved picker at exactly the four levels above.
@@ -249,6 +249,8 @@ describe("omnirush runtime config file", () => {
     for (const id of ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol"]) {
       expect(Object.keys(models[id]!.variants as object).sort()).toEqual(Object.keys(variants).sort());
       expect(enabledVariants(models[id]!)).toEqual(["low", "high", "xhigh", "max"]);
+      // The default effort (High, as the picker shows), for a message that names no variant.
+      expect(models[id]!.options).toEqual({ reasoningEffort: "high" });
     }
     expect(parsed.model).toBe("omnirush/gpt-6-astra");
     expect((parsed.plugin as string[]).some((plugin) => /omnirush-reasoning-effort\.(?:ts|js)$/.test(plugin))).toBe(true);
@@ -663,11 +665,13 @@ describe("omnirush runtime config file", () => {
 });
 
 /**
- * The omnirush provider exactly as v1.0.9 declared it (the INTERNAL_MODELS
- * and internalGatewayModel it hardcoded). Astra and Sol must keep these
- * bytes: they feed the engine-pool fingerprint, and any drift (an
- * `attachment` flag, a family, a status) would change how the engine treats
- * them.
+ * The omnirush provider as v1.0.9 declared it (the INTERNAL_MODELS and
+ * internalGatewayModel it hardcoded), with two deliberate changes: variants
+ * carry the camelCase `reasoningEffort` the engine's OpenAI adapter reads, and
+ * each model has a default effort (`options.reasoningEffort`, High). Astra
+ * and Sol must keep these bytes otherwise: they feed the engine-pool
+ * fingerprint, and any other drift (an `attachment` flag, a family, a status)
+ * would change how the engine treats them.
  */
 function v109OmniRushProvider(baseURL: string) {
   const model = (name: string) => ({
@@ -677,14 +681,15 @@ function v109OmniRushProvider(baseURL: string) {
     structured_output: true,
     temperature: true,
     variants: {
-      low: { reasoning_effort: "low" },
-      high: { reasoning_effort: "high" },
-      xhigh: { reasoning_effort: "xhigh" },
-      max: { reasoning_effort: "max" },
+      low: { reasoningEffort: "low" },
+      high: { reasoningEffort: "high" },
+      xhigh: { reasoningEffort: "xhigh" },
+      max: { reasoningEffort: "max" },
       none: { disabled: true },
       minimal: { disabled: true },
       medium: { disabled: true },
     },
+    options: { reasoningEffort: "high" },
     limit: { context: 400_000, output: 128_000 },
     modalities: { input: ["text", "image", "pdf"], output: ["text"] },
   });
@@ -750,11 +755,11 @@ describe("omnirush runtime config from the model catalog", () => {
     const provider = providerOf(parsed);
     const models = provider.models as Record<string, Record<string, unknown>>;
     const museVariants = {
-      minimal: { reasoning_effort: "minimal" },
-      low: { reasoning_effort: "low" },
-      medium: { reasoning_effort: "medium" },
-      high: { reasoning_effort: "high" },
-      xhigh: { reasoning_effort: "xhigh" },
+      minimal: { reasoningEffort: "minimal" },
+      low: { reasoningEffort: "low" },
+      medium: { reasoningEffort: "medium" },
+      high: { reasoningEffort: "high" },
+      xhigh: { reasoningEffort: "xhigh" },
       // Muse answers none and max with 400; the engine's own defaults are disabled.
       none: { disabled: true },
       max: { disabled: true },
@@ -774,6 +779,7 @@ describe("omnirush runtime config from the model catalog", () => {
       structured_output: true,
       temperature: true,
       variants: museVariants,
+      options: { reasoningEffort: "high" },
       limit: { context: 158_000, output: 32_000 },
       modalities: { input: ["text", "image", "pdf"], output: ["text"] },
     });
@@ -786,6 +792,7 @@ describe("omnirush runtime config from the model catalog", () => {
       structured_output: true,
       temperature: true,
       variants: museVariants,
+      options: { reasoningEffort: "high" },
       limit: { context: 99_000, output: 16_000 },
       modalities: { input: ["text"], output: ["text"] },
     });

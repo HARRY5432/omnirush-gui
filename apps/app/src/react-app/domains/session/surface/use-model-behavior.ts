@@ -6,6 +6,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { formatGenericBehaviorLabel, getModelBehaviorSummary } from "@/app/lib/model-behavior";
 import type { ModelRef, ProviderListItem } from "@/app/types";
+import { rememberProviderCatalog } from "./session-model-store";
 import { t } from "@/i18n";
 
 type ProviderModel = ProviderListItem["models"][string];
@@ -35,6 +36,7 @@ export function useModelBehavior(input: UseModelBehaviorInput) {
     for (const provider of providerList.all) {
       next[provider.id] = { ...(provider.models ?? {}) };
     }
+    rememberProviderCatalog(next);
     setProviderCatalog(next);
   }, [providerList]);
 

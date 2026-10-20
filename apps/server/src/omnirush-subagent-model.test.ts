@@ -97,6 +97,37 @@ describe("resolve a sub-agent prompt", () => {
     })).toEqual({});
   });
 
+  test("same as main: a sub-agent on its own model follows the main session's effort", () => {
+    // The agent has its own model, so the engine put no variant on the prompt.
+    const muse = { providerID: "omnirush", modelID: "meta-muse-spark" };
+    expect(resolveSubagentModel({
+      setting: { model: null, effort: null },
+      catalog,
+      gateway: true,
+      inherited: { ...astra, variant: null },
+      main: { ...astra, variant: "low" },
+    })).toEqual({ model: astra, variant: "low" });
+    // Mapped to the nearest level the agent's model offers (Muse has no max).
+    expect(resolveSubagentModel({
+      setting: { model: null, effort: null },
+      catalog,
+      gateway: true,
+      inherited: muse,
+      main: { ...astra, variant: "max" },
+    })).toEqual({ model: muse, variant: "xhigh" });
+    // Main effort unknown (e.g. after a restart): left to the engine (model default).
+    expect(resolveSubagentModel({ setting: { model: null, effort: null }, catalog, gateway: true, inherited: muse, main: null })).toEqual({});
+    expect(resolveSubagentModel({ setting: { model: null, effort: null }, catalog, gateway: true, inherited: muse })).toEqual({});
+    // Another provider's model: untouched.
+    expect(resolveSubagentModel({
+      setting: { model: null, effort: null },
+      catalog,
+      gateway: true,
+      inherited: { providerID: "openai", modelID: "gpt-5.5" },
+      main: { ...astra, variant: "low" },
+    })).toEqual({});
+  });
+
   test("a picked catalog model runs the sub-agent; the main effort maps to the model's nearest level", () => {
     expect(resolveSubagentModel({
       setting: { model: "meta-muse-spark", effort: null },

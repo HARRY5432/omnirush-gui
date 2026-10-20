@@ -88,10 +88,10 @@ const omnirushModel = (id: string, name: string): ProviderModel => ({
   providerID: "omnirush",
   api: { id, url: "http://127.0.0.1:8090/omnirush-gateway/v1", npm: "@ai-sdk/openai" },
   variants: {
-    low: { reasoning_effort: "low" },
-    high: { reasoning_effort: "high" },
-    xhigh: { reasoning_effort: "xhigh" },
-    max: { reasoning_effort: "max" },
+    low: { reasoningEffort: "low" },
+    high: { reasoningEffort: "high" },
+    xhigh: { reasoningEffort: "xhigh" },
+    max: { reasoningEffort: "max" },
   },
 });
 
@@ -131,22 +131,23 @@ describe("model behavior options", () => {
       family: "Meta Muse",
       variants: {
         minimal: { reasoning_effort: "minimal" },
-        low: { reasoning_effort: "low" },
+        low: { reasoningEffort: "low" },
         medium: { reasoning_effort: "medium", reasoningEffort: "medium", reasoningSummary: "auto" },
-        high: { reasoning_effort: "high" },
-        xhigh: { reasoning_effort: "xhigh" },
+        high: { reasoningEffort: "high" },
+        xhigh: { reasoningEffort: "xhigh" },
         ultra: { reasoningEffort: "ultra" },
       },
     };
     const options = getModelBehaviorOptions("omnirush", museSpark, "omnirush.ai");
     expect(options.map((option) => option.value)).toEqual(["minimal", "low", "medium", "high", "xhigh"]);
-    expect(getModelBehaviorSummary("omnirush", museSpark, null, "omnirush.ai").value).toBe("medium");
-    expect(getModelBehaviorSummary("omnirush", museSpark, "xhigh", "omnirush.ai").value).toBe("xhigh");
+    // High wherever the model offers it.
+    expect(getModelBehaviorSummary("omnirush", museSpark, null, "omnirush.ai").value).toBe("high");
+    expect(getModelBehaviorSummary("omnirush", museSpark, "low", "omnirush.ai").value).toBe("low");
     // An effort Muse does not offer (Astra's max) falls back to its default.
-    expect(getModelBehaviorSummary("omnirush", museSpark, "max", "omnirush.ai").value).toBe("medium");
-    expect(getModelBehaviorSummary("omnirush", museSpark, "ultra", "omnirush.ai").value).toBe("medium");
+    expect(getModelBehaviorSummary("omnirush", museSpark, "max", "omnirush.ai").value).toBe("high");
+    expect(getModelBehaviorSummary("omnirush", museSpark, "ultra", "omnirush.ai").value).toBe("high");
 
-    // Astra and Sol keep their v1.0.9 levels and default.
+    // Astra and Sol keep their v1.0.9 levels and default (High).
     for (const internal of OMNIRUSH_MODELS) {
       expect(getModelBehaviorOptions("omnirush", internal, "omnirush.ai").map((option) => option.value)).toEqual(["low", "high", "xhigh", "max"]);
       expect(getModelBehaviorSummary("omnirush", internal, null, "omnirush.ai").value).toBe("high");

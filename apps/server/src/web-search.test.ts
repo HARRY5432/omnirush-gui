@@ -111,7 +111,7 @@ describe("engine config", () => {
     ]) {
       expect(JSON.stringify(buildOmniRushRuntimeConfigObjectFromSnapshot({}, gateway, {}, catalog, undefined, undefined, setting))).toBe(before);
     }
-    for (const model of Object.values(engineModelsFromCatalog(catalog))) expect(model.options).toBeUndefined();
+    for (const model of Object.values(engineModelsFromCatalog(catalog))) expect(model.options).not.toHaveProperty("hostedWebSearch");
   });
 
   test("on: hostedWebSearch only on the models the server lists; nothing else changes", () => {
@@ -119,11 +119,12 @@ describe("engine config", () => {
     const off = buildOmniRushRuntimeConfigObjectFromSnapshot({}, gateway, {}, catalog) as { provider: { omnirush: { models: Record<string, Record<string, unknown>> } } };
     const on = buildOmniRushRuntimeConfigObjectFromSnapshot({}, gateway, {}, catalog, undefined, undefined, setting) as typeof off;
     const models = on.provider.omnirush.models;
-    for (const id of serverBlock.models) expect(models[id]!.options).toEqual({ hostedWebSearch: { searchContextSize: "low" } });
-    for (const id of ["meta-muse-spark", "muse-spark-1.1", "muse-spark-1.3"]) expect(models[id]!.options).toBeUndefined();
+    for (const id of serverBlock.models) expect(models[id]!.options).toEqual({ reasoningEffort: "high", hostedWebSearch: { searchContextSize: "low" } });
+    for (const id of ["meta-muse-spark", "muse-spark-1.1", "muse-spark-1.3"]) expect(models[id]!.options).toEqual({ reasoningEffort: "high" });
     for (const [id, model] of Object.entries(models)) {
-      const { options: _options, ...rest } = model;
-      expect([id, rest]).toEqual([id, off.provider.omnirush.models[id]]);
+      // Only hostedWebSearch is added; the default effort and the rest stay as they were.
+      const { hostedWebSearch: _search, ...options } = model.options as Record<string, unknown>;
+      expect([id, { ...model, options } as Record<string, unknown>]).toEqual([id, off.provider.omnirush.models[id]!]);
     }
     const strip = (config: typeof off) => JSON.stringify({ ...config, provider: null });
     expect(strip(on)).toBe(strip(off));
