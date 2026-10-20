@@ -3,14 +3,42 @@
   "schema": 1,
   "cli": [
     {
-      "version": "2.6.3",
-      "date": "2026-10-20",
+      "version": "2.6.5",
+      "date": "2026-10-21",
       "new": [
         "See what changed in each release with `/changelog` or `omnirush changelog`, and a short note after each update.",
-        "Pick a colour theme for the terminal app with `/theme` or `omnirush theme`. By default it follows your terminal's light or dark setting."
+        "Pick a colour theme for the terminal app with `/theme` or `omnirush theme`. By default it follows your terminal's light or dark setting.",
+        "Computer use: the agent can operate an app window you approve (screenshots, clicks, typing), with a stop control and approvals that follow your permission mode. Off until it is enabled for your account."
       ],
+      "improved": [
+        "Fewer repeated failed edits: when an edit can't find its text, the agent now sees the file's current lines.",
+        "Only OmniRush models are offered. Other providers, and your own opencode plugins and custom tools, stay off."
+      ],
+      "fixed": [
+        "Security: a project's MCP settings can no longer hand the app's keys or files outside the project to an MCP server, and no local MCP server starts unless the app's checks are running.",
+        "Better masking of access keys that tools print with escaped characters."
+      ]
+    },
+    {
+      "version": "2.6.4",
+      "date": "2026-10-20",
+      "new": [],
       "improved": [],
-      "fixed": []
+      "fixed": [
+        "MCP servers get the display, browser, Git, Volta and package settings they need again, while the app's own tokens stay hidden from them.",
+        "Security: Git hooks run by parallel tasks no longer receive the app's sign-in tokens."
+      ]
+    },
+    {
+      "version": "2.6.3",
+      "date": "2026-10-20",
+      "new": [],
+      "improved": [],
+      "fixed": [
+        "Security: opening a project no longer runs its own runtime settings or environment file.",
+        "Security: MCP servers no longer receive the app's own sign-in tokens.",
+        "Security: requests with unusual paths can no longer get around the MCP and settings rules."
+      ]
     },
     {
       "version": "2.6.2",
@@ -172,14 +200,52 @@
   ],
   "desktop": [
     {
-      "version": "3.6.4",
-      "date": "2026-10-20",
+      "version": "3.6.7",
+      "date": "2026-10-21",
       "new": [
         "What's new: see what changed in each release from the sidebar, the Help menu or the command palette, and a short note after each update.",
-        "Themes: eight presets with light and dark versions, and your own theme in Settings › Appearance with a live preview and contrast checks. Share it as a code or a file; the editor, terminal and chat all follow it."
+        "Themes: eight presets with light and dark versions, and your own theme in Settings › Appearance with a live preview and contrast checks. Share it as a code or a file; the editor, terminal and chat all follow it.",
+        "Computer use: the agent can operate an app window you approve (screenshots, clicks, typing), with a stop control and approvals that follow your permission mode. Off until it is enabled for your account.",
+        "Editor: search, problems and language features, a split editor, editor settings, Markdown and image preview, and a Git change gutter. Format on save asks once before running a project's own formatter."
       ],
+      "improved": [
+        "Fewer repeated failed edits: when an edit can't find its text, the agent now sees the file's current lines.",
+        "The reasoning effort shown in the model picker is always the one used.",
+        "The session quality status now sits inside its chip instead of above the chat.",
+        "Only OmniRush models are offered. Other providers, and your own opencode plugins and custom tools, stay off."
+      ],
+      "fixed": [
+        "Security: a project's MCP settings can no longer hand the app's keys or files outside the project to an MCP server, and no local MCP server starts unless the app's checks are running.",
+        "Better masking of access keys that tools print with escaped characters."
+      ]
+    },
+    {
+      "version": "3.6.6",
+      "date": "2026-10-20",
+      "new": [],
       "improved": [],
-      "fixed": []
+      "fixed": [
+        "MCP servers get the display, browser, Git, Volta and package settings they need again, while the app's own tokens stay hidden from them.",
+        "Security: Git hooks run by the editor's git panel and by parallel tasks no longer receive the app's sign-in tokens."
+      ]
+    },
+    {
+      "version": "3.6.5",
+      "date": "2026-10-20",
+      "new": [],
+      "improved": [],
+      "fixed": [
+        "Security: MCP servers no longer receive the app's own sign-in tokens."
+      ]
+    },
+    {
+      "version": "3.6.4",
+      "date": "2026-10-20",
+      "new": [],
+      "improved": [],
+      "fixed": [
+        "Security: the folder access check no longer reads settings or an environment file from the shared temporary folder."
+      ]
     },
     {
       "version": "3.6.3",
