@@ -97,6 +97,8 @@ describe("Settings > MCP: supported servers", () => {
       .toMatchObject({ hint: null });
     expect(mcpServerState(server("x"), { name: "x", status: "blocked", code: "unknown_command", reason: "The app cannot tell which MCP server this is." }))
       .toMatchObject({ hint: "Start it with npx or uvx." });
+    expect(mcpServerState(server("x"), { name: "x", status: "blocked", code: "unknown_command", reason: "The app cannot tell which MCP server this is. Start it with npx (npm packages) or uvx (Python packages) and the package name." }))
+      .toMatchObject({ hint: null });
     expect(mcpServerState(server("x"), { name: "x", status: "blocked", code: "outside_project", reason: "This MCP server may only use files inside the project folder. (/etc)" }))
       .toMatchObject({ hint: "Point it at a folder or file inside the project." });
   });

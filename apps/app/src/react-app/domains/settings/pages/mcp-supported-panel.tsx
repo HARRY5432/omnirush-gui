@@ -41,7 +41,9 @@ export function mcpServerState(entry: Pick<McpServerEntry, "name" | "config">, d
     const hint = MCP_BLOCKED_HINTS[decision.code] ?? null;
     // No hint that only repeats what the reason already says.
     const said = (text: string) => text.toLowerCase().replace(/\bmcp /g, "").replace(/\.$/, "");
-    return { kind: "blocked", reason, hint: hint && !said(reason).includes(said(hint)) ? hint : null };
+    // The same advice in other words ("Start it with npx (npm packages) or uvx …") counts as said too.
+    const opening = hint ? said(hint).split(" ").slice(0, 4).join(" ") : "";
+    return { kind: "blocked", reason, hint: hint && !said(reason).includes(said(hint)) && !said(reason).includes(opening) ? hint : null };
   }
   if ((entry.config as { enabled?: unknown } | undefined)?.enabled === false) return { kind: "off" };
   const parts = [
