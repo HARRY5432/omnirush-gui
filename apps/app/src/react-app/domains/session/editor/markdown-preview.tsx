@@ -73,6 +73,11 @@ export function MarkdownPreview(props: {
       const src = image.getAttribute("src") ?? "";
       image.removeAttribute("srcset");
       image.removeAttribute("src");
+      // Inline images (data:image/…) load nothing from anywhere: shown as they are.
+      if (/^data:image\/(png|jpe?g|gif|webp|avif|bmp)[;,]/i.test(src)) {
+        image.setAttribute("src", src);
+        continue;
+      }
       if (/^[a-z][a-z0-9+.-]*:/i.test(src) || src.startsWith("//")) {
         const note = document.createElement("span");
         note.className = "my-2 inline-block rounded-md border border-dashed border-border px-2 py-1 text-xs text-muted-foreground";
@@ -108,7 +113,11 @@ export function MarkdownPreview(props: {
       if (!url) {
         url = props.client.editorRaw(props.workspaceId, target).then(
           (result) => URL.createObjectURL(new Blob([result.data], { type: result.contentType ?? "application/octet-stream" })),
-          () => null,
+          () => {
+            // Not cached: the image may appear or be fixed while the preview is open.
+            imageUrls.current.delete(target);
+            return null;
+          },
         );
         imageUrls.current.set(target, url);
       }

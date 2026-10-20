@@ -156,6 +156,7 @@ export function addGroupKeys(monaco: Monaco, editor: MonacoApi.editor.IStandalon
     label: "Open Markdown preview to the side",
     keybindings: [KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyV],
     keybindingContext: context,
+    precondition: "editorLangId == 'markdown'",
     run: () => {
       window.dispatchEvent(new CustomEvent("omnirush:editor-command", { detail: "preview-side" }));
     },

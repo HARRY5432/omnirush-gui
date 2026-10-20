@@ -150,12 +150,17 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
     const modified = diff.getModifiedEditor() as MonacoApi.editor.IStandaloneCodeEditor;
     // Keys scoped per editor (monaco.ts scopeEditor): Monaco shares keybindings between editors.
     const contexts = new Map<MonacoApi.editor.IStandaloneCodeEditor, string>([[code, scopeEditor(code, "code")], [modified, scopeEditor(modified, "diff")]]);
-    code.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, save, contexts.get(code));
-    modified.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, save, contexts.get(modified));
+    const saveAction = (editor: MonacoApi.editor.IStandaloneCodeEditor) => editor.addAction({
+      id: "omnirush.editor.save",
+      label: "Save",
+      keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
+      keybindingContext: contexts.get(editor),
+      run: save,
+    });
     const cursor = (editor: MonacoApi.editor.ICodeEditor) => editor.onDidChangeCursorPosition((event) => {
       onCursorRef.current({ line: event.position.lineNumber, column: event.position.column });
     });
-    const disposables = [cursor(code), cursor(diff.getModifiedEditor())];
+    const disposables = [cursor(code), cursor(diff.getModifiedEditor()), saveAction(code), saveAction(modified)];
     // The agent in the editor: first in the right-click menu, and Cmd/Ctrl+L to ask. Monaco always sorts its
     // "navigation" group first, so the agent items join it with orders below Go to Definition (1.1).
     const agentActions = (editor: MonacoApi.editor.IStandaloneCodeEditor) => ([

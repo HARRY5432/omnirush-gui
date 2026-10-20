@@ -57,3 +57,39 @@ describe("git gutter line diff on large files", () => {
     expect(gutterMarks(head, current)).toBeNull();
   });
 });
+
+describe("git gutter line diff: no common line in the changed region", () => {
+  test("two lines replaced by two others", () => {
+    expect(diffLines(["x", "q"], ["y", "r"])).toEqual([{ kind: "delete", count: 2 }, { kind: "insert", count: 2 }]);
+  });
+
+  test("two lines replaced by one is a single change", () => {
+    expect(gutterMarks("a\nx\nz\nb", "a\ny\nb")).toEqual([{ kind: "change", startLine: 2, endLine: 2, removed: 2 }]);
+  });
+
+  test("random edits always rebuild the new text", () => {
+    let seed = 7;
+    const random = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+    for (let round = 0; round < 2000; round += 1) {
+      const before = Array.from({ length: Math.floor(random() * 8) }, () => "abc"[Math.floor(random() * 3)]!);
+      const after = Array.from({ length: Math.floor(random() * 8) }, () => "abc"[Math.floor(random() * 3)]!);
+      const edits = diffLines(before, after)!;
+      const rebuilt: string[] = [];
+      let i = 0;
+      let j = 0;
+      for (const edit of edits) {
+        if (edit.kind === "equal") {
+          rebuilt.push(...before.slice(i, i + edit.count));
+          i += edit.count;
+          j += edit.count;
+        } else if (edit.kind === "delete") i += edit.count;
+        else {
+          rebuilt.push(...after.slice(j, j + edit.count));
+          j += edit.count;
+        }
+      }
+      expect(i).toBe(before.length);
+      expect(rebuilt).toEqual(after);
+    }
+  });
+});

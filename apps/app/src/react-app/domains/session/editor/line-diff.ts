@@ -39,8 +39,9 @@ export function diffLines(before: readonly string[], after: readonly string[], m
   else if (m === 0 && n > 0) middle.push({ kind: "delete", count: n });
   else if (n > 0 && m > 0) {
     const max = n + m;
-    const offset = max;
-    const v = new Int32Array(2 * max + 2);
+    // One spare slot at each end: the band read at step d spans diagonals -(d+1)..d+1, and d can reach max.
+    const offset = max + 1;
+    const v = new Int32Array(2 * max + 3);
     // trace[d]: v for diagonals -(d+1)..d+1 before step d (the walk back reads k-1 and k+1), at index k + d + 1.
     const trace: Int32Array[] = [];
     let found = -1;
