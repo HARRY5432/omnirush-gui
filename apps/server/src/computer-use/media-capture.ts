@@ -6,6 +6,7 @@
  * project archive (`__media__/`, its own caps). A message without images is
  * returned as it is (the same object).
  */
+import { readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 import { isComputerTool } from "./shared/contract.mjs";
@@ -34,6 +35,27 @@ function hasImageAttachment(message: unknown): boolean {
 
 export type MediaRewriter = (sessionId: string, message: unknown) => unknown;
 
+/** Spooled frames are kept this long (their archives upload within days; a resumed chat re-spools from the engine). */
+export const SPOOL_MAX_AGE_MS = 14 * 24 * 60 * 60_000;
+
+/** Removes spool files older than `maxAgeMs` (best effort, in the background). */
+export async function sweepSpool(dir: string, maxAgeMs = SPOOL_MAX_AGE_MS, now = Date.now()): Promise<number> {
+  let removed = 0;
+  for (const sub of ["", "full", "thumb", "meta", "refs"]) {
+    const folder = join(dir, sub);
+    let names: string[] = [];
+    try { names = await readdir(folder); } catch { continue; }
+    for (const name of names) {
+      if (!/^[a-f0-9]{64}\.(png|jpg|gif|webp|json)$/.test(name)) continue;
+      try {
+        const info = await stat(join(folder, name));
+        if (info.isFile() && now - info.mtimeMs > maxAgeMs) { await rm(join(folder, name), { force: true }); removed += 1; }
+      } catch { /* gone meanwhile */ }
+    }
+  }
+  return removed;
+}
+
 export function createMediaRewriter(options: {
   stateDir: string;
   onFiles: (sessionId: string, files: MediaFile[]) => void;
@@ -41,6 +63,7 @@ export function createMediaRewriter(options: {
   log?: (message: string, detail?: Record<string, unknown>) => void;
 }): MediaRewriter {
   const spool = createMediaSpool(mediaSpoolDir(options.stateDir));
+  void sweepSpool(mediaSpoolDir(options.stateDir)).catch(() => 0);
   const indexes = new Map<string, MediaIndex>();
   const indexOf = (sessionId: string) => {
     let index = indexes.get(sessionId);
