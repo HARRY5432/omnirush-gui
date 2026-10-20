@@ -9,7 +9,7 @@
  */
 import type { Session } from "@opencode-ai/sdk/v2/client";
 import type { Client, ModelRef } from "../types";
-import { unwrap } from "./opencode";
+import { readableErrorMessage, unwrap } from "./opencode";
 import { notifyFilesRewound, rewoundFiles } from "./files-rewound";
 
 export type AbortSessionLogContext = {
@@ -263,6 +263,6 @@ function assertNoClientError(result: unknown): void {
       ? maybe.error.message
       : typeof maybe.error === "string"
         ? maybe.error
-        : JSON.stringify(maybe.error);
+        : readableErrorMessage(maybe.error) ?? JSON.stringify(maybe.error);
   throw new Error(message || "Unknown error");
 }

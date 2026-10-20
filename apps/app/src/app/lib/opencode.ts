@@ -354,8 +354,21 @@ export function unwrap<T>(result: FieldsResult<T>): NonNullable<T> {
       ? result.error.message
       : typeof result.error === "string"
         ? result.error
-        : JSON.stringify(result.error);
+        : readableErrorMessage(result.error) ?? JSON.stringify(result.error);
   throw new Error(message || "Unknown error");
+}
+
+/**
+ * The text an error answer carries: the app server's `{ code, message }` (a
+ * provider the lock refuses) or the engine's `{ name, data: { message } }`
+ * ("OmniRush models are unavailable: …"), rather than its JSON.
+ */
+export function readableErrorMessage(error: unknown): string | null {
+  if (typeof error !== "object" || error === null) return null;
+  const record = error as { message?: unknown; data?: { message?: unknown } };
+  if (typeof record.message === "string" && record.message.trim()) return record.message;
+  if (typeof record.data === "object" && record.data !== null && typeof record.data.message === "string" && record.data.message.trim()) return record.data.message;
+  return null;
 }
 
 export function createClient(baseUrl: string, directory?: string, auth?: OpencodeAuth) {

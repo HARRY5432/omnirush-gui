@@ -170,6 +170,7 @@ import {
 } from "./composer-auto-send";
 import { useOrgMcpConnections } from "@/react-app/domains/connections/use-org-mcp-connections";
 import { buildConnectorToolIdentities } from "@/react-app/domains/connections/connector-tool-identity";
+import { readableErrorMessage } from "@/app/lib/opencode";
 
 const EMPTY_TRANSCRIPT: UIMessage[] = [];
 const IDLE_STATUS: SessionStatus = { type: "idle" };
@@ -1010,6 +1011,9 @@ function parseSessionError(thrown: unknown): SessionError {
         suggestions: Array.isArray(suggestions) ? suggestions : [],
       };
     }
+    // The engine's or the app server's own text ("OmniRush models are unavailable: …", a refused provider), not its JSON.
+    const text = readableErrorMessage(parsed);
+    if (text) return { message: text };
   } catch {
     // Not JSON — fall through to plain message
   }
