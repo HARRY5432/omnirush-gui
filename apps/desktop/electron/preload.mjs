@@ -91,6 +91,16 @@ contextBridge.exposeInMainWorld("__OMNIRUSH_ELECTRON__", {
       return detail;
     },
   },
+  computerUse: {
+    /** Computer use status (asks, sessions, frames) from the host in Electron main. */
+    onStatus(callback) {
+      const handler = (_event, status) => callback(status);
+      ipcRenderer.on("omnirush:computer-use:status", handler);
+      return () => {
+        ipcRenderer.removeListener("omnirush:computer-use:status", handler);
+      };
+    },
+  },
   automationRunner: {
     onCredentialRejected(callback) {
       const handler = () => callback();

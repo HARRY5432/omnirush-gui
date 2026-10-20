@@ -56,6 +56,7 @@ import type {
   OpenBrowserUrlResult,
 } from "@omnirush/browser-tabs";
 import type { ImportableSite, ImportSourceAvailability } from "@omnirush/browser-logins";
+import type { ComputerUseStatus } from "@omnirush/types/desktop-ipc";
 
 export type BrowserLoginSite = ImportableSite;
 
@@ -188,6 +189,9 @@ declare global {
       ) => Promise<DesktopCommandResult<C>>;
       automationRunner?: {
         onCredentialRejected?: (callback: () => void) => () => void;
+      };
+      computerUse?: {
+        onStatus?: (callback: (status: ComputerUseStatus) => void) => () => void;
       };
       fileSystem?: {
         getPathForFile?: (file: File) => string;

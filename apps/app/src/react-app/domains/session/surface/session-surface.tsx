@@ -99,6 +99,7 @@ import { useSessionFindStore } from "./find-store";
 import { getSessionActivityStatusLabel, useSessionActivityStore, type SessionActivityStatus } from "@/react-app/domains/session/status/session-activity-store";
 import { PermissionApprovalPanel } from "@/react-app/domains/session/chat/permission-approval-modal";
 import { QuestionPanel } from "@/react-app/domains/session/modals/question-modal";
+import { ComputerUseInline, useComputerUseForChat } from "@/react-app/domains/session/surface/computer-use/inline";
 import { QueuedMessagesPanel } from "@/react-app/domains/session/modals/queued-messages-panel";
 import { GoodSessionChecklistBar, noteUserStop } from "@/react-app/domains/quality/good-session";
 import { PlacementTurnFooter } from "@/react-app/domains/placements/placements";
@@ -1173,6 +1174,8 @@ export function SessionSurface(props: SessionSurfaceProps) {
   const findAppliedQuery = useSessionFindStore((state) => state.appliedQuery);
   const setFindLastFocused = useSessionFindStore((state) => state.setLastFocused);
   const findOwned = findOpen && findSessionId === props.sessionId;
+  const computerUse = useComputerUseForChat(props.sessionId);
+  const hasComputerUse = computerUse.requests.length > 0 || computerUse.sessions.length > 0;
   const findHighlightQuery = findOwned && findAppliedQuery.trim().length >= 2 ? findAppliedQuery : "";
   const sessionActivityStatus = useSessionActivityStore(
     (state) => state.statusesByWorkspaceId[props.workspaceId]?.[props.sessionId] ?? "idle",
@@ -3610,9 +3613,9 @@ export function SessionSurface(props: SessionSurfaceProps) {
         isRemoteWorkspace={props.isRemoteWorkspace}
           isSandboxWorkspace={props.isSandboxWorkspace}
           onUploadInboxFiles={props.onUploadInboxFiles ?? handleUploadInboxFiles}
-          compactTopSpacing={Boolean(showCompactionProgress || props.activeQuestion || (props.todos ?? []).some((todo) => todo.content.trim()) || props.activePermission || queuedItems.length > 0)}
+          compactTopSpacing={Boolean(showCompactionProgress || props.activeQuestion || (props.todos ?? []).some((todo) => todo.content.trim()) || props.activePermission || queuedItems.length > 0 || hasComputerUse)}
           topAccessory={
-            showCompactionProgress || props.activeQuestion || (props.todos ?? []).some((todo) => todo.content.trim()) || props.activePermission || queuedItems.length > 0 ? (
+            showCompactionProgress || props.activeQuestion || (props.todos ?? []).some((todo) => todo.content.trim()) || props.activePermission || queuedItems.length > 0 || hasComputerUse ? (
               <div>
                 {showCompactionProgress ? <ContextCompactionProgress /> : null}
                 {queuedItems.length > 0 ? (
@@ -3638,6 +3641,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
                 ) : (props.todos ?? []).some((todo) => todo.content.trim()) ? (
                   <TodoPanel todos={props.todos ?? []} />
                 ) : null}
+                {hasComputerUse ? <ComputerUseInline requests={computerUse.requests} sessions={computerUse.sessions} /> : null}
                 {props.activePermission ? (
                   <PermissionApprovalPanel
                     permission={props.activePermission}

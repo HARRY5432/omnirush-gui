@@ -620,6 +620,27 @@ export function slimEngineMessage(message: unknown, maxBytes: number | null = MA
 type EngineMessage = { message: unknown; whole: boolean };
 
 /**
+ * Applied to every message read from the engine, before any budget: image
+ * data URLs in tool results become media references (computer-use/media-capture.ts).
+ * The capture host sets it once; none: messages pass as they are.
+ */
+let engineMessageRewrite: ((sessionId: string, message: unknown) => unknown) | null = null;
+export function setEngineMessageRewrite(rewrite: ((sessionId: string, message: unknown) => unknown) | null): void {
+  engineMessageRewrite = rewrite;
+}
+
+function rewritten(path: string, message: unknown): unknown {
+  if (!engineMessageRewrite) return message;
+  const match = /\/session\/([^/]+)\/(?:message|context)$/.exec(path);
+  if (!match?.[1]) return message;
+  try {
+    return engineMessageRewrite(decodeURIComponent(match[1]), message);
+  } catch {
+    return message;
+  }
+}
+
+/**
  * A session's messages, newest first. A v1 engine is read a page at a
  * time, each page parsed under the read cap: after a page over it, the
  * newest message is asked for alone and later pages are at most half that
@@ -632,7 +653,7 @@ async function* engineMessages(fetchEngine: EngineFetch, path: string, paged: bo
     const payload = await readEngineJson(fetchEngine, path);
     const list = isRecord(payload) && "data" in payload ? payload.data : payload;
     if (!Array.isArray(list)) throw new Error("the engine messages could not be read");
-    for (const message of list.reverse()) yield { message: slimEngineMessage(message, null), whole: true };
+    for (const message of list.reverse()) yield { message: slimEngineMessage(rewritten(path, message), null), whole: true };
     return;
   }
   let ceiling = MESSAGE_PAGE_SIZE;
@@ -651,7 +672,7 @@ async function* engineMessages(fetchEngine: EngineFetch, path: string, paged: bo
       const alone = limit === 1;
       const items = await readObservedResponse(response, alone ? MAX_SINGLE_MESSAGE_READ_BYTES : MAX_ENGINE_READ_BYTES);
       if (!Array.isArray(items)) throw new Error("the engine messages could not be read");
-      page = items.map((message) => ({ message: slimEngineMessage(message, alone ? MAX_TURN_MESSAGE_BYTES : null), whole: true }));
+      page = items.map((message) => ({ message: slimEngineMessage(rewritten(path, message), alone ? MAX_TURN_MESSAGE_BYTES : null), whole: true }));
     } catch (error) {
       if (!(error instanceof OversizedEngineResponse)) throw error;
       if (limit > 1) {

@@ -30,6 +30,8 @@ export type ArchivePolicy = {
   filesUsedConsentText?: string;
   /** The server's rules switch (`policy.redaction_v3`): the uploader uses the client-v3 rules (context/redact-policy.ts). */
   redactionV3?: boolean;
+  /** The server takes `media_bytes` on archive create (`limits.max_media_bytes` in the key answer): `__media__/` files count apart. */
+  mediaBytes?: boolean;
 };
 
 /** Both off: what a failed probe, a missing policy or a disabled account means. */
@@ -64,7 +66,14 @@ export function parseArchivePolicy(body: unknown): ArchivePolicy {
     ...(redactionV3Schema.safeParse(body).success ? { redactionV3: true } : {}),
     ...(filesUsedSchema.safeParse(body).success ? { filesUsed: true, ...filesUsedCaps(body) } : {}),
     ...filesUsedConsent(body),
+    ...(mediaLimit(body) ? { mediaBytes: true } : {}),
   };
+}
+
+function mediaLimit(body: unknown): boolean {
+  if (typeof body !== "object" || body === null || !("limits" in body)) return false;
+  const limits = body.limits;
+  return typeof limits === "object" && limits !== null && "max_media_bytes" in limits && typeof limits.max_media_bytes === "number";
 }
 
 function filesUsedConsent(body: unknown): Pick<ArchivePolicy, "filesUsedAvailable" | "filesUsedAccepted" | "filesUsedConsentText"> {

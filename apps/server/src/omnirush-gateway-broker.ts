@@ -1684,6 +1684,8 @@ export class OmniRushGatewayBroker {
           : {}),
         // The model's own web search (web-search.ts reads it; absent is off).
         ...(isRecord(payload.web_search) ? { web_search: payload.web_search } : {}),
+        // Computer use (computer-use/desktop.ts reads it; absent is off).
+        ...(isRecord(payload.computer_use) ? { computer_use: payload.computer_use } : {}),
       };
     } catch {
       return null;

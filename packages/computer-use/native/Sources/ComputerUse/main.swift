@@ -20,6 +20,40 @@ case "--list-apps":
         .filter { $0.activationPolicy == .regular && AppIdentity.isAllowed($0) }
         .compactMap(\.localizedName).sorted()
     printJSON(["ok": true, "apps": apps])
+case "worker":
+    // Native layer of the desktop's shared computer-use host (contract v2); see NativeWorker.swift.
+    NSApplication.shared.setActivationPolicy(.accessory)
+    signal(SIGPIPE, SIG_IGN)
+    let worker = NativeWorker()
+    worker.start()
+    Task.detached {
+        var pending = Data()
+        var oversized = false
+        while true {
+            let chunk = FileHandle.standardInput.availableData
+            if chunk.isEmpty { break }
+            for byte in chunk {
+                if byte == 10 {
+                    if !oversized && !pending.isEmpty {
+                        // Each request runs on its own: stop and input-source answer while an action is running.
+                        let message = pending
+                        Task { @MainActor in await worker.receive(message) }
+                    }
+                    pending.removeAll(keepingCapacity: true); oversized = false
+                } else if !oversized {
+                    if pending.count >= 1_048_576 { oversized = true; pending.removeAll(keepingCapacity: true) }
+                    else { pending.append(byte) }
+                }
+            }
+        }
+        // The parent went away: release anything held, then exit.
+        await worker.receive(Data(#"{"method":"shutdown"}"#.utf8))
+        exit(0)
+    }
+    withExtendedLifetime(worker) { NSApplication.shared.run() }
+case "release":
+    guard CommandLine.arguments.count == 3 else { exit(1) }
+    exit(NativeWorker.releaseOnly(CommandLine.arguments[2]) ? 0 : 1)
 case "relay":
     guard CommandLine.arguments.count == 3 else { exit(1) }
     runDesktopRelay(CommandLine.arguments[2])
@@ -73,7 +107,7 @@ case "setup":
     reopen.resume()
     withExtendedLifetime((delegate, reopen)) { NSApplication.shared.run() }
 default:
-    fputs("Usage: ComputerUse [mcp|--check|--list-apps|setup]\n", stderr)
+    fputs("Usage: ComputerUse [worker|mcp|--check|--list-apps|setup]\n", stderr)
     exit(1)
 }
 }

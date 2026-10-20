@@ -6,6 +6,7 @@
 //
 // The engine gets the three paths in its environment; its plugin
 // (opencode-plugins/omnirush-mcp-policy.ts) reads them at each project's start.
+import { computerUseEngineEnv } from "../computer-use/desktop.js";
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
@@ -53,6 +54,8 @@ export function mcpEngineEnv(stateDir: string, env: Record<string, string | unde
     // The engine starts no MCP server unless the MCP plugin marked its config: a missing or broken plugin
     // fails closed (engine 1.18.32-ux4 and later).
     OMNIRUSH_MCP_FILTER: "required",
+    // The built-in computer use server (computer-use/desktop.ts), read by the same plugin.
+    ...computerUseEngineEnv(stateDir),
   };
 }
 

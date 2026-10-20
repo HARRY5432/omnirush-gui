@@ -932,12 +932,13 @@ export const OmniRushExtensionsPreview = async (factoryInput?: unknown) => {
     output.headers["x-omnirush-session-id"] = input.sessionID;
     output.headers["x-omnirush-task-id"] = input.message.id;
   },
-  "tool.execute.after": async (_input: unknown, output: unknown) => {
+  "tool.execute.after": async (input: unknown, output: unknown) => {
     // OpenCode 1.17.x keeps the text projection of an MCP result but drops
     // structuredContent and result _meta before persisting the completed tool
     // part. Preserve those standard fields in the existing metadata channel
     // so OmniRush.ai can host the UI without replaying the tool call.
-    preserveMcpResult(output);
+    // The built-in computer use server has no app UI: its screenshots stay attachments only.
+    if (!(isRecord(input) && typeof input.tool === "string" && input.tool.startsWith("computer-use_"))) preserveMcpResult(output);
   },
   "experimental.chat.system.transform": async (input: unknown, output: { system: string[] }) => {
     const mergedInput = mergeTransformInputWithFactoryContext(input, factoryContext);

@@ -380,6 +380,13 @@ export function isHostedWebSearchToolPart(part: ToolUIPart | DynamicToolUIPart):
   return part.type === "dynamic-tool" && part.toolName === "web_search";
 }
 
+/** A tool of the app's built-in computer use server ("computer-use_computer_act", ...). */
+export type ComputerUseToolPart = DynamicToolUIPart & { toolName: `computer-use_${string}` };
+
+export function isComputerUseToolPart(part: ToolUIPart | DynamicToolUIPart): part is ComputerUseToolPart {
+  return part.type === "dynamic-tool" && part.toolName.startsWith("computer-use_");
+}
+
 export type QuestionToolPart = BuiltInDynamicToolPart<"question", QuestionInput>;
 
 export function isQuestionToolPart(part: ToolUIPart | DynamicToolUIPart): part is QuestionToolPart {

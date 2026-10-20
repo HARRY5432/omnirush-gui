@@ -141,7 +141,7 @@ final class SessionRuntime {
     static func permissions() -> [String: Any] {
         let ax = AXIsProcessTrusted(); let capture = CGPreflightScreenCaptureAccess()
         return ["ok": ax && capture, "accessibility": ax, "screenRecording": capture,
-            "supported": true, "protocolVersion": "omnirush.computer-use/1"]
+            "supported": true, "protocolVersion": "omnirush.computer-use/1", "workerProtocol": "omnirush.computer-use/2"]
     }
     private func current(_ id: String, allowPaused: Bool = false) throws -> Session {
         expire()

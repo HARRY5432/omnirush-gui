@@ -36,6 +36,16 @@ migration's authority understandable and revocable.
 
 ## Runtime and protocol
 
+Contract v2 (desktop): `ComputerUse worker` is the native layer of the shared
+computer-use host (`apps/server/src/computer-use/shared/portable-host.mjs`),
+started by `apps/desktop/electron/computer-use-host.mjs`. The shared host owns
+the tool schemas, validation, results, approvals, events and media spool; the
+worker lists windows, captures one window (password fields and recognized
+credential text are reported as boxes to paint), hit-tests target points,
+posts window-targeted input and reports person input. Its stdio protocol is
+described in `native/Sources/ComputerUse/NativeWorker.swift`. The `mcp` /
+`mcp-hosted` / `relay` modes below are the earlier v1 surface.
+
 ```
 OmniRush.ai engine → stdio relay → desktop broker → native MCPServer
 OmniRush.ai main window → desktop IPC → broker's private UI channel

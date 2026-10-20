@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 
-import { COMPUTER_USE_PAUSED, MCP_QUICK_CONNECT } from "../src/app/constants";
+import { COMPUTER_USE_LIBRARY_CONNECT, MCP_QUICK_CONNECT } from "../src/app/constants";
 import { createOmniRushServerClient } from "../src/app/lib/omnirush-server";
 import { createOmniRushServerStore } from "../src/react-app/domains/connections/omnirush-server-store";
 import type { McpDirectoryInfo } from "../src/app/constants";
@@ -76,7 +76,7 @@ describe("local MCP server recovery", () => {
 });
 
 // The setup flow is not reachable while Computer Use is paused (no catalog entry).
-describe.skipIf(COMPUTER_USE_PAUSED)("bundled Computer Use setup", () => {
+describe.skipIf(!COMPUTER_USE_LIBRARY_CONNECT)("bundled Computer Use setup", () => {
   async function connectWithHelper(command: string[] | null) {
     Object.defineProperty(globalThis, "window", {
       configurable: true,

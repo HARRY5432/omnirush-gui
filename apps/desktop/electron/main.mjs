@@ -28,7 +28,9 @@ import {
   getComputerUseMcpCommand,
   getComputerUseMcpEnvironment,
   getComputerUseState,
-  computerUseAction,
+  computerUseAnswer,
+  computerUseControl,
+  initComputerUse,
   listRunningApps,
   openComputerUseSetupApp,
 } from "./computer-use.mjs";
@@ -2311,9 +2313,14 @@ const desktopCommandHandlers = {
       return omnirushUiMcpLaunch().command;
   },
   "getComputerUseState": async () => getComputerUseState(),
-  "computerUseAction": async (event, value) => {
-    if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error("Computer Use controls require the main OmniRush.ai window.");
-    return computerUseAction(value);
+  // Only the person answers, in the main window's own frame (never the agent, a page or a config).
+  "computerUseAnswer": async (event, value) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error("Computer use controls require the main OmniRush.ai window.");
+    return computerUseAnswer(value);
+  },
+  "computerUseControl": async (event, value) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error("Computer use controls require the main OmniRush.ai window.");
+    return computerUseControl(value);
   },
   "getComputerUseMcpCommand": async (event, ...args) => {
       return getComputerUseMcpCommand();
@@ -3443,6 +3450,8 @@ or use: pnpm dev:worktree`);
   });
 
   app.whenReady().then(async () => {
+    // Computer use follows the local server's switch (computer-use.mjs); the host starts only when it is on.
+    initComputerUse({ getWindow: () => mainWindow, serverInfo: () => runtimeManager.omnirushServerInfo(), log: (message, error) => console.warn(`[computer-use] ${message}`, error?.message ?? "") });
     const systemCaCertificates = await runtimeManager.systemCaCertificates();
     session.defaultSession.setCertificateVerifyProc(createSystemCaCertificateVerifyProc(systemCaCertificates));
     installMediaPermissionHandlers(session, () => mainWindow);
