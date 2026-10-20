@@ -186,10 +186,12 @@ const MCP_ENV_ALLOW_UPPER = new Set(MCP_ENV_ALLOW.map((k) => k.toUpperCase()));
 
 // The engine's values a server's entry must not hold anywhere (its command, variables or folder): the app's
 // tokens and the engine's password, from 8 characters on. A project config could copy them in ({env:...}).
-const PROTECTED_VALUE_NAME = /^(?:OPENCODE_SERVER_|OPENCODE_PASSWORD$)|^OMNIRUSH_.*(?:TOKEN|SECRET|PASSWORD|PASSWD|KEY|AUTH|CREDENTIAL|COOKIE|SESSION)/i;
+// Whole name parts only, and not a setting that names where something is (…_URL, …_DIR, …_PATH, …).
+const PROTECTED_VALUE_NAME = /^(?:OPENCODE_SERVER_|OPENCODE_PASSWORD$)|^OMNIRUSH_(?:\w*_)?(?:TOKENS?|SECRETS?|PASSWORD|PASSWD|KEYS?|CREDENTIALS?|COOKIES?|AUTH)(?:_|$)/i;
+const PROTECTED_VALUE_NOT = /_(?:URL|DIR|PATH|FILE|STORE|MS|MODULE|MODE)$/i;
 export function protectedValues(engineEnv) {
   return [...new Set(Object.entries(engineEnv ?? {})
-    .filter(([k, v]) => typeof v === "string" && v.length >= 8 && PROTECTED_VALUE_NAME.test(k))
+    .filter(([k, v]) => typeof v === "string" && v.length >= 8 && PROTECTED_VALUE_NAME.test(k) && !(k.startsWith("OMNIRUSH_") && PROTECTED_VALUE_NOT.test(k)))
     .map(([, v]) => v))];
 }
 

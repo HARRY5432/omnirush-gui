@@ -17,7 +17,7 @@
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { createMcpPolicyHooks, engineStartsServersEnvOnly, mcpServerEnvironment, reportPath, type McpBox } from "../mcp-allow/mcp-allow.mjs";
+import { createMcpPolicyHooks, MCP_ENV_VALUES_MARK, mcpServerEnvironment, reportPath, type McpBox } from "../mcp-allow/mcp-allow.mjs";
 import { readWorkspaceMcp } from "../mcp-allow/state.js";
 import { computerUseBuiltins, COMPUTER_USE_DIR_ENV } from "../computer-use/desktop.js";
 import { isComputerTool, SERVER_ID } from "../computer-use/shared/contract.mjs";
@@ -143,7 +143,9 @@ export default async function omnirushMcpPolicy(input?: { directory?: string; cl
         // Like every server: the engine's tokens never reach it, only the variables the allowlist keeps plus
         // the ones the app gives it.
         const own = isRecord(builtin.environment) ? Object.fromEntries(Object.entries(builtin.environment).filter((entry): entry is [string, string] => typeof entry[1] === "string")) : {};
-        const environment = { ...mcpServerEnvironment(process.env, {}, [], process.platform, { envOnly: engineStartsServersEnvOnly() }), ...own };
+        // Values only when the filter marked this config (the engine then leaves the rest of its environment out).
+        const envOnly = (target as Record<symbol, unknown>)[MCP_ENV_VALUES_MARK] === true;
+        const environment = { ...mcpServerEnvironment(process.env, {}, [], process.platform, { envOnly }), ...own };
         target.mcp = { ...(isRecord(target.mcp) ? target.mcp : {}), [SERVER_ID]: { ...builtin, environment } };
         // The host asks the person itself (never the engine's permission prompts), in every mode.
         const permission: Record<string, unknown> = typeof target.permission === "string" ? { "*": target.permission } : isRecord(target.permission) ? { ...target.permission } : {};
