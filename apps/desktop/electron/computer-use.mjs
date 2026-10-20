@@ -138,8 +138,11 @@ function hostSettings() {
   return { enabled: server?.enabled === true, real_screen: setting.real_screen !== false, limits: setting.limits ?? null, deny_apps: setting.deny_apps ?? [], mode: server?.mode ?? "normal", message: setting.message ?? null };
 }
 
-function hostContext() {
+async function hostContext() {
   const metrics = (() => { try { return app.getAppMetrics().map((m) => m.pid); } catch { return []; } })();
+  // The chat now (the one that just called), not the last poll's.
+  const fresh = await serverFetch("/computer-use/state").catch(() => null);
+  if (fresh) server = fresh;
   return { ancestors: shared?.ancestors ?? [], self_pids: [process.pid, ...metrics], chat: server?.chat ?? null };
 }
 

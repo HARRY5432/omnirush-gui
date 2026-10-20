@@ -86,7 +86,8 @@ export function createPortableHost(options: {
   native: NativeWorker;
   spool?: MediaSpool | null;
   settings: () => HostSettings;
-  context?: () => HostContext;
+  /** May be async (read once per discover / open-session). */
+  context?: () => HostContext | Promise<HostContext>;
   approve: { open(request: OpenRequest): Promise<OpenAnswer> | OpenAnswer; act(request: ActRequest): Promise<{ allow: boolean }> | { allow: boolean } };
   onEvent?: (event: SessionEvent) => void;
   onState?: (states: HostSessionState[]) => void;

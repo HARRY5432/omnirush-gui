@@ -129,8 +129,8 @@ function describeAction(a) {
  * - spool: a media spool (media.mjs createMediaSpool) frames go to, or null
  * - settings(): { enabled, real_screen, limits, deny_apps, mode } now
  *   (mode: the chat's permission mode careful|normal|auto)
- * - context(): { ancestors, self_pids, tty_pids, chat } now (chat: the chat
- *   using computer use, for "Allow for this chat" and per-chat counts)
+ * - context(): { ancestors, self_pids, tty_pids, chat } now, or a promise of it
+ *   (chat: the chat using computer use, for "Allow for this chat" and per-chat counts)
  * - approve: { open(request) → { decision: "chat"|"once"|"deny", window_id? },
  *              act(request) → { allow: boolean } }
  * - onEvent(event): `computer.session` events; onState(states); onFrame(frame)
@@ -367,7 +367,7 @@ export async function createPortableHost({ native, spool = null, settings, conte
   }
 
   async function discover() {
-    const ctx = context() ?? {};
+    const ctx = (await context()) ?? {};
     const config = settings() ?? {};
     const windows = await native.call("list");
     const apps = new Map();
@@ -383,7 +383,7 @@ export async function createPortableHost({ native, spool = null, settings, conte
 
   async function openSession(connection, args) {
     const config = settings() ?? {};
-    const ctx = context() ?? {};
+    const ctx = (await context()) ?? {};
     if (!config.enabled) return mcpResult(failure("disabled", config.message || "Computer use is turned off."));
     if (config.real_screen === false) return mcpResult(failure("real_screen_unavailable", "Computer use on this screen is turned off."));
     if (lease) return mcpResult(failure("session_busy", "Another computer use session is open. Close it first."));
