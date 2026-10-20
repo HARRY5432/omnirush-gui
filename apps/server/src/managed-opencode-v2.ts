@@ -127,6 +127,10 @@ export async function createManagedOpencodeV2Server(
       OPENCODE_CONFIG_DIR: configDir,
       // No session sharing to an outside share service.
       OPENCODE_DISABLE_SHARE: "1",
+      // A project's own config files are not read: this engine has no MCP filter, and it starts a project's
+      // MCP servers (with this environment, the password included) as soon as it opens the folder.
+      OPENCODE_DISABLE_PROJECT_CONFIG: "1",
+      OPENCODE_CONFIG_PROJECT_DISABLE: "1",
       OPENCODE_AUTO_SHARE: "false",
       ...(opencodeModelsUrl === undefined ? {} : { OPENCODE_MODELS_URL: opencodeModelsUrl }),
       ...(disableModelsFetch === undefined ? {} : { OPENCODE_DISABLE_MODELS_FETCH: disableModelsFetch }),

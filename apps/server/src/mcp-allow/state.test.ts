@@ -296,6 +296,39 @@ describe("MCP server environment", () => {
     expect(mcpServerEnvironment({ memory_file_path: "C:\\other" }, { MEMORY_FILE_PATH: "C:\\work\\m" }, [], "win32")).toEqual({ MEMORY_FILE_PATH: "C:\\work\\m" });
   });
 
+  test("env-only engine: a server gets the allowed values, nothing empty, and no app value even when set later", () => {
+    const policy = normalizePolicy(policyFixture);
+    const engineEnv: Record<string, string> = { PATH: "/usr/bin", HOME: "/home/u", DISPLAY: ":0", HTTPS_PROXY: "http://proxy:3128", OMNIRUSH_ACCESS_TOKEN: "acc-0123456789", OPENCODE_SERVER_PASSWORD: "pw-0123456789", AWS_SECRET_ACCESS_KEY: "aws-0123456789" };
+    const base = (env: Record<string, string>) => Object.fromEntries(Object.entries(env).filter(([k]) => /^(?:PATH|HOME|TMPDIR|LANG|LC_\w+|XDG_\w+)$/i.test(k)));
+    for (const envOnly of [false, true]) {
+      const { mcp } = evaluateMcp({ filesystem: { type: "local", command: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "."] } }, policy,
+        { root: "/work/app", platform: "linux", npmPrefix: "/state/npx", resolveRunner: (runner: string) => runner, env: engineEnv, envOnly });
+      const environment = (mcp as Record<string, { environment?: Record<string, string> }>).filesystem!.environment ?? {};
+      if (envOnly) expect(Object.values(environment)).not.toContain("");
+      const later = { ...engineEnv, OMNIRUSH_LATE_TOKEN: "late-0123456789" };
+      const spawned = envOnly ? { ...base(later), ...environment } : { ...later, ...environment };
+      for (const secret of ["acc-0123456789", "pw-0123456789", "aws-0123456789", ...(envOnly ? ["late-0123456789"] : [])]) expect(Object.values(spawned)).not.toContain(secret);
+      expect(spawned).toMatchObject({ PATH: "/usr/bin", HOME: "/home/u", DISPLAY: ":0", HTTPS_PROXY: "http://proxy:3128" });
+    }
+  });
+
+  test("an entry holding one of the app's values (args, variables, folder) does not start", () => {
+    const policy = normalizePolicy(policyFixture);
+    const env = { PATH: "/usr/bin", OMNIRUSH_ACCESS_TOKEN: "acc-0123456789", OPENCODE_SERVER_PASSWORD: "pw-0123456789", OMNIRUSH_PERMISSION_MODE: "careful" };
+    const ctx = { root: "/work/app", platform: "linux", npmPrefix: "/state/npx", resolveRunner: (runner: string) => runner, env };
+    for (const entry of [
+      { type: "local", command: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "./acc-0123456789"] },
+      { type: "local", command: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "."], environment: { X: "pw-0123456789" } },
+      { type: "local", command: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "."], cwd: "pw-0123456789" },
+    ]) {
+      const { mcp, decisions } = evaluateMcp({ filesystem: entry }, policy, ctx);
+      expect(mcp).toEqual({});
+      expect(decisions[0]).toMatchObject({ status: "blocked", code: "protected_value" });
+      expect(JSON.stringify(decisions)).not.toContain("0123456789");
+    }
+    expect(evaluateMcp({ filesystem: { type: "local", command: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "careful"] } }, policy, ctx).decisions[0]!.status).toBe("allowed");
+  });
+
   test("Windows: mixed-case names are matched whatever their case", () => {
     expect(mcpServerEnvironment({ Path: "C:\\Windows", SystemRoot: "C:\\Windows", Omnirush_Access_Token: "t", opencode_server_password: "p", Aws_Secret: "a" }, {}, [], "win32"))
       .toEqual({ Omnirush_Access_Token: "", opencode_server_password: "", Aws_Secret: "" });
