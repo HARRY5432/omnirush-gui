@@ -525,7 +525,7 @@ export function SessionRoute() {
     runRemoteWorkspaceConnectionCheck,
   } = useWorkspaceRouteState({
     developerMode,
-    workspaceRoute: appsRouteActive ? "apps" : automationsRouteActive ? "automations" : dashboardWorkspaceRoute ? "dashboard" : tasksRouteActive ? "tasks" : "session",
+    workspaceRoute: tasksRouteActive ? "tasks" : appsRouteActive ? "apps" : automationsRouteActive ? "automations" : dashboardWorkspaceRoute ? "dashboard" : "session",
     onServerSettingsChanged: () => setOmniRushServerSettingsVersion((value) => value + 1),
     onHostInfo: setOmniRushServerHostInfoState,
   });

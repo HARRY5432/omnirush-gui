@@ -14,7 +14,8 @@ import { readTask, TASK_MERGED_EVENT, TASK_STARTED_EVENT, tasksDir } from "./wor
 import { workspaceIdForPath } from "./workspaces.js";
 
 const roots: string[] = [];
-const savedEnv = { ...process.env };
+const ENV_KEYS = ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "OMNIRUSH_DATA_DIR", "OMNIRUSH_RUNTIME_DB"] as const;
+const savedEnv = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
 
 beforeAll(() => {
   process.env.GIT_AUTHOR_NAME = "Test";
@@ -24,7 +25,10 @@ beforeAll(() => {
 });
 
 afterAll(async () => {
-  process.env = savedEnv;
+  for (const key of ENV_KEYS) {
+    if (savedEnv[key] === undefined) delete process.env[key];
+    else process.env[key] = savedEnv[key];
+  }
   while (roots.length) await rm(roots.pop()!, { recursive: true, force: true });
 });
 
@@ -47,7 +51,9 @@ async function makeRepo(): Promise<{ root: string; repo: string }> {
 }
 
 function makeConfig(root: string, workspaces: WorkspaceInfo[]): ServerConfig {
+  // This test's own data folder and runtime database (another test file may leave either pointing elsewhere).
   process.env.OMNIRUSH_DATA_DIR = join(root, "data");
+  process.env.OMNIRUSH_RUNTIME_DB = join(root, "runtime.sqlite");
   return {
     host: "127.0.0.1",
     port: 0,
@@ -120,8 +126,8 @@ function harness(config: ServerConfig): Harness {
       const response = await matched.handler(ctx);
       return { status: response.status, json: await response.json() };
     } catch (error) {
-      const failure = error as { status?: number; code?: string; message?: string };
-      return { status: failure.status ?? 500, json: { code: failure.code, message: failure.message } };
+      const failure = error as { status?: number; code?: string; message?: string; stack?: string };
+      return { status: failure.status ?? 500, json: { code: failure.code, message: failure.message, ...(failure.status ? {} : { stack: failure.stack }) } };
     }
   };
   return state;
@@ -155,7 +161,7 @@ describe("parallel tasks (desktop)", () => {
 
   test("creating a task makes a worktree next to the repository and registers it as its own workspace", async () => {
     const created = await h.call("POST", `/workspaces/${mainId}/tasks`, { prompt: "Add a greeting file" });
-    expect(created.status).toBe(201);
+    expect(created).toMatchObject({ status: 201 });
     const task = created.json.task as Record<string, string>;
     expect(dirname(task.path)).toBe(tasksDir(repo));
     expect(existsSync(join(task.path, ".git"))).toBe(true);
