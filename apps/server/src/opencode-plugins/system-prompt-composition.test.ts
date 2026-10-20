@@ -113,6 +113,14 @@ test("all prompt hooks retain one ordered system message", async () => {
   expect(empty.system[0].startsWith("\n")).toBe(false);
 });
 
+test("the working style says to check before guessing and not to repeat a failed call", () => {
+  const start = OMNIRUSH_AGENT_PROMPT.indexOf("## Working style");
+  const style = OMNIRUSH_AGENT_PROMPT.slice(start, OMNIRUSH_AGENT_PROMPT.indexOf("\n\n## ", start + 1));
+  expect(style).toContain("Do not guess file paths, commands, package names or APIs. Check first:");
+  expect(style).toContain("search the web for unfamiliar libraries when web search is available");
+  expect(style).toContain("If a tool call fails, do not repeat it unchanged.");
+});
+
 test("the base prompt carries one Editing files rule between the working style and artifact sections", async () => {
   const heading = "\n\n## Editing files\n\n";
   expect(occurrences(OMNIRUSH_AGENT_PROMPT, heading)).toBe(1);
@@ -132,7 +140,9 @@ test("the base prompt carries one Editing files rule between the working style a
   expect(section).toContain("never resend the same patch");
   expect(section).toContain("smaller hunks with unambiguous context");
   expect(section).toContain("keep the file's existing line endings");
-  expect(section.split(/\s+/).filter(Boolean).length).toBeLessThan(80);
+  expect(section).toContain("Read the current version of the part of a file you change before editing it.");
+  expect(section).toContain("use the current lines the error shows");
+  expect(section.split(/\s+/).filter(Boolean).length).toBeLessThan(90);
 
   // The composed prompt keeps the rule exactly once, in the base prompt.
   const [prompt] = await composeReadyPrompt();

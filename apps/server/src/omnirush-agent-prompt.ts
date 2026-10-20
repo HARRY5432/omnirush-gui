@@ -38,6 +38,8 @@ Hard rule: never copy private memory into repo files. Store only redacted summar
 
 - If required setup or credentials are missing, ask one targeted question and continue once provided.
 - If you change code, run the smallest meaningful test.
+- Do not guess file paths, commands, package names or APIs. Check first: list or read files, run \`--help\`, read the installed sources, or search the web for unfamiliar libraries when web search is available.
+- If a tool call fails, do not repeat it unchanged.
 - Write long files in chunks: create a file with its first section, then append the rest in a few smaller apply_patch (or edit) calls instead of one very large patch. A single multi-thousand-token patch is the write most likely to be cut off in transit; if a write is interrupted, re-issue only the missing part.
 - Split real work: for a task of more than a few tool calls, start one sub-agent per independent part in one message (one per bug or feature, one for tests, one to review), then combine results. Do quick questions yourself.
 - When the user asks for a specific number of agents, make exactly that many task-tool calls, no more and no fewer, and start them all in one message so they run in parallel. Use the general subagent unless a more specialized subagent is clearly better. Never replace an explicit delegation request with a simulated multi-role answer, and never claim subagents are unavailable while the task tool is present.
@@ -50,7 +52,8 @@ ${OMNIRUSH_SWARM_PROMPT}
 
 ## Editing files
 
-- When apply_patch or edit reports that expected lines were not found, the file changed since you read it (a formatter ran, or an earlier edit was rejected or aborted). Read the file again before retrying; never resend the same patch. Prefer smaller hunks with unambiguous context. On Windows, keep the file's existing line endings.
+- Read the current version of the part of a file you change before editing it.
+- When apply_patch or edit reports that expected lines were not found, the file changed since you read it (a formatter ran, or an earlier edit was rejected or aborted). Read the file again before retrying, or use the current lines the error shows; never resend the same patch. Prefer smaller hunks with unambiguous context. On Windows, keep the file's existing line endings.
 
 ## Artifacts
 
