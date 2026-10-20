@@ -10,6 +10,7 @@ import { AlertTriangle, ChevronDown, ChevronRight, CircleX, Info, RefreshCw, Spa
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { useEditorStore } from "./editor-store";
 import { diagnosticCode, problemCounts, useProblemsStore, type LspDiagnostic } from "./lsp";
 
 const EMPTY: never[] = [];
@@ -23,6 +24,8 @@ export function ProblemsView(props: {
 }) {
   const files = useProblemsStore((state) => state.byWorkspace[props.workspaceId] ?? EMPTY);
   const available = useProblemsStore((state) => state.available);
+  const languageFeatures = useEditorStore((state) => state.languageFeatures);
+  const setLanguageFeatures = useEditorStore((state) => state.setLanguageFeatures);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [errorsOnly, setErrorsOnly] = useState(false);
   const counts = problemCounts(files);
@@ -39,6 +42,10 @@ export function ProblemsView(props: {
         <span>{counts.errors} error{counts.errors === 1 ? "" : "s"}, {counts.warnings} warning{counts.warnings === 1 ? "" : "s"}</span>
         <span className="text-[11px]">· files the language servers have open</span>
         <span className="flex-1" />
+        <label className="flex items-center gap-1" title="Problems, hover, go to definition, rename and outline from the project's language servers">
+          <input type="checkbox" checked={languageFeatures} onChange={(event) => setLanguageFeatures(event.target.checked)} data-editor-language-features />
+          Language features
+        </label>
         <label className="flex items-center gap-1">
           <input type="checkbox" checked={errorsOnly} onChange={(event) => setErrorsOnly(event.target.checked)} />
           Errors only
@@ -48,7 +55,12 @@ export function ProblemsView(props: {
         </Button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto py-1">
-        {!available ? (
+        {!languageFeatures ? (
+          <p className="px-3 py-2 text-muted-foreground">
+            Language features in the editor are off, so no language server starts for the files you open.{" "}
+            <button type="button" className="text-foreground underline underline-offset-2" onClick={() => setLanguageFeatures(true)}>Turn on</button>
+          </p>
+        ) : !available ? (
           <p className="px-3 py-2 text-muted-foreground">This engine build has no editor language features yet; problems show once it updates.</p>
         ) : shown.length === 0 ? (
           <p className="px-3 py-2 text-muted-foreground">No problems in the files the language servers have open. Open a file to check it.</p>

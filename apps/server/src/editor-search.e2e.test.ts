@@ -63,3 +63,21 @@ test("bad input is refused", () => {
   expect(() => parseSearchOptions({ query: "(", regex: true })).toThrow();
   expect(parseSearchOptions({ query: "x", include: ["../etc/*", "/abs", "src/**"] }).include).toEqual(["src/**"]);
 });
+
+test("git grep: a file name holding `:1:` is read whole, and a failing git is an error", async () => {
+  const root = await project();
+  await writeFile(join(root, "src", "we:1:ird.ts"), "limit\n");
+  const result = await searchWorkspace(root, options({ include: ["src/we*"] }), null);
+  expect(result.files.map((file) => file.path)).toEqual(["src/we:1:ird.ts"]);
+  // A pattern git refuses (no closing bracket in either regex syntax) comes back as an error, not "0 results".
+  await expect(searchWorkspace(root, { ...options({ regex: true }), query: "lim[it" }, null)).rejects.toThrow();
+});
+
+test("ripgrep from the desktop engine's data folder", async () => {
+  const userData = await mkdtemp(join(tmpdir(), "omnirush-userdata-"));
+  roots.push(userData);
+  const name = process.platform === "win32" ? "rg.exe" : "rg";
+  await mkdir(join(userData, "engine-data", "omnirush", "bin"), { recursive: true });
+  await writeFile(join(userData, "engine-data", "omnirush", "bin", name), "");
+  expect(findRipgrep({ PATH: "", OMNIRUSH_DESKTOP_USER_DATA_DIR: userData, HOME: userData })).toBe(join(userData, "engine-data", "omnirush", "bin", name));
+});

@@ -5,7 +5,8 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 import type * as MonacoApi from "monaco-editor/editor/editor.api.js";
 
 import { cn } from "@/lib/utils";
-import { documentSymbols } from "./lsp";
+import { useEditorStore } from "./editor-store";
+import { documentSymbols, useIsLspActive } from "./lsp";
 
 // Monaco SymbolKind (0-based): a short mark per kind.
 const KIND_MARK: Record<number, { mark: string; className: string }> = {
@@ -54,6 +55,8 @@ export function OutlineView(props: { model: MonacoApi.editor.ITextModel | null; 
   const [open, setOpen] = useState(true);
   const [symbols, setSymbols] = useState<MonacoApi.languages.DocumentSymbol[] | null>(null);
   const [tick, setTick] = useState(0);
+  const active = useIsLspActive(props.path);
+  const languageFeatures = useEditorStore((state) => state.languageFeatures);
 
   useEffect(() => {
     const model = props.model;
@@ -78,7 +81,7 @@ export function OutlineView(props: { model: MonacoApi.editor.ITextModel | null; 
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [open, props.model, tick]);
+  }, [open, props.model, tick, active]);
 
   return (
     <div className={cn("flex min-h-0 flex-col border-t border-border text-xs", open ? "max-h-[45%]" : "")} data-editor-outline>
@@ -90,7 +93,8 @@ export function OutlineView(props: { model: MonacoApi.editor.ITextModel | null; 
       {open ? (
         <div className="min-h-0 overflow-y-auto px-1 pb-2">
           {!props.model ? <p className="px-2 text-muted-foreground">Open a file to see its symbols.</p>
-            : symbols === null ? <p className="px-2 text-muted-foreground">Loading symbols…</p>
+            : !languageFeatures ? <p className="px-2 text-muted-foreground">Language features in the editor are off.</p>
+            : symbols === null ? <p className="px-2 text-muted-foreground">{active ? "Loading symbols…" : "Symbols show once the file has been open a moment."}</p>
               : symbols.length === 0 ? <p className="px-2 text-muted-foreground">No symbols (no language server for this file, or none found).</p>
                 : symbols.map((symbol, index) => <SymbolRow key={`${symbol.name}:${index}`} symbol={symbol} depth={0} onReveal={props.onReveal} />)}
         </div>

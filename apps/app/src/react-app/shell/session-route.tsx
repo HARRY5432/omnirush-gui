@@ -2926,6 +2926,7 @@ export function SessionRoute() {
     };
   }, [selectedSessionId]);
 
+  const editorLanguageFeatures = useEditorStore((state) => state.languageFeatures);
   const layoutModeName = useEditorStore((state) => (selectedWorkspaceId ? state.modeByWorkspace[selectedWorkspaceId] : undefined) ?? "chat");
   const layoutAvailable = isElectronRuntime() && Boolean(selectedWorkspace) && selectedWorkspace?.workspaceType !== "remote";
   const layoutPaletteItems = useMemo<PaletteItem[]>(() => layoutAvailable ? [
@@ -2958,6 +2959,16 @@ export function SessionRoute() {
       },
     })) : []),
     ...(layoutModeName === "ide" ? [{
+      id: "editor.language-features",
+      title: editorLanguageFeatures ? "Turn off language features in the editor" : "Turn on language features in the editor",
+      detail: "Problems, hover, go to definition, rename and outline from the project's language servers",
+      meta: "",
+      searchText: "editor ide language features lsp problems hover rename outline server off on",
+      action: () => {
+        setCommandPaletteOpen(false);
+        useEditorStore.getState().setLanguageFeatures(!editorLanguageFeatures);
+      },
+    }, {
       id: "layout.chat-panel",
       title: "Show or hide the chat",
       detail: "Fold the chat panel of the IDE layout away, or bring it back",

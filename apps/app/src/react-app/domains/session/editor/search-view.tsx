@@ -27,13 +27,25 @@ function matcher(query: string, flags: Flags): RegExp | null {
   }
 }
 
-/** The replacement for one matched text ($1… groups in regex mode). */
-export function replacementFor(matched: string, query: string, replace: string, flags: Flags): string {
-  if (!flags.regex) return replace;
-  const re = matcher(query, { ...flags });
-  if (!re) return replace;
-  re.lastIndex = 0;
-  return matched.replace(new RegExp(re.source, re.flags.replace("g", "")), replace);
+/** A sticky copy of the search: it matches exactly at `lastIndex`, with the whole line as context (\b, lookarounds). */
+function stickyMatcher(query: string, flags: Flags): RegExp | null {
+  const re = matcher(query, flags);
+  return re ? new RegExp(re.source, `${re.flags.replace("g", "")}y`) : null;
+}
+
+/**
+ * The text that replaces the match at [start, end) of `line` ($1… groups in regex mode), or null when the
+ * search no longer matches exactly there.
+ */
+export function replacementAt(line: string, start: number, end: number, replace: string, sticky: RegExp | null, regex: boolean): string | null {
+  if (!sticky) return null;
+  sticky.lastIndex = start;
+  const found = sticky.exec(line);
+  if (!found || found[0].length !== end - start) return null;
+  if (!regex) return replace;
+  sticky.lastIndex = start;
+  const replaced = line.replace(sticky, replace);
+  return replaced.slice(start, replaced.length - (line.length - end));
 }
 
 type Target = { path: string; line: number; start: number; end: number };
@@ -118,6 +130,7 @@ export function SearchView(props: {
     matches: file.matches.filter((match, index) => !dismissed[`${file.path}:${index}`]).map((match) => ({ ...match, key: `${file.path}:${file.matches.indexOf(match)}` })),
   })).filter((file) => file.matches.length && !dismissed[file.path]), [dismissed, result]);
   const total = visible.reduce((sum, file) => sum + file.matches.length, 0);
+  const previewMatcher = useMemo(() => stickyMatcher(query, flags), [flags, query]);
 
   /** Replaces the given matches: in each file's document (open or loaded now), one undo step per file, then saved. */
   const apply = async (targets: Target[]) => {
@@ -125,6 +138,8 @@ export function SearchView(props: {
     for (const target of targets) byFile.set(target.path, [...(byFile.get(target.path) ?? []), target]);
     let changed = 0;
     let failed = 0;
+    let leftUnsaved = 0;
+    const sticky = stickyMatcher(query, flags);
     for (const [path, list] of byFile) {
       const opened = await props.docs.open(path);
       if (!opened.ok) {
@@ -132,27 +147,29 @@ export function SearchView(props: {
         continue;
       }
       const model = opened.doc.model;
+      // A file with unsaved changes of yours is edited but not saved (saving would also save your changes).
+      const wasDirty = props.docs.isDirty(opened.doc);
       const edits: { range: { startLineNumber: number; startColumn: number; endLineNumber: number; endColumn: number }; text: string }[] = [];
       for (const target of list) {
         if (target.line > model.getLineCount()) continue;
-        const lineText = model.getLineContent(target.line);
-        const matched = lineText.slice(target.start, target.end);
         // The file may have changed since the search: only a match that is still there is replaced.
-        const re = matcher(query, flags);
-        if (!re) continue;
-        re.lastIndex = 0;
-        const still = new RegExp(re.source, re.flags.replace("g", "")).exec(matched);
-        if (!still || still.index !== 0 || still[0].length !== matched.length) {
+        const text = replacementAt(model.getLineContent(target.line), target.start, target.end, replace, sticky, flags.regex);
+        if (text === null) {
           failed += 1;
           continue;
         }
         edits.push({
           range: { startLineNumber: target.line, startColumn: target.start + 1, endLineNumber: target.line, endColumn: target.end + 1 },
-          text: replacementFor(matched, query, replace, flags),
+          text,
         });
       }
       if (!edits.length) continue;
       model.pushEditOperations([], edits, () => null);
+      if (wasDirty) {
+        changed += edits.length;
+        leftUnsaved += 1;
+        continue;
+      }
       const saved = await props.docs.save(path, { sessionId: props.sessionId, source: "editor" });
       if (saved.ok) changed += edits.length;
       else {
@@ -160,7 +177,10 @@ export function SearchView(props: {
         toast.error(`${path}: ${saved.message}`);
       }
     }
-    if (changed) toast.success(`Replaced ${changed} match${changed === 1 ? "" : "es"}${failed ? `; ${failed} skipped` : ""}.`);
+    if (changed) {
+      const unsaved = leftUnsaved ? ` ${leftUnsaved} file${leftUnsaved === 1 ? "" : "s"} with your unsaved changes ${leftUnsaved === 1 ? "was" : "were"} left unsaved.` : "";
+      toast.success(`Replaced ${changed} match${changed === 1 ? "" : "es"}${failed ? `; ${failed} skipped` : ""}.${unsaved}`);
+    }
     else if (failed) toast.error("Nothing replaced: the files changed since the search. Search again.");
     props.onSaved();
     setRerun((value) => value + 1);
@@ -308,7 +328,7 @@ export function SearchView(props: {
                     {showReplace && replace !== undefined ? (
                       <>
                         <span className="bg-red-3 text-red-11 line-through dark:bg-red-5/40">{hit}</span>
-                        <span className="bg-green-3 text-green-11 dark:bg-green-5/40">{replacementFor(hit, query, replace, flags)}</span>
+                        <span className="bg-green-3 text-green-11 dark:bg-green-5/40">{replacementAt(match.text, match.start, match.end, replace, previewMatcher, flags.regex) ?? replace}</span>
                       </>
                     ) : (
                       <span className="rounded-sm bg-amber-4 text-foreground dark:bg-amber-6/60">{hit}</span>

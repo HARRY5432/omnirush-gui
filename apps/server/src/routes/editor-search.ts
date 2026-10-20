@@ -7,8 +7,8 @@
  */
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { engineDataDir, userDataHome } from "../engine-data-home.js";
 import { ApiError } from "../errors.js";
 import type { ServerConfig, WorkspaceInfo } from "../types.js";
 import { addRoute, type Route } from "./registry.js";
@@ -43,16 +43,18 @@ type RegisterOptions = {
   resolveWorkspace: (config: ServerConfig, id: string) => Promise<WorkspaceInfo>;
 };
 
-/** ripgrep: on PATH, or where the engine puts its own copy. */
+/** ripgrep: on PATH, or the copy the engine downloads into its data folder (the desktop engine's own, else the default one). */
 export function findRipgrep(env: NodeJS.ProcessEnv = process.env): string | null {
   const name = process.platform === "win32" ? "rg.exe" : "rg";
   if (env.OMNIRUSH_RG && existsSync(env.OMNIRUSH_RG)) return env.OMNIRUSH_RG;
   for (const dir of (env.PATH ?? "").split(process.platform === "win32" ? ";" : ":")) {
     if (dir && existsSync(join(dir, name))) return join(dir, name);
   }
-  const dataHome = env.XDG_DATA_HOME || join(homedir(), ".local", "share");
-  const engineCopy = join(dataHome, "omnirush", "bin", name);
-  return existsSync(engineCopy) ? engineCopy : null;
+  for (const dataDir of [engineDataDir(env), join(userDataHome(env), "omnirush")]) {
+    const engineCopy = join(dataDir, "bin", name);
+    if (existsSync(engineCopy)) return engineCopy;
+  }
+  return null;
 }
 
 function globList(value: unknown): string[] {
@@ -165,7 +167,8 @@ export async function searchWorkspace(root: string, options: SearchOptions, rg =
   };
 
   if (rg) {
-    const args = ["--json", "--no-config", "--max-columns", "2000", "--max-filesize", "5M", "--no-follow"];
+    // `--path-separator /`: Windows paths come back as `src/a.ts`, like everywhere else.
+    const args = ["--json", "--no-config", "--max-columns", "2000", "--max-filesize", "5M", "--no-follow", "--path-separator", "/"];
     if (!options.regex) args.push("--fixed-strings");
     if (options.caseSensitive) args.push("--case-sensitive");
     else args.push("--ignore-case");
@@ -197,32 +200,44 @@ export async function searchWorkspace(root: string, options: SearchOptions, rg =
   }
 
   // No ripgrep: git grep in a repository (tracked and untracked, ignored files left out), matched again here for columns.
+  // Plain text is a fixed string (-F). A regex tries Perl syntax (-P, closest to the editor's) and, where git has no
+  // PCRE (Apple's git), extended syntax (-E). A failing git is an error, never an empty result.
   if (!existsSync(resolve(root, ".git"))) return { engine: "none", files: [], matchCount: 0, truncated: false, timedOut: false };
   const source = options.regex ? options.query : options.query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const pattern = new RegExp(options.wholeWord ? `\\b(?:${source})\\b` : source, options.caseSensitive ? "g" : "gi");
-  const args = ["-c", "core.quotePath=false", "grep", "-n", "-I", "--untracked", "--exclude-standard", "--full-name", "-P"];
-  if (!options.caseSensitive) args.push("-i");
-  if (options.wholeWord) args.push("-w");
-  // Pathspecs are OR-ed: with include globs, those alone (not "."), then the excludes.
-  args.push("-e", options.regex ? options.query : source, "--");
-  if (options.include.length) for (const glob of options.include) args.push(`:(glob)${glob}`);
-  else args.push(".");
-  for (const glob of options.exclude) args.push(`:(exclude,glob)${glob}`);
-  const outcome = await run("git", args, root, (line) => {
-    const hit = /^(.*?):(\d+):(.*)$/.exec(line);
-    if (!hit) return true;
-    const [, path, lineNumber, text] = hit;
-    pattern.lastIndex = 0;
-    let found: RegExpExecArray | null;
-    while ((found = pattern.exec(text!)) !== null) {
-      if (found[0].length === 0) {
-        pattern.lastIndex += 1;
-        continue;
+  const gitGrep = async (syntax: "-F" | "-P" | "-E") => {
+    const args = ["-c", "core.quotePath=false", "grep", "-n", "-z", "-I", "--untracked", "--exclude-standard", "--full-name", syntax];
+    if (!options.caseSensitive) args.push("-i");
+    if (options.wholeWord) args.push("-w");
+    // Pathspecs are OR-ed: with include globs, those alone (not "."), then the excludes.
+    args.push("-e", options.query, "--");
+    if (options.include.length) for (const glob of options.include) args.push(`:(glob)${glob}`);
+    else args.push(".");
+    for (const glob of options.exclude) args.push(`:(exclude,glob)${glob}`);
+    // -z: `path\0line\0text`, so a file name with `:12:` in it cannot be mis-split.
+    return run("git", args, root, (line) => {
+      const [path, lineNumber, ...rest] = line.split("\0");
+      if (!path || !lineNumber || !rest.length) return true;
+      const text = rest.join("\0");
+      pattern.lastIndex = 0;
+      let found: RegExpExecArray | null;
+      while ((found = pattern.exec(text)) !== null) {
+        if (found[0].length === 0) {
+          pattern.lastIndex += 1;
+          continue;
+        }
+        if (!add(path, { line: Number(lineNumber), ...cutLine(text, found.index, found.index + found[0].length) })) return false;
       }
-      if (!add(path!, { line: Number(lineNumber), ...cutLine(text!, found.index, found.index + found[0].length) })) return false;
-    }
-    return true;
-  });
+      return true;
+    });
+  };
+  let outcome = await gitGrep(options.regex ? "-P" : "-F");
+  if (options.regex && outcome.code === 128 && !matchCount && /perl|pcre/i.test(outcome.stderr)) outcome = await gitGrep("-E");
+  // 0 = matches, 1 = none; anything else (128: bad pattern, no PCRE …) is an error unless matching was cut short on purpose.
+  if (outcome.code !== null && outcome.code > 1 && !truncated && !outcome.timedOut) {
+    const message = outcome.stderr.replace(/^fatal:\s*/i, "").trim().slice(0, 300) || "git grep failed";
+    throw new ApiError(400, options.regex ? "invalid_regex" : "search_failed", message);
+  }
   return { engine: "git", files: [...files].map(([path, matches]) => ({ path, matches })), matchCount, truncated, timedOut: outcome.timedOut };
 }
 

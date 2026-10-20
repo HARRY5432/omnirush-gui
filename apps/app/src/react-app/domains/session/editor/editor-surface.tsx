@@ -59,7 +59,8 @@ const BASE_OPTIONS: MonacoApi.editor.IStandaloneEditorConstructionOptions = {
   renderLineHighlight: "line",
   smoothScrolling: false,
   padding: { top: 6, bottom: 6 },
-  stickyScroll: { enabled: true, maxLineCount: 3 },
+  // Indentation, not the outline: the outline would ask the language servers for symbols as soon as a file opens.
+  stickyScroll: { enabled: true, maxLineCount: 3, defaultModel: "indentationModel" },
   // Large files stay responsive: no tokenisation past 20k chars per line, no word-based suggestions on huge files.
   maxTokenizationLineLength: 20_000,
   wordBasedSuggestions: "currentDocument",

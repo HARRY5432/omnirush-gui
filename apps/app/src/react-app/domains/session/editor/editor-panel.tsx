@@ -52,19 +52,27 @@ import { ProblemsView } from "./problems-view";
 import { OutlineView } from "./outline-view";
 import { codeChipText, lineLabel, sendToChat } from "./chat-context";
 import {
+  activateLsp,
+  activateLspForModel,
+  clearLanguageFeatures,
   documentSymbols,
   installLanguageFeatures,
   problemCounts,
   refreshAllDiagnostics,
   refreshFileDiagnostics,
   setLanguageContext,
+  setLspSessionBusy,
   symbolPath,
+  useIsLspActive,
   useProblemsStore,
   type LspDiagnostic,
 } from "./lsp";
 import type { AgentAction, SurfaceHandle } from "./editor-surface";
 import { baselinesForTurns, turnFileChange, type TurnFileChange } from "./review";
 import "./editor.css";
+
+/** How long a file stays the active one before its language features start. */
+const LSP_DWELL_MS = 2500;
 
 export type EditorPanelProps = {
   client: OmniRushServerClient;
@@ -934,9 +942,38 @@ export default function EditorPanel(props: EditorPanelProps) {
     requestAnimationFrame(() => surfaceHandle.current?.reveal(reveal.line, reveal.column, reveal.endColumn));
   }, [activeTab, surface]);
 
-  // The active file's problems: when it opens and after edits (its unsaved text is checked).
+  // Language features start for a file once it has been the active file for a moment, or when it is edited
+  // (a file only glanced at from search, quick open or Problems starts no language server).
+  const languageFeatures = useEditorStore((state) => state.languageFeatures);
+  const activeFilePath = surface?.kind === "file" ? surface.doc.path : null;
+  const lspActive = useIsLspActive(activeFilePath);
   useEffect(() => {
-    if (!surface || surface.kind !== "file") return;
+    setLspSessionBusy(sessionBusy);
+  }, [sessionBusy]);
+  useEffect(() => {
+    if (!languageFeatures) clearLanguageFeatures();
+  }, [languageFeatures]);
+  useEffect(() => {
+    if (!surface || surface.kind !== "file" || !languageFeatures || lspActive) return;
+    const path = surface.doc.path;
+    const timer = window.setTimeout(() => activateLsp(path), LSP_DWELL_MS);
+    // A typed edit starts them at once; the text loading or reloading from disk does not (the document is clean
+    // again right after a reload, so the check waits a microtask).
+    const doc = surface.doc;
+    const subscription = doc.model.onDidChangeContent(() => {
+      queueMicrotask(() => {
+        if (docs.isDirty(doc)) activateLsp(path);
+      });
+    });
+    return () => {
+      window.clearTimeout(timer);
+      subscription.dispose();
+    };
+  }, [docs, surface, languageFeatures, lspActive]);
+
+  // The active file's problems: when its language features start and after edits (its unsaved text is checked).
+  useEffect(() => {
+    if (!surface || surface.kind !== "file" || !lspActive) return;
     const doc = surface.doc;
     void refreshFileDiagnostics(doc.path);
     let timer = 0;
@@ -948,7 +985,7 @@ export default function EditorPanel(props: EditorPanelProps) {
       window.clearTimeout(timer);
       subscription.dispose();
     };
-  }, [surface]);
+  }, [surface, lspActive, sessionBusy]);
 
   // Breadcrumbs: the symbols around the cursor.
   useEffect(() => {
@@ -959,14 +996,14 @@ export default function EditorPanel(props: EditorPanelProps) {
     let cancelled = false;
     const timer = window.setTimeout(() => {
       void documentSymbols(surface.doc.model).then((symbols) => {
-        if (!cancelled) setBreadcrumbSymbols(symbolPath(symbols, cursor.line, cursor.column).map((symbol) => symbol.name));
+        if (!cancelled) setBreadcrumbSymbols(symbolPath(symbols ?? [], cursor.line, cursor.column).map((symbol) => symbol.name));
       });
     }, 300);
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [cursor, surface]);
+  }, [cursor, surface, lspActive]);
 
   // ── save ───────────────────────────────────────────────────────────────
   const save = useCallback(async (options: { force?: boolean } = {}) => {
@@ -1029,6 +1066,8 @@ export default function EditorPanel(props: EditorPanelProps) {
         useEditorStore.getState().setQuickOpen(true);
       } else if (command === "symbol") {
         const editor = surfaceHandle.current?.activeEditor();
+        const model = editor?.getModel();
+        if (model) activateLspForModel(model);
         editor?.focus();
         editor?.trigger("palette", "editor.action.quickOutline", null);
       } else if (command === "outline") {
