@@ -8,7 +8,13 @@
  * accepted offer asks the engine to compact on the model it last ran on.
  * The compaction record itself contains the generated handoff summary; no
  * warning or synthetic prompt is written to the session trace.
+ *
+ * The question rules are shared with the CLI (`budget-wrap-rules.ts`): asked
+ * only while the session is idle, once per offer, and a failed wrap turns
+ * into a notice with a retry action instead of the question again.
  */
+import { replacesWrapOffer, startWrapNow, wrapFinished } from "./budget-wrap-rules";
+
 const REQUIRED_HEADER = "x-omnirush-wrap-required";
 const WRAP_UP_HEADER = "x-omnirush-wrap-up";
 const OFFER_HEADER = "x-omnirush-wrap-offer-id";
@@ -16,6 +22,8 @@ const SESSION_HEADER = "x-omnirush-session-id";
 type ModelRef = { providerID: string; modelID: string };
 type Offer = { id: string; scopes: string; watching: boolean; inFlight: boolean; approved: boolean; backendWrapped: boolean; compacted: boolean };
 const pending = new Map<string, Offer>();
+/** Sessions with a turn running (`session.status` busy until idle). */
+const busy = new Set<string>();
 /** The model each session last sent a request on (the compaction runs on it). */
 const models = new Map<string, ModelRef>();
 const MAX_TRACKED_SESSIONS = 256;
@@ -117,7 +125,8 @@ export const OmniRushBudgetWrap = async (input: {
       return;
     }
     const id = headers.get(OFFER_HEADER) || `legacy:${headers.get("x-omnirush-wrap-scopes") ?? ""}`;
-    if (current?.id === id) return;
+    if (!replacesWrapOffer(current ? { offerID: current.id } : undefined, id)) return;
+    if (current?.inFlight) return;
     if (current) void update(sessionID, current, "clear");
     remember(pending, sessionID, {
       id, scopes: headers.get("x-omnirush-wrap-scopes") || "token", watching: false,
@@ -160,8 +169,9 @@ export const OmniRushBudgetWrap = async (input: {
           body: JSON.stringify({ providerID: model.providerID, modelID: model.modelID }),
         },
       );
-      if (!response.ok) throw new Error("automatic budget wrap returned " + response.status);
-      if (!entry.compacted || !entry.backendWrapped) throw new Error("the wrap was not confirmed by the engine and gateway");
+      if (!wrapFinished({ ok: response.ok, compacted: entry.compacted })) {
+        throw new Error("the wrap did not finish (" + response.status + ")");
+      }
       await notify(
         "Wrap up complete",
         "Your handoff is saved. You can keep working while tokens remain.",
@@ -170,11 +180,15 @@ export const OmniRushBudgetWrap = async (input: {
       await update(sessionID, entry, "finish");
       pending.delete(sessionID);
     } catch {
-      // A failed wrap requires a fresh click. Never retry on the next idle.
+      // A failed wrap is final for this offer: the window shows a notice
+      // with a retry action, never the question again, and nothing retries
+      // on the next idle unless the person asks.
       entry.approved = false;
       entry.inFlight = false;
+      entry.compacted = false;
+      entry.backendWrapped = false;
       await update(sessionID, entry, "fail");
-      await notify("Wrap up did not finish", "Choose Wrap up again to retry, or keep working.", "warning");
+      await notify("Wrap up did not finish", "Your session is unchanged. You can retry, or keep working.", "warning");
     }
   }
 
@@ -182,13 +196,18 @@ export const OmniRushBudgetWrap = async (input: {
     const entry = pending.get(sessionID);
     if (!entry || entry.watching || entry.inFlight) return;
     entry.watching = true;
-    while (!disposed && pending.get(sessionID) === entry && !entry.inFlight) {
+    // Only while the session is idle: a new turn hides the question and
+    // ends this loop; the next idle starts it again.
+    while (!disposed && pending.get(sessionID) === entry && !entry.inFlight && !busy.has(sessionID)) {
       const offered = await update(sessionID, entry, "offer");
       if (offered === "decline" || offered === "done") { pending.delete(sessionID); break; }
-      if (offered === "accept") { await compact(sessionID); continue; }
+      if (busy.has(sessionID)) break;
+      if (startWrapNow({ choice: offered, busy: busy.has(sessionID), inFlight: entry.inFlight })) { await compact(sessionID); continue; }
+      // "pending" (unanswered) or "failed" (a retry may come from the notice).
       await new Promise<void>((resolve) => setTimeout(resolve, 3_000));
     }
     entry.watching = false;
+    if (busy.has(sessionID) && pending.get(sessionID) === entry && !entry.inFlight) void update(sessionID, entry, "hold");
   }
 
   return {
@@ -208,13 +227,29 @@ export const OmniRushBudgetWrap = async (input: {
         const entry = pending.get(sessionID);
         if (entry?.inFlight) entry.compacted = true;
       }
-      if (event.type === "session.idle") void watch(sessionID);
+      if (event.type === "session.status" && record(event.properties) && record(event.properties.status)) {
+        const type = event.properties.status.type;
+        if (type === "busy" || type === "retry") {
+          const entry = pending.get(sessionID);
+          // The compaction itself runs the session too; only a person's
+          // turn hides the question.
+          if (!entry?.inFlight) {
+            busy.add(sessionID);
+            if (entry) void update(sessionID, entry, "hold");
+          }
+        } else if (type === "idle") busy.delete(sessionID);
+      }
+      if (event.type === "session.idle") {
+        busy.delete(sessionID);
+        void watch(sessionID);
+      }
     },
     dispose: async () => {
       disposed = true;
       listeners.delete(noteBudgetResponse);
       pending.clear();
       models.clear();
+      busy.clear();
     },
   };
 };
