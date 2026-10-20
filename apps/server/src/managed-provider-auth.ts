@@ -5,6 +5,7 @@ import { resolveWorkspaceOpencodeConnection } from "./opencode-connection.js";
 import { readGlobalRuntimeOpencodeConfig, runtimeProviderMap } from "./runtime-opencode-config-store.js";
 import type { ServerConfig } from "./types.js";
 import { findManagedEngineWorkspace } from "./workspaces.js";
+import { providerAllowed } from "./provider-lock.js";
 
 /**
  * Deliver server-managed provider credentials to the engine.
@@ -60,7 +61,7 @@ export type ManagedProviderAuthResult = {
   rotated: string[];
   unchanged: string[];
   removed: string[];
-  skipped: Array<{ providerId: string; reason: "no_env_names" | "no_stored_credential" }>;
+  skipped: Array<{ providerId: string; reason: "no_env_names" | "no_stored_credential" | "provider_locked" }>;
   failed: Array<{ providerId: string; status: number | null }>;
 };
 
@@ -271,10 +272,15 @@ async function reconcileManagedProviderAuth(input: ManagedProviderAuthInput): Pr
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (target.authHeader) headers.authorization = target.authHeader;
 
-  const managedIds = new Set(Object.keys(providers));
+  const managedIds = new Set(Object.keys(providers).filter((providerId) => providerAllowed(providerId)));
 
   for (const [providerId, entry] of Object.entries(providers)) {
     if (!isCurrent()) return result;
+    // The model provider lock (provider-lock.ts): no key reaches the engine for a provider it does not allow.
+    if (!providerAllowed(providerId)) {
+      result.skipped.push({ providerId, reason: "provider_locked" });
+      continue;
+    }
     const envNames = readEnvNames(entry);
     if (envNames.length === 0) {
       result.skipped.push({ providerId, reason: "no_env_names" });

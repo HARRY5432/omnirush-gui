@@ -81,6 +81,7 @@ import {
   resolveCloudProviderCredentials,
 } from "./cloud-provider-config";
 import { dispatchNewProviders } from "../../../../app/lib/provider-events";
+import { isProviderAllowedByLock, isProviderLocked, providerLockMessage } from "../../../../app/lib/provider-lock";
 import { updateManagedDisabledProviders } from "../managed-engine-config";
 import {
   DESKTOP_RESTRICTION_OPENCODE_PROVIDER_ID,
@@ -926,6 +927,8 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
   };
 
   const assertProviderAllowedByDesktopPolicy = (providerId: string) => {
+    // The server's model provider lock first: its message, not the organization's.
+    if (!isProviderAllowedByLock(providerId)) throw new Error(providerLockMessage());
     const restrictToCloud = options.checkDesktopAppRestriction({ restriction: "allowCustomProviders" });
     if (
       isDesktopProviderBlocked({
@@ -1395,6 +1398,7 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
     methodIndex?: number,
   ): Promise<ProviderOAuthStartResult> {
     setStateField("providerAuthError", null);
+    if (providerId && !isProviderAllowedByLock(providerId)) throw new Error(providerLockMessage());
     const c = options.client();
     if (!c) {
       throw new Error(t("providers.not_connected"));
@@ -1544,6 +1548,7 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
     code?: string,
   ) {
     setStateField("providerAuthError", null);
+    if (!isProviderAllowedByLock(providerId)) throw new Error(providerLockMessage());
     const c = options.client();
     if (!c) {
       throw new Error(t("providers.not_connected"));
@@ -1657,6 +1662,8 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
     if (!optionsArg?.silent) {
       setStateField("providerAuthError", null);
     }
+    // Organization providers are other providers to the server's lock: none is connected while it is on.
+    if (isProviderLocked()) throw new Error(providerLockMessage());
     const c = options.client();
     if (!c) {
       throw new Error(t("providers.not_connected"));
@@ -2220,7 +2227,7 @@ export function createProviderAuthStore(options: CreateProviderAuthStoreOptions)
     preferredProviderId?: string;
   }) {
     if (isProviderAddRestricted(optionsArg?.preferredProviderId)) {
-      const message = t("providers.custom_providers_disabled");
+      const message = isProviderLocked() ? providerLockMessage() : t("providers.custom_providers_disabled");
       mutateState((current) => ({
         ...current,
         providerAuthReturnFocusTarget: "none",

@@ -8,6 +8,7 @@ import { omnirushRuntimeConfigFilePath, writeOmniRushRuntimeConfigFile } from ".
 import {
   ENGINE_GLOBAL_RUNTIME_CONFIG_ID,
   readEffectiveRuntimeOpencodeConfig,
+  readGlobalRuntimeOpencodeConfig,
   readRuntimeOpencodeConfig,
   runtimeDbPath,
   writeRuntimeOpencodeConfig,
@@ -218,10 +219,13 @@ describe("MCP allowlist at the HTTP and runtime boundaries", () => {
     expect(await response.json()).toMatchObject({ code: "mcp_config_patch" });
     expect((await readRuntimeOpencodeConfig(config, "ws_1")).mcp).toBeUndefined();
 
+    // Another model provider is refused too while the server locks them (provider-lock.ts).
     const provider = await call("PATCH", "/workspace/ws_1/config", {
       opencode: { provider: { "user-provider": { npm: "@ai-sdk/openai" } } },
     });
-    expect(provider.status).toBe(200);
+    expect(provider.status).toBe(403);
+    expect(await provider.json()).toMatchObject({ code: "provider_locked", message: "Only OmniRush models are available." });
+    expect((await readGlobalRuntimeOpencodeConfig(config)).provider).toBeUndefined();
   });
 
   test("enabling a stored registry launch is refused and not pushed", async () => {

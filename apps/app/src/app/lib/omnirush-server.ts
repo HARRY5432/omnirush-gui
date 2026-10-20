@@ -451,6 +451,8 @@ export type OmniRushFilesUsed = { active: boolean | null; available: boolean | n
 export type OmniRushPendingUploads = { uploads: number; archives: number };
 /** The server waits at most 10 s for queued uploads at a sign-out; a little more for the answer. */
 const SIGN_OUT_FLUSH_TIMEOUT_MS = 15_000;
+/** GET /omnirush/provider-lock: the model providers the engine may use (app/lib/provider-lock.ts). */
+export type OmniRushProviderLock = { locked: boolean; allow: string[]; message: string };
 /** GET /omnirush/capture/status: whether session capture runs; "off" when signed out (nothing to capture). */
 export type OmniRushCaptureStatus = {
   running: boolean;
@@ -2136,6 +2138,8 @@ export function createOmniRushServerClient(options: { baseUrl: string; token?: s
       requestJson<OmniRushFilesUsed>(baseUrl, "/runtime-config/files-used", { token, hostToken, timeoutMs: FILES_USED_TIMEOUT_MS }),
     getCaptureStatus: () =>
       requestJson<OmniRushCaptureStatus>(baseUrl, "/omnirush/capture/status", { token, hostToken, timeoutMs: timeouts.config }),
+    getProviderLock: () =>
+      requestJson<OmniRushProviderLock>(baseUrl, "/omnirush/provider-lock", { token, hostToken, timeoutMs: timeouts.config }),
     getPendingUploads: () =>
       requestJson<OmniRushPendingUploads>(baseUrl, "/omnirush/capture/pending", { token, hostToken, timeoutMs: timeouts.config }),
     flushPendingUploads: () =>

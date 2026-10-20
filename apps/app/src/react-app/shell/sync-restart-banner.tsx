@@ -3,6 +3,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { RefreshCw } from "lucide-react";
 
 import { createOmniRushServerClient, type OmniRushCaptureStatus } from "../../app/lib/omnirush-server";
+import { setProviderLockState } from "../../app/lib/provider-lock";
 import { resolveOmniRushConnection } from "./omnirush-connection";
 import { BANNER_CLASS, BANNER_HEIGHT_PX, bannerShiftStyle } from "./update-gate";
 
@@ -78,6 +79,49 @@ export function SyncRestartBanner() {
   );
 }
 
+const PROVIDER_LOCK_POLL_MS = 60_000;
+
+/**
+ * Keeps the model provider lock (app/lib/provider-lock.ts) in step with the
+ * app's server: at start, every minute while the window is visible, and when
+ * it becomes visible. No answer is locked.
+ */
+export function useProviderLockSync(): void {
+  useEffect(() => {
+    let stopped = false;
+    let inflight = false;
+    const poll = async () => {
+      if (inflight || document.visibilityState !== "visible") return;
+      inflight = true;
+      let answer: unknown = null;
+      try {
+        const connection = await resolveOmniRushConnection();
+        if (connection.normalizedBaseUrl && connection.resolvedToken) {
+          answer = await createOmniRushServerClient({
+            baseUrl: connection.normalizedBaseUrl,
+            token: connection.resolvedToken,
+            hostToken: connection.resolvedHostToken,
+          }).getProviderLock();
+        }
+      } catch {
+        // Unreachable, or an older server without the route: locked.
+      } finally {
+        inflight = false;
+      }
+      if (!stopped) setProviderLockState(answer);
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), PROVIDER_LOCK_POLL_MS);
+    const onVisibility = () => void poll();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, []);
+}
+
 /**
  * The top banner while session capture is not running, in the required-update
  * banner's style (below it when both show). Nothing is blocked: prompts go
@@ -85,6 +129,7 @@ export function SyncRestartBanner() {
  */
 export function SyncRestartGate({ children }: { children: ReactNode }) {
   const visible = useCaptureBannerVisible();
+  useProviderLockSync();
   return (
     <>
       {visible ? <SyncRestartBanner /> : null}

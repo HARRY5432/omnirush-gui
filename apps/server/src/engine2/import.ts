@@ -33,6 +33,7 @@ import { v1Messages, v1Session, type V1Message } from "./shapes.js";
 import { isEngine2Store, listEngine2Sessions, readEngine2Session, type Engine2StoredSession } from "./store.js";
 import { isRecord, num, record, str, type JsonRecord } from "./util.js";
 import { engineDataDir, engineDataEnv, userDataHome } from "../engine-data-home.js";
+import { finishEngineEnv } from "../provider-lock.js";
 
 export { ENGINE2_IMPORT_MANIFEST } from "./imported.js";
 import { ENGINE2_IMPORT_MANIFEST } from "./imported.js";
@@ -235,6 +236,8 @@ function importEnv(env: NodeJS.ProcessEnv, configDir: string): NodeJS.ProcessEnv
   const out: NodeJS.ProcessEnv = {};
   for (const [name, value] of Object.entries(env)) if (typeof value === "string" && !SECRET_ENV.test(name)) out[name] = value;
   delete out.OPENCODE_CONFIG_CONTENT;
+  // Model providers (provider-lock.ts): the lock's keys; the import's own config folder below stays.
+  finishEngineEnv(out);
   out.OPENCODE_CONFIG = join(configDir, "opencode.json");
   out.OPENCODE_CONFIG_DIR = configDir;
   out.OPENCODE_DISABLE_PROJECT_CONFIG = "1";

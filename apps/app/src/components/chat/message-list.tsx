@@ -1,5 +1,6 @@
 "use memo";
 
+import { isProviderLocked } from "@/app/lib/provider-lock"
 import { VisualizationTool } from "@/components/tools/visualization-tool"
 import * as React from "react"
 import {
@@ -1168,10 +1169,12 @@ const RetryMessage = React.memo(({ status }: RetryMessageProps) => {
               </p>
               <p className="text-xs text-amber-12/80">
                 {freeModelLimit
-                  ? "omnirush.ai will keep retrying. To keep working now, connect your own model provider."
+                  ? isProviderLocked()
+                    ? "omnirush.ai will keep retrying."
+                    : "omnirush.ai will keep retrying. To keep working now, connect your own model provider."
                   : action.message}
               </p>
-              {freeModelLimit ? (
+              {freeModelLimit && !isProviderLocked() ? (
                 <RetryActionButton
                   label="Connect a model provider"
                   onClick={() => dispatchAction({ target: "settings", action: "open", section: "providers" })}

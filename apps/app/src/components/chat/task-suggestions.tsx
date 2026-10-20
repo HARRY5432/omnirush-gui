@@ -1,5 +1,6 @@
 "use client"
 
+import { useProviderLock } from "@/app/lib/provider-lock"
 import {
   DescriptiveButton,
   DescriptiveButtonContent,
@@ -106,7 +107,8 @@ export function TaskSuggestions({ className }: TaskSuggestionsProps) {
     return null
   }
 
-  const noProviders = providerConnectedCount === 0
+  const providerLock = useProviderLock()
+  const noProviders = providerConnectedCount === 0 && !providerLock.locked
   const hasOrganizationPrompts = organizationPrompts !== undefined
 
   return (

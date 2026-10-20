@@ -1686,6 +1686,8 @@ export class OmniRushGatewayBroker {
         ...(isRecord(payload.web_search) ? { web_search: payload.web_search } : {}),
         // Computer use (computer-use/desktop.ts reads it; absent is off).
         ...(isRecord(payload.computer_use) ? { computer_use: payload.computer_use } : {}),
+        // The model provider lock (provider-lock.ts reads it; absent is locked).
+        ...(isRecord(payload.providers) ? { providers: payload.providers } : {}),
       };
     } catch {
       return null;

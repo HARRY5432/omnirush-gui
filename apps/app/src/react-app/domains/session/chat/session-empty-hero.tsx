@@ -1,4 +1,5 @@
 /** @jsxImportSource react */
+import { useProviderLock } from "@/app/lib/provider-lock";
 import { useEffect, useState } from "react";
 import { Zap } from "lucide-react";
 
@@ -78,7 +79,8 @@ export function SessionEmptyHero(props: SessionEmptyHeroProps) {
   const [prompt, setPrompt] = useState("");
   const [greeting] = useState(() => greetingForLocalHour(new Date().getHours()));
   const checkDesktopRestriction = useCheckDesktopRestriction();
-  const canAddProviders = !checkDesktopRestriction({ restriction: "allowCustomProviders" });
+  const providerLock = useProviderLock();
+  const canAddProviders = !providerLock.locked && !checkDesktopRestriction({ restriction: "allowCustomProviders" });
 
   const submit = (
     resolvedPrompt: string,

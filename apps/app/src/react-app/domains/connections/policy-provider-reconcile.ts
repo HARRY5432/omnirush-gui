@@ -1,6 +1,7 @@
 import type { OmniRushServerClient } from "@/app/lib/omnirush-server";
 import type { Client } from "@/app/types";
 import type { DesktopAppRestrictionChecker } from "@/app/cloud/desktop-app-restrictions";
+import { isProviderLocked } from "@/app/lib/provider-lock";
 import { updateManagedDisabledProviders } from "./managed-engine-config";
 import { isProviderAllowedByDesktopPolicy } from "./provider-auth/provider-policy";
 
@@ -153,6 +154,11 @@ export async function reconcilePolicyDisabledProviders(
   let disabledProviderIds = normalizeProviderIds(input.disabledProviderIds);
   let markedDisabledProviderIds = readPolicyDisabledProviderIds(storage);
   let writes = 0;
+  // While the server locks model providers (app/lib/provider-lock.ts) the server and the engine keep the
+  // others out: this organization reconcile writes nothing, and runs again once unlocked.
+  if (isProviderLocked()) {
+    return { toDisable: [], toReenable: [], nextMarkedDisabledProviderIds: markedDisabledProviderIds, disabledProviderIds, markedDisabledProviderIds, writes };
+  }
 
   const initialPlan = computePolicyProviderReconcilePlan({
     allProviders: input.allProviders,

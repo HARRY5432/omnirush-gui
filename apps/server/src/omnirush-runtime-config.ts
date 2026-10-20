@@ -59,6 +59,7 @@ import {
 } from "./omnirush-model-catalog.js";
 import { writeFileAtomic } from "./atomic-write.js";
 import { webSearchSetting, type WebSearchSwitch } from "./web-search.js";
+import { currentProviderLockPolicy, lockEngineConfig, type ProviderLockPolicy } from "./provider-lock.js";
 import { boxServiceFor } from "./box/desktop.js";
 import { engineConfig as withBoxEngineConfig } from "./box/launch.js";
 import {
@@ -231,6 +232,7 @@ export function buildOmniRushRuntimeConfigObjectFromSnapshot(
   bestPracticesDir?: string,
   webSearch: WebSearchSwitch | null = null,
   userSkillPaths: string[] = [],
+  providerLock: ProviderLockPolicy = currentProviderLockPolicy(),
 ): Record<string, unknown> {
   const disabledProviders = runtimeDisabledProviderList(runtimeConfig);
   // OMNIRUSH_APPROVALS in the server environment wins over the persisted setting.
@@ -258,15 +260,17 @@ export function buildOmniRushRuntimeConfigObjectFromSnapshot(
       : {}),
   };
   const ownProviders = Object.keys(provider).filter((id) => /^(?:lpr_|omnirush$)/i.test(id));
-  // Signed in, the model picker lists only omnirush.ai (and org-assigned)
-  // models: the engine would otherwise also load providers from the user's
-  // own opencode config, whose models bypass the gateway and whose errors
-  // name upstream relays. OMNIRUSH_ALLOW_OTHER_PROVIDERS=1 or an org policy
-  // with allowCustomProviders: true lets them back in.
+  // Only when the server unlocked providers (provider-lock.ts): signed in,
+  // the model picker lists only omnirush.ai (and org-assigned) models: the
+  // engine would otherwise also load providers from the user's own opencode
+  // config, whose models bypass the gateway and whose errors name upstream
+  // relays. OMNIRUSH_ALLOW_OTHER_PROVIDERS=1 or an org policy with
+  // allowCustomProviders: true lets them back in. While locked, none of them
+  // does: lockEngineConfig() below keeps only the allowed providers.
   const onlyOwnProviders = ownProviders.length > 0
     && env.OMNIRUSH_ALLOW_OTHER_PROVIDERS !== "1"
     && runtimeConfig.managedPolicy?.allowCustomProviders !== true;
-  return {
+  return withoutEmptyProviderMap(lockEngineConfig({
     ...engineConfig,
     ...(internalGateway
       ? { model: `${INTERNAL_PROVIDER_ID}/${omnirushDefaultModelId(catalog)}` }
@@ -340,7 +344,14 @@ export function buildOmniRushRuntimeConfigObjectFromSnapshot(
     ...(disabledProviders.length ? { disabled_providers: disabledProviders } : {}),
     ...(lsp ? { lsp } : {}),
     ...(Object.keys(provider).length ? { provider } : {}),
-  };
+  }, providerLock).config);
+}
+
+/** A provider map the lock emptied is left out, as when there was none. */
+function withoutEmptyProviderMap(config: Record<string, unknown>): Record<string, unknown> {
+  if (!isRecord(config.provider) || Object.keys(config.provider).length) return config;
+  const { provider: _provider, ...rest } = config;
+  return rest;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

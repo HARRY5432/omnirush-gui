@@ -881,6 +881,8 @@ export type TraceCapabilities = {
   computer_use?: Record<string, unknown>;
   /** The MCP list (mcp-allow/state.ts remembers it): absent is off. */
   mcp?: Record<string, unknown>;
+  /** The model provider lock (provider-lock.ts): the block as the server sent it; absent is locked. */
+  providers?: Record<string, unknown>;
 };
 
 

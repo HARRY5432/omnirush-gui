@@ -6,6 +6,14 @@ import {
   type PolicyProviderListItem,
 } from "../src/react-app/domains/connections/policy-provider-reconcile";
 
+import { afterAll as afterAllUnlocked, beforeAll as beforeAllUnlocked } from "bun:test";
+import { setProviderLockState } from "../src/app/lib/provider-lock";
+
+// These cover the app while the server leaves model providers unlocked
+// (providers.locked false); tests/provider-lock.test.ts covers the lock.
+beforeAllUnlocked(() => setProviderLockState({ locked: false }));
+afterAllUnlocked(() => setProviderLockState(null));
+
 function provider(id: string): PolicyProviderListItem {
   return { id };
 }
