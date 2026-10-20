@@ -66,8 +66,11 @@ run(pnpmCmd, ["--filter", "@omnirush/headless-threads", "build"], repoRoot);
 // OMNIRUSH_ELECTRON_BUILD tells Vite to emit relative asset paths so
 // index.html resolves /assets/* correctly when loaded via file:// from
 // inside the packaged .app bundle.
+// The app bundle (with the code editor) needs more than the default heap on
+// smaller build machines.
 run(pnpmCmd, ["--filter", "@omnirush/app", "build"], repoRoot, {
   OMNIRUSH_ELECTRON_BUILD: "1",
+  NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --max-old-space-size=6144`.trim(),
 });
 // Relocate repository constants for every compiled server module, including v2.
 const serverDistDir = resolve(repoRoot, "apps", "server", "dist");
