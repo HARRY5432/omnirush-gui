@@ -49,6 +49,7 @@ export const MCP_REASONS = {
   missing_flag: "This MCP server needs a setting that points at a file in the project.",
   missing_arg: "This MCP server needs the file it works on, inside the project, as its argument.",
   flag: "This MCP server setting is not supported: it reaches outside the project.",
+  secret_flag: "A key or token is not supported in a config file (it would travel with the project): set it in your environment instead.",
   duplicate: "Another entry already starts this MCP server.",
   invalid: "This MCP server entry is not valid.",
   runner_missing: "npx or uvx was not found on this computer outside the project folder, so the server does not start.",
@@ -579,7 +580,7 @@ export function evaluateMcp(mcpMap, policy, ctx = {}) {
     if (box && !boxHere) notes.push("runs on this computer (needs your key)");
     if (rules.allow_flags) {
       const other = rest.map((a) => (a.includes("=") ? a.slice(0, a.indexOf("=")) : a)).find((a) => a.startsWith("-") && !rules.allow_flags.includes(a));
-      if (other) refusal = blocked(name, "flag", { ...base, version, reason: `${MCP_REASONS.flag} (${other})` });
+      if (other) refusal = blocked(name, "flag", { ...base, version, reason: `${/key|token|secret|passw/i.test(other) ? MCP_REASONS.secret_flag : MCP_REASONS.flag} (${other})` });
     }
     if (!refusal) for (const [flag, values] of Object.entries(rules.flag_values ?? {})) {
       const found = flagValue(rest, flag);
