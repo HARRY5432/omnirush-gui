@@ -535,7 +535,8 @@ final class NativeWorker {
             event.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(w.id))
             post(event, w.pid)
         case "drag":
-            let path = try (action["path"] as? [Any] ?? []).map(Self.point)
+            let raw: [Any] = action["path"] as? [Any] ?? []
+            let path: [CGPoint] = try raw.map { try Self.point($0) }
             guard path.count >= 2, path.count <= 64 else { throw UseError("invalid_action", "A drag needs 2 to 64 points.") }
             hold(path[0], w, flags)
             try mouse(.leftMouseDown, path[0], w, clicks: 1, flags: flags)
