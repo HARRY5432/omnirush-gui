@@ -589,7 +589,7 @@ export function GoodSessionChecklistBar(props: GoodSessionChecklistBarProps) {
             {showMessage && checklist.message ? (
               <p className={cn("font-medium", checklist.messageTone ? TONE_TEXT[checklist.messageTone] : "text-foreground")}>{checklist.message}</p>
             ) : null}
-            {checklist.reasons.map((reason) => <p key={reason} className="text-amber-11">{reason}</p>)}
+            {checklist.reasons.map((reason) => <p key={reason} className="text-warning">{reason}</p>)}
             {checklist.delivery ? <p data-testid="good-session-delivery">{checklist.delivery}</p> : null}
             {/* The chip's own status already announces it. */}
             {showVerdict ? <GoodSessionLine result={goodSession} announce={false} /> : null}
