@@ -13,6 +13,7 @@ import {
 } from "./omnirush-swarm.js";
 import { builtinOmniRushModelCatalog, omnirushModelWantsReasoningSummary } from "./omnirush-model-catalog.js";
 import { RejectedAttachments, isRejectedAttachmentError, type Attachment } from "./rejected-attachments.js";
+import { gatewayUrlAllowed, RELEASE_GATEWAY_ERROR } from "./release-guard.js";
 
 /** A refused attachment is left out and the model request sent again, at most this often per request. */
 const MAX_ATTACHMENT_RETRIES = 2;
@@ -844,6 +845,11 @@ function normalizedGatewayUrl(value: string): string | null {
   try {
     const url = new URL(value.trim());
     if (url.protocol !== "https:" && !(url.protocol === "http:" && ["127.0.0.1", "localhost", "::1"].includes(url.hostname))) {
+      return null;
+    }
+    // A release build talks to omnirush.ai only (release-guard.ts): another address is no account.
+    if (!gatewayUrlAllowed(url.toString())) {
+      console.error(`[omnirush] ${RELEASE_GATEWAY_ERROR} The sign-in names another account server; sign in again.`);
       return null;
     }
     return url.toString().replace(/\/+$/, "");

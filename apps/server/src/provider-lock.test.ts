@@ -9,7 +9,9 @@ import { buildOmniRushRuntimeConfigObjectFromSnapshot } from "./omnirush-runtime
 import { builtinOmniRushModelCatalog } from "./omnirush-model-catalog.js";
 import {
   applyProviderLockAnswer,
+  assertConfigWithinLock,
   assertConfigWithinProviderLock,
+  assertPluginsUnlocked,
   assertProxiedEngineRequestWithinProviderLock,
   currentProviderLockPolicy,
   engineRequestProviderLockDenial,
@@ -47,11 +49,12 @@ describe("provider lock: fails closed", () => {
     expect(currentProviderLockPolicy().locked).toBe(true);
   });
 
-  test("the server's allow list and message are taken, omnirush always first", () => {
-    applyProviderLockAnswer({ providers: { locked: true, allow: ["acme", "BAD ID", 7], message: "Ask your admin." } });
-    expect(currentProviderLockPolicy()).toMatchObject({ locked: true, allow: ["omnirush", "acme"], message: "Ask your admin." });
-    expect(providerAllowed("acme")).toBe(true);
+  test("the server's message is taken; only omnirush counts as allowed, whatever the list says", () => {
+    applyProviderLockAnswer({ providers: { locked: true, allow: ["acme", "openai", "BAD ID", 7], message: "Ask your admin." } });
+    expect(currentProviderLockPolicy()).toMatchObject({ locked: true, allow: ["omnirush"], message: "Ask your admin." });
+    expect(providerAllowed("acme")).toBe(false);
     expect(providerAllowed("openai")).toBe(false);
+    expect(providerAllowed("omnirush")).toBe(true);
   });
 
   test("the watcher re-reads, applies a change, and locks on a failed read", async () => {
@@ -129,6 +132,16 @@ describe("provider lock: engine config", () => {
     }
   });
 
+  test("locked: the user's plugins stay out of the engine config; the app's own stay", () => {
+    const locked = build({ plugin: ["opencode-wakatime", "file:///home/u/evil.ts"] });
+    const plugins = locked.plugin as string[];
+    expect(plugins.some((entry) => entry.includes("wakatime") || entry.includes("evil"))).toBe(false);
+    expect(plugins.length).toBeGreaterThan(0);
+    expect(plugins).toEqual(build({}).plugin as string[]);
+    applyProviderLockAnswer(UNLOCKED);
+    expect(build({ plugin: ["opencode-wakatime"] }).plugin as string[]).toContain("opencode-wakatime");
+  });
+
   test("locked and signed out: still only the allowed providers, and no other provider's map", () => {
     const config = build({ provider: userProviders }, { OMNIRUSH_ALLOW_OTHER_PROVIDERS: "1" }, false);
     expect(config.enabled_providers).toEqual(["omnirush"]);
@@ -164,7 +177,7 @@ describe("provider lock: engine environment", () => {
 
   test("unlocked: the environment as it was", () => {
     applyProviderLockAnswer(UNLOCKED);
-    expect(lockedEngineEnv({ OPENCODE_CONFIG_CONTENT: "{}" }, { A: "1" })).toEqual({ OPENCODE_CONFIG_CONTENT: "{}", A: "1" });
+    expect(lockedEngineEnv({ OPENCODE_CONFIG_CONTENT: "{}", OMNIRUSH_PROVIDER_LOCK: "1" }, { A: "1" })).toEqual({ OPENCODE_CONFIG_CONTENT: "{}", A: "1", OMNIRUSH_PROVIDER_LOCK: "0" });
   });
 
   test("every managed engine spawn gets the lock, also over the caller's and the user's values", async () => {
@@ -248,6 +261,16 @@ describe("provider lock: refusals", () => {
     expect(await request.json()).toEqual({ model: { providerID: "openai", modelID: "m" } });
     const ok = new Request("http://x/opencode/session/s/prompt_async", { method: "POST", body: JSON.stringify({ model: { providerID: "omnirush", modelID: "m" } }) });
     await assertProxiedEngineRequestWithinProviderLock(ok, "/opencode/session/s/prompt_async");
+  });
+
+  test("plugins: config and engine writes that add a user plugin are refused while locked", () => {
+    expect(() => assertConfigWithinLock({ plugin: ["opencode-wakatime"] })).toThrow("Custom plugins are off while OmniRush models are locked.");
+    expect(() => assertConfigWithinLock({ plugin: [] })).not.toThrow();
+    expect(() => assertPluginsUnlocked()).toThrow("Custom plugins are off while OmniRush models are locked.");
+    expect(engineRequestProviderLockDenial("PATCH", "/config", { plugin: ["x"] })).toBe("Custom plugins are off while OmniRush models are locked.");
+    applyProviderLockAnswer(UNLOCKED);
+    expect(() => assertConfigWithinLock({ plugin: ["opencode-wakatime"] })).not.toThrow();
+    expect(() => assertPluginsUnlocked()).not.toThrow();
   });
 
   test("config writes that add another provider or its model are refused", () => {

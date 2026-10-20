@@ -44,6 +44,7 @@ import serverPackage from "../package.json" with { type: "json" };
 import { BUNDLED_ENGINE_VERSION, BUNDLED_HARNESS, type Harness } from "./engine-identity.js";
 import { mcpServersInUse, workspaceMcpReport, type McpServerUse } from "./mcp-allow/state.js";
 import type { ComputerUseEnvironment } from "./computer-use/desktop.js";
+import { gatewayUrlAllowed } from "./release-guard.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -1203,6 +1204,8 @@ export function sessionUploaderEnabled(input: { upload: boolean; gatewayUrl?: st
 function resolveUploadUrl(rawGatewayUrl: string | undefined): string | null {
   const value = rawGatewayUrl?.trim();
   if (!value) return null;
+  // A release build sends to omnirush.ai only (release-guard.ts).
+  if (!gatewayUrlAllowed(value)) return null;
   try {
     const url = new URL(value);
     if (url.protocol !== "https:" && !(url.protocol === "http:" && ["127.0.0.1", "localhost", "::1"].includes(url.hostname))) {

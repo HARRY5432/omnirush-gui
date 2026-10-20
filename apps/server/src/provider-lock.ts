@@ -29,6 +29,8 @@ import {
   lockEngineConfig,
   lockedProviderPolicy,
   modelRefAllowed,
+  OMNIRUSH_PROVIDER_ID,
+  PLUGINS_OFF_MESSAGE,
   providerLockEnv,
   providerLockPolicy,
   withProviderLockEnv,
@@ -39,6 +41,9 @@ export type { ProviderLockPolicy } from "./provider-lock/provider-lock.mjs";
 export { lockEngineConfig, modelRefAllowed, providerLockPolicy, withProviderLockEnv } from "./provider-lock/provider-lock.mjs";
 
 export const PROVIDER_LOCKED_CODE = "provider_locked";
+export const PLUGINS_LOCKED_CODE = "plugins_locked";
+/** User plugins while locked: the engine loads only the app's own (owner decision). */
+export const PLUGINS_LOCKED_MESSAGE: string = PLUGINS_OFF_MESSAGE;
 
 let current: ProviderLockPolicy = lockedProviderPolicy("default");
 
@@ -56,7 +61,9 @@ function samePolicy(left: ProviderLockPolicy, right: ProviderLockPolicy): boolea
  * answer, which is locked). Whether the policy in force changed.
  */
 export function applyProviderLockAnswer(capabilities: unknown): boolean {
-  const next = providerLockPolicy(capabilities ?? null);
+  const parsed = providerLockPolicy(capabilities ?? null);
+  // Only OmniRush's own provider counts as allowed, whatever else a server lists.
+  const next = parsed.locked ? { ...parsed, allow: parsed.allow.filter((id) => id === OMNIRUSH_PROVIDER_ID) } : parsed;
   const changed = !samePolicy(current, next);
   current = next;
   return changed;
@@ -143,6 +150,24 @@ export function parseJsoncContent(content: string): Record<string, unknown> | nu
   }
 }
 
+/** Whether a config (a file's content, a PATCH) names engine plugins of its own. */
+export function configAddsPlugins(config: unknown): boolean {
+  if (!isRecord(config) || !("plugin" in config)) return false;
+  const plugin = config.plugin;
+  return typeof plugin === "string" ? plugin.trim().length > 0 : Array.isArray(plugin) && plugin.length > 0;
+}
+
+/** Throws 403 plugins_locked while locked (routes that add or turn on a user plugin). */
+export function assertPluginsUnlocked(policy: ProviderLockPolicy = current): void {
+  if (policy.locked) throw new ApiError(403, PLUGINS_LOCKED_CODE, PLUGINS_LOCKED_MESSAGE);
+}
+
+/** Throws 403 when a config would add another provider (provider_locked) or plugins (plugins_locked) while locked. */
+export function assertConfigWithinLock(config: unknown, policy: ProviderLockPolicy = current): void {
+  assertConfigWithinProviderLock(config, policy);
+  if (configAddsPlugins(config)) assertPluginsUnlocked(policy);
+}
+
 /** Throws 403 provider_locked when the config would bring in another provider. */
 export function assertConfigWithinProviderLock(config: unknown, policy: ProviderLockPolicy = current): void {
   if (providerLockConfigViolations(config, policy).length) throw providerLockedError(policy);
@@ -178,6 +203,7 @@ export function engineRequestProviderLockDenial(
   const oauth = path.match(/^\/provider\/([^/]+)\/oauth(?:\/|$)/);
   if (oauth) return providerAllowed(decodeURIComponent(oauth[1] ?? ""), policy) ? null : policy.message;
   if (/^\/(?:global\/)?config\/?$/.test(path)) {
+    if (configAddsPlugins(body)) return PLUGINS_LOCKED_MESSAGE;
     return providerLockConfigViolations(body, policy).length ? policy.message : null;
   }
   if (/^\/session(?:\/|$)/.test(path)) {
@@ -192,7 +218,7 @@ export function engineRequestProviderLockDenial(
 /** Throws 403 provider_locked for engineRequestProviderLockDenial(). */
 export function assertEngineRequestWithinProviderLock(method: string, enginePath: string, body: Record<string, unknown>, policy: ProviderLockPolicy = current): void {
   const denial = engineRequestProviderLockDenial(method, enginePath, body, policy);
-  if (denial) throw new ApiError(403, PROVIDER_LOCKED_CODE, denial);
+  if (denial) throw new ApiError(403, denial === PLUGINS_LOCKED_MESSAGE ? PLUGINS_LOCKED_CODE : PROVIDER_LOCKED_CODE, denial);
 }
 
 /**
@@ -245,6 +271,12 @@ export function watchProviderLock({ read, apply, everyMs }: { read: () => Promis
 }
 
 /** The policy for the app's UI (GET /omnirush/provider-lock). */
-export function providerLockStatus(policy: ProviderLockPolicy = current): { locked: boolean; allow: string[]; message: string; source: string } {
-  return { locked: policy.locked, allow: [...policy.allow], message: policy.message, source: policy.source };
+export function providerLockStatus(policy: ProviderLockPolicy = current, userPlugins = 0): { locked: boolean; allow: string[]; message: string; source: string; plugins: { off: boolean; message: string | null; userPlugins: number } } {
+  return {
+    locked: policy.locked,
+    allow: [...policy.allow],
+    message: policy.message,
+    source: policy.source,
+    plugins: { off: policy.locked, message: policy.locked ? PLUGINS_LOCKED_MESSAGE : null, userPlugins },
+  };
 }

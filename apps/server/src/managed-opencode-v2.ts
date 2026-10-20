@@ -13,6 +13,7 @@ import { loopbackFetch } from "./server-fetch.js";
 import { writeFileAtomic } from "./atomic-write.js";
 import { currentProviderLockPolicy, providerAllowed } from "./provider-lock.js";
 import { providerLockEnv } from "./provider-lock/provider-lock.mjs";
+import { isReleaseBuild, RELEASE_ENGINE_ERROR } from "./release-guard.js";
 
 export interface OpencodeV2ModelSpec {
   id: string;
@@ -80,6 +81,8 @@ function diagnostics(exitCode: number | null, stdout: string, stderr: string): E
 export async function createManagedOpencodeV2Server(
   options: ManagedOpencodeV2ServerOptions,
 ): Promise<ManagedOpencodeV2Server> {
+  // A release build runs only the engine it bundles (release-guard.ts); this preview downloads another.
+  if (isReleaseBuild()) throw new Error(RELEASE_ENGINE_ERROR);
   const hostname = options.hostname ?? "127.0.0.1";
   const port = options.port ?? 0;
   const bootTimeoutMs = options.bootTimeoutMs ?? 60_000;

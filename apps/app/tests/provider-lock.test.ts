@@ -34,11 +34,12 @@ describe("provider lock in the app", () => {
     expect(isProviderLocked()).toBe(true);
   });
 
-  test("takes the server's allow list and message", () => {
-    setProviderLockState({ locked: true, allow: ["acme"], message: "Ask your admin." });
-    expect(providerLockState()).toEqual({ locked: true, allow: ["omnirush", "acme"], message: "Ask your admin." });
+  test("takes the server's message; only omnirush counts as allowed", () => {
+    setProviderLockState({ locked: true, allow: ["acme", "openai"], message: "Ask your admin." });
+    expect(providerLockState()).toEqual({ locked: true, allow: ["omnirush"], message: "Ask your admin." });
     expect(providerLockMessage()).toBe("Ask your admin.");
-    expect(isProviderAllowedByLock("acme")).toBe(true);
+    expect(isProviderAllowedByLock("acme")).toBe(false);
+    expect(isProviderAllowedByLock("omnirush")).toBe(true);
   });
 
   test("model pickers list only OmniRush models while locked, whatever the build flag says", () => {

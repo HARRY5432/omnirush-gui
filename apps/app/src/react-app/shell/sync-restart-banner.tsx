@@ -3,7 +3,8 @@ import { useEffect, useState, type ReactNode } from "react";
 import { RefreshCw } from "lucide-react";
 
 import { createOmniRushServerClient, type OmniRushCaptureStatus } from "../../app/lib/omnirush-server";
-import { setProviderLockState } from "../../app/lib/provider-lock";
+import { PLUGINS_LOCKED_MESSAGE, setProviderLockState } from "../../app/lib/provider-lock";
+import { toast } from "@/components/ui/sonner";
 import { resolveOmniRushConnection } from "./omnirush-connection";
 import { BANNER_CLASS, BANNER_HEIGHT_PX, bannerShiftStyle } from "./update-gate";
 
@@ -80,6 +81,21 @@ export function SyncRestartBanner() {
 }
 
 const PROVIDER_LOCK_POLL_MS = 60_000;
+const PLUGINS_OFF_NOTICE_KEY = "omnirush.providerLock.pluginsOffNoticed";
+
+/** Once per app profile: the user had plugins of their own and the lock keeps them off. */
+function noticePluginsOffOnce(answer: unknown): void {
+  if (typeof answer !== "object" || answer === null) return;
+  const plugins = (answer as { locked?: unknown; plugins?: { userPlugins?: unknown } }).plugins;
+  if ((answer as { locked?: unknown }).locked === false || typeof plugins?.userPlugins !== "number" || plugins.userPlugins <= 0) return;
+  try {
+    if (window.localStorage.getItem(PLUGINS_OFF_NOTICE_KEY)) return;
+    window.localStorage.setItem(PLUGINS_OFF_NOTICE_KEY, String(Date.now()));
+  } catch {
+    return;
+  }
+  toast(PLUGINS_LOCKED_MESSAGE);
+}
 
 /**
  * Keeps the model provider lock (app/lib/provider-lock.ts) in step with the
@@ -108,7 +124,10 @@ export function useProviderLockSync(): void {
       } finally {
         inflight = false;
       }
-      if (!stopped) setProviderLockState(answer);
+      if (!stopped) {
+        setProviderLockState(answer);
+        noticePluginsOffOnce(answer);
+      }
     };
     void poll();
     const timer = window.setInterval(() => void poll(), PROVIDER_LOCK_POLL_MS);

@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import tls from "node:tls";
 import { fileURLToPath } from "node:url";
+import { isReleaseBuild, releaseEngineBinary } from "./build-variant.mjs";
 import { pathToFileURL } from "node:url";
 import {
   appendRuntimeRestartRecord,
@@ -1701,6 +1702,9 @@ export function createRuntimeManager({
   }
 
   function resolveOpencodeBinary(opencodeBinPath) {
+    // A release build runs only the engine it bundles, checked by its sha256: no
+    // custom path, no PATH or known-location lookup (build-variant.mjs). Throws.
+    if (isReleaseBuild()) return releaseEngineBinary({ fileNames: binaryFileNames("opencode") });
     const explicitPath = typeof opencodeBinPath === "string" ? opencodeBinPath.trim() : "";
     return explicitPath ? { path: explicitPath, source: "custom" } : resolveBinaryInfo("opencode");
   }
@@ -1798,7 +1802,13 @@ export function createRuntimeManager({
   }
 
   function engineDoctor(options = {}) {
-    const resolved = resolveOpencodeBinary(options?.opencodeBinPath);
+    let resolved = null;
+    let refused = null;
+    try {
+      resolved = resolveOpencodeBinary(options?.opencodeBinPath);
+    } catch (error) {
+      refused = error instanceof Error ? error.message : String(error);
+    }
     if (!resolved?.path) {
       return {
         found: false,
@@ -1807,7 +1817,7 @@ export function createRuntimeManager({
         resolvedSource: null,
         version: null,
         supportsServe: false,
-        notes: ["OmniRush binary not found in bundled sidecars or PATH."],
+        notes: [refused ?? "OmniRush binary not found in bundled sidecars or PATH."],
         serveHelpStatus: null,
         serveHelpStdout: null,
         serveHelpStderr: null,
@@ -2619,7 +2629,7 @@ export function createRuntimeManager({
       throw new Error("server_name is required");
     }
 
-    const program = resolveBinary("opencode");
+    const program = resolveOpencodeBinary()?.path ?? null;
     if (!program) {
       throw new Error("Failed to locate the local agent runtime.");
     }
@@ -2675,7 +2685,13 @@ export function createRuntimeManager({
     engineDoctor,
     /** The engine binary a start would use and where the bundled copy belongs (start-report.mjs). */
     engineBinaryInfo: () => ({
-      resolved: resolveOpencodeBinary(),
+      resolved: (() => {
+        try {
+          return resolveOpencodeBinary();
+        } catch {
+          return null;
+        }
+      })(),
       bundledCandidates: sidecarDirs.flatMap((directory) => binaryFileNames("opencode").map((name) => path.join(directory, name))),
       versionsFiles: sidecarDirs.map((directory) => path.join(directory, "versions.json")),
     }),

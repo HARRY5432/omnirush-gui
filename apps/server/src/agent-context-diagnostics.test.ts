@@ -44,6 +44,14 @@ import {
 } from "./runtime-opencode-config-store.js";
 import type { ServerConfig, WorkspaceInfo } from "./types.js";
 
+import { afterAll as afterAllUnlocked, beforeAll as beforeAllUnlocked } from "bun:test";
+import { applyProviderLockAnswer, resetProviderLock } from "./provider-lock.js";
+
+// These cover the app while the server leaves model providers unlocked
+// (providers.locked false): user plugins reach the engine config only then (provider-lock.ts).
+beforeAllUnlocked(() => { applyProviderLockAnswer({ providers: { locked: false } }); });
+afterAllUnlocked(() => resetProviderLock());
+
 type Served = {
   port: number;
   stop: (closeActiveConnections?: boolean) => void | Promise<void>;

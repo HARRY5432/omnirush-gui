@@ -37,6 +37,7 @@ import { finishEngineEnv } from "../provider-lock.js";
 
 export { ENGINE2_IMPORT_MANIFEST } from "./imported.js";
 import { ENGINE2_IMPORT_MANIFEST } from "./imported.js";
+import { releaseEngineBinary } from "../release-guard.js";
 const MAX_ATTEMPTS = 3;
 const IMPORT_TIMEOUT_MS = 120_000;
 const LOCK_STALE_MS = 30 * 60_000;
@@ -350,7 +351,8 @@ export async function importEngine2Sessions(options: Engine2ImportOptions): Prom
       }
       const file = join(work, `${id}.json`);
       writeFileSync(file, JSON.stringify(document), "utf8");
-      const run = await runImport(options.bin, file, directory, env, options.timeoutMs ?? IMPORT_TIMEOUT_MS);
+      // A release build runs only the engine it bundles (release-guard.ts).
+      const run = await runImport((await releaseEngineBinary(options.bin)) ?? options.bin, file, directory, env, options.timeoutMs ?? IMPORT_TIMEOUT_MS);
       rmSync(file, { force: true });
       if (run.ok && run.output.includes(`Imported session: ${id}`)) {
         manifest.imported[id] = { at: Date.now(), messages: document.messages.length, from: `opencode ${String(document.info.version ?? "2.x")}` };

@@ -70,6 +70,7 @@ import {
   removeLegacyBestPracticesSkills,
   writeBestPracticesSkills,
 } from "./best-practices.js";
+import { gatewayUrlAllowed } from "./release-guard.js";
 
 const INTERNAL_PROVIDER_ID = "omnirush";
 
@@ -81,6 +82,8 @@ function resolveInternalGatewayRuntime(
   env: NodeJS.ProcessEnv = process.env,
 ): InternalGatewayRuntime | undefined {
   const baseUrl = (env.OMNIRUSH_ENGINE_GATEWAY_URL ?? env.OMNIRUSH_GATEWAY_URL)?.trim().replace(/\/+$/, "");
+  // A release build's engine talks to omnirush.ai only (release-guard.ts); another address is not used.
+  if (baseUrl && !gatewayUrlAllowed(baseUrl)) return undefined;
   const accessToken = env.OMNIRUSH_ACCESS_TOKEN?.trim();
   if (!baseUrl || !accessToken) return undefined;
 
@@ -336,7 +339,9 @@ export function buildOmniRushRuntimeConfigObjectFromSnapshot(
     },
     plugin: [
       ...omnirushLeadingPluginPaths(),
-      ...runtimePluginList(runtimeConfig),
+      // The user's plugins only while model providers are unlocked (provider-lock.ts): locked, the
+      // engine loads the app's own plugins and built-ins only.
+      ...(providerLock.locked ? [] : runtimePluginList(runtimeConfig)),
       // This must be last: it applies the server's MCP list to the final
       // configuration, after every other plugin.
       omnirushMcpPolicyPluginPath(),

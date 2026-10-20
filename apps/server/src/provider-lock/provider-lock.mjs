@@ -23,8 +23,8 @@
 
 export const OMNIRUSH_PROVIDER_ID = "omnirush";
 export const PROVIDER_LOCK_MESSAGE = "Only OmniRush models are available.";
+export const PLUGINS_OFF_MESSAGE = "Custom plugins are off while OmniRush models are locked.";
 export const PROVIDER_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
-const MAX_ALLOW = 16;
 const MAX_MESSAGE = 300;
 
 /**
@@ -66,14 +66,9 @@ export function providerLockPolicy(capabilities) {
   if (!isRecord(block)) return lockedProviderPolicy(isRecord(capabilities) ? "missing" : "default");
   const message = cleanMessage(block.message);
   if (block.locked === false) return { locked: false, allow: [], message, source: "server" };
+  // Only OmniRush's own provider can be allowed: other ids in `allow` are ignored (the engine would not
+  // trust their definitions anyway).
   const allow = [OMNIRUSH_PROVIDER_ID];
-  if (Array.isArray(block.allow)) {
-    for (const id of block.allow) {
-      if (typeof id !== "string" || !PROVIDER_ID_PATTERN.test(id) || allow.includes(id)) continue;
-      if (allow.length >= MAX_ALLOW) break;
-      allow.push(id);
-    }
-  }
   return { locked: true, allow, message, source: "server" };
 }
 
@@ -90,18 +85,20 @@ export function modelProvider(ref) {
  * provider) is the app's own catalog's to resolve, so it passes here.
  */
 export function modelRefAllowed(policy, ref) {
-  if (!policy?.locked) return true;
+  if (policy && policy.locked === false) return true;
   const provider = modelProvider(ref);
-  return provider === null || policy.allow.includes(provider);
+  return provider === null || (policy ?? lockedProviderPolicy()).allow.includes(provider);
 }
 
 /**
  * The engine environment changes for `policy`: `set` to add, `remove` to
- * delete from the inherited environment. Unlocked: nothing (the app runs as
- * it did before the lock existed).
+ * delete from the inherited environment. Unlocked: only OMNIRUSH_PROVIDER_LOCK=0
+ * (the app runs as it did before the lock existed). No policy is locked.
  */
-export function providerLockEnv(policy) {
-  if (!policy?.locked) return { set: {}, remove: [] };
+export function providerLockEnv(policy = null) {
+  policy = policy ?? lockedProviderPolicy();
+  // Unlocked by the server: the engine is told so (it is locked unless OMNIRUSH_PROVIDER_LOCK=0).
+  if (policy && policy.locked === false) return { set: { OMNIRUSH_PROVIDER_LOCK: "0" }, remove: [] };
   return {
     set: {
       OMNIRUSH_PROVIDER_LOCK: "1",
@@ -131,7 +128,8 @@ export function withProviderLockEnv(env, policy) {
  * as it is.
  */
 export function lockEngineConfig(config, policy) {
-  if (!policy?.locked || !isRecord(config)) return { config, removed: [] };
+  policy = policy ?? lockedProviderPolicy();
+  if (policy.locked === false || !isRecord(config)) return { config, removed: [] };
   const removed = [];
   const out = { ...config };
   if (isRecord(out.provider)) {

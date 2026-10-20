@@ -13,6 +13,7 @@ import {
   writePlaintextCredentialFile,
 } from "./plaintext-credential-file.mjs";
 import { CLIENT_HEADER, guiClientHeaderValue, parseClientUpdate } from "./update-gate.mjs";
+import { desktopBuild, gatewayUrlAllowedForBuild, isReleaseBuild, RELEASE_GATEWAY_ERROR } from "./build-variant.mjs";
 import { buildathonJoinError, buildathonLinkCode, buildathonLinkError, buildathonProjectName, buildathonTrackId, parseBuildathonAnswer, parseBuildathonSessions, parseBuildathonStatus } from "./buildathon.mjs";
 import { parseAccountQuality, parseFailLabels, parseQualitySessions, parseSessionStatus, parseSpinHistory, profileSessionId, parseSpinResult, parseWheelSegments, spinIdempotencyKey, spinRefusal } from "./quality.mjs";
 
@@ -76,12 +77,14 @@ function normalizeCredential(value) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-function normalizeGatewayUrl(value) {
+function normalizeGatewayUrl(value, build = desktopBuild) {
   const normalized = normalizeCredential(value);
   if (!normalized) return null;
   try {
     const url = new URL(normalized);
     if (url.protocol !== "https:" && !(url.protocol === "http:" && LOOPBACK_HOSTNAMES.includes(url.hostname))) return null;
+    // A release build talks to omnirush.ai only (build-variant.mjs).
+    if (!gatewayUrlAllowedForBuild(url.toString(), build)) return null;
     return url.toString().replace(/\/+$/, "");
   } catch {
     return null;
@@ -146,9 +149,9 @@ async function responseDetail(response) {
  * a bundle written before the counter existed loads as 0.
  * @returns {{ gatewayUrl: string, accessToken: string, refreshToken: string, rotation: number } | null}
  */
-function validCredentials(value) {
+function validCredentials(value, build = desktopBuild) {
   if (!value || typeof value !== "object") return null;
-  const gatewayUrl = normalizeGatewayUrl(value.gatewayUrl);
+  const gatewayUrl = normalizeGatewayUrl(value.gatewayUrl, build);
   const accessToken = normalizeCredential(value.accessToken);
   const refreshToken = normalizeCredential(value.refreshToken);
   if (!gatewayUrl || !accessToken || !refreshToken) return null;
@@ -306,6 +309,8 @@ export function legacyKeychainAllowed({ appIdentifier, productionAppIdentifier, 
 }
 
 export function createDesktopOmniRushAccountStore({
+  // Which build this is (build-variant.mjs); tests pass one.
+  build = desktopBuild,
   filePath,
   loadSafeStorage,
   platform = process.platform,
@@ -337,7 +342,14 @@ export function createDesktopOmniRushAccountStore({
   // An explicit OMNIRUSH_GATEWAY_URL, read once here: the runtime deletes it
   // from process.env when it starts the embedded server (runtime.mjs), and a
   // later sign-in must still go to the server it named, not to omnirush.ai.
-  const explicitGatewayUrl = normalizeGatewayUrl(env.OMNIRUSH_GATEWAY_URL);
+  const storeGatewayUrl = (value) => normalizeGatewayUrl(value, build);
+  const storeCredentials = (value) => validCredentials(value, build);
+  // A release build takes no other account server from the environment: an
+  // address there that is not omnirush.ai is an error at sign-in, not a fallback.
+  const refusedGatewayUrl = isReleaseBuild(build)
+    && ((normalizeCredential(env.OMNIRUSH_GATEWAY_URL) && !storeGatewayUrl(env.OMNIRUSH_GATEWAY_URL))
+      || (env.OMNIRUSH_DEV_MODE === "1" && env.OMNIRUSH_LOCAL_API === "1"));
+  const explicitGatewayUrl = storeGatewayUrl(env.OMNIRUSH_GATEWAY_URL);
   const clientHeader = guiClientHeaderValue(clientVersion);
   /** fetchImpl with `X-OmniRush-Client` added to every account request. */
   const send = clientHeader
@@ -441,7 +453,7 @@ export function createDesktopOmniRushAccountStore({
   async function loadFallbackFile() {
     try {
       const contents = await readPlaintextCredentialFile(fallbackFilePath);
-      return contents ? validCredentials(JSON.parse(contents)?.credentials) : null;
+      return contents ? storeCredentials(JSON.parse(contents)?.credentials) : null;
     } catch {
       return null;
     }
@@ -476,7 +488,7 @@ export function createDesktopOmniRushAccountStore({
   async function decryptKeyringCopy(storage) {
     try {
       const decrypted = await storage.decryptStringAsync(await readFile(filePath));
-      const credentials = validCredentials(JSON.parse(decrypted.result));
+      const credentials = storeCredentials(JSON.parse(decrypted.result));
       return credentials ? { credentials, shouldReEncrypt: Boolean(decrypted.shouldReEncrypt) } : null;
     } catch {
       return null;
@@ -581,7 +593,7 @@ export function createDesktopOmniRushAccountStore({
   async function legacyCredentials() {
     if (await exists(filePath) || (fileFallback && await exists(fallbackFilePath))) return null;
     if (await exists(signedOutPath)) return null;
-    return validCredentials({
+    return storeCredentials({
       gatewayUrl: env.OMNIRUSH_GATEWAY_URL ?? await readMacKeychain(KEYCHAIN_SERVICES.gatewayUrl, platform, runSecurity),
       accessToken: env.OMNIRUSH_ACCESS_TOKEN ?? await readMacKeychain(KEYCHAIN_SERVICES.accessToken, platform, runSecurity),
       refreshToken: env.OMNIRUSH_REFRESH_TOKEN ?? await readMacKeychain(KEYCHAIN_SERVICES.refreshToken, platform, runSecurity),
@@ -674,7 +686,7 @@ export function createDesktopOmniRushAccountStore({
   async function save(credentials) {
     // A new or renewed sign-in: the account is read again (accountId).
     knownAccountId = null;
-    const normalized = validCredentials(credentials);
+    const normalized = storeCredentials(credentials);
     if (!normalized) throw new Error("Invalid OmniRush account credential bundle");
     if (clearInFlight) {
       const revoked = clearRevokesRemote;
@@ -767,9 +779,10 @@ export function createDesktopOmniRushAccountStore({
     // Development builds keep using omnirush.ai. Only an explicit
     // OMNIRUSH_GATEWAY_URL, or OMNIRUSH_DEV_MODE=1 together with
     // OMNIRUSH_LOCAL_API=1, points the account service at a local API.
+    if (refusedGatewayUrl) throw new Error(`${RELEASE_GATEWAY_ERROR} OMNIRUSH_GATEWAY_URL is not an omnirush.ai address.`);
     const localApiSelected = env.OMNIRUSH_DEV_MODE === "1" && env.OMNIRUSH_LOCAL_API === "1";
     return explicitGatewayUrl
-      ?? normalizeGatewayUrl(await readMacKeychain(KEYCHAIN_SERVICES.gatewayUrl, platform, runSecurity))
+      ?? storeGatewayUrl(await readMacKeychain(KEYCHAIN_SERVICES.gatewayUrl, platform, runSecurity))
       ?? (localApiSelected ? DEV_GATEWAY_URL : DEFAULT_GATEWAY_URL);
   }
 
@@ -904,7 +917,7 @@ export function createDesktopOmniRushAccountStore({
     try {
       const payload = await response.json();
       if (payload && typeof payload === "object" && "client_update" in payload) reportClientUpdate(payload);
-      const rotated = validCredentials({
+      const rotated = storeCredentials({
         gatewayUrl: payload.gateway_url ?? credentials.gatewayUrl,
         accessToken: payload.access_token,
         refreshToken: payload.refresh_token,
@@ -1040,7 +1053,8 @@ export function createDesktopOmniRushAccountStore({
 
   async function authorize({ gatewayUrl, deviceName, openVerification }) {
     const explicitGateway = normalizeCredential(gatewayUrl);
-    const configured = explicitGateway ? normalizeGatewayUrl(explicitGateway) : await configuredGatewayUrl();
+    const configured = explicitGateway ? storeGatewayUrl(explicitGateway) : await configuredGatewayUrl();
+    if (explicitGateway && !configured && isReleaseBuild(build)) throw new Error(`${RELEASE_GATEWAY_ERROR} The account server given is not an omnirush.ai address.`);
     if (!configured) throw new Error("OmniRush account service is not configured");
     const base = controlPlaneBase(configured);
     const authorizeUrl = new URL(base);
@@ -1072,7 +1086,7 @@ export function createDesktopOmniRushAccountStore({
       if (!tokenResponse.ok) throw new Error(`Account link failed (${tokenResponse.status})`);
       const payload = await tokenResponse.json();
       if (payload && typeof payload === "object" && "client_update" in payload) reportClientUpdate(payload);
-      const credentials = validCredentials({
+      const credentials = storeCredentials({
         gatewayUrl: payload.gateway_url ?? configured,
         accessToken: payload.access_token,
         refreshToken: payload.refresh_token,
@@ -1113,7 +1127,8 @@ export function createDesktopOmniRushAccountStore({
   async function status(input = {}) {
     const sessionId = profileSessionId(input?.sessionId);
     const credentials = await load();
-    const configured = await configuredGatewayUrl();
+    // A release build refusing the configured address reports no account server (sign-in shows the error).
+    const configured = await configuredGatewayUrl().catch(() => null);
     const gatewayConfigured = Boolean(configured);
     // A connected account reports the server it is actually linked to; a
     // signed-out app reports the server the next sign-in will use.

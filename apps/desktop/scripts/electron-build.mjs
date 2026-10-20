@@ -3,6 +3,7 @@ import { copyFileSync, cpSync, readdirSync, rmSync, writeFileSync } from "node:f
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { prepareServerConstants } from "./prepare-server-constants.mjs";
+import { stampBuildVariant } from "./stamp-build-variant.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(__dirname, "..");
@@ -78,6 +79,14 @@ prepareServerConstants(serverDistDir, resolve(repoRoot, "constants.json"));
 rmSync(packagedServerRoot, { recursive: true, force: true });
 cpSync(serverDistDir, resolve(packagedServerRoot, "dist"), { recursive: true });
 copyFileSync(resolve(repoRoot, "apps", "server", "package.json"), resolve(packagedServerRoot, "package.json"));
+// Release unless OMNIRUSH_DESKTOP_VARIANT=dev: a release talks to omnirush.ai only and runs only the
+// engine bundled above (its sha256 is recorded here). Stamps the packaged server copy, not the source.
+const desktopBuild = stampBuildVariant({
+  sidecarDir: electronSidecarDir,
+  serverDistDir: resolve(packagedServerRoot, "dist"),
+  buildFilePath: resolve(desktopRoot, ".electron-runtime", "omnirush-build.json"),
+});
+process.stdout.write(`Desktop build variant: ${desktopBuild.variant}\n`);
 for (const fileName of readdirSync(electronRoot).filter((name) => name.endsWith(".mjs")).sort()) {
   run(nodeCmd, ["--check", resolve(electronRoot, fileName)], repoRoot);
 }

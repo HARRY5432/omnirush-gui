@@ -79,6 +79,7 @@ import {
   type CreateLibraryItemInput,
   type LibraryAuthorableKind,
 } from "../library";
+import { isProviderLocked, PLUGINS_LOCKED_MESSAGE } from "@/app/lib/provider-lock";
 
 const OPENCODE_SKILL_NAME_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 const OPENCODE_MCP_NAME_RE = /^[A-Za-z0-9_][A-Za-z0-9_-]*$/;
@@ -1763,6 +1764,11 @@ export function createExtensionsStore(options: {
 
   async function addPlugin(pluginNameOverride?: string) {
     if (extensionMutationDenied()) return;
+    // User plugins are off while OmniRush models are locked (app/lib/provider-lock.ts).
+    if (isProviderLocked()) {
+      setStateField("pluginStatus", PLUGINS_LOCKED_MESSAGE);
+      return;
+    }
     const pluginName = (pluginNameOverride ?? snapshot.pluginInput).trim();
     const isManualInput = pluginNameOverride == null;
     const triggerName = stripPluginVersion(pluginName);

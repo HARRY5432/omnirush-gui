@@ -16,6 +16,7 @@ import { execFile, spawn } from "node:child_process";
 import { chmodSync, closeSync, fsyncSync, mkdirSync, mkdtempSync, openSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { isReleaseBuild, releaseEngineBinary } from "./release-guard.js";
 
 export type FolderWriteReason =
   | "missing"
@@ -122,7 +123,9 @@ function isolatedBunFolder(env: NodeJS.ProcessEnv = process.env): string | null 
 }
 
 /** The probe run by the engine binary; null when it could not run or said nothing usable. */
-export function probeWithEngine(dir: string, engineBin: string, timeoutMs = 15_000): Promise<FolderProbeOutcome | null> {
+export async function probeWithEngine(dir: string, engineBin: string, timeoutMs = 15_000): Promise<FolderProbeOutcome | null> {
+  // A release build runs only the engine it bundles (release-guard.ts); another binary is not run.
+  if (isReleaseBuild() && !(await releaseEngineBinary(engineBin).then(() => true, () => false))) return null;
   const folder = isolatedBunFolder();
   if (!folder) return Promise.resolve(null);
   let exited: Promise<void> = Promise.resolve();

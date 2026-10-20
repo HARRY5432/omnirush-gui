@@ -112,8 +112,15 @@ describe("global runtime providers", () => {
       const prompt = await fetch(`${base}/workspace/ws_1/opencode/session/ses_x/prompt_async`, { method: "POST", headers: clientHeaders(), body: JSON.stringify({ model: { providerID: "anthropic", modelID: "m" }, parts: [] }) });
       expect(prompt.status).toBe(403);
       expect(await readJsonObject(prompt)).toMatchObject({ code: "provider_locked" });
+      const plugin = await fetch(`${base}/workspace/ws_1/plugins`, { method: "POST", headers: clientHeaders(), body: JSON.stringify({ spec: "opencode-wakatime" }) });
+      expect(plugin.status).toBe(403);
+      expect(await readJsonObject(plugin)).toMatchObject({ code: "plugins_locked", message: "Custom plugins are off while OmniRush models are locked." });
+      const pluginPatch = await fetch(`${base}/workspace/ws_1/config`, { method: "PATCH", headers: clientHeaders(), body: JSON.stringify({ opencode: { plugin: ["opencode-wakatime"] } }) });
+      expect(pluginPatch.status).toBe(403);
+      const enginePlugin = await fetch(`${base}/opencode/config`, { method: "PATCH", headers: clientHeaders(), body: JSON.stringify({ plugin: ["opencode-wakatime"] }) });
+      expect(enginePlugin.status).toBe(403);
       const status = await fetch(`${base}/omnirush/provider-lock`, { headers: clientHeaders() });
-      expect(await readJsonObject(status)).toMatchObject({ locked: true, allow: ["omnirush"] });
+      expect(await readJsonObject(status)).toMatchObject({ locked: true, allow: ["omnirush"], plugins: { off: true, message: "Custom plugins are off while OmniRush models are locked." } });
       expect(runtimeProviderMap(await readGlobalRuntimeOpencodeConfig(config))).toEqual({});
     } finally {
       applyProviderLockAnswer({ providers: { locked: false } });

@@ -188,9 +188,11 @@ import { createChatTracker, rememberComputerUseSwitch } from "./computer-use/des
 import { registerComputerUseRoutes } from "./computer-use/routes.js";
 import {
   applyProviderLockAnswer,
-  assertConfigWithinProviderLock,
+  assertConfigWithinLock,
+  assertPluginsUnlocked,
   assertProviderAllowed,
   assertProxiedEngineRequestWithinProviderLock,
+  currentProviderLockPolicy,
   parseJsoncContent,
   providerLockStatus,
   watchProviderLock,
@@ -3173,6 +3175,12 @@ async function applyBoxEngineConfig(config: ServerConfig, reason: string, option
     const pool = enginePoolForConfig(config);
     const workspaces = config.workspaces.filter((workspace) => resolveWorkspaceOpencodeConnection(config, workspace).baseUrl?.trim());
     const workspace = findManagedEngineWorkspace(workspaces) ?? workspaces[0];
+    if (!pool && workspace && options.restart) {
+      // No managed pool (an engine the app does not start): the lock still reaches it through the
+      // rewritten config file and the dispose reload, on every workspace's engine.
+      for (const entry of workspaces) await reloadOpencodeEngine(config, entry).catch(() => undefined);
+      return { status: "applied" };
+    }
     if (!pool || !workspace) return { status: "unmanaged" };
     const outcome = await pool.requestRollover({ reason, workspace, manual: true });
     return { status: outcome.action === "coalesced" ? "deferred" : outcome.action === "skipped" ? "failed" : "applied" };
@@ -4425,7 +4433,15 @@ function createRoutes(
   addRoute(routes, "POST", LEGACY_SESSION_UPLOAD_EVENTS_ROUTE, "policy", sessionUploadEvents);
 
   // The model provider lock (provider-lock.ts): what the app's model pickers and provider screens show.
-  addRoute(routes, "GET", "/omnirush/provider-lock", "client", async () => jsonResponse(providerLockStatus()));
+  addRoute(routes, "GET", "/omnirush/provider-lock", "client", async () => {
+    // How many plugins of the user's own the lock keeps off (the app tells the user once).
+    let userPlugins = 0;
+    const workspace = config.workspaces.find((entry) => entry.workspaceType !== "remote");
+    if (workspace && currentProviderLockPolicy().locked) {
+      userPlugins = await listPlugins(config, workspace.id, workspace.path, true).then((result) => result.items.length, () => 0);
+    }
+    return jsonResponse(providerLockStatus(currentProviderLockPolicy(), userPlugins));
+  });
 
   // Sub-agent model and effort (omnirush-subagent-model.ts). The app reads
   // and writes the setting; the swarm engine plugin resolves every sub-agent
@@ -4731,7 +4747,7 @@ function createRoutes(
 
     const configPath = resolveOpencodeConfigFilePath(scope, workspace.path);
     // The model provider lock (provider-lock.ts): a file that adds another provider or names its model is refused.
-    assertConfigWithinProviderLock(parseJsoncContent(content));
+    assertConfigWithinLock(parseJsoncContent(content));
     await requireApproval(ctx, {
       workspaceId: workspace.id,
       action: scope === "global" ? "config.global.write" : "config.write",
@@ -4818,7 +4834,7 @@ function createRoutes(
       const providerUpdate = isRecord(provider) ? provider : {};
       // The model provider lock (provider-lock.ts): no other provider and no model of one.
       for (const [providerId, value] of Object.entries(providerUpdate)) if (value !== null) assertProviderAllowed(providerId);
-      assertConfigWithinProviderLock(topLevelUpdates);
+      assertConfigWithinLock(topLevelUpdates);
       if (Object.keys(providerUpdate).length) await managedDesktopPolicy(config).assert("provider");
       if (Object.keys(providerUpdate).length) {
         const providerResult = await writeGlobalRuntimeOpencodeConfig(config, (current) => ({
@@ -4973,6 +4989,8 @@ function createRoutes(
     ensureWritable(config);
     requireClientScope(ctx, "collaborator");
     const workspace = await resolveWorkspace(config, ctx.params.id);
+    // User plugins are off while model providers are locked (provider-lock.ts).
+    assertPluginsUnlocked();
     const body = await readJsonBody(ctx.request);
     const spec = String(body.spec ?? "");
     const normalized = normalizePluginSpec(spec);

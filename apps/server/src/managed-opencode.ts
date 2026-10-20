@@ -8,6 +8,7 @@ import { providerLockEnv, withProviderLockEnv } from "./provider-lock/provider-l
 import { engineDataEnv } from "./engine-data-home.js";
 import { repairEngineStoreBeforeStart } from "./engine-store-repair.js";
 import { engineInstallLogEnv } from "./install-log-host.js";
+import { releaseEngineBinary } from "./release-guard.js";
 
 export type ManagedChildProcess = {
   pid?: number;
@@ -212,7 +213,8 @@ async function startManagedOpencodeServer(
   const username = randomSecret();
   const password = randomSecret();
   const args = ["serve", "--hostname", hostname, "--port", String(port), "--cors", "*"];
-  const command = options.bin?.trim() || "opencode";
+  // A release build runs only the engine it bundles (release-guard.ts): no other path, no PATH lookup.
+  const command = (await releaseEngineBinary(options.bin?.trim() || undefined)) || "opencode";
   // The engine's in-process npm installs use Arborist, which audits by default.
   // That audit POST depends on npm's advisories endpoint, which has been observed
   // to hang for the full five-minute registry timeout, so first-run must not wait.
@@ -271,7 +273,7 @@ async function startManagedOpencodeServer(
   await repairEngineStoreBeforeStart(env, (level, message, attributes) => {
     console[level === "warn" ? "warn" : "info"](`[engine-store] ${message}`, attributes ?? {});
   });
-  const child: ChildProcess = spawn(options.bin?.trim() || "opencode", args, {
+  const child: ChildProcess = spawn(command, args, {
     cwd: options.cwd,
     env,
     stdio: ["ignore", "pipe", "pipe"],

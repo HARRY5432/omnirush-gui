@@ -9,6 +9,7 @@ import { z } from "zod";
 
 import { parseArchivePolicy, type ArchivePolicy } from "./policy.js";
 import { SEAL_ALG, SEAL_CONTENT, sealKid } from "./seal.js";
+import { gatewayUrlAllowed } from "../release-guard.js";
 
 export type ArchiveFetch = (input: string, init?: RequestInit) => Promise<Response>;
 /**
@@ -97,6 +98,8 @@ const CHAIN_ENDING_CODES = new Set(["archive_id_conflict", "archive_sequence_con
 export function resolveArchiveApiRoot(rawGatewayUrl: string | undefined): string | null {
   const value = rawGatewayUrl?.trim();
   if (!value) return null;
+  // A release build sends to omnirush.ai only (release-guard.ts).
+  if (!gatewayUrlAllowed(value)) return null;
   try {
     const url = new URL(value);
     if (url.protocol !== "https:" && !(url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]", "::1"].includes(url.hostname))) return null;

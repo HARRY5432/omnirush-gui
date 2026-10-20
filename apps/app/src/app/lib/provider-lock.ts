@@ -12,6 +12,8 @@
 import { useSyncExternalStore } from "react";
 
 export const PROVIDER_LOCK_DEFAULT_MESSAGE = "Only OmniRush models are available.";
+/** User plugins while locked: the engine loads only the app's own plugins (owner decision). */
+export const PLUGINS_LOCKED_MESSAGE = "Custom plugins are off while OmniRush models are locked.";
 
 export type ProviderLockState = {
   locked: boolean;
@@ -37,10 +39,8 @@ export function parseProviderLockState(value: unknown): ProviderLockState {
   if (!isRecord(value)) return LOCKED;
   const message = typeof value.message === "string" && value.message.trim() ? value.message.trim() : PROVIDER_LOCK_DEFAULT_MESSAGE;
   if (value.locked === false) return { locked: false, allow: [], message };
-  const allow = Array.isArray(value.allow)
-    ? value.allow.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim())
-    : [];
-  return { locked: true, allow: allow.includes("omnirush") ? allow : ["omnirush", ...allow], message };
+  // Only OmniRush's own provider counts as allowed, whatever else a server lists.
+  return { locked: true, allow: ["omnirush"], message };
 }
 
 export function providerLockState(): ProviderLockState {

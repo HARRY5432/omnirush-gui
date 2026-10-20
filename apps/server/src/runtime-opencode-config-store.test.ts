@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,6 +22,9 @@ import {
 } from "./runtime-opencode-config-store.js";
 import { startServer } from "./server.js";
 import type { ServerConfig } from "./types.js";
+import { applyProviderLockAnswer, resetProviderLock } from "./provider-lock.js";
+
+afterEach(() => resetProviderLock());
 
 const WORKSPACE_ID = "ws_runtime_test";
 
@@ -163,6 +166,8 @@ describe("runtime OpenCode config store", () => {
   });
 
   test("stores plugin changes in the OmniRush.ai runtime DB without rewriting workspace files", async () => {
+    // The injected file carries user plugins only while the server leaves providers unlocked (provider-lock.ts).
+    applyProviderLockAnswer({ providers: { locked: false } });
     await withWorkspace(async ({ root, config }) => {
       const opencodePath = join(root, "opencode.jsonc");
       const opencode = '{\n  "plugin": ["project-plugin"]\n}\n';
