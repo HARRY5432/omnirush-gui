@@ -2846,7 +2846,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
 
   const listMcp = useCallback(async (): Promise<{ servers: McpServerEntry[]; statuses: McpStatusMap; status: string | null }> => {
     if (props.mcpDisabled === true) {
-      const status = "MCP servers are disabled in OmniRush.ai.";
+      const status = "This project's MCP servers are listed in Settings > MCP.";
       setToolMcpServers([]);
       setToolMcpStatuses({});
       setToolMcpStatus(status);

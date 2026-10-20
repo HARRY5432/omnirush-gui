@@ -215,7 +215,8 @@ import {
 const ROUTE_OMNIRUSH_CAPABILITIES: OmniRushServerCapabilities = {
   skills: { read: true, write: true, source: "omnirush" },
   plugins: { read: true, write: true },
-  mcp: { read: false, write: false },
+  // The server checks each MCP server against the account's list (GET /workspace/:id/mcp says whether it is on).
+  mcp: { read: true, write: true },
   commands: { read: true, write: true },
   config: { read: true, write: true },
 };
@@ -2411,6 +2412,7 @@ function SettingsRouteContent(props: SettingsSurfaceProps = {}) {
                 isRemoteWorkspace={isRemoteWorkspace}
                 mcpServers={connectionsSnapshot.mcpServers}
                 mcpDisabled={mcpDisabledByPolicy}
+                mcpPolicy={connectionsSnapshot.mcpPolicy}
                 mcpStatus={connectionsSnapshot.mcpStatus}
                 mcpLastUpdatedAt={connectionsSnapshot.mcpLastUpdatedAt}
                 mcpStatuses={connectionsSnapshot.mcpStatuses}
