@@ -113,8 +113,9 @@ describe("Settings > MCP: supported servers", () => {
 
   test("what the project's own config could not load is said once, in the panel and as a notice", () => {
     const line = "Not loaded from this project's config: plugins evil.ts.";
-    expect(render({ policy: policy({ ignoredNotice: line }) })).toContain(line);
-    expect(render({ policy: policy({ enabled: false, ignoredNotice: line }) })).toContain(line);
+    const shown = line.replace(/'/g, "&#x27;");
+    expect(render({ policy: policy({ ignoredNotice: line }) })).toContain(shown);
+    expect(render({ policy: policy({ enabled: false, ignoredNotice: line }) })).toContain(shown);
     expect(render()).not.toContain("mcp-project-code-ignored");
     expect(projectCodeNotice("ws_1", line)).toEqual({ id: "project-code-ignored:ws_1", text: line });
     expect(projectCodeNotice("ws_1", line)).toBeNull();
