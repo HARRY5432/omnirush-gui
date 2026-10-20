@@ -369,20 +369,26 @@ export function luminanceGrid(image, cell = 16) {
 /**
  * Tolerant compare of two grids of the same image size: cells whose mean
  * luminance moved more than `threshold` count as changed, except cells that
- * touch a `mask` rectangle (caret, cursor). Stale when more than `maxCells`
- * cells changed or the changed cells span more than `maxSpan` pixels.
+ * touch a `mask` rectangle (caret, cursor). The changed "mass" (luminance
+ * change × cell area, summed) estimates how many pixels changed and by how
+ * much: a blinking caret, a spinner or a fading overlay scrollbar stay under
+ * it, a dialog, a scrolled page or a new screen go over it. Stale when the
+ * mass passes max(`minMass`, `fraction` of the image at mid-grey).
  */
-export function compareGrids(a, b, { mask = [], threshold = 6, maxCells = 4, maxSpan = 48 } = {}) {
+export function compareGrids(a, b, { mask = [], threshold = 6, minMass = 60_000, fraction = 0.004 } = {}) {
   if (!a || !b || a.cols !== b.cols || a.rows !== b.rows || a.cell !== b.cell) return { stale: true, changed: -1 };
-  let changed = 0, minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  let changed = 0, mass = 0, minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (let r = 0; r < a.rows; r += 1) for (let c = 0; c < a.cols; c += 1) {
     const i = r * a.cols + c;
-    if (Math.abs(a.values[i] - b.values[i]) <= threshold) continue;
+    const delta = Math.abs(a.values[i] - b.values[i]);
+    if (delta <= threshold) continue;
     const x = c * a.cell, y = r * a.cell;
     if (mask.some((m) => x < m.x + m.width && x + a.cell > m.x && y < m.y + m.height && y + a.cell > m.y)) continue;
     changed += 1;
+    mass += delta * Math.min(a.cell, a.width - x) * Math.min(a.cell, a.height - y);
     minX = Math.min(minX, x); minY = Math.min(minY, y); maxX = Math.max(maxX, x + a.cell); maxY = Math.max(maxY, y + a.cell);
   }
   const span = changed ? Math.max(maxX - minX, maxY - minY) : 0;
-  return { stale: changed > maxCells || span > maxSpan, changed, span };
+  const limit = Math.max(minMass, fraction * a.width * a.height * 128);
+  return { stale: mass > limit, changed, span, mass: Math.round(mass) };
 }

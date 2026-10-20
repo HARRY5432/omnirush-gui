@@ -14,4 +14,4 @@ export function encodeJpeg(image: RgbaImage, options?: { quality?: number }): Bu
 export function imageInfo(bytes: Uint8Array): { mime: string; width: number; height: number } | null;
 export function extensionOf(mime: unknown): "png" | "jpg" | "gif" | "webp" | "bin";
 export function luminanceGrid(image: RgbaImage, cell?: number): Grid;
-export function compareGrids(a: Grid | null | undefined, b: Grid | null | undefined, options?: { mask?: Rect[]; threshold?: number; maxCells?: number; maxSpan?: number }): { stale: boolean; changed: number; span?: number };
+export function compareGrids(a: Grid | null | undefined, b: Grid | null | undefined, options?: { mask?: Rect[]; threshold?: number; minMass?: number; fraction?: number }): { stale: boolean; changed: number; span?: number; mass?: number };

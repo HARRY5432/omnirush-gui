@@ -65,11 +65,25 @@ describe("image codecs", () => {
     paintBoxes(b, [{ x: 100, y: 50, width: 2, height: 14 }], [255, 255, 255]);
     expect(compareGrids(luminanceGrid(a), luminanceGrid(b)).stale).toBe(false);
     expect(compareGrids(luminanceGrid(a), luminanceGrid(b), { mask: [{ x: 96, y: 48, width: 10, height: 20 }] }).changed).toBe(0);
+    expect(compareGrids(luminanceGrid(a), luminanceGrid(b)).changed).toBeGreaterThan(0);
     // A dialog opened: a large region changed.
     const c = { ...a, data: Uint8Array.from(a.data) };
     paintBoxes(c, [{ x: 40, y: 40, width: 200, height: 100 }]);
     expect(compareGrids(luminanceGrid(a), luminanceGrid(c)).stale).toBe(true);
     expect(compareGrids(luminanceGrid(a), luminanceGrid(frame(160, 100, 4))).stale).toBe(true);
+    // A GTK overlay scrollbar fading in at the right edge: a 3 px strip down the window.
+    const wide = frame(660, 220, 6);
+    const strip = { ...wide, data: Uint8Array.from(wide.data) };
+    paintBoxes(strip, [{ x: 655, y: 29, width: 3, height: 187 }], [120, 120, 120]);
+    expect(compareGrids(luminanceGrid(wide), luminanceGrid(strip)).stale).toBe(false);
+    // One typed word is a small change too; a cleared text area is not.
+    const typed = { ...wide, data: Uint8Array.from(wide.data) };
+    // Glyph strokes, not a solid block: a few 2 px lines.
+    paintBoxes(typed, [0, 6, 12, 18, 24, 30, 36].map((dx) => ({ x: 4 + dx, y: 30, width: 2, height: 12 })), [0, 0, 0]);
+    expect(compareGrids(luminanceGrid(wide), luminanceGrid(typed)).stale).toBe(false);
+    const cleared = { ...wide, data: Uint8Array.from(wide.data) };
+    paintBoxes(cleared, [{ x: 0, y: 26, width: 660, height: 194 }], [255, 255, 255]);
+    expect(compareGrids(luminanceGrid(wide), luminanceGrid(cleared)).stale).toBe(true);
   });
 });
 
