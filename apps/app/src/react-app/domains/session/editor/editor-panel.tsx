@@ -667,6 +667,8 @@ export default function EditorPanel(props: EditorPanelProps) {
     docs.disposeReviewModels(new Set(recentReviewKeys.current));
     const keep = new Set<string>([
       ...useEditorStore.getState().byWorkspace[workspaceId]?.tabs.map((tab) => tab.path) ?? [],
+      // The split editor's second group shows documents too.
+      ...useEditorStore.getState().byWorkspace[workspaceId]?.group2?.tabs.map((tab) => tab.path) ?? [],
       ...(review?.files.map((file) => file.path) ?? []),
     ]);
     docs.evict(keep);
