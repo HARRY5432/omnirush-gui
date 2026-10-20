@@ -1571,6 +1571,25 @@ async function fetchWithTimeout(
   }
 }
 
+export type OmniRushEditorTree = { git: boolean; files: string[]; truncated: boolean; generatedAt: number };
+export type OmniRushEditorFile = {
+  path: string;
+  content: string | null;
+  bytes: number;
+  updatedAt: number;
+  binary?: boolean;
+  tooLarge?: boolean;
+};
+export type OmniRushEditorGitFile = { path: string; from?: string; index: string; worktree: string };
+export type OmniRushEditorGitStatus = {
+  repo: boolean;
+  branch: string | null;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  files: OmniRushEditorGitFile[];
+};
+
 async function requestJson<T>(
   baseUrl: string,
   path: string,
@@ -2646,6 +2665,57 @@ export function createOmniRushServerClient(options: { baseUrl: string; token?: s
           method: "POST",
           body: payload,
         },
+      ),
+
+    // The desktop editor (server routes/editor.ts).
+    editorTree: (workspaceId: string) =>
+      requestJson<OmniRushEditorTree>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/editor/tree`, { token, hostToken, timeoutMs: 60_000 }),
+
+    editorReadFile: (workspaceId: string, path: string) =>
+      requestJson<OmniRushEditorFile>(
+        baseUrl,
+        `/workspace/${encodeURIComponent(workspaceId)}/editor/file?path=${encodeURIComponent(path)}`,
+        { token, hostToken },
+      ),
+
+    editorWriteFile: (
+      workspaceId: string,
+      payload: { path: string; content?: string; delete?: boolean; baseUpdatedAt?: number | null; force?: boolean; sessionId?: string | null; source?: "editor" | "review" },
+    ) =>
+      requestJson<{ ok: true; path: string; bytes: number; deleted: boolean; updatedAt: number | null }>(
+        baseUrl,
+        `/workspace/${encodeURIComponent(workspaceId)}/editor/file`,
+        { token, hostToken, method: "PUT", body: payload },
+      ),
+
+    editorReview: (
+      workspaceId: string,
+      payload: { sessionId: string; path: string; decision: "accept" | "reject"; added: number; removed: number; scope: "hunk" | "file" },
+    ) =>
+      requestJson<{ ok: true }>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/editor/review`, { token, hostToken, method: "POST", body: payload }),
+
+    editorGitStatus: (workspaceId: string) =>
+      requestJson<OmniRushEditorGitStatus>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/editor/git/status`, { token, hostToken, timeoutMs: 30_000 }),
+
+    editorGitOriginal: (workspaceId: string, path: string, ref: "HEAD" | "index") =>
+      requestJson<{ path: string; ref: string; content: string | null; exists: boolean; binary?: boolean; tooLarge?: boolean }>(
+        baseUrl,
+        `/workspace/${encodeURIComponent(workspaceId)}/editor/git/original?path=${encodeURIComponent(path)}&ref=${ref}`,
+        { token, hostToken },
+      ),
+
+    editorGitStage: (workspaceId: string, paths: string[], stage: boolean) =>
+      requestJson<OmniRushEditorGitStatus>(
+        baseUrl,
+        `/workspace/${encodeURIComponent(workspaceId)}/editor/git/${stage ? "stage" : "unstage"}`,
+        { token, hostToken, method: "POST", body: { paths }, timeoutMs: 60_000 },
+      ),
+
+    editorGitCommit: (workspaceId: string, message: string) =>
+      requestJson<{ ok: true; commit: string; status: OmniRushEditorGitStatus }>(
+        baseUrl,
+        `/workspace/${encodeURIComponent(workspaceId)}/editor/git/commit`,
+        { token, hostToken, method: "POST", body: { message }, timeoutMs: 130_000 },
       ),
 
     deleteWorkspaceFiles: async (

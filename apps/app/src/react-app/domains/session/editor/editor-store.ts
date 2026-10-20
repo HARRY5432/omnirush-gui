@@ -1,0 +1,123 @@
+import { create } from "zustand";
+import { createJSONStorage, persist } from "zustand/middleware";
+
+/**
+ * The desktop editor's open tabs and side view, per workspace. Tabs are
+ * remembered across restarts (paths only); file text lives in Monaco models
+ * (editor-panel.tsx) and is read again on open.
+ */
+export type EditorTab =
+  | { id: string; kind: "file"; path: string }
+  /** The agent's change to one file, for review (accept/reject per hunk). */
+  | { id: string; kind: "review"; path: string }
+  /** A file against git (HEAD or the index), from the git panel. */
+  | { id: string; kind: "git"; path: string; ref: "HEAD" | "index" };
+
+export type EditorSideView = "files" | "changes" | "git";
+export type ReviewScope = "turn" | "chat";
+
+type WorkspaceEditorState = {
+  tabs: EditorTab[];
+  activeId: string | null;
+  view: EditorSideView;
+};
+
+type EditorStore = {
+  byWorkspace: Record<string, WorkspaceEditorState>;
+  /** Paths with unsaved changes, per workspace (not persisted). */
+  dirty: Record<string, Record<string, true>>;
+  quickOpen: boolean;
+  /** One-shot request to show the editor (Cmd/Ctrl+P while it is closed). */
+  showRequest: number;
+  /** One-shot request to toggle the editor (Cmd/Ctrl+Shift+E). */
+  toggleRequest: number;
+  reviewScope: ReviewScope;
+  sideOpen: boolean;
+  openTab: (workspaceId: string, tab: EditorTab, options?: { preview?: boolean }) => void;
+  closeTab: (workspaceId: string, id: string) => void;
+  selectTab: (workspaceId: string, id: string) => void;
+  setView: (workspaceId: string, view: EditorSideView) => void;
+  setDirty: (workspaceId: string, path: string, dirty: boolean) => void;
+  setQuickOpen: (open: boolean) => void;
+  requestShow: () => void;
+  requestToggle: () => void;
+  setReviewScope: (scope: ReviewScope) => void;
+  setSideOpen: (open: boolean) => void;
+};
+
+const EMPTY: WorkspaceEditorState = { tabs: [], activeId: null, view: "files" };
+const MAX_TABS = 20;
+
+export function tabId(tab: { kind: EditorTab["kind"]; path: string; ref?: "HEAD" | "index" }): string {
+  return tab.kind === "git" ? `git:${tab.ref ?? "HEAD"}:${tab.path}` : `${tab.kind}:${tab.path}`;
+}
+
+export function editorWorkspaceState(state: EditorStore, workspaceId: string): WorkspaceEditorState {
+  return state.byWorkspace[workspaceId] ?? EMPTY;
+}
+
+export const useEditorStore = create<EditorStore>()(
+  persist(
+    (set) => ({
+      byWorkspace: {},
+      dirty: {},
+      quickOpen: false,
+      showRequest: 0,
+      toggleRequest: 0,
+      reviewScope: "turn",
+      sideOpen: true,
+      openTab: (workspaceId, tab) =>
+        set((state) => {
+          const current = state.byWorkspace[workspaceId] ?? EMPTY;
+          const exists = current.tabs.some((item) => item.id === tab.id);
+          let tabs = exists ? current.tabs : [...current.tabs, tab];
+          if (tabs.length > MAX_TABS) {
+            // Drop the oldest tab that has no unsaved changes.
+            const dirty = state.dirty[workspaceId] ?? {};
+            const drop = tabs.find((item) => item.id !== tab.id && !(item.kind === "file" && dirty[item.path]));
+            if (drop) tabs = tabs.filter((item) => item !== drop);
+          }
+          return { byWorkspace: { ...state.byWorkspace, [workspaceId]: { ...current, tabs, activeId: tab.id } } };
+        }),
+      closeTab: (workspaceId, id) =>
+        set((state) => {
+          const current = state.byWorkspace[workspaceId] ?? EMPTY;
+          const index = current.tabs.findIndex((item) => item.id === id);
+          if (index < 0) return state;
+          const tabs = current.tabs.filter((item) => item.id !== id);
+          const activeId = current.activeId === id ? (tabs[Math.min(index, tabs.length - 1)]?.id ?? null) : current.activeId;
+          return { byWorkspace: { ...state.byWorkspace, [workspaceId]: { ...current, tabs, activeId } } };
+        }),
+      selectTab: (workspaceId, id) =>
+        set((state) => {
+          const current = state.byWorkspace[workspaceId] ?? EMPTY;
+          if (!current.tabs.some((item) => item.id === id) || current.activeId === id) return state;
+          return { byWorkspace: { ...state.byWorkspace, [workspaceId]: { ...current, activeId: id } } };
+        }),
+      setView: (workspaceId, view) =>
+        set((state) => {
+          const current = state.byWorkspace[workspaceId] ?? EMPTY;
+          return { byWorkspace: { ...state.byWorkspace, [workspaceId]: { ...current, view } }, sideOpen: true };
+        }),
+      setDirty: (workspaceId, path, dirty) =>
+        set((state) => {
+          const current = state.dirty[workspaceId] ?? {};
+          if (Boolean(current[path]) === dirty) return state;
+          const next = { ...current };
+          if (dirty) next[path] = true;
+          else delete next[path];
+          return { dirty: { ...state.dirty, [workspaceId]: next } };
+        }),
+      setQuickOpen: (quickOpen) => set({ quickOpen }),
+      requestShow: () => set((state) => ({ showRequest: state.showRequest + 1 })),
+      requestToggle: () => set((state) => ({ toggleRequest: state.toggleRequest + 1 })),
+      setReviewScope: (reviewScope) => set({ reviewScope }),
+      setSideOpen: (sideOpen) => set({ sideOpen }),
+    }),
+    {
+      name: "omnirush:editor:v1",
+      storage: createJSONStorage(() => localStorage),
+      partialize: (state) => ({ byWorkspace: state.byWorkspace, reviewScope: state.reviewScope, sideOpen: state.sideOpen }),
+    },
+  ),
+);

@@ -78,6 +78,7 @@
     "marked-emoji": "^2.0.3",
     "marked-katex-extension": "^5.1.10",
     "mermaid": "^11.17.1",
+    "monaco-editor": "0.57.0",
     "motion": "^12.38.0",
     "react": "catalog:",
     "react-dom": "catalog:",

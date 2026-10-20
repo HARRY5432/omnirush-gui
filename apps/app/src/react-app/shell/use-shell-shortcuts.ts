@@ -23,6 +23,8 @@ import {
 } from "./thinking-mode-shortcut";
 import { isFavoriteModelShortcut } from "./favorite-model-shortcut";
 import { useTerminalTabsStore } from "../domains/session/terminal/terminal-tabs-store";
+import { useEditorStore } from "../domains/session/editor/editor-store";
+import { isElectronRuntime } from "../../app/utils";
 
 export type UseShellShortcutsInput = {
   canCreateTask: boolean;
@@ -115,6 +117,8 @@ export function useShellShortcuts(input: UseShellShortcutsInput) {
   //   Cmd/Ctrl+N        -> new task in selected workspace
   //   Cmd/Ctrl+K        -> toggle command palette
   //   Cmd/Ctrl+J        -> toggle terminal panel (matches VS Code)
+  //   Cmd/Ctrl+P        -> editor: go to file (opens the editor)
+  //   Cmd/Ctrl+Shift+E  -> show / hide the editor
   //   Ctrl+Shift+`      -> new terminal tab (matches VS Code; Ctrl on macOS too)
   //   Cmd/Ctrl+F        -> find in current conversation (handled by session surface)
   //   Cmd/Ctrl+Shift+F  -> search every session (titles + messages)
@@ -151,6 +155,11 @@ export function useShellShortcuts(input: UseShellShortcutsInput) {
       setSessionSearchOpen((value) => !value);
       return;
     }
+    if (event.shiftKey && !event.altKey && event.key?.toLowerCase() === "e") {
+      event.preventDefault();
+      if (!event.repeat) useEditorStore.getState().requestToggle();
+      return;
+    }
     if (event.shiftKey && !event.altKey && event.key?.toLowerCase() === "t") {
       event.preventDefault();
       onPrevSessionTab?.();
@@ -171,6 +180,16 @@ export function useShellShortcuts(input: UseShellShortcutsInput) {
       if (canCreateTask && workspaceId) {
         void onCreateTask(workspaceId);
       }
+      return;
+    }
+    // In the terminal Ctrl+P is the shell's (previous command); Cmd+P on macOS still opens quick open.
+    const inTerminal = Boolean(target?.closest?.(".xterm"));
+    if (key === "p" && isElectronRuntime() && !(inTerminal && !isMac)) {
+      // Quick open: shows the editor (session-page) with its file finder.
+      event.preventDefault();
+      const editor = useEditorStore.getState();
+      editor.setQuickOpen(true);
+      editor.requestShow();
       return;
     }
     if (key === "j" && platform.capabilities.terminal) {

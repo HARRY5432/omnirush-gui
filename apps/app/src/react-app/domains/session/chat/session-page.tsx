@@ -4,7 +4,7 @@ import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } fro
 import { usePanelRef } from "react-resizable-panels";
 import { DesktopUpdateButton } from "../../settings/state/desktop-updater-provider";
 import { BuildathonChip } from "../../buildathon/buildathon";
-import { ArrowLeft, Cloud, FileText, Globe, Maximize2, MoreHorizontal, PanelRight, TextSearch, X, Zap } from "lucide-react";
+import { ArrowLeft, Cloud, Code2, FileText, Globe, Maximize2, MoreHorizontal, PanelRight, TextSearch, X, Zap } from "lucide-react";
 
 import { resolveExtensionIconSrc } from "@/react-app/design-system/extension-icon-src";
 import { t } from "../../../../i18n";
@@ -86,6 +86,8 @@ import { SidePanel } from "../panel/side-panel";
 import { getSidePanelSessionKey } from "../panel/side-panel-session";
 import { useCreateTab } from "../panel/use-side-panel-tabs";
 import { TerminalDock } from "../terminal/terminal-dock";
+import { LazyEditorPanel } from "../editor/editor-entry";
+import { useEditorStore } from "../editor/editor-store";
 import { useActivePanelTab, usePanelTabStore, useSessionPanelState } from "../panel/panel-tab-store";
 import { useWorkspaceShellLayout } from "../../../shell/workspace-shell-layout";
 import { useControlAction, type OmniRushControlAction } from "../../../shell/control/control-provider";
@@ -103,6 +105,7 @@ import { isSameWorkbenchSession } from "./workbench-store";
 import { ReactSessionRuntime } from "../sync/runtime-sync";
 import { useSessionInteractions } from "../sync/use-session-interactions";
 import { createClient } from "@/app/lib/opencode";
+import type { Client } from "@/app/types";
 import { createQuitGuard, finishGuardKey, leavingRunningTurn, type FinishGuardKind } from "@/app/lib/good-session";
 import { FinishGuardDialog, TurnGuardDialog, finishGuardFor, requestFinishIt } from "@/react-app/domains/quality/good-session";
 import { createClientV2, isOpencodeV2BaseUrl } from "@/app/lib/opencode-v2-adapter";
@@ -289,6 +292,8 @@ export type SessionPageProps = {
   primaryTitle?: string;
   terminalOpen?: boolean;
   onTerminalOpenChange?: (open: boolean) => void;
+  /** The selected workspace's engine client: the editor reads the agent's per-turn changes from it. */
+  opencodeClient?: Client | null;
   onSessionTabsChange?: (tabs: OpenSessionTab[]) => void;
 };
 
@@ -482,6 +487,11 @@ export function SessionPage(props: SessionPageProps) {
   const activeSidePanel = sessionSidePanel;
   const sidePanelOpen = activeSidePanel !== null;
   const panelRailActive = activeSidePanel === "panel";
+  const editorOpen = activeSidePanel === "editor";
+  // The editor needs the local server's file routes: desktop, local workspaces.
+  const editorAvailable = isElectronRuntime()
+    && Boolean(props.omnirushServerClient && props.runtimeWorkspaceId)
+    && props.selectedWorkspaceDisplay.workspaceType !== "remote";
   const denControlPlaneConfigured = useDenControlPlaneConfigured();
   const showCloudSignIn =
     shellConfig.cloudSignin && denControlPlaneConfigured && !denAuth.isSignedIn && denAuth.status !== "checking";
@@ -779,6 +789,32 @@ export function SessionPage(props: SessionPageProps) {
   const closeRightPane = useCallback(() => {
     setCurrentSidePanel(null);
   }, [setCurrentSidePanel]);
+  // The editor stays open when the chat changes (a new chat starting, another chat picked):
+  // a chat that never had a side panel of its own gets the editor the last one had.
+  const lastSidePanel = useRef<{ key: string; panel: SidePanelItem | null }>({ key: sidePanelSessionKey, panel: sessionSidePanel });
+  useEffect(() => {
+    const last = lastSidePanel.current;
+    if (last.key !== sidePanelSessionKey && last.panel === "editor") {
+      const own = useUiStateStore.getState().sidePanelState[sidePanelSessionKey];
+      if (own === undefined) setSidePanelState(sidePanelSessionKey, "editor");
+    }
+    lastSidePanel.current = { key: sidePanelSessionKey, panel: useUiStateStore.getState().sidePanelState[sidePanelSessionKey] ?? (last.key !== sidePanelSessionKey && last.panel === "editor" ? "editor" : null) };
+  }, [sessionSidePanel, setSidePanelState, sidePanelSessionKey]);
+
+  // Cmd/Ctrl+Shift+E toggles the editor; Cmd/Ctrl+P opens it with quick open (use-shell-shortcuts.ts).
+  const editorShowRequest = useEditorStore((state) => state.showRequest);
+  const editorToggleRequest = useEditorStore((state) => state.toggleRequest);
+  const lastEditorRequests = useRef({ show: editorShowRequest, toggle: editorToggleRequest });
+  useEffect(() => {
+    const last = lastEditorRequests.current;
+    lastEditorRequests.current = { show: editorShowRequest, toggle: editorToggleRequest };
+    if (!editorAvailable) {
+      if (editorShowRequest !== last.show) useEditorStore.getState().setQuickOpen(false);
+      return;
+    }
+    if (editorShowRequest !== last.show) setCurrentSidePanel("editor");
+    else if (editorToggleRequest !== last.toggle) toggleCurrentSidePanel("editor");
+  }, [editorAvailable, editorShowRequest, editorToggleRequest, setCurrentSidePanel, toggleCurrentSidePanel]);
   const openGeneralSidePanel = useCallback(() => {
     setCurrentSidePanel("panel");
   }, [setCurrentSidePanel]);
@@ -1401,6 +1437,26 @@ export function SessionPage(props: SessionPageProps) {
     <div className="flex h-full min-h-0 flex-col overflow-y-auto bg-background">
       {props.settingsSlot}
     </div>
+  ) : activeSidePanel === "editor" && editorAvailable && props.omnirushServerClient && props.runtimeWorkspaceId ? (
+    <LazyEditorPanel
+      client={props.omnirushServerClient}
+      workspaceId={props.runtimeWorkspaceId}
+      workspaceRoot={props.selectedWorkspaceRoot}
+      sessionId={props.selectedSessionId}
+      sessionBusy={sessionTurnRunning(props.selectedSessionId)}
+      opencodeClient={props.opencodeClient ?? null}
+      terminalOpen={Boolean(props.terminalOpen)}
+      onToggleTerminal={() => props.onTerminalOpenChange?.(!props.terminalOpen)}
+      terminal={props.terminalOpen ? (
+        <TerminalDock
+          workspaceId={props.selectedWorkspaceId}
+          workspaceRoot={props.selectedWorkspaceRoot}
+          isRemoteWorkspace={props.selectedWorkspaceDisplay.workspaceType === "remote"}
+          onClose={() => props.onTerminalOpenChange?.(false)}
+        />
+      ) : null}
+      onClose={closeRightPane}
+    />
   ) : activeSidePanel === "panel" ? (
     <SidePanel
       sessionId={sidePanelSessionKey}
@@ -1998,7 +2054,7 @@ export function SessionPage(props: SessionPageProps) {
               ) : null}
             </div>
             </ResizablePanel>
-            {props.terminalOpen && !isMobile ? (
+            {props.terminalOpen && !isMobile && !(editorOpen && editorAvailable) ? (
               <>
                 <ResizableHandle />
                 <ResizablePanel defaultSize="280px" minSize="160px" maxSize="55%" className="min-h-0">
@@ -2021,8 +2077,8 @@ export function SessionPage(props: SessionPageProps) {
                 <ResizableHandle className="hidden bg-transparent lg:flex" />
                 <ResizablePanel
                   panelRef={browserPanelRef}
-                  defaultSize={`${activeSidePanel === "extensions" ? Math.max(browserPanelDefaultWidth, 480) : browserPanelDefaultWidth}px`}
-                  minSize={activeSidePanel === "extensions" ? "420px" : "320px"}
+                  defaultSize={`${activeSidePanel === "extensions" ? Math.max(browserPanelDefaultWidth, 480) : activeSidePanel === "editor" ? Math.max(browserPanelDefaultWidth, 560) : browserPanelDefaultWidth}px`}
+                  minSize={activeSidePanel === "extensions" ? "420px" : activeSidePanel === "editor" ? "420px" : "320px"}
                   maxSize="70%"
                   className="min-h-0 overflow-hidden pl-2 lg:flex lg:flex-col"
                 >
@@ -2034,6 +2090,23 @@ export function SessionPage(props: SessionPageProps) {
             ) : null}
           </ResizablePanelGroup>
           <aside className="hidden w-10 shrink-0 flex-col items-center gap-1 px-1 py-2 text-muted-foreground lg:flex mac:titlebar-no-drag">
+            {editorAvailable ? (
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className={cn(
+                  "rounded-xl transition-colors hover:bg-muted hover:text-foreground",
+                  editorOpen && "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary",
+                )}
+                onClick={() => toggleCurrentSidePanel("editor")}
+                title={`Editor (${/Mac/i.test(navigator.platform) ? "⌘⇧E" : "Ctrl+Shift+E"})`}
+                aria-label="Editor"
+                aria-pressed={editorOpen}
+                data-editor-rail
+              >
+                <Code2 size={15} />
+              </Button>
+            ) : null}
             {isElectronRuntime() ? (
               <Button
                 variant="ghost"
