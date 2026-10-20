@@ -17,16 +17,32 @@ export const MCP_REMOTE_NOT_SUPPORTED =
 export const MCP_ENGINE_V2_NOTE =
   "MCP servers are off while the preview engine runs chats. Turn the preview engine off to use them.";
 
+/** What to do about a blocked server, by decision code (the reason says why). */
+export const MCP_BLOCKED_HINTS: Record<string, string> = {
+  denied: "Not on the supported list.",
+  not_allowed: "Not on the supported list.",
+  remote: "Remote servers are not supported.",
+  unknown_command: "Start it with npx or uvx.",
+  outside_project: "Point it at a folder or file inside the project.",
+  version: "Leave the version out to use the supported one.",
+};
+
 export type McpServerState =
   | { kind: "on"; detail: string }
-  | { kind: "blocked"; reason: string }
+  | { kind: "blocked"; reason: string; hint: string | null }
   | { kind: "off" }
   | { kind: "pending" };
 
 /** The line a configured server shows, from the plugin's decision. */
 export function mcpServerState(entry: Pick<McpServerEntry, "name" | "config">, decision: OmniRushMcpDecision | null | undefined): McpServerState {
   if (!decision) return { kind: "pending" };
-  if (decision.status === "blocked") return { kind: "blocked", reason: decision.reason?.trim() || "This MCP server is not supported." };
+  if (decision.status === "blocked") {
+    const reason = decision.reason?.trim() || "This MCP server is not supported.";
+    const hint = MCP_BLOCKED_HINTS[decision.code] ?? null;
+    // No hint that only repeats what the reason already says.
+    const said = (text: string) => text.toLowerCase().replace(/\bmcp /g, "").replace(/\.$/, "");
+    return { kind: "blocked", reason, hint: hint && !said(reason).includes(said(hint)) ? hint : null };
+  }
   if ((entry.config as { enabled?: unknown } | undefined)?.enabled === false) return { kind: "off" };
   const parts = [
     decision.package && decision.version ? `${decision.package}@${decision.version}` : null,
@@ -34,6 +50,19 @@ export function mcpServerState(entry: Pick<McpServerEntry, "name" | "config">, d
     decision.renamed_to && decision.renamed_to !== decision.name ? `tools named ${decision.renamed_to}_…` : null,
   ].filter((part): part is string => Boolean(part));
   return { kind: "on", detail: parts.join(" · ") };
+}
+
+/** Server text with `code` spans: the backticked parts as inline code, the rest as plain text. */
+export function PlainText(props: { text: string }) {
+  const parts = props.text.split("`");
+  if (parts.length < 3) return <>{props.text.replace(/`/g, "")}</>;
+  return (
+    <>
+      {parts.map((part, index) => (index % 2 === 1 && index < parts.length - 1
+        ? <code key={index} className="rounded bg-dls-hover px-1 font-mono text-[11px]">{part}</code>
+        : <span key={index}>{part}</span>))}
+    </>
+  );
 }
 
 /** The command a preset adds, as one line. */
@@ -101,7 +130,7 @@ export function McpSupportedPanel(props: {
                       </p>
                     ) : state.kind === "blocked" ? (
                       <p className="mt-0.5 text-xs text-dls-secondary">
-                        <span className="font-medium text-foreground">Blocked</span>{` · ${state.reason}`}
+                        <span className="font-medium text-amber-11">Blocked</span>{` · ${state.reason}${state.hint ? ` ${state.hint}` : ""}`}
                       </p>
                     ) : state.kind === "off" ? (
                       <p className="mt-0.5 text-xs text-dls-secondary">Off</p>
@@ -135,7 +164,7 @@ export function McpSupportedPanel(props: {
                 <li key={preset.id} data-testid={`mcp-preset-${preset.id}`} className="flex items-start justify-between gap-3 px-4 py-3">
                   <div className="min-w-0">
                     <p className="text-sm font-medium text-foreground">{preset.title}</p>
-                    {preset.why ? <p className="mt-0.5 text-xs text-dls-secondary">{preset.why}</p> : null}
+                    {preset.why ? <p className="mt-0.5 text-xs text-dls-secondary"><PlainText text={preset.why} /></p> : null}
                     <code className="mt-1 block truncate rounded-md bg-dls-hover px-2 py-1 font-mono text-[11px] text-dls-secondary" title={presetCommandLine(preset)}>
                       {presetCommandLine(preset)}
                     </code>

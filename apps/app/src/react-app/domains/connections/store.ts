@@ -33,6 +33,7 @@ import {
   removeMcpFromConfig,
   validateMcpServerName,
 } from "../../../app/mcp";
+import { registerMcpServerTitles } from "@/lib/capability-call";
 import {
   buildOmniRushWorkspaceBaseUrl,
   type OmniRushMcpPolicyView,
@@ -487,6 +488,7 @@ export function createConnectionsStore(options: {
         }
       }
     }
+    if (response.mcpPolicy) registerMcpServerTitles([...response.mcpPolicy.supported, ...response.mcpPolicy.decisions]);
     const next = response.items.map((entry) => ({
       name: entry.name,
       config: entry.config as McpServerEntry["config"],

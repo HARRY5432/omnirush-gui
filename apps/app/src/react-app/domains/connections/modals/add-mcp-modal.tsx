@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import { useReducer } from "react";
+import { useEffect, useReducer } from "react";
 import { Loader2, Plus } from "lucide-react";
 
 import {
@@ -25,6 +25,10 @@ export type AddMcpModalProps = {
   onAdd: (entry: McpDirectoryInfo) => Promise<McpConnectResult>;
   busy: boolean;
   isRemoteWorkspace: boolean;
+  /** Local (command) servers only, e.g. when only the account's supported servers start. */
+  localOnly?: boolean;
+  /** A short note under the title (what will happen to the server). */
+  note?: string | null;
 };
 
 type AddMcpState = {
@@ -60,6 +64,9 @@ function addMcpReducer(state: AddMcpState, patch: Partial<AddMcpState> | "reset"
 
 export function AddMcpModal(props: AddMcpModalProps) {
   const [state, dispatch] = useReducer(addMcpReducer, initialAddMcpState);
+  useEffect(() => {
+    if (props.open && props.localOnly && state.serverType !== "local") dispatch({ serverType: "local" });
+  }, [props.open, props.localOnly, state.serverType]);
 
   const reset = () => {
     dispatch("reset");
@@ -168,7 +175,7 @@ export function AddMcpModal(props: AddMcpModalProps) {
             {t("mcp.add_modal_title")}
           </DialogTitle>
           <DialogDescription>
-            {t("mcp.add_modal_subtitle")}
+            {props.note ?? t("mcp.add_modal_subtitle")}
           </DialogDescription>
         </DialogHeader>
 
@@ -180,7 +187,7 @@ export function AddMcpModal(props: AddMcpModalProps) {
             onChange={(event) => dispatch({ name: event.currentTarget.value })}
           />
 
-          <div>
+          {props.localOnly ? null : <div>
             <div className="mb-1 text-xs font-medium text-dls-secondary">
               {t("mcp.server_type")}
             </div>
@@ -217,7 +224,7 @@ export function AddMcpModal(props: AddMcpModalProps) {
                 {t("mcp.remote_workspace_url_hint")}
               </div>
             ) : null}
-          </div>
+          </div>}
 
           {state.serverType === "remote" ? (
             <div className="space-y-3">

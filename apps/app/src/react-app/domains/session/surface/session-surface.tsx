@@ -146,6 +146,7 @@ import {
   type ChatMcpReconnectScope,
 } from "./mcp-chat-reconnect";
 import { OpenTargetProvider, type OpenTargetOptions } from "@/lib/target-provider";
+import { registerMcpServerTitles } from "@/lib/capability-call";
 import type { ThreadStatus } from "@/lib/messages";
 import {
   EnvironmentVariableProvider,
@@ -2842,6 +2843,15 @@ export function SessionSurface(props: SessionSurfaceProps) {
     const next = [...localSkills, ...cachedConnect.skills];
     setToolSkills(next);
     return next;
+  }, [props.client, props.workspaceId]);
+
+  // Chat labels for supported MCP servers' tools use their titles (lib/capability-call.ts).
+  useEffect(() => {
+    let current = true;
+    void props.client.listMcp(props.workspaceId).then((response) => {
+      if (current && response.mcpPolicy) registerMcpServerTitles([...response.mcpPolicy.supported, ...response.mcpPolicy.decisions]);
+    }).catch(() => undefined);
+    return () => { current = false; };
   }, [props.client, props.workspaceId]);
 
   const listMcp = useCallback(async (): Promise<{ servers: McpServerEntry[]; statuses: McpStatusMap; status: string | null }> => {

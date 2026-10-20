@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { OmniRushMcpPolicyView, OmniRushMcpPreset } from "../src/app/lib/omnirush-server";
 import type { McpServerEntry } from "../src/app/types";
 import {
+  MCP_BLOCKED_HINTS,
   MCP_ENGINE_V2_NOTE,
   MCP_REMOTE_NOT_SUPPORTED,
   McpSupportedPanel,
@@ -76,6 +77,9 @@ describe("Settings > MCP: supported servers", () => {
     expect(html).toContain("Checked when the project&#x27;s next chat starts.");
     expect(html).toContain("From the project&#x27;s opencode.json");
     expect(html).not.toContain("text-red-11");
+    // Blocked reads as a warning, not an error, and the remote hint is not said twice.
+    expect(html).toContain('text-amber-11">Blocked');
+    expect(html).not.toContain(MCP_BLOCKED_HINTS.remote);
     // The configured preset says Added instead of offering it again.
     expect(html).toMatch(/data-testid="mcp-preset-filesystem".*Added/s);
   });
@@ -84,6 +88,24 @@ describe("Settings > MCP: supported servers", () => {
     const html = render({ policy: policy({ engineV2: true }), canAdd: false });
     expect(html).toContain(MCP_ENGINE_V2_NOTE);
     expect(html).not.toContain(">Add<");
+  });
+
+  test("a blocked row says why and what to do", () => {
+    expect(mcpServerState(server("gh"), { name: "gh", status: "blocked", code: "denied", reason: "The GitHub server works on your GitHub account." }))
+      .toEqual({ kind: "blocked", reason: "The GitHub server works on your GitHub account.", hint: "Not on the supported list." });
+    expect(mcpServerState(server("x"), { name: "x", status: "blocked", code: "not_allowed", reason: "This MCP server is not on the supported list." }))
+      .toMatchObject({ hint: null });
+    expect(mcpServerState(server("x"), { name: "x", status: "blocked", code: "unknown_command", reason: "The app cannot tell which MCP server this is." }))
+      .toMatchObject({ hint: "Start it with npx or uvx." });
+    expect(mcpServerState(server("x"), { name: "x", status: "blocked", code: "outside_project", reason: "This MCP server may only use files inside the project folder. (/etc)" }))
+      .toMatchObject({ hint: "Point it at a folder or file inside the project." });
+  });
+
+  test("backticks in a preset's description show as inline code", () => {
+    const html = render({ policy: policy({ supported: [{ ...filesystem, why: "Answers `now` in any time zone." }] }) });
+    expect(html).toContain("<code");
+    expect(html).toContain(">now</code>");
+    expect(html).not.toContain("`");
   });
 
   test("helpers", () => {

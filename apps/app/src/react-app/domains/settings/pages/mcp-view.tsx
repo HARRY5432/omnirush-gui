@@ -550,6 +550,8 @@ export function McpView(props: McpViewProps) {
   const availableConnectMcpServers: McpServerEntry[] = [];
   const installedPlugins = (props.installedPlugins ?? []).filter((plugin) => !plugin.files.some((file) => file.objectType === "mcp"));
   const orgMcpItems: ExtensionItem[] = [];
+  // The supported-servers panel stands for the MCP part of the library.
+  const mcpPanelShown = Boolean(mcpPolicy) && (filter === "all" || filter === "mcp") && inventoryState === "all";
   const addSupportedMcp = async (preset: OmniRushMcpPreset) => {
     const result = await props.connectMcp({
       id: preset.id,
@@ -1421,25 +1423,6 @@ export function McpView(props: McpViewProps) {
 
   return (
     <section className="w-full max-w-3xl animate-in fade-in duration-300">
-      {(filter === "all" || filter === "mcp") && inventoryState === "all" ? (
-        mcpPolicy ? (
-          <McpSupportedPanel
-            policy={mcpPolicy}
-            servers={props.mcpServers.filter((entry) => !isConnectDirectMcpServerName(entry.name) && entry.name !== "omnirush-cloud")}
-            canAdd={props.allowManageExtensions && !props.isRemoteWorkspace && mcpPolicy.engineV2 !== true}
-            busy={props.busy}
-            addPreset={addSupportedMcp}
-            removeServer={props.allowManageExtensions ? (name) => {
-              setRemoveTarget(name);
-              setRemoveOpen(true);
-            } : undefined}
-          />
-        ) : mcpDisabled ? (
-          <p data-testid="mcp-disabled-policy-notice" className="mb-5 text-sm text-dls-secondary">
-            MCP servers are turned off for this account.
-          </p>
-        ) : null
-      ) : null}
       {props.builtInExtensionsDisabled && props.allowManageExtensions ? (
         <div className="mb-5 rounded-xl border border-amber-6 bg-amber-2 px-4 py-3 text-xs text-amber-11">
           Built-in omnirush.ai extensions are disabled by your organization. Use Show hidden to review blocked built-ins.
@@ -1534,6 +1517,25 @@ export function McpView(props: McpViewProps) {
         </div>
       </div>
 
+      {(filter === "all" || filter === "mcp") && inventoryState === "all" ? (
+        mcpPolicy ? (
+          <McpSupportedPanel
+            policy={mcpPolicy}
+            servers={props.mcpServers.filter((entry) => !isConnectDirectMcpServerName(entry.name) && entry.name !== "omnirush-cloud")}
+            canAdd={props.allowManageExtensions && !props.isRemoteWorkspace && mcpPolicy.engineV2 !== true}
+            busy={props.busy}
+            addPreset={addSupportedMcp}
+            removeServer={props.allowManageExtensions ? (name) => {
+              setRemoveTarget(name);
+              setRemoveOpen(true);
+            } : undefined}
+          />
+        ) : mcpDisabled ? (
+          <p data-testid="mcp-disabled-policy-notice" className="mb-5 text-sm text-dls-secondary">
+            MCP servers are turned off for this account.
+          </p>
+        ) : null
+      ) : null}
       {/* Async refresh status must not move the Add button or filter controls. */}
       {props.mcpStatus ? (
         <div className="mb-5 whitespace-pre-wrap wrap-break-word rounded-xl border border-dls-border bg-dls-hover px-4 py-3 text-xs text-dls-secondary">
@@ -1541,7 +1543,8 @@ export function McpView(props: McpViewProps) {
         </div>
       ) : null}
 
-      <McpQuickConnectSection
+      {mcpPanelShown && filter === "mcp" ? null : <McpQuickConnectSection
+        hideEmpty={mcpPanelShown}
         skillCount={skillCount}
         entries={
           quickConnectList.filter((entry) => {
@@ -1657,7 +1660,7 @@ export function McpView(props: McpViewProps) {
         orgMcpDisconnectingId={props.orgMcpDisconnectingId ?? null}
         disconnectOrgMcp={props.disconnectOrgMcp}
         filtersActive={Boolean(search.trim()) || filter !== "all" || inventoryState !== "all"}
-      />
+      />}
 
       {visibleMcpServers.length > 0 ? (
       <McpConfiguredServersSection
@@ -1745,6 +1748,8 @@ export function McpView(props: McpViewProps) {
         onAdd={props.connectMcp}
         busy={props.busy}
         isRemoteWorkspace={props.isRemoteWorkspace}
+        localOnly={Boolean(mcpPolicy)}
+        note={mcpPolicy ? "Only servers on the supported list start: a local server started with npx or uvx, working on files inside this project. Anything else is refused with the reason." : null}
       /> : null}
 
       <AddLibraryItemModal
@@ -1943,6 +1948,8 @@ function ExtensionLayoutToggle(props: {
 }
 
 function McpQuickConnectSection(props: {
+  /** Leave out the empty state (the MCP panel above already fills the page). */
+  hideEmpty?: boolean;
   skillCount: number;
   entries: McpDirectoryInfo[];
   installedSkills?: SkillItem[];
@@ -2213,7 +2220,7 @@ function McpQuickConnectSection(props: {
             />
           ))}
         </div>
-      ) : !hasCards ? (
+      ) : !hasCards && props.hideEmpty ? null : !hasCards ? (
         <div className="rounded-[10px] border border-dashed border-dls-border bg-dls-surface px-6 py-12 text-center">
           <p className="text-[15px] font-medium text-dls-text">
             {props.filtersActive ? t("extensions.empty_filtered_title") : t("extensions.empty_title")}
