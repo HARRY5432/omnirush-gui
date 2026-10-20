@@ -63,13 +63,71 @@ export function compareVersions(a: string, b: string): number | null {
     const diff = Number(left[i]) - Number(right[i]);
     if (diff !== 0) return diff;
   }
-  // A pre-release sorts before its release.
+  // A pre-release sorts before its release; identifiers compare as in semver (numbers numerically).
   const lp = left[4] ?? "";
   const rp = right[4] ?? "";
   if (lp === rp) return 0;
   if (!lp) return 1;
   if (!rp) return -1;
-  return lp < rp ? -1 : 1;
+  const la = lp.split(".");
+  const ra = rp.split(".");
+  for (let i = 0; i < Math.max(la.length, ra.length); i += 1) {
+    const l = la[i];
+    const r = ra[i];
+    if (l === undefined) return -1;
+    if (r === undefined) return 1;
+    if (l === r) continue;
+    const ln = /^\d+$/.test(l);
+    const rn = /^\d+$/.test(r);
+    if (ln && rn) return Number(l) - Number(r);
+    if (ln) return -1;
+    if (rn) return 1;
+    return l < r ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * The releases to show for a build: none newer than it, and the one it runs
+ * (its own entry, else the closest older one) marked current. A dev build or
+ * a build older than every entry shows them all, newest first.
+ */
+export function releasesFor(version: string, releases: readonly WhatsNewRelease[] = desktopReleases): { releases: readonly WhatsNewRelease[]; current: string | null } {
+  if (!version || !isSemver(version)) return { releases, current: releases[0]?.version ?? null };
+  const shown = releases.filter((release) => (compareVersions(release.version, version) ?? 1) <= 0);
+  if (!shown.length) return { releases, current: null };
+  return { releases: shown, current: shown[0]!.version };
+}
+
+function stripCode(text: string): string {
+  return text.replace(/`([^`]+)`/g, "$1");
+}
+
+function headline(item: string): string {
+  const plain = stripCode(item).trim();
+  const colon = plain.indexOf(":");
+  let head = colon > 0 && colon <= 48 ? plain.slice(0, colon) : plain;
+  head = head.replace(/[.;]\s.*$/, "").replace(/[.;]$/, "");
+  if (head.length > 60) head = `${head.slice(0, 57).replace(/\s+\S*$/, "")}…`;
+  return head;
+}
+
+function lowerFirst(text: string): string {
+  // Leave names and acronyms ("IDE", "Git") alone.
+  if (/^[A-Z][A-Z]/.test(text) || /^(Git|GitHub|OmniRush|Windows|macOS|Linux)\b/.test(text)) return text;
+  return text.charAt(0).toLowerCase() + text.slice(1);
+}
+
+/** One line for the update toast: the first one or two New items, shortened. */
+export function updateSummary(release: WhatsNewRelease | undefined): string {
+  if (!release) return "";
+  const items = release.new.length ? release.new : release.improved.length ? release.improved : release.fixed;
+  if (!items.length) return "";
+  const heads = items.slice(0, 2).map(headline).filter(Boolean);
+  if (heads.length === 1 && items.length === 1) return `${heads[0]}.`;
+  const [first, second] = heads;
+  if (!second) return `${first} and more.`;
+  return items.length > 2 ? `${first}, ${lowerFirst(second)} and more.` : `${first} and ${lowerFirst(second)}.`;
 }
 
 export type UpdateDecision = {

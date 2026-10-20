@@ -473,8 +473,11 @@ export function AccountStatusMenu(props: AccountStatusMenuProps) {
         {isDesktopRuntime() ? (
           <DropdownMenuItem onClick={() => openWhatsNew("menu")} data-testid="account-menu-whats-new">
             <Sparkles className="size-3.5" />
-            <span className="flex-1">{t("whats_new.title")}</span>
-            {whatsNewUnseen ? <span className="size-1.5 shrink-0 rounded-full bg-primary" aria-label={t("whats_new.unseen")} /> : null}
+            <span className="flex-1">
+              {t("whats_new.title")}
+              {whatsNewUnseen ? <span className="sr-only"> ({t("whats_new.unseen")})</span> : null}
+            </span>
+            {whatsNewUnseen ? <span className="size-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" /> : null}
           </DropdownMenuItem>
         ) : null}
         {shellConfig.feedbackButton && props.onSendFeedback ? (

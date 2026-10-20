@@ -2151,7 +2151,9 @@ export default {
   "whats_new.group_fixed": "Fixed",
   "whats_new.all_releases": "All releases",
   "whats_new.release_count": "{count} releases · newest first",
-  "whats_new.updated_toast": "Updated to {version} — see what's new",
+  "whats_new.updated_title": "Updated to {version}",
+  "whats_new.later": "Later",
+  "whats_new.close": "Close",
   "whats_new.palette_detail": "Release notes for {version} and earlier",
   "whats_new.unseen": "New",
 } as const;

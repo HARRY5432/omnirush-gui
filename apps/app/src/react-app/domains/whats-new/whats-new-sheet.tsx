@@ -1,10 +1,10 @@
 /** @jsxImportSource react */
 // The "What's new" sheet (right side) and the one-time toast after an update.
-import { useEffect, useRef, useState } from "react";
-import { ExternalLink } from "lucide-react";
+import { useEffect, useState } from "react";
+import { ExternalLink, Sparkles, XIcon } from "lucide-react";
 
 import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
-import { Toaster, toast } from "@/components/ui/sonner";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { t } from "@/i18n";
 import { usePlatform } from "../../kernel/platform";
@@ -19,17 +19,19 @@ import {
   inlineParts,
   markUpdateToastShown,
   openWhatsNew,
+  releasesFor,
   takeUpdateDecision,
+  updateSummary,
   useWhatsNewStore,
   type WhatsNewRelease,
 } from "./whats-new";
 
-const UPDATE_TOAST_ID = "whats-new-update";
 const UPDATE_TOAST_MS = 12_000;
 const UPDATE_TOAST_SETTLE_MS = 2_500;
-/** Its own toaster: bottom right but above the chat's composer (the main toaster sits at the window's edge). */
-const UPDATE_TOASTER_ID = "whats-new";
-const UPDATE_TOASTER_OFFSET = { bottom: 168, right: 24 };
+const UPDATE_TOAST_WIDTH = 360;
+/** Below this chat-column width the toast becomes a full-width strip. */
+const UPDATE_TOAST_STRIP_BELOW = 480;
+const UPDATE_TOAST_GAP = 12;
 
 const GROUPS = [
   { key: "new", label: () => t("whats_new.group_new"), dot: "bg-primary" },
@@ -104,10 +106,11 @@ function ReleaseCard({ release, current }: { release: WhatsNewRelease; current: 
 
 /** The release cards, newest first; the running version first with a badge. */
 export function WhatsNewReleases({ releases = desktopReleases, version }: { releases?: readonly WhatsNewRelease[]; version: string }) {
+  const shown = releasesFor(version, releases);
   return (
     <div className="flex flex-col gap-2">
-      {releases.map((release) => (
-        <ReleaseCard key={release.version} release={release} current={release.version === version} />
+      {shown.releases.map((release) => (
+        <ReleaseCard key={release.version} release={release} current={release.version === shown.current} />
       ))}
     </div>
   );
@@ -153,7 +156,7 @@ export function WhatsNewSheet() {
             {t("whats_new.all_releases")}
             <ExternalLink className="size-3.5" aria-hidden="true" />
           </button>
-          <span className="text-xs text-muted-foreground">{t("whats_new.release_count", { count: desktopReleases.length })}</span>
+          <span className="text-xs text-muted-foreground">{t("whats_new.release_count", { count: releasesFor(version).releases.length })}</span>
         </SheetFooter>
       </SheetContent>
     </Sheet>
@@ -163,9 +166,103 @@ export function WhatsNewSheet() {
 let updateDecisionTaken = false;
 let updateToastDue = false;
 
+type ToastPlacement = { left?: number; right: number; bottom: number; width?: number; strip: boolean };
+
+/**
+ * Where the update toast sits: above the chat's composer stack (the composer
+ * plus the run status and session-quality rows over it), right-aligned to the
+ * composer, or as a full-width strip inside a narrow chat column. Without a
+ * composer on screen: the window's bottom-right corner.
+ */
+export function updateToastPlacement(
+  shell: { left: number; right: number; top: number; width: number } | null,
+  panel: { right: number } | null,
+  viewport: { width: number; height: number },
+): ToastPlacement {
+  if (!shell) return { right: 24, bottom: 24, strip: false };
+  const bottom = Math.max(12, viewport.height - shell.top + UPDATE_TOAST_GAP);
+  if (shell.width < UPDATE_TOAST_STRIP_BELOW) {
+    return { left: shell.left + 12, right: Math.max(12, viewport.width - shell.right + 12), bottom, strip: true };
+  }
+  const edge = panel ? Math.min(panel.right, shell.right - 12) : shell.right - 16;
+  return { right: Math.max(12, viewport.width - edge), bottom, width: Math.min(UPDATE_TOAST_WIDTH, shell.width - 24), strip: false };
+}
+
+function composerAnchor(): { shell: DOMRect; panel: DOMRect | null } | null {
+  const visible = (el: Element) => {
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0 ? rect : null;
+  };
+  const shells = [...document.querySelectorAll("[data-composer-shell]")].flatMap((el) => {
+    const rect = visible(el);
+    return rect ? [{ el, rect }] : [];
+  });
+  const shell = shells.at(-1);
+  if (shell) {
+    const panelEl = shell.el.querySelector("[data-composer-panel]");
+    return { shell: shell.rect, panel: panelEl ? visible(panelEl) : null };
+  }
+  // The new-chat screen: the composer alone, high on the page.
+  const panels = [...document.querySelectorAll("[data-composer-panel]")].flatMap((el) => visible(el) ?? []);
+  const panel = panels.at(-1);
+  return panel ? { shell: panel, panel } : null;
+}
+
+function useToastPlacement(active: boolean): ToastPlacement {
+  const [placement, setPlacement] = useState<ToastPlacement>({ right: 24, bottom: 24, strip: false });
+  useEffect(() => {
+    if (!active) return;
+    let frame = 0;
+    const measure = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const anchor = composerAnchor();
+        const next = updateToastPlacement(anchor?.shell ?? null, anchor?.panel ?? null, { width: window.innerWidth, height: window.innerHeight });
+        setPlacement((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
+      });
+    };
+    measure();
+    // The composer grows with the draft, panels open and close: follow it while the toast is up.
+    const timer = window.setInterval(measure, 250);
+    window.addEventListener("resize", measure);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.clearInterval(timer);
+      window.removeEventListener("resize", measure);
+    };
+  }, [active]);
+  return placement;
+}
+
+export function UpdateToastCard(props: { version: string; summary: string; onOpen: () => void; onClose: () => void; strip?: boolean }) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      data-testid="whats-new-toast"
+      data-strip={props.strip ? "true" : undefined}
+      className="flex w-full items-start gap-3 rounded-2xl border border-border bg-popover/95 p-4 text-popover-foreground shadow-md ring-1 ring-popover-border/20 backdrop-blur-sm"
+    >
+      <Sparkles className="mt-0.5 size-4 shrink-0 text-foreground" aria-hidden="true" />
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
+        <p className="text-sm font-semibold">{t("whats_new.updated_title", { version: props.version })}</p>
+        {props.summary ? <p className="text-sm text-muted-foreground">{props.summary}</p> : null}
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <Button size="sm" onClick={props.onOpen}>{t("whats_new.title")}</Button>
+          <Button size="sm" variant="ghost" onClick={props.onClose}>{t("whats_new.later")}</Button>
+        </div>
+      </div>
+      <Button size="icon-sm" variant="ghost" aria-label={t("whats_new.close")} onClick={props.onClose} className="-me-1 -mt-1 shrink-0">
+        <XIcon className="size-4" />
+      </Button>
+    </div>
+  );
+}
+
 /** "Updated to X": once per version, after an upgrade, never while a turn runs or an approval waits. */
 export function WhatsNewUpdateToast() {
   const turnRunning = useSessionActivityStore((store) => hasLiveSessionActivity(store.statusesByWorkspaceId));
+  const sheetOpen = useWhatsNewStore((state) => state.open);
   const [due, setDue] = useState(() => {
     if (!updateDecisionTaken) {
       updateDecisionTaken = true;
@@ -173,26 +270,55 @@ export function WhatsNewUpdateToast() {
     }
     return updateToastDue;
   });
-  const shown = useRef(false);
+  const [visible, setVisible] = useState(false);
+  const [hovered, setHovered] = useState(false);
+  const placement = useToastPlacement(visible);
+  const version = buildAppVersion();
 
   useEffect(() => {
-    if (!due || turnRunning || shown.current) return;
+    if (!due || turnRunning) return;
     // A short settle so the chats' running state (read from the server after start) can hold it back.
     const timer = window.setTimeout(() => {
-      shown.current = true;
       updateToastDue = false;
-      const version = buildAppVersion();
       markUpdateToastShown(version);
       setDue(false);
-      toast(t("whats_new.updated_toast", { version }), {
-        id: UPDATE_TOAST_ID,
-        duration: UPDATE_TOAST_MS,
-        action: { label: t("whats_new.title"), onClick: () => openWhatsNew("toast") },
-        toasterId: UPDATE_TOASTER_ID,
-      });
+      setVisible(true);
     }, UPDATE_TOAST_SETTLE_MS);
     return () => window.clearTimeout(timer);
-  }, [due, turnRunning]);
+  }, [due, turnRunning, version]);
 
-  return <Toaster id={UPDATE_TOASTER_ID} position="bottom-right" offset={UPDATE_TOASTER_OFFSET} mobileOffset={UPDATE_TOASTER_OFFSET} />;
+  // Hides by itself (not while the pointer is on it); opening the notes from anywhere closes it.
+  useEffect(() => {
+    if (!visible || hovered) return;
+    const timer = window.setTimeout(() => setVisible(false), UPDATE_TOAST_MS);
+    return () => window.clearTimeout(timer);
+  }, [visible, hovered]);
+  useEffect(() => {
+    if (sheetOpen) setVisible(false);
+  }, [sheetOpen]);
+
+  if (!visible) return null;
+  const { current } = releasesFor(version);
+  const release = desktopReleases.find((entry) => entry.version === current);
+  return (
+    <div
+      className="fixed z-40"
+      style={{ left: placement.left, right: placement.right, bottom: placement.bottom, width: placement.strip ? undefined : placement.width ?? UPDATE_TOAST_WIDTH }}
+      onPointerEnter={() => setHovered(true)}
+      onPointerLeave={() => setHovered(false)}
+      onFocusCapture={() => setHovered(true)}
+      onBlurCapture={() => setHovered(false)}
+    >
+      <UpdateToastCard
+        version={version}
+        summary={updateSummary(release)}
+        strip={placement.strip}
+        onOpen={() => {
+          setVisible(false);
+          openWhatsNew("toast");
+        }}
+        onClose={() => setVisible(false)}
+      />
+    </div>
+  );
 }

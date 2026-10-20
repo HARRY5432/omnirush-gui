@@ -359,9 +359,9 @@ export function CommandPalette(props: CommandPaletteProps) {
           id: "whats-new",
           title: t("whats_new.title"),
           detail: t("whats_new.palette_detail", { version: displayVersion() }),
-          meta: whatsNewUnseen ? t("whats_new.unseen") : undefined,
+          dot: whatsNewUnseen,
           keywords: ["what's new", "whats new", "changelog", "release notes", "updates", "version", "help"],
-          group: ACTIONS_GROUP,
+          group: "help" as const,
           action: () => {
             props.onClose();
             openWhatsNew("palette");
@@ -693,7 +693,15 @@ export function CommandPalette(props: CommandPaletteProps) {
       }}
     >
       <div className="min-w-0 flex-1">
-        <div className="truncate font-medium">{item.title}</div>
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className="truncate font-medium">{item.title}</span>
+          {item.dot ? (
+            <>
+              <span className="size-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" data-palette-dot />
+              <span className="sr-only">({t("whats_new.unseen")})</span>
+            </>
+          ) : null}
+        </div>
         {item.breadcrumb || item.detail ? (
           <div className="truncate text-muted-foreground text-xs">
             {item.breadcrumb ? (

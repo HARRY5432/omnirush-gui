@@ -19,7 +19,8 @@ Object.defineProperty(globalThis, "window", {
 });
 
 const whatsNew = await import("../src/react-app/domains/whats-new/whats-new");
-const { WhatsNewReleases, WhatsNewText } = await import("../src/react-app/domains/whats-new/whats-new-sheet");
+const { UpdateToastCard, WhatsNewReleases, WhatsNewText, updateToastPlacement } = await import("../src/react-app/domains/whats-new/whats-new-sheet");
+const { rankPaletteItems } = await import("../src/react-app/shell/command-palette-search");
 const { ensureInspectorInstalled } = await import("../src/app/lib/app-inspector");
 
 const DIR = path.join(import.meta.dir, "../src/react-app/domains/whats-new");
@@ -85,6 +86,10 @@ describe("versions", () => {
     expect(whatsNew.compareVersions("3.6.3", "3.6.3")).toBe(0);
     expect(whatsNew.compareVersions("3.6.3-beta.1", "3.6.3")).toBeLessThan(0);
     expect(whatsNew.compareVersions("junk", "3.6.3")).toBeNull();
+    expect(whatsNew.compareVersions("3.6.3-beta.10", "3.6.3-beta.9")).toBeGreaterThan(0);
+    expect(whatsNew.compareVersions("3.6.3-beta.2", "3.6.3-beta.10")).toBeLessThan(0);
+    expect(whatsNew.compareVersions("3.6.3-1", "3.6.3-alpha")).toBeLessThan(0);
+    expect(whatsNew.compareVersions("3.6.3-beta", "3.6.3-beta.1")).toBeLessThan(0);
   });
 
   test("dev builds count as no version", () => {
@@ -195,5 +200,68 @@ describe("sheet content", () => {
     const markup = renderToStaticMarkup(<WhatsNewReleases version={whatsNew.desktopReleases[0]!.version} />);
     for (const release of whatsNew.desktopReleases) expect(markup).toContain(`data-whats-new-release="${release.version}"`);
     expect(markup.match(/data-current="true"/g)?.length).toBe(1);
+  });
+});
+
+describe("which releases a build shows", () => {
+  const releases = [
+    { version: "3.6.3", date: "2026-10-20", new: ["A"], improved: [], fixed: [] },
+    { version: "3.6.1", date: "2026-10-19", new: ["B"], improved: [], fixed: [] },
+    { version: "3.6.0", date: "2026-10-18", new: ["C"], improved: [], fixed: [] },
+  ];
+  test("own entry is current", () => {
+    expect(whatsNew.releasesFor("3.6.3", releases)).toEqual({ releases, current: "3.6.3" });
+  });
+  test("no own entry: the closest older one is current, newer ones hidden", () => {
+    const shown = whatsNew.releasesFor("3.6.2", releases);
+    expect(shown.current).toBe("3.6.1");
+    expect(shown.releases.map((r) => r.version)).toEqual(["3.6.1", "3.6.0"]);
+    const markup = renderToStaticMarkup(<WhatsNewReleases releases={releases} version="3.6.2" />);
+    expect(markup).not.toContain('data-whats-new-release="3.6.3"');
+    expect(markup).toContain('data-whats-new-release="3.6.1" data-current="true"');
+  });
+  test("dev build or older than every entry: all, newest first", () => {
+    expect(whatsNew.releasesFor("", releases)).toEqual({ releases, current: "3.6.3" });
+    expect(whatsNew.releasesFor("3.5.0", releases)).toEqual({ releases, current: null });
+  });
+});
+
+describe("update toast", () => {
+  test("one-line summary from the first New items", () => {
+    expect(whatsNew.updateSummary(whatsNew.desktopReleases.find((r) => r.version === "3.6.3"))).toBe("Chat and IDE layouts, permission modes and more.");
+    expect(whatsNew.updateSummary({ version: "1.0.0", date: "2026-01-01", new: ["Use `/undo` now."], improved: [], fixed: [] })).toBe("Use /undo now.");
+    expect(whatsNew.updateSummary({ version: "1.0.0", date: "2026-01-01", new: ["One thing: a", "IDE mode: b"], improved: [], fixed: [] })).toBe("One thing and IDE mode.");
+    expect(whatsNew.updateSummary({ version: "1.0.0", date: "2026-01-01", new: [], improved: [], fixed: ["Fixed a crash."] })).toBe("Fixed a crash.");
+    expect(whatsNew.updateSummary(undefined)).toBe("");
+  });
+
+  test("card: icon, title, summary, What's new and Later", () => {
+    const markup = renderToStaticMarkup(<UpdateToastCard version="3.6.3" summary="Chat and IDE layouts and more." onOpen={() => {}} onClose={() => {}} />);
+    expect(markup).toContain("Updated to 3.6.3");
+    expect(markup).toContain("Chat and IDE layouts and more.");
+    expect(markup).toContain("What&#x27;s new");
+    expect(markup).toContain("Later");
+    expect(markup).toContain("<svg");
+  });
+
+  test("placement: above the composer, right-aligned; a strip in a narrow chat; corner without a composer", () => {
+    const viewport = { width: 1440, height: 900 };
+    const wide = updateToastPlacement({ left: 230, right: 1400, top: 640, width: 1170 }, { right: 1213 }, viewport);
+    expect(wide).toEqual({ right: 227, bottom: 272, width: 360, strip: false });
+    const narrow = updateToastPlacement({ left: 760, right: 1090, top: 470, width: 330 }, { right: 1060 }, { width: 1100, height: 800 });
+    expect(narrow).toEqual({ left: 772, right: 22, bottom: 342, strip: true });
+    expect(updateToastPlacement(null, null, viewport)).toEqual({ right: 24, bottom: 24, strip: false });
+  });
+});
+
+describe("command palette", () => {
+  test("the What's new row sits under Help", () => {
+    const groups = rankPaletteItems("what", [
+      { id: "whats-new", title: "What's new", group: "help", keywords: ["changelog"], action: () => {} },
+      { id: "x", title: "Something else", action: () => {} },
+    ], []);
+    expect(groups[0]?.label).toBe("Help");
+    expect(groups[0]?.items[0]?.id).toBe("whats-new");
+    expect(rankPaletteItems("", [{ id: "whats-new", title: "What's new", group: "help", action: () => {} }], [])[0]?.label).toBe("Help");
   });
 });
