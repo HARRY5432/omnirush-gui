@@ -1,0 +1,3 @@
+# Handoff offer rules: the same file in omnirush-cli (assets/extensions/omnirush/budget-wrap/) and omnirush-gui (apps/server/src/opencode-plugins/).
+# A change to one must be ported to the other and this list updated in both.
+afdcd2591be97d3aa45ea03c9a37e47a0861b09bb3f067d5f932b0492d2eea69  budget-wrap-rules.ts

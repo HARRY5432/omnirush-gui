@@ -74,8 +74,33 @@ test("a quota handoff waits for a choice, honors decline, and offers again after
     await dismissed();
   });
 
+  await step("a running turn hides the question until the session is idle", async () => {
+    expect(await offer("allowance-four")).toMatchObject({ ok: true, result: { choice: "pending" } });
+    await user.see({ testId: "budget-wrap-consent" });
+    expect(await offer("allowance-four", "hold")).toMatchObject({ ok: true });
+    await dismissed();
+    await user.notSee({ testId: "budget-wrap-consent" });
+    expect(await offer("allowance-four")).toMatchObject({ ok: true, result: { choice: "pending" } });
+    await user.see({ testId: "budget-wrap-consent" });
+  });
+
+  await step("a failed wrap is a notice with a retry, never the question again", async () => {
+    await user.click({ role: "button", label: "Wrap up" });
+    await dismissed();
+    expect(await offer("allowance-four", "fail")).toMatchObject({ ok: true });
+    await user.see({ text: "Wrap up did not finish" });
+    await user.notSee({ testId: "budget-wrap-consent" });
+    expect(await offer("allowance-four")).toMatchObject({ ok: true, result: { choice: "failed" } });
+    expect(await offer("allowance-four", "clear")).toMatchObject({ ok: true });
+    expect(await offer("allowance-four")).toMatchObject({ ok: true, result: { choice: "failed" } });
+    await user.notSee({ testId: "budget-wrap-consent" });
+    await user.click({ role: "button", label: "Retry" });
+    expect(await offer("allowance-four")).toMatchObject({ ok: true, result: { choice: "accept" } });
+    await user.notSee({ testId: "budget-wrap-consent" });
+  });
+
   evidence.recordAssertionEvidence(
-    "An unanswered wrap stays visible; decline is remembered; a changed allowance asks again; a restart requires renewal",
+    "An unanswered wrap stays visible while idle; decline is remembered; a changed allowance asks again; a restart requires renewal; a running turn hides it; a failure is a retry notice",
     "The desktop shell kept the choice open while running. Decline was remembered for that allowance. A changed allowance reopened it; acceptance and completion dismissed it. After a full app reload, an unanswered offer stayed hidden until the server renewed it.",
     true,
   );
