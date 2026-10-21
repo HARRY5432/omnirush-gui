@@ -42,6 +42,8 @@ export type ComputerUseRouteDeps = {
   recordTrace: (sessionId: string, type: string, data: Record<string, unknown>) => void;
 };
 
+const REFRESH_FLOOR_MS = 2_000;
+
 export function registerComputerUseRoutes(deps: ComputerUseRouteDeps): void {
   const { routes, jsonResponse } = deps;
   const state = async (read?: boolean) => {
@@ -64,11 +66,13 @@ export function registerComputerUseRoutes(deps: ComputerUseRouteDeps): void {
 
   addRoute(routes, "GET", "/computer-use/state", "client", async () => jsonResponse(await state()));
 
-  // `max_age_ms` (0..60000, default 60000): how old a cached answer may be; the host asks with 0 before each
+  // `max_age_ms` (2000..60000, default 60000): how old a cached answer may be; the host asks with 0 before each
   // open, so a stricter server value applies at once. `read`: whether the server answered.
   addRoute(routes, "POST", "/computer-use/refresh", "client", async (ctx) => {
     const body = await deps.readJsonBody(ctx.request).catch(() => ({} as Record<string, unknown>));
-    const maxAge = typeof body.max_age_ms === "number" && Number.isFinite(body.max_age_ms) ? Math.min(60_000, Math.max(0, Math.round(body.max_age_ms))) : 60_000;
+    // At most one real read per REFRESH_FLOOR_MS (a loop on this route cannot flood the server): an answer
+    // that recent counts as read now.
+    const maxAge = typeof body.max_age_ms === "number" && Number.isFinite(body.max_age_ms) ? Math.min(60_000, Math.max(REFRESH_FLOOR_MS, Math.round(body.max_age_ms))) : 60_000;
     let read = false;
     try {
       const capabilities = await deps.readCapabilities(maxAge);

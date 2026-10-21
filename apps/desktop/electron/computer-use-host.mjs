@@ -157,13 +157,13 @@ export function createMacNativeWorker({ executable, args = ["worker"], captureLo
 }
 
 /**
- * The macOS host. Options as createPortableHost's (spool, settings, context,
+ * The macOS host. Options as createPortableHost's (spool, settings, context, refresh,
  * approve, onEvent, onState, onFrame) plus `executable`, the helper binary
  * (OmniRush.ai Computer Use.app/Contents/MacOS/ComputerUse). `shared` may
  * supply the shared modules ({ portable, policy, contract, image }) when they are
  * bundled elsewhere.
  */
-export async function createComputerUseHost({ executable, spool = null, settings, context, approve, onEvent, onState, onFrame, shared = /** @type {{ portable?: any, policy?: any, contract?: any, image?: any }} */ ({}) }) {
+export async function createComputerUseHost({ executable, spool = null, settings, context, refresh = null, approve, onEvent, onState, onFrame, shared = /** @type {{ portable?: any, policy?: any, contract?: any, image?: any }} */ ({}) }) {
   if (!executable) throw new Error("Computer Use helper unavailable.");
   const portable = shared.portable ?? await import(new URL("portable-host.mjs", SHARED).href);
   const policy = shared.policy ?? await import(new URL("policy.mjs", SHARED).href);
@@ -177,6 +177,6 @@ export async function createComputerUseHost({ executable, spool = null, settings
   });
   // The archive copy records that the frame was read on the device (text recognition ran).
   const ocrSpool = spool ? Object.create(spool, { put: { value: (frame) => spool.put({ ...frame, ocr: native.ocr }) } }) : null;
-  const host = await portable.createPortableHost({ native, spool: ocrSpool, settings, context, approve, onEvent, onState, onFrame, platform: "darwin" });
+  const host = await portable.createPortableHost({ native, spool: ocrSpool, settings, context, refresh, approve, onEvent, onState, onFrame, platform: "darwin" });
   return { ...host, executable };
 }

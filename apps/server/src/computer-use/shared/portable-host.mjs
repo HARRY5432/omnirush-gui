@@ -452,7 +452,7 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     s.waiting = true; update();
     try {
       return await Promise.race([
-        Promise.resolve(approve.act({ session_id: s.id, request_id: randomUUID(), app: { app_id: s.window.appId, app_name: s.window.appName, bundle_or_exe: s.window.executable, pid: s.window.pid }, window_title: s.window.title, purpose: s.purpose, intent: request.intent, action: request.action, reasons: request.reasons, points: request.points, frame: { width: request.frame.model.width, height: request.frame.model.height, sha256: request.frame.sha, data_url: `data:${request.frame.mime};base64,${request.frame.bytes.toString("base64")}` } })).then((v) => ({ allow: v?.allow === true })),
+        Promise.resolve(approve.act({ session_id: s.id, request_id: randomUUID(), chat: s.chat ?? null, app: { app_id: s.window.appId, app_name: s.window.appName, bundle_or_exe: s.window.executable, pid: s.window.pid }, window_title: s.window.title, purpose: s.purpose, intent: request.intent, action: request.action, reasons: request.reasons, points: request.points, frame: { width: request.frame.model.width, height: request.frame.model.height, sha256: request.frame.sha, data_url: `data:${request.frame.mime};base64,${request.frame.bytes.toString("base64")}` } })).then((v) => ({ allow: v?.allow === true })),
         expired,
       ]);
     } catch {
@@ -494,7 +494,7 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     const l = limits();
     const s = {
       id: randomUUID(), connection, window: preferred, windows, mode: args.mode, purpose: args.purpose, phase: "approval", status: "",
-      approval: null, chat: ctx.chat ?? null, actions: 0, requests: new Set(), observation: null, resumeObservation: null, log: [],
+      approval: null, chat: connection.internal === false ? null : ctx.chat ?? null, actions: 0, requests: new Set(), observation: null, resumeObservation: null, log: [],
       lastOperation: Date.now(), lastAct: 0, generation: 0, allowed: new Map(), expiresAt: Date.now() + l.approval_timeout_seconds * 1000, screen: await screenOf(preferred),
     };
     lease = s.id; sessions.set(s.id, s);
@@ -507,7 +507,7 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     if (fresh) answer = { decision: "chat", window_id: String(preferred.id), reused: true };
     else {
       const pendingAnswer = new Promise((resolve) => { s.pendingApproval = { resolve }; });
-      const request = { session_id: s.id, request_id: randomUUID(), app: { app_id: preferred.appId, app_name: preferred.appName, bundle_or_exe: preferred.executable, pid: preferred.pid }, windows: windows.map((w) => ({ id: String(w.id), title: w.title })), window_id: String(preferred.id), mode: s.mode, purpose: s.purpose, os, seconds: l.session_seconds, chat_seconds: l.chat_approval_seconds };
+      const request = { session_id: s.id, request_id: randomUUID(), app: { app_id: preferred.appId, app_name: preferred.appName, bundle_or_exe: preferred.executable, pid: preferred.pid }, windows: windows.map((w) => ({ id: String(w.id), title: w.title })), window_id: String(preferred.id), mode: s.mode, purpose: s.purpose, os, seconds: l.session_seconds, chat_seconds: l.chat_approval_seconds, chat: s.chat ?? null };
       answer = await Promise.race([
         Promise.resolve(approve.open(request)).catch(() => ({ decision: "deny" })),
         pendingAnswer,
@@ -573,8 +573,12 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
   }
 
   /** One MCP client (an engine connection): JSON-RPC in, JSON-RPC out. */
-  function connect() {
-    const connection = { id: randomUUID(), busy: false, closed: false };
+  /**
+   * One MCP connection. `internal` false: a connection from outside the app's own engine (the copied CLI
+   * connection), whose calls belong to no chat of this app: it never keeps or reuses "Allow for this chat".
+   */
+  function connect({ internal = true } = {}) {
+    const connection = { id: randomUUID(), busy: false, closed: false, internal: internal !== false };
     return {
       id: connection.id,
       async handle(message) {
@@ -609,17 +613,21 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
   /** Desktop transport: a loopback socket with a token, found through `<dir>/connection.json` (the bundled relay reads it). */
   async function listen(dir) {
     await mkdir(dir, { recursive: true, mode: 0o700 });
+    // Two tokens: the app's own engine relay reads connection.json; the copied CLI connection reads
+    // cli-connection.json, and its connections are external (no chat, no grants).
     const discoveryPath = path.join(dir, "connection.json");
+    const externalDiscoveryPath = path.join(dir, "cli-connection.json");
     const token = randomBytes(32).toString("hex");
+    const externalToken = randomBytes(32).toString("hex");
     const sockets = new Set();
     const server = createServer((socket) => {
       if (closed || sockets.size >= 16) { socket.destroy(); return; }
       sockets.add(socket);
-      const connection = connect();
+      let connection = null;
       let incoming = "", authenticated = false;
       const authTimer = setTimeout(() => socket.destroy(), 5000);
       socket.setEncoding("utf8");
-      socket.once("close", () => { clearTimeout(authTimer); sockets.delete(socket); void connection.close(); });
+      socket.once("close", () => { clearTimeout(authTimer); sockets.delete(socket); void connection?.close(); });
       socket.on("error", () => socket.destroy());
       socket.on("data", (chunk) => {
         incoming += chunk;
@@ -630,7 +638,10 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
           let message; try { message = JSON.parse(line); } catch { socket.destroy(); return; }
           if (!authenticated) {
             const candidate = typeof message?.token === "string" ? Buffer.from(message.token) : Buffer.alloc(0);
-            if (candidate.length !== token.length || !timingSafeEqual(candidate, Buffer.from(token))) { socket.destroy(); return; }
+            const matches = (expected) => candidate.length === expected.length && timingSafeEqual(candidate, Buffer.from(expected));
+            const internal = matches(token);
+            if (!internal && !matches(externalToken)) { socket.destroy(); return; }
+            connection = connect({ internal });
             authenticated = true; clearTimeout(authTimer); continue;
           }
           void connection.handle(message).then((reply) => { if (reply && !socket.destroyed) socket.write(`${JSON.stringify(reply)}\n`); });
@@ -640,10 +651,12 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", () => resolve(undefined)); });
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("Computer use could not open its local connection.");
-    const temp = `${discoveryPath}.${randomUUID()}`;
-    await writeFile(temp, JSON.stringify({ version: 1, host: "127.0.0.1", port: address.port, token }), { mode: 0o600, flag: "wx" });
-    await rename(temp, discoveryPath);
-    return { discoveryPath, close: async () => { for (const socket of sockets) socket.destroy(); server.close(); await unlink(discoveryPath).catch(() => {}); } };
+    for (const [file, value] of [[discoveryPath, token], [externalDiscoveryPath, externalToken]]) {
+      const temp = `${file}.${randomUUID()}`;
+      await writeFile(temp, JSON.stringify({ version: 1, host: "127.0.0.1", port: address.port, token: value }), { mode: 0o600, flag: "wx" });
+      await rename(temp, file);
+    }
+    return { discoveryPath, externalDiscoveryPath, close: async () => { for (const socket of sockets) socket.destroy(); server.close(); await unlink(discoveryPath).catch(() => {}); await unlink(externalDiscoveryPath).catch(() => {}); } };
   }
 
   /** Controls from the person (host channel only): stop | takeover | continue | hide | show. */

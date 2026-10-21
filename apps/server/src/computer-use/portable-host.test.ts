@@ -233,6 +233,61 @@ describe("portable host: MCP surface and consent", () => {
     await host.close();
   });
 
+  test("the copied CLI connection (cli-connection.json) belongs to no chat: it never reuses or keeps the app's grant", async () => {
+    const r = rig("normal", { decision: "chat" });
+    const host = await r.hostPromise;
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cu-listen-"));
+    dirs.push(dir);
+    const listener = await host.listen(dir);
+    expect(path.basename(listener.externalDiscoveryPath)).toBe("cli-connection.json");
+    const internalFile = JSON.parse(readFileSync(listener.discoveryPath, "utf8")) as { port: number; token: string };
+    const externalFile = JSON.parse(readFileSync(listener.externalDiscoveryPath, "utf8")) as { port: number; token: string };
+    expect(externalFile.token).not.toBe(internalFile.token);
+    const { createConnection } = await import("node:net");
+    const dial = (file: { port: number; token: string }) => new Promise<{ call: (name: string, args: Record<string, unknown>) => Promise<Record<string, unknown>>; close: () => void }>((resolve) => {
+      const socket = createConnection({ host: "127.0.0.1", port: file.port });
+      let buffer = "", id = 0;
+      const waiting = new Map<number, (v: Record<string, unknown>) => void>();
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk: string) => { buffer += chunk; let i; while ((i = buffer.indexOf("\n")) >= 0) { const m = JSON.parse(buffer.slice(0, i)) as { id: number; result: { content: Array<{ text: string }> } }; buffer = buffer.slice(i + 1); waiting.get(m.id)?.(JSON.parse(m.result.content[0]!.text)); } });
+      socket.once("connect", () => {
+        socket.write(`${JSON.stringify({ token: file.token })}\n`);
+        resolve({
+          call: (name, args) => new Promise((done) => { const my = ++id; waiting.set(my, done); socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: my, method: "tools/call", params: { name, arguments: args } })}\n`); }),
+          close: () => socket.destroy(),
+        });
+      });
+    });
+    const open = { app_id: "/usr/bin/gedit", mode: "control", purpose: "Write" };
+    // The app's own engine (one desktop chat runs: ses_1): asked once, granted for the chat.
+    const engine = await dial(internalFile);
+    const first = await engine.call("computer_open_session", open);
+    await engine.call("computer_close_session", { session_id: first.session_id });
+    expect(r.opens.length).toBe(1);
+    expect(r.opens[0]?.chat).toBe("ses_1");
+    // The copied CLI connection while ses_1 still runs: asked (no reuse), its request names no chat,
+    // and its "Allow for this chat" keeps nothing.
+    const cli = await dial(externalFile);
+    const second = await cli.call("computer_open_session", open);
+    expect(second).toMatchObject({ ok: true });
+    expect(r.opens.length).toBe(2);
+    expect(r.opens[1]?.chat).toBeNull();
+    await cli.call("computer_close_session", { session_id: second.session_id });
+    const third = await cli.call("computer_open_session", open);
+    expect(r.opens.length).toBe(3);
+    await cli.call("computer_close_session", { session_id: third.session_id });
+    // The engine's grant is still its own.
+    const fourth = await engine.call("computer_open_session", open);
+    expect(fourth).toMatchObject({ ok: true, approval: "chat" });
+    expect(r.opens.length).toBe(3);
+    // A wrong token is dropped.
+    const bad = await dial({ port: internalFile.port, token: "0".repeat(64) });
+    bad.close();
+    engine.close(); cli.close();
+    await listener.close();
+    await host.close();
+  });
+
   test("off by the server: no session", async () => {
     const r = rig("normal", { enabled: false });
     const host = await r.hostPromise;

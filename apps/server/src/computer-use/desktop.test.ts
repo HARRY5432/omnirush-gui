@@ -103,7 +103,7 @@ describe("routes: the chat a grant is kept for, and the policy read before an op
     // Before an open the host asks with max_age_ms 0; the new bound is in force at once.
     const read = await hit("POST", "/computer-use/refresh", { max_age_ms: 0 });
     expect(read.read).toBe(true);
-    expect(ages.at(-1)).toBe(0);
+    expect(ages.at(-1)).toBe(2_000);
     expect((read.setting as { limits: { chat_approval_seconds: number } }).limits.chat_approval_seconds).toBe(600);
     expect((await hit("POST", "/computer-use/refresh", {})).read).toBe(true);
     expect(ages.at(-1)).toBe(60_000);

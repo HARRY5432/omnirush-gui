@@ -153,14 +153,14 @@ function settled(requestId) {
 const approve = {
   async open(request) {
     const icon = await iconOf(request.app.bundle_or_exe);
-    const answer = await ask({ kind: "open", ...request, icon, chat: server?.chat ?? null });
+    const answer = await ask({ kind: "open", ...request, icon, chat: request.chat ?? null });
     settled(request.request_id);
     return answer;
   },
   async act(request) {
     const { policyModule } = await sharedModules();
     const reasons = request.reasons.map((r) => ({ ...r, text: `${policyModule.ASK_REASONS[r.code] ?? r.code}${r.detail ? ` (${r.detail})` : ""}` }));
-    const answer = await ask({ kind: "act", ...request, reasons, icon: await iconOf(request.app.bundle_or_exe), chat: server?.chat ?? null });
+    const answer = await ask({ kind: "act", ...request, reasons, icon: await iconOf(request.app.bundle_or_exe), chat: request.chat ?? null });
     settled(request.request_id);
     return { allow: answer.decision === "allow" };
   },
@@ -301,7 +301,9 @@ async function getComputerUseMcpCommand() {
   if (!server?.enabled) throw new Error(server?.setting?.message ?? "Computer use is turned off.");
   await startHost();
   const relay = app.isPackaged ? path.join(process.resourcesPath, "computer-use", "relay.mjs") : path.join(__dirname, "computer-use-relay.mjs");
-  return [process.execPath, relay, listener.discoveryPath];
+  // The copied CLI connection: its own token (cli-connection.json), so its calls belong to no chat of this app
+  // and never keep or reuse "Allow for this chat". The engine's relay alone reads connection.json.
+  return [process.execPath, relay, listener.externalDiscoveryPath];
 }
 
 // ---------------------------------------------------------------------------
