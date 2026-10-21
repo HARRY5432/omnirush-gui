@@ -39,8 +39,9 @@ import { externalFetch } from "../../server-fetch.js";
 import type { RuntimeResult } from "../runtime.js";
 import bundledPins from "../wsl.json" with { type: "json" };
 import { IDLE_MINUTES, newMeta, upArgs, type BoxMeta } from "./bwrap.js";
+import { YOUNG_IMAGE_MS, removableImage, removeTree, staleEntries } from "../retention.mjs";
 import { boxshExec, num, parseOut, str } from "./shared.js";
-import type { BoxDriver, OpenContext, Opened, PresentImage, SpawnLike } from "./types.js";
+import type { BoxDriver, OpenContext, Opened, PresentImage, Removed, SpawnLike } from "./types.js";
 import { ping } from "../client.js";
 
 type Env = NodeJS.ProcessEnv;
@@ -418,8 +419,54 @@ export const wslDriver: BoxDriver = {
     const { out } = await boxrun(runtime, ["stop", "--box", boxPath(key)], { run, env });
     return { stopped: Boolean(out?.ok) };
   },
-  async gcImages() {
-    return [];
+  /**
+   * Box images in the distro's store that no box uses and that are neither
+   * the current nor the previous pins, and rootfs downloads of other pins
+   * (the distro is imported once; a tarball of other pins is never read again).
+   */
+  async gcImages(runtime, { run = runCommand, env = process.env, home = "", current, used, keep = { refs: current, digests: new Set<string>() }, dryRun = false, now = Date.now(), pins = loadWslPins() }: Parameters<BoxDriver["gcImages"]>[1] & { pins?: WslPins | null }) {
+    const removed: Removed[] = [];
+    if (home) {
+      const cache = path.join(home, "wsl", "cache");
+      const wanted = new Set(Object.values(pins?.assets ?? {}).map((asset) => `${asset?.sha256}.tar.gz`));
+      // The newest tarball of other pins stays (the previous box version's); older ones go.
+      const others = staleEntries(cache, { now, maxAgeMs: -1, match: (name) => /^[0-9a-f]{64}\.tar\.gz$/.test(name) && !wanted.has(name) }).sort((a, b) => b.mtimeMs - a.mtimeMs);
+      for (const item of others.slice(1)) {
+        if (dryRun) removed.push({ kind: "download", name: item.path, reason: "rootfs of other pins", dryRun: true });
+        else if (removeTree(item.path)) removed.push({ kind: "download", name: item.path, reason: "rootfs of other pins" });
+      }
+      // Partial downloads (`.part`) a stopped download left a day ago.
+      for (const item of staleEntries(cache, { now, match: (name) => /\.tmp$|\.part$|\.download$/.test(name) })) {
+        if (dryRun) removed.push({ kind: "download", name: item.path, reason: "left by a stopped download", dryRun: true });
+        else if (removeTree(item.path)) removed.push({ kind: "download", name: item.path, reason: "left by a stopped download" });
+      }
+    }
+    // The distro may not be there (never pulled): nothing in it to remove then.
+    const wsl: WslRuntime = runtime;
+    const listed = await wslCall(wsl.bin, ["--list", "--verbose"], { run, env }).catch(() => null);
+    if (!listed || !parseWslList(listed.stdout).some((row) => row.name.toLowerCase() === String(wsl.distro).toLowerCase())) return removed;
+    const script = `for f in ${STORE}/images/*/image.json; do [ -f "$f" ] || continue; d=\${f%/image.json}; printf '%s\\t%s\\t' "\${d##*/}" "$(stat -c %Y "$f" 2>/dev/null || echo 0)"; tr -d '\\n\\r' < "$f"; printf '\\n'; done`;
+    const res = await wslCall(wsl.bin, inDistro(wsl, ["/bin/sh", "-c", script]), { run, env, timeoutMs: 60_000 });
+    if (res.code !== 0) return removed;
+    const usedIds = new Set<string>(used);
+    for (const name of (() => { try { return readdirSync(path.join(home, "wsl", "boxes")).filter((n) => n.endsWith(".json")); } catch { return [] as string[]; } })()) {
+      const meta = readJson<WslMeta>(path.join(home, "wsl", "boxes", name));
+      if (meta?.image) usedIds.add(meta.image);
+    }
+    for (const line of String(res.stdout || "").split(/\r?\n/)) {
+      const [rawId = "", mtime = "", ...rest] = line.split("\t");
+      const id = rawId.trim();
+      let img: { ref?: string; digest?: string } | null = null;
+      try { img = JSON.parse(rest.join("\t")); } catch { continue; }
+      // Unpacked in the last week (or its age unknown): another app may be about to make a box on it.
+      const unpackedAt = Number(mtime) * 1000;
+      if (!Number.isFinite(unpackedAt) || unpackedAt <= 0 || now - unpackedAt < YOUNG_IMAGE_MS) continue;
+      if (!/^[0-9a-zA-Z._-]+$/.test(id) || !removableImage({ ref: img?.ref, digest: img?.digest, id }, { keep, used: usedIds })) continue;
+      if (dryRun) { removed.push({ kind: "image", name: String(img?.ref), reason: "not current", dryRun: true }); continue; }
+      const { out } = await boxrun(wsl, ["rmimage", "--store", STORE, "--id", id, "--boxes", BOXES], { run, env, timeoutMs: 120_000 });
+      if (out?.ok) removed.push({ kind: "image", name: String(img?.ref), reason: "not current" });
+    }
+    return removed;
   },
   async upperBytes(runtime, key, { run = runCommand, env = process.env } = {}) {
     const { out } = await boxrun(runtime, ["status", "--box", boxPath(key)], { run, env });

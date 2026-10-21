@@ -1,0 +1,4 @@
+# Disk retention rules (log caps, version retention, locks, Windows-locked files): the same files in omnirush-cli (src/disk-cleanup/) and omnirush-gui (apps/desktop/electron/disk-cleanup/).
+# A change to one must be ported to the other and this list updated in both.
+2b77be63658209702e963d0ea39b94fb19a055ef212999ac5af82b816df6ed78  retention.mjs
+ebeef9e976f117736a448298d68e71eb1f107514e8f17d58f441f04bfab4a61d  retention.d.mts

@@ -34,6 +34,7 @@ import {
   replaceAppImage,
   stageMacBundle,
 } from "./self-install.mjs";
+import { rememberDownloadedPackage } from "./disk-cleanup/index.mjs";
 
 const ELECTRON_UPDATER_CHANNEL_FILENAME = "electron-updater-channel.v1.json";
 // Where a manually installed update (macOS DMG) is staged before it is opened.
@@ -1344,9 +1345,12 @@ export function registerUpdaterIpc({
           : "The release manifest does not list a macOS installer for this update.");
       }
       if (installMode === "package") {
-        downloadedInstallerPath = await downloadManualInstaller(checkedInstallerArtifact, {
-          directory: await packageDownloadDirectory(),
-        });
+        const directory = await packageDownloadDirectory();
+        // A file already there is the user's (it may be one they downloaded): never recorded for cleanup.
+        const wasThere = await fileExists(path.join(directory, checkedInstallerArtifact.fileName));
+        downloadedInstallerPath = await downloadManualInstaller(checkedInstallerArtifact, { directory });
+        // Recorded so "Free up space" can offer this file (and only it, unchanged) once it is installed.
+        if (!wasThere) rememberDownloadedPackage(app.getPath("userData"), downloadedInstallerPath, checkedInstallerArtifact.version);
       } else {
         downloadedInstallerPath = await downloadManualInstaller(checkedInstallerArtifact);
       }
@@ -1626,5 +1630,28 @@ export function registerUpdaterIpc({
     }
   }
 
-  return { ensureAutoUpdater, prepareInstallOnQuit, offerMoveAtLaunch };
+  /**
+   * Runs `operation` in the updater's queue (never while a check, download or
+   * install runs), unless an update is downloaded and waiting to install, or
+   * installing: then it is skipped ({ skipped: "update-pending" }).
+   * @template T
+   * @param {() => T | Promise<T>} operation
+   * @returns {Promise<T | { skipped: "update-pending" }>}
+   */
+  function whenUpdaterIdle(operation) {
+    return /** @type {Promise<any>} */ (queueUpdaterOperation(async () => {
+      if (updateDownloaded || installTriggered || quitInstallInProgress || stagedMacBundle) return { skipped: "update-pending" };
+      return operation();
+    }));
+  }
+
+  /**
+   * Files an update in progress uses (never cleaned).
+   * @returns {string[]}
+   */
+  function pendingUpdatePaths() {
+    return [downloadedInstallerPath, stagedMacBundle && path.dirname(stagedMacBundle), downloadedAppImagePath].filter(Boolean);
+  }
+
+  return { ensureAutoUpdater, prepareInstallOnQuit, offerMoveAtLaunch, whenUpdaterIdle, pendingUpdatePaths };
 }

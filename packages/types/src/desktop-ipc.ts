@@ -1185,6 +1185,18 @@ export type DesktopCommandMap = {
 
   /** Opens <userData>/logs in the system file manager. Takes no path from the renderer. */
   openLogsFolder: { args: []; result: { ok: boolean; error?: string } };
+  /** Settings > Storage. Lists (dryRun) or removes what the app no longer needs; takes no path from the renderer. */
+  freeUpSpace: {
+    args: [options?: { dryRun?: boolean }];
+    result: {
+      ok: boolean;
+      skipped: string | null;
+      dryRun: boolean;
+      freedBytes: number;
+      freed: string;
+      items: Array<{ kind: string; path: string; bytes: number; size: string; reason: string; inUse: boolean }>;
+    };
+  };
 
   // Window / OS utilities (dunder commands)
   __openPath: { args: [target: string]; result: unknown };

@@ -17,13 +17,14 @@
 // (kernel.apparmor_restrict_unprivileged_userns=1): the probe says so in one
 // line and the next backend (rootless Podman, Docker) is used.
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import { GOARCH, RUN_DIR, SHIMS_DIR, containerName, containerRoot, helperPath, newToken, readJson, writeJson, type BoxInstallLog, type BoxRuntime } from "../common.js";
 import { runCommand, type RunCommand, type RunOptions } from "../run.js";
 import type { RuntimeResult } from "../runtime.js";
+import { YOUNG_IMAGE_MS, removableImage, removeTree, staleEntries } from "../retention.mjs";
 import { boxshExec, num, parseOut, str } from "./shared.js";
 import type { BoxDriver, ListedBox, OpenContext, Opened, PresentImage, Removed } from "./types.js";
 
@@ -238,23 +239,28 @@ export const bwrapDriver: BoxDriver = {
     const res = await run(runtime.bin, ["stop", "--box", boxDir(home, key)], { timeoutMs: 60_000 });
     return { stopped: Boolean(parseOut(res.stdout)?.ok) };
   },
-  async gcImages(runtime, { run = runCommand, home = "", current, used }) {
+  async gcImages(runtime, { run = runCommand, home = "", current, used, keep = { refs: current, digests: new Set<string>() }, dryRun = false, now = Date.now() }) {
     const removed: Removed[] = [];
+    // Downloads a killed pull left in the store (each one can be a whole image).
+    for (const item of staleEntries(path.join(storeDir(home), "tmp"), { now })) {
+      if (dryRun) removed.push({ kind: "download", name: item.path, reason: "left by a stopped download", dryRun: true });
+      else if (removeTree(item.path)) removed.push({ kind: "download", name: item.path, reason: "left by a stopped download" });
+    }
     const dir = path.join(storeDir(home), "images");
     let ids: string[] = [];
     try { ids = readdirSync(dir); } catch { return removed; }
-    const usedIds = new Set<string>();
+    const usedIds = new Set<string>(used);
     for (const box of await list(runtime, { home })) {
       const meta = readJson<BoxMeta>(metaFile(home, box.key));
       if (meta?.image) usedIds.add(meta.image);
     }
-    const plain = (ref: unknown) => String(ref || "").replace(/@sha256:[0-9a-f]{64}$/, "").replace(/^docker\.io\//, "");
-    const currentPlain = new Set([...current].map(plain));
     for (const id of ids) {
-      const img = readJson<{ ref?: string }>(path.join(dir, id, "image.json"));
-      if (!img || usedIds.has(id) || used.has(String(img.ref)) || currentPlain.has(plain(img.ref))) continue;
-      if (!/(^|\/)omnirush-ai\/box-[a-z]+:/.test(String(img.ref))) continue;
-      const res = await run(runtime.bin, ["rmimage", ...storeArgs(home), "--id", id], { timeoutMs: 120_000 });
+      const img = readJson<{ ref?: string; digest?: string }>(path.join(dir, id, "image.json"));
+      if (!img || !removableImage({ ref: img.ref, digest: img.digest, id }, { keep, used: usedIds })) continue;
+      try { if (now - statSync(path.join(dir, id, "image.json")).mtimeMs < YOUNG_IMAGE_MS) continue; } catch { continue; }
+      if (dryRun) { removed.push({ kind: "image", name: String(img.ref), reason: "not current", path: path.join(dir, id), dryRun: true }); continue; }
+      // boxrun itself also refuses while any box (running or stopped) records this image.
+      const res = await run(runtime.bin, ["rmimage", ...storeArgs(home), "--id", id, "--boxes", path.join(bwrapHome(home), "boxes")], { timeoutMs: 120_000 });
       if (parseOut(res.stdout)?.ok) removed.push({ kind: "image", name: String(img.ref), reason: "not current" });
     }
     return removed;

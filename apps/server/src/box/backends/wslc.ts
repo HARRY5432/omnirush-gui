@@ -30,7 +30,8 @@ import { runCommand, type RunCommand, type RunResult } from "../run.js";
 import type { RuntimeResult } from "../runtime.js";
 import { parseSize } from "./container.js";
 import { versionAtLeast } from "./shared.js";
-import type { BoxDriver, OpenContext, Opened, PresentImage } from "./types.js";
+import { removableImage, removalTarget } from "../retention.mjs";
+import type { BoxDriver, OpenContext, Opened, PresentImage, Removed } from "./types.js";
 import { ENABLE_HINT, decodeWsl, wslCall, wslExe } from "./wsl.js";
 
 type Env = NodeJS.ProcessEnv;
@@ -248,14 +249,17 @@ export const wslcDriver: BoxDriver = {
     const res = await wslc(runtime, ["container", "remove", "--force", containerName(key, env)], { run, timeoutMs: 60_000 });
     return { removed: res.code === 0 };
   },
-  async gcImages(runtime, { run = runCommand, current, used }) {
-    const removed = [];
+  async gcImages(runtime, { run = runCommand, current, used, keep = { refs: current, digests: new Set<string>() }, dryRun = false }) {
+    const removed: Removed[] = [];
     const res = await wslc(runtime, ["image", "list", "--format", "json"], { run, timeoutMs: 30_000 });
     for (const img of parseJsonRows(res.stdout)) {
       const ref = img.Repository && img.Tag ? `${img.Repository}:${img.Tag}` : String(img.Name ?? img.Reference ?? "");
-      if (!ref || !/(^|\/)omnirush-ai\/box-[a-z]+:/.test(ref) || current.has(ref) || used.has(ref)) continue;
-      const del = await wslc(runtime, ["image", "remove", ref], { run, timeoutMs: 60_000 });
-      if (del.code === 0) removed.push({ kind: "image", name: ref, reason: "not current" });
+      const image = { ref, digest: typeof img.Digest === "string" ? img.Digest : null, id: String(img.Id ?? img.ID ?? "") };
+      if (!ref || !removableImage(image, { keep, used })) continue;
+      const target = removalTarget(image) || ref;
+      if (dryRun) { removed.push({ kind: "image", name: target, reason: "not current", dryRun: true }); continue; }
+      const del = await wslc(runtime, ["image", "remove", target], { run, timeoutMs: 60_000 });
+      if (del.code === 0) removed.push({ kind: "image", name: target, reason: "not current" });
     }
     return removed;
   },

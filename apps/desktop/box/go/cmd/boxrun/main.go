@@ -13,7 +13,7 @@
 //	boxrun pull    --store DIR --ref REF [--arch A]                      download + unpack an image
 //	boxrun import  --store DIR --file TAR [--ref REF] [--arch A]         unpack `docker save` / a rootfs tar
 //	boxrun image   --store DIR --ref REF [--arch A]                      the unpacked image, if any
-//	boxrun rmimage --store DIR --id ID                                   delete an unpacked image
+//	boxrun rmimage --store DIR --id ID [--boxes DIR]...                  delete an unpacked image no box uses
 //	boxrun up      --box DIR --store DIR --image ID --boxd FILE ...      start (or reuse) a project's box
 //	boxrun stop    --box DIR                                             stop it (the upper layer stays)
 //	boxrun rm      --box DIR                                             stop it and delete its layer
@@ -234,15 +234,29 @@ func cmdRmImage(args []string) error {
 	fs := newFlags("rmimage")
 	store := fs.String("store", "", "image store folder")
 	id := fs.String("id", "", "image id")
+	var roots multi
+	fs.Var(&roots, "boxes", "a folder whose subfolders are boxes (repeat): one recording this image keeps it")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *store == "" || *id == "" || strings.ContainsAny(*id, "/\\.") {
 		return errors.New("--store and a plain --id are needed")
 	}
+	st := oci.Store{Dir: *store}
+	unlock, err := st.Lock(*id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	// Never the lower layer of a box that still exists, running or stopped.
+	if users := imageUsers(*store, *id, roots); len(users) > 0 {
+		emit(map[string]any{"ok": false, "in_use": true, "id": *id, "boxes": users})
+		return nil
+	}
 	if err := removeTree(filepath.Join(*store, "images", *id)); err != nil {
 		return err
 	}
+	_ = os.RemoveAll(refsDir(*store, *id))
 	emit(map[string]any{"ok": true, "removed": *id})
 	return nil
 }
@@ -707,6 +721,13 @@ func cmdUp(args []string) error {
 	start := time.Now()
 	if s := readState(*box); alive(s) {
 		if port := readPort(*portFile); port > 0 && portOpen(port) {
+			// A box started by an older boxrun is registered now (best effort).
+			if boxImage(*box) != *image && !strings.ContainsAny(*image, "/\\.") {
+				if unlock, err := (oci.Store{Dir: *store}).Lock(*image); err == nil {
+					_ = recordImageUse(*store, *box, *image)
+					unlock()
+				}
+			}
 			emit(map[string]any{"ok": true, "reused": true, "pid": s.Pid, "port": port, "launcher": s.Launcher, "idmap": s.IDMap, "overlay": s.Overlay, "ms": time.Since(start).Milliseconds()})
 			if *foreground {
 				keep(nil)
@@ -716,9 +737,20 @@ func cmdUp(args []string) error {
 		killTree(s.Pid)
 	}
 	st := oci.Store{Dir: *store}
+	unlockImage, err := st.Lock(*image)
+	if err != nil {
+		return err
+	}
 	img := st.Lookup(*image)
 	if img == nil {
+		unlockImage()
 		return fmt.Errorf("image %s is not unpacked", *image)
+	}
+	// Registered before the box uses it, under the lock rmimage holds: it is never deleted under the box.
+	err = recordImageUse(*store, *box, *image)
+	unlockImage()
+	if err != nil {
+		return err
 	}
 	for _, d := range []string{"upper", "work"} {
 		if err := os.MkdirAll(filepath.Join(*box, d), 0o755); err != nil {

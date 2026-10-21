@@ -32,7 +32,8 @@ import { BOX_PORT, HOME_IN_BOX, LABEL, RUN_DIR, SHIMS_DIR, containerName, contai
 import { runCommand, type RunCommand } from "../run.js";
 import type { RuntimeResult } from "../runtime.js";
 import { versionAtLeast } from "./shared.js";
-import type { BoxDriver, OpenContext, Opened, PresentImage } from "./types.js";
+import { removableImage } from "../retention.mjs";
+import type { BoxDriver, OpenContext, Opened, PresentImage, Removed } from "./types.js";
 
 type Env = NodeJS.ProcessEnv;
 
@@ -303,13 +304,15 @@ export const appleDriver: BoxDriver = {
     const res = await run(runtime.bin, ["delete", "--force", containerName(key, env)], { timeoutMs: 60_000 });
     return { removed: res.code === 0 };
   },
-  async gcImages(runtime, { run = runCommand, current, used }) {
-    const removed = [];
+  async gcImages(runtime, { run = runCommand, current, used, keep = { refs: current, digests: new Set<string>() }, dryRun = false }) {
+    const removed: Removed[] = [];
     const res = await run(runtime.bin, ["image", "list", "--format", "json"], { timeoutMs: 30_000 });
     const parsed = parseJson(res.stdout);
     for (const entry of Array.isArray(parsed) ? parsed.map(record) : []) {
       const ref = String(entry.reference ?? entry.name ?? "");
-      if (!ref || !/(^|\/)omnirush-ai\/box-[a-z]+:/.test(ref) || current.has(ref) || used.has(ref)) continue;
+      const digest = record(entry.descriptor).digest ?? entry.digest;
+      if (!ref || !removableImage({ ref, digest: typeof digest === "string" ? digest : null, id: "" }, { keep, used })) continue;
+      if (dryRun) { removed.push({ kind: "image", name: ref, reason: "not current", dryRun: true }); continue; }
       const del = await run(runtime.bin, ["image", "delete", ref], { timeoutMs: 60_000 });
       if (del.code === 0) removed.push({ kind: "image", name: ref, reason: "not current" });
     }

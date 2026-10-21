@@ -105,6 +105,7 @@ import {
 } from "./brand-icon-windows.mjs";
 import { resetMacDockIcon } from "./brand-icon-darwin.mjs";
 import { createOpenLogsFolderHandler } from "./logs-folder.mjs";
+import { freeUpSpace, scheduleDiskCleanup } from "./disk-cleanup/index.mjs";
 import { readSkillFolder } from "./skill-folder.mjs";
 import { createDesktopVaultKeyProvider } from "./secure-vault-key.mjs";
 import { applyLinuxPasswordStore, recordLinuxPasswordStore } from "./linux-password-store.mjs";
@@ -2701,6 +2702,16 @@ const desktopCommandHandlers = {
   "openLogsFolder": async (event) => {
       return openLogsFolder(event);
   },
+  // Settings > Storage. Only app-owned downloads, logs and temp files (disk-cleanup/index.mjs); no path from the renderer.
+  "freeUpSpace": async (event, ...args) => {
+      if (!mainWindow || mainWindow.isDestroyed() || event?.sender !== mainWindow.webContents || event?.senderFrame !== mainWindow.webContents.mainFrame) {
+        return { ok: false, skipped: "untrusted", dryRun: true, freedBytes: 0, freed: "0 B", items: [] };
+      }
+      const dryRun = Boolean(args[0] && typeof args[0] === "object" && args[0].dryRun);
+      const result = await whenUpdaterIdle(() => freeUpSpace({ app, currentVersion: app.getVersion(), dryRun, protect: pendingUpdatePaths() }));
+      if ("items" in result) return result;
+      return { ok: false, skipped: result.skipped, dryRun, freedBytes: 0, freed: "0 B", items: [] };
+  },
   "__openPath": async (event, ...args) => {
       const target = String(args[0] ?? "").trim();
       if (!target) return "Path is required.";
@@ -3354,7 +3365,7 @@ const browserLoginSync = createBrowserLoginSync({
 browserLoginSync.registerIpc(ipcMain, { evalSeam: browserLoginEvalSeam });
 
 registerMigrationIpc({ app, ipcMain });
-const { ensureAutoUpdater, prepareInstallOnQuit, offerMoveAtLaunch } = registerUpdaterIpc({
+const { ensureAutoUpdater, prepareInstallOnQuit, offerMoveAtLaunch, whenUpdaterIdle, pendingUpdatePaths } = registerUpdaterIpc({
   app,
   ipcMain,
   allowQuit: () => turnGuard.allowQuit(),
@@ -3544,6 +3555,8 @@ or use: pnpm dev:worktree`);
     const win = await createMainWindow();
     // In the background: the window never waits for it.
     desktopPlacements.start();
+    // Installed update downloads, old logs and temp files go two minutes later, in the updater's queue.
+    scheduleDiskCleanup({ app, currentVersion: app.getVersion(), whenIdle: whenUpdaterIdle, protect: pendingUpdatePaths });
     void desktopFeedback.start();
     if (startReset.ran && startReset.moved.length > 0) {
       runDetachedTask("show app data reset notice", async () => {

@@ -13,7 +13,8 @@ import os from "node:os";
 
 import { BOX_PORT, GOARCH, HOME_IN_BOX, LABEL, RUN_DIR, SHIMS_DIR, containerName, containerRoot, firstLine, helperPath, newToken, wslPath, type BoxInstallLog, type BoxRuntime } from "../common.js";
 import { runCommand, type RunCommand, type RunOptions } from "../run.js";
-import type { BoxDriver, ListedBox, OpenContext, Opened } from "./types.js";
+import { removableImage, removalTarget } from "../retention.mjs";
+import type { BoxDriver, ListedBox, OpenContext, Opened, Removed } from "./types.js";
 
 type Env = NodeJS.ProcessEnv;
 
@@ -272,14 +273,27 @@ export const containerDriver: BoxDriver = {
     return { removed: res.code === 0 };
   },
   /** Box images that no box uses and that are not the current pins (`omnirush-ai/box-*` only; never a prune). */
-  async gcImages(runtime, { run = runCommand, current, used }) {
-    const removed = [];
-    const images = await rt(runtime, run)(["images", "--format", "{{.Repository}}:{{.Tag}} {{.ID}}"], { timeoutMs: 30_000 });
+  /**
+   * Box images that no box uses and that are neither the current nor the
+   * previous pins (`omnirush-ai/box-*` only, by tag or by digest; never a prune).
+   * A digest pull lists as `repo:<none>`: it is removed as `repo@digest`.
+   */
+  async gcImages(runtime, { run = runCommand, current, used, keep = { refs: current, digests: new Set<string>() }, dryRun = false }) {
+    const removed: Removed[] = [];
+    const images = await rt(runtime, run)(["images", "--digests", "--format", "{{.Repository}}\t{{.Tag}}\t{{.Digest}}\t{{.ID}}\t{{.Size}}"], { timeoutMs: 30_000 });
+    if (images.code !== 0) return removed;
+    const seen = new Set<string>();
     for (const line of images.stdout.split("\n")) {
-      const [ref, id] = line.trim().split(/\s+/);
-      if (!ref || !/(^|\/)omnirush-ai\/box-[a-z]+:/.test(ref) || current.has(ref) || used.has(ref) || (id && used.has(id))) continue;
-      const res = await rt(runtime, run)(["rmi", ref], { timeoutMs: 60_000 });
-      if (res.code === 0) removed.push({ kind: "image", name: ref, reason: "not current" });
+      const [repo, tag, digest, id, size] = line.trim().split("\t");
+      if (!repo || repo === "<none>") continue;
+      const image = { ref: `${repo}:${tag || "<none>"}`, digest: /^sha256:/.test(digest || "") ? digest : null, id };
+      if (!removableImage(image, { keep, used })) continue;
+      const target = removalTarget(image);
+      if (!target || seen.has(target)) continue;
+      seen.add(target);
+      if (dryRun) { removed.push({ kind: "image", name: target, reason: "not current", size: size || null, dryRun: true }); continue; }
+      const res = await rt(runtime, run)(["rmi", target], { timeoutMs: 60_000 });
+      if (res.code === 0) removed.push({ kind: "image", name: target, reason: "not current", size: size || null });
     }
     return removed;
   },
