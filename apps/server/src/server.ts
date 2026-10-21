@@ -4977,7 +4977,15 @@ function createRoutes(
     },
     applyEngine: () => applyComputerUseEngine(config),
     chats: computerUseChats(config),
-    runningSessions: async () => null,
+    // The engine's running top-level chats, marked or not (null when any engine or session could not be
+    // read: no chat is named then).
+    runningSessions: async () => {
+      const pool = enginePoolForConfig(config);
+      if (!pool) return null;
+      const directories = new Set(engineInstanceReaperForConfig(config)?.snapshot().map((instance) => instance.directory) ?? []);
+      const busy = await pool.activeChats([...directories]);
+      return busy.unknown > 0 ? null : busy.sessions;
+    },
     recordTrace: (sessionId, type, data) => recordOpenSessionTrace(config, sessionId, type, data),
   });
 

@@ -72,7 +72,8 @@ function rig(mode: "careful" | "normal" | "auto", options: { decision?: "chat" |
   const events: Array<Record<string, unknown>> = [];
   const opens: OpenRequest[] = [];
   const acts: ActRequest[] = [];
-  const settings = { enabled: options.enabled ?? true, real_screen: true, limits: options.limits ?? {}, deny_apps: [], mode };
+  // As a fresh server read gives them: the grant epoch and the chat bound the server sent.
+  const settings: Record<string, unknown> & { enabled: boolean; limits: Record<string, number> } = { enabled: options.enabled ?? true, real_screen: true, limits: options.limits ?? {}, deny_apps: [], mode, grant_epoch: 1, chat_bound_read: true };
   const hostPromise = createPortableHost({
     native,
     spool: createMediaSpool(path.join(dir, "spool")),
@@ -212,6 +213,119 @@ describe("portable host: MCP surface and consent", () => {
         await hd.close();
       }
     } finally { Date.now = realNow; }
+  });
+
+  test("refresh before each open: a lowered bound applies at once; unread: no grant reused; off: refused", async () => {
+    const r = rig("normal", { decision: "chat" });
+    let reads = 0, ok = true;
+    const host = await createPortableHost({ native: r.native, settings: () => r.settings, context: () => ({ ancestors: [], chat: "ses_1" }), refresh: async () => { reads += 1; return ok; }, approve: { open: async (request: OpenRequest) => { r.opens.push(request); return { decision: "chat", window_id: request.window_id }; }, act: async () => ({ allow: true }) } });
+    const c = host.connect();
+    const once = async () => { const x = await call(c, "computer_open_session", { app_id: "/usr/bin/gedit", mode: "control", purpose: "Write" }); if (x.state.session_id) await call(c, "computer_close_session", { session_id: x.state.session_id }); return x; };
+    await once();
+    await once();
+    expect(r.opens.length).toBe(1);
+    ok = false;
+    await once();
+    expect(r.opens.length).toBe(2);
+    ok = true;
+    r.settings.enabled = false;
+    expect((await once()).state).toMatchObject({ ok: false, code: "disabled" });
+    expect(reads).toBe(4);
+    await host.close();
+  });
+
+  test("the copied CLI connection (cli-connection.json) belongs to no chat: it never reuses or keeps the app's grant", async () => {
+    const r = rig("normal", { decision: "chat" });
+    const host = await r.hostPromise;
+    const dir = mkdtempSync(path.join(os.tmpdir(), "cu-listen-"));
+    dirs.push(dir);
+    const listener = await host.listen(dir);
+    expect(path.basename(listener.externalDiscoveryPath)).toBe("cli-connection.json");
+    const internalFile = JSON.parse(readFileSync(listener.discoveryPath, "utf8")) as { port: number; token: string };
+    const externalFile = JSON.parse(readFileSync(listener.externalDiscoveryPath, "utf8")) as { port: number; token: string };
+    expect(externalFile.token).not.toBe(internalFile.token);
+    const { createConnection } = await import("node:net");
+    const dial = (file: { port: number; token: string }) => new Promise<{ call: (name: string, args: Record<string, unknown>) => Promise<Record<string, unknown>>; close: () => void }>((resolve) => {
+      const socket = createConnection({ host: "127.0.0.1", port: file.port });
+      let buffer = "", id = 0;
+      const waiting = new Map<number, (v: Record<string, unknown>) => void>();
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk: string) => { buffer += chunk; let i; while ((i = buffer.indexOf("\n")) >= 0) { const m = JSON.parse(buffer.slice(0, i)) as { id: number; result: { content: Array<{ text: string }> } }; buffer = buffer.slice(i + 1); waiting.get(m.id)?.(JSON.parse(m.result.content[0]!.text)); } });
+      socket.once("connect", () => {
+        socket.write(`${JSON.stringify({ token: file.token })}\n`);
+        resolve({
+          call: (name, args) => new Promise((done) => { const my = ++id; waiting.set(my, done); socket.write(`${JSON.stringify({ jsonrpc: "2.0", id: my, method: "tools/call", params: { name, arguments: args } })}\n`); }),
+          close: () => socket.destroy(),
+        });
+      });
+    });
+    const open = { app_id: "/usr/bin/gedit", mode: "control", purpose: "Write" };
+    // The app's own engine (one desktop chat runs: ses_1): asked once, granted for the chat.
+    const engine = await dial(internalFile);
+    const first = await engine.call("computer_open_session", open);
+    await engine.call("computer_close_session", { session_id: first.session_id });
+    expect(r.opens.length).toBe(1);
+    expect(r.opens[0]?.chat).toBe("ses_1");
+    // The copied CLI connection while ses_1 still runs: asked (no reuse), its request names no chat,
+    // and its "Allow for this chat" keeps nothing.
+    const cli = await dial(externalFile);
+    const second = await cli.call("computer_open_session", open);
+    expect(second).toMatchObject({ ok: true });
+    expect(r.opens.length).toBe(2);
+    expect(r.opens[1]?.chat).toBeNull();
+    await cli.call("computer_close_session", { session_id: second.session_id });
+    const third = await cli.call("computer_open_session", open);
+    expect(r.opens.length).toBe(3);
+    await cli.call("computer_close_session", { session_id: third.session_id });
+    // The engine's grant is still its own.
+    const fourth = await engine.call("computer_open_session", open);
+    expect(fourth).toMatchObject({ ok: true, approval: "chat" });
+    expect(r.opens.length).toBe(3);
+    // A wrong token is dropped.
+    const bad = await dial({ port: internalFile.port, token: "0".repeat(64) });
+    bad.close();
+    engine.close(); cli.close();
+    await listener.close();
+    await host.close();
+  });
+
+  test("grant epoch: off -> on with no open asks again; no epoch or no chat bound: never reused; a Deny withdraws the grant", async () => {
+    const open = { app_id: "/usr/bin/gedit", mode: "control", purpose: "Write" };
+    const cycle = async (c: { handle: (m: unknown) => Promise<unknown> }) => { const x = await call(c, "computer_open_session", open); if (x.state.session_id) await call(c, "computer_close_session", { session_id: x.state.session_id }); return x; };
+    // Same epoch: reused. The server switched off and on (epoch 1 -> 3): asked again.
+    {
+      const r = rig("normal", { decision: "chat" });
+      const host = await r.hostPromise; const c = host.connect();
+      await cycle(c); await cycle(c);
+      expect(r.opens.length).toBe(1);
+      r.settings.grant_epoch = 3;
+      await cycle(c);
+      expect(r.opens.length).toBe(2);
+      await host.close();
+    }
+    // No epoch (an older server), or the bound not sent: asked every time.
+    for (const change of [{ grant_epoch: null }, { grant_epoch: undefined }, { chat_bound_read: false }]) {
+      const r = rig("normal", { decision: "chat" });
+      Object.assign(r.settings, change);
+      const host = await r.hostPromise; const c = host.connect();
+      await cycle(c); await cycle(c);
+      expect(r.opens.length).toBe(2);
+      await host.close();
+    }
+    // Allow for this chat, then (the epoch moved, so asked) Deny, then the old epoch again: still asked.
+    {
+      const r = rig("normal");
+      const answers = ["chat", "deny", "chat"];
+      const host = await createPortableHost({ native: r.native, settings: () => r.settings, context: () => ({ ancestors: [], chat: "ses_1" }), approve: { open: async (request: OpenRequest) => { r.opens.push(request); return { decision: answers.shift() as "chat" | "deny", window_id: request.window_id }; }, act: async () => ({ allow: true }) } });
+      const c = host.connect();
+      await cycle(c);
+      r.settings.grant_epoch = 2;
+      expect((await cycle(c)).state).toMatchObject({ ok: false, code: "approval_denied" });
+      r.settings.grant_epoch = 1;
+      await cycle(c);
+      expect(r.opens.length).toBe(3);
+      await host.close();
+    }
   });
 
   test("off by the server: no session", async () => {

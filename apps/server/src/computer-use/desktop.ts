@@ -72,7 +72,7 @@ export function expectedHostCommand(env: Record<string, string | undefined> = pr
   const resources = (process as { resourcesPath?: string }).resourcesPath;
   const packaged = resources ? join(resources, "computer-use", "relay.mjs") : null;
   const relay = packaged && existsSync(packaged) ? packaged : fileURLToPath(new URL("../../../desktop/electron/computer-use-relay.mjs", import.meta.url));
-  return { command: [process.execPath, relay, join(profile, "computer-use", "connection.json")], environment: { ELECTRON_RUN_AS_NODE: "1" } };
+  return { command: [process.execPath, relay, join(profile, "computer-use", "engine-connection.json")], environment: { ELECTRON_RUN_AS_NODE: "1" } };
 }
 
 export function computerUseEngineEnv(stateDir: string, env: Record<string, string | undefined> = process.env): Record<string, string> {
@@ -160,9 +160,10 @@ export function permissionModeName(mode: string | null | undefined): "careful" |
 }
 
 /**
- * The chat a computer use call belongs to: the latest prompted chat that is
- * still running (MCP calls carry no chat id). `mark` at every prompt
- * dispatch; `resolve` with the engine's running sessions.
+ * The chat a computer use call belongs to (MCP calls carry no chat id). `mark`
+ * at every prompt dispatch; `only` (grants: exactly one prompted chat running)
+ * and `resolve` (traces: the latest prompted chat still running) with the
+ * engine's running sessions.
  */
 export function createChatTracker(limit = 64) {
   const order: string[] = [];
@@ -173,6 +174,17 @@ export function createChatTracker(limit = 64) {
       order.push(sessionId);
       if (order.length > limit) order.splice(0, order.length - limit);
     },
+    /**
+     * The one chat a call can belong to, for "Allow for this chat": `running` (the engine's running top-level
+     * chats, marked or not) is exactly one chat, and the person prompted it here. Unknown (null), none,
+     * several, or one never prompted here: null, so no grant is kept or reused (the person is asked).
+     */
+    only(running: string[] | null): string | null {
+      if (!running) return null;
+      const chats = [...new Set(running)];
+      return chats.length === 1 && order.includes(chats[0]!) ? chats[0]! : null;
+    },
+    /** The chat to record a trace event on: the latest prompted chat still running, else the latest. */
     resolve(running: string[] | null): string | null {
       for (let i = order.length - 1; i >= 0; i -= 1) {
         const id = order[i];

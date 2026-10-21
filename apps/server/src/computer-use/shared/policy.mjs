@@ -35,10 +35,11 @@ function text(value, limit = 400) {
  * missing or malformed block is off. The server already applied
  * `rollout_percent` (and the account) to `enabled`.
  * Shape: { enabled, clients, os, models, real_screen, virtual_display,
- * deny_apps, limits, message, ask_send_delete } (null lists: no restriction).
+ * deny_apps, limits, message, ask_send_delete, grant_epoch, chat_bound_read }
+ * (null lists: no restriction).
  */
 export function normalizeComputerUse(block) {
-  if (!isRecord(block)) return { enabled: false, clients: null, os: null, models: null, real_screen: false, virtual_display: false, deny_apps: [], limits: normalizeLimits(null), message: null, ask_send_delete: false };
+  if (!isRecord(block)) return { enabled: false, clients: null, os: null, models: null, real_screen: false, virtual_display: false, deny_apps: [], limits: normalizeLimits(null), message: null, ask_send_delete: false, grant_epoch: null, chat_bound_read: false };
   const denyApps = Array.isArray(block.deny_apps)
     ? block.deny_apps.flatMap((item) => {
       if (typeof item === "string" && item.trim()) return [{ match: item.trim().slice(0, 200), reason: null }];
@@ -58,6 +59,11 @@ export function normalizeComputerUse(block) {
     message: text(block.message),
     // The send/delete asks in Normal (actApproval options.sendDelete): only an explicit true turns them on.
     ask_send_delete: block.ask_send_delete === true,
+    // "Allow for this chat" is reused only under the epoch it was given in (the server bumps it when the
+    // switch or the bound changes) and only when the server sent the bound itself: else null / false.
+    grant_epoch: Number.isSafeInteger(block.grant_epoch) && block.grant_epoch >= 0 ? block.grant_epoch : null,
+    // (A block normalized here once already keeps its answer: its limits are filled in by then.)
+    chat_bound_read: block.chat_bound_read === false ? false : isRecord(block.limits) && typeof block.limits.chat_approval_seconds === "number" && Number.isFinite(block.limits.chat_approval_seconds),
   };
 }
 

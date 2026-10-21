@@ -129,13 +129,14 @@ function describeAction(a) {
  * - spool: a media spool (media.mjs createMediaSpool) frames go to, or null
  * - settings(): { enabled, real_screen, limits, deny_apps, mode, ask_send_delete } now
  *   (mode: the chat's permission mode careful|normal|auto; ask_send_delete: the server's send/delete asks)
+ * - refresh(): read the server's switch and limits now (before each open); false or a throw: unread
  * - context(): { ancestors, self_pids, tty_pids, chat } now, or a promise of it
  *   (chat: the chat using computer use, for "Allow for this chat" and per-chat counts)
  * - approve: { open(request) → { decision: "chat"|"once"|"deny", window_id? },
  *              act(request) → { allow: boolean } }
  * - onEvent(event): `computer.session` events; onState(states); onFrame(frame)
  */
-export async function createPortableHost({ native: firstNative, nativeFactory = null, spool = null, settings, context = () => ({}), approve, onEvent = () => {}, onState = () => {}, onFrame = () => {}, platform = process.platform }) {
+export async function createPortableHost({ native: firstNative, nativeFactory = null, spool = null, settings, context = () => ({}), refresh = null, approve, onEvent = () => {}, onState = () => {}, onFrame = () => {}, platform = process.platform }) {
   let native = firstNative;
   let availability = await native.ready;
   let nativeDown = false;
@@ -451,7 +452,7 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     s.waiting = true; update();
     try {
       return await Promise.race([
-        Promise.resolve(approve.act({ session_id: s.id, request_id: randomUUID(), app: { app_id: s.window.appId, app_name: s.window.appName, bundle_or_exe: s.window.executable, pid: s.window.pid }, window_title: s.window.title, purpose: s.purpose, intent: request.intent, action: request.action, reasons: request.reasons, points: request.points, frame: { width: request.frame.model.width, height: request.frame.model.height, sha256: request.frame.sha, data_url: `data:${request.frame.mime};base64,${request.frame.bytes.toString("base64")}` } })).then((v) => ({ allow: v?.allow === true })),
+        Promise.resolve(approve.act({ session_id: s.id, request_id: randomUUID(), chat: s.chat ?? null, app: { app_id: s.window.appId, app_name: s.window.appName, bundle_or_exe: s.window.executable, pid: s.window.pid }, window_title: s.window.title, purpose: s.purpose, intent: request.intent, action: request.action, reasons: request.reasons, points: request.points, frame: { width: request.frame.model.width, height: request.frame.model.height, sha256: request.frame.sha, data_url: `data:${request.frame.mime};base64,${request.frame.bytes.toString("base64")}` } })).then((v) => ({ allow: v?.allow === true })),
         expired,
       ]);
     } catch {
@@ -476,6 +477,9 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
   }
 
   async function openSession(connection, args) {
+    // The server's switch and limits as of now, so a stricter value (off, a shorter chat bound) applies at once.
+    // When they could not be read, no "Allow for this chat" is reused (the person is asked).
+    const policyRead = typeof refresh === "function" ? await Promise.resolve().then(refresh).then((v) => v !== false, () => false) : true;
     const config = settings() ?? {};
     const ctx = (await context()) ?? {};
     if (!config.enabled) return mcpResult(failure("disabled", config.message || "Computer use is turned off."));
@@ -490,20 +494,24 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     const l = limits();
     const s = {
       id: randomUUID(), connection, window: preferred, windows, mode: args.mode, purpose: args.purpose, phase: "approval", status: "",
-      approval: null, chat: ctx.chat ?? null, actions: 0, requests: new Set(), observation: null, resumeObservation: null, log: [],
+      approval: null, chat: connection.internal === false ? null : ctx.chat ?? null, actions: 0, requests: new Set(), observation: null, resumeObservation: null, log: [],
       lastOperation: Date.now(), lastAct: 0, generation: 0, allowed: new Map(), expiresAt: Date.now() + l.approval_timeout_seconds * 1000, screen: await screenOf(preferred),
     };
     lease = s.id; sessions.set(s.id, s);
     update();
     const grantKey = `${s.chat ?? ""}\0${preferred.appId}\0${s.mode}`;
-    const grant = s.chat ? grants.get(grantKey) : null;
+    // A grant is kept and reused only with a fresh read that carries the server's grant epoch and its own
+    // chat bound, under the same epoch it was given in (off -> on, or a new bound, bumps the epoch).
+    const epoch = Number.isSafeInteger(config.grant_epoch) ? config.grant_epoch : null;
+    const grantable = Boolean(s.chat) && policyRead && epoch !== null && config.chat_bound_read === true;
+    const grant = grantable ? grants.get(grantKey) : null;
     // The server's bound now (it may have been lowered since): 0 = until the chat ends.
-    const fresh = grant && (l.chat_approval_seconds === 0 || Date.now() - grant.at < l.chat_approval_seconds * 1000);
+    const fresh = grant && grant.epoch === epoch && (l.chat_approval_seconds === 0 || Date.now() - grant.at < l.chat_approval_seconds * 1000);
     let answer;
     if (fresh) answer = { decision: "chat", window_id: String(preferred.id), reused: true };
     else {
       const pendingAnswer = new Promise((resolve) => { s.pendingApproval = { resolve }; });
-      const request = { session_id: s.id, request_id: randomUUID(), app: { app_id: preferred.appId, app_name: preferred.appName, bundle_or_exe: preferred.executable, pid: preferred.pid }, windows: windows.map((w) => ({ id: String(w.id), title: w.title })), window_id: String(preferred.id), mode: s.mode, purpose: s.purpose, os, seconds: l.session_seconds, chat_seconds: l.chat_approval_seconds };
+      const request = { session_id: s.id, request_id: randomUUID(), app: { app_id: preferred.appId, app_name: preferred.appName, bundle_or_exe: preferred.executable, pid: preferred.pid }, windows: windows.map((w) => ({ id: String(w.id), title: w.title })), window_id: String(preferred.id), mode: s.mode, purpose: s.purpose, os, seconds: l.session_seconds, chat_seconds: l.chat_approval_seconds, chat: s.chat ?? null };
       answer = await Promise.race([
         Promise.resolve(approve.open(request)).catch(() => ({ decision: "deny" })),
         pendingAnswer,
@@ -513,6 +521,8 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     }
     if (!sessions.has(s.id)) return mcpResult(failure("approval_denied", "The request ended without access."));
     if (!answer || !["chat", "once"].includes(answer.decision)) {
+      // A Deny (or no answer) withdraws any earlier "Allow for this chat" for this app in this chat.
+      for (const key of [...grants.keys()]) if (key.startsWith(`${s.chat ?? ""}\0${preferred.appId}\0`)) grants.delete(key);
       sessions.delete(s.id); if (lease === s.id) lease = null;
       s.approval = null;
       emit(s, "denied", answer?.timeout ? "limit" : "person");
@@ -536,7 +546,7 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     // server's chat_approval_seconds (checked again at each reuse). Kept in memory only, keyed to the chat: never
     // another chat, never a restart; the person's Stop and the server's switch clear it. A call no chat can be
     // named for gets no grant (it works as "Allow once").
-    if (answer.decision === "chat" && !answer.reused && s.chat) grants.set(grantKey, { at: Date.now() });
+    if (answer.decision === "chat" && !answer.reused && grantable) grants.set(grantKey, { at: Date.now(), epoch });
     s.phase = "working"; s.lastOperation = Date.now();
     s.expiresAt = Date.now() + l.session_seconds * 1000;
     s.approved = { window_id: String(s.window.id), app_id: s.window.appId };
@@ -569,8 +579,12 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
   }
 
   /** One MCP client (an engine connection): JSON-RPC in, JSON-RPC out. */
-  function connect() {
-    const connection = { id: randomUUID(), busy: false, closed: false };
+  /**
+   * One MCP connection. `internal` false: a connection from outside the app's own engine (the copied CLI
+   * connection), whose calls belong to no chat of this app: it never keeps or reuses "Allow for this chat".
+   */
+  function connect({ internal = true } = {}) {
+    const connection = { id: randomUUID(), busy: false, closed: false, internal: internal !== false };
     return {
       id: connection.id,
       async handle(message) {
@@ -602,20 +616,25 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     };
   }
 
-  /** Desktop transport: a loopback socket with a token, found through `<dir>/connection.json` (the bundled relay reads it). */
+  /** Desktop transport: a loopback socket with a token, found through `<dir>/engine-connection.json` (the bundled relay reads it; the copied CLI connection reads `<dir>/cli-connection.json`). */
   async function listen(dir) {
     await mkdir(dir, { recursive: true, mode: 0o700 });
-    const discoveryPath = path.join(dir, "connection.json");
+    // Two tokens: the app's own engine relay reads engine-connection.json; the copied CLI connection reads
+    // cli-connection.json, and its connections are external (no chat, no grants). (A CLI connection copied
+    // before these names pointed at connection.json, which is no longer written: it fails to connect.)
+    const discoveryPath = path.join(dir, "engine-connection.json");
+    const externalDiscoveryPath = path.join(dir, "cli-connection.json");
     const token = randomBytes(32).toString("hex");
+    const externalToken = randomBytes(32).toString("hex");
     const sockets = new Set();
     const server = createServer((socket) => {
       if (closed || sockets.size >= 16) { socket.destroy(); return; }
       sockets.add(socket);
-      const connection = connect();
+      let connection = null;
       let incoming = "", authenticated = false;
       const authTimer = setTimeout(() => socket.destroy(), 5000);
       socket.setEncoding("utf8");
-      socket.once("close", () => { clearTimeout(authTimer); sockets.delete(socket); void connection.close(); });
+      socket.once("close", () => { clearTimeout(authTimer); sockets.delete(socket); void connection?.close(); });
       socket.on("error", () => socket.destroy());
       socket.on("data", (chunk) => {
         incoming += chunk;
@@ -626,7 +645,10 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
           let message; try { message = JSON.parse(line); } catch { socket.destroy(); return; }
           if (!authenticated) {
             const candidate = typeof message?.token === "string" ? Buffer.from(message.token) : Buffer.alloc(0);
-            if (candidate.length !== token.length || !timingSafeEqual(candidate, Buffer.from(token))) { socket.destroy(); return; }
+            const matches = (expected) => candidate.length === expected.length && timingSafeEqual(candidate, Buffer.from(expected));
+            const internal = matches(token);
+            if (!internal && !matches(externalToken)) { socket.destroy(); return; }
+            connection = connect({ internal });
             authenticated = true; clearTimeout(authTimer); continue;
           }
           void connection.handle(message).then((reply) => { if (reply && !socket.destroyed) socket.write(`${JSON.stringify(reply)}\n`); });
@@ -636,10 +658,12 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", () => resolve(undefined)); });
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("Computer use could not open its local connection.");
-    const temp = `${discoveryPath}.${randomUUID()}`;
-    await writeFile(temp, JSON.stringify({ version: 1, host: "127.0.0.1", port: address.port, token }), { mode: 0o600, flag: "wx" });
-    await rename(temp, discoveryPath);
-    return { discoveryPath, close: async () => { for (const socket of sockets) socket.destroy(); server.close(); await unlink(discoveryPath).catch(() => {}); } };
+    for (const [file, value] of [[discoveryPath, token], [externalDiscoveryPath, externalToken]]) {
+      const temp = `${file}.${randomUUID()}`;
+      await writeFile(temp, JSON.stringify({ version: 1, host: "127.0.0.1", port: address.port, token: value }), { mode: 0o600, flag: "wx" });
+      await rename(temp, file);
+    }
+    return { discoveryPath, externalDiscoveryPath, close: async () => { for (const socket of sockets) socket.destroy(); server.close(); await unlink(discoveryPath).catch(() => {}); await unlink(externalDiscoveryPath).catch(() => {}); } };
   }
 
   /** Controls from the person (host channel only): stop | takeover | continue | hide | show. */

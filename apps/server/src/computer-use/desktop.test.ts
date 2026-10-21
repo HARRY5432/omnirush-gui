@@ -62,8 +62,55 @@ describe("switch and built-in entry", () => {
     chats.mark("ses_a"); chats.mark("ses_b"); chats.mark("ses_a");
     expect(chats.resolve(null)).toBe("ses_a");
     expect(chats.resolve(["ses_b"])).toBe("ses_b");
+    // For grants only one running prompted chat names a chat; unknown, none or several: none.
+    expect(chats.only(null)).toBeNull();
+    expect(chats.only([])).toBeNull();
+    expect(chats.only(["ses_b"])).toBe("ses_b");
+    // Running chats come without sub-agent sessions; an unmarked running chat (steered, not captured) counts.
+    expect(chats.only(["ses_b", "ses_b"])).toBe("ses_b");
+    expect(chats.only(["ses_b", "ses_unmarked"])).toBeNull();
+    expect(chats.only(["ses_a", "ses_b"])).toBeNull();
+    expect(chats.only(["ses_unmarked"])).toBeNull();
     expect(sessionEventOf({ event: "opened", by: "agent", app_id: "/usr/bin/gedit", screen: { id: "0", width: 10, height: 5, scale: 1 }, junk: 1 })).toEqual({ event: "opened", by: "agent", app_id: "/usr/bin/gedit", screen: { id: "0", width: 10, height: 5, scale: 1 } });
     expect(sessionEventOf({ event: "hacked", by: "agent" })).toBeNull();
+  });
+});
+
+describe("routes: the chat a grant is kept for, and the policy read before an open", () => {
+  test("state names a chat only when exactly one prompted chat runs; refresh reads the server now (max_age_ms) and says whether it did", async () => {
+    const routes: Route[] = [];
+    const state = tmp();
+    const chats = createChatTracker();
+    let running: string[] | null = null;
+    const ages: number[] = [];
+    let failRead = false;
+    registerComputerUseRoutes({ routes, stateDir: () => state, jsonResponse: (d, status = 200) => new Response(JSON.stringify(d), { status }), readJsonBody: async (r) => r.json(), approvalMode: async () => "guarded", readCapabilities: async (maxAgeMs) => { ages.push(maxAgeMs); if (failRead) throw new Error("offline"); return { computer_use: { enabled: true, limits: { chat_approval_seconds: 600 } } }; }, applyEngine: async () => undefined, chats, runningSessions: async () => running, recordTrace: () => undefined });
+    const hit = async (method: string, p: string, body?: unknown) => {
+      const route = routes.find((r) => r.method === method && r.regex.test(p));
+      if (!route) throw new Error("no route");
+      const response = await route.handler({ request: new Request(`http://x${p}`, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }), url: new URL(`http://x${p}`), params: {} } as never);
+      return (await response.json()) as Record<string, unknown>;
+    };
+    chats.mark("ses_a");
+    // The engine's running sessions unknown: no chat, even though one was prompted.
+    expect((await hit("GET", "/computer-use/state")).chat).toBeNull();
+    running = ["ses_a"];
+    expect((await hit("GET", "/computer-use/state")).chat).toBe("ses_a");
+    // Switching chat: the new one is named, so a grant from ses_a is not reused there.
+    chats.mark("ses_b"); running = ["ses_b"];
+    expect((await hit("GET", "/computer-use/state")).chat).toBe("ses_b");
+    // Both running: no chat (asked every time).
+    running = ["ses_a", "ses_b"];
+    expect((await hit("GET", "/computer-use/state")).chat).toBeNull();
+    // Before an open the host asks with max_age_ms 0; the new bound is in force at once.
+    const read = await hit("POST", "/computer-use/refresh", { max_age_ms: 0 });
+    expect(read.read).toBe(true);
+    expect(ages.at(-1)).toBe(2_000);
+    expect((read.setting as { limits: { chat_approval_seconds: number } }).limits.chat_approval_seconds).toBe(600);
+    expect((await hit("POST", "/computer-use/refresh", {})).read).toBe(true);
+    expect(ages.at(-1)).toBe(60_000);
+    failRead = true;
+    expect((await hit("POST", "/computer-use/refresh", { max_age_ms: 0 })).read).toBe(false);
   });
 });
 

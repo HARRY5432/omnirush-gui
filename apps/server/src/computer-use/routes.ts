@@ -42,34 +42,46 @@ export type ComputerUseRouteDeps = {
   recordTrace: (sessionId: string, type: string, data: Record<string, unknown>) => void;
 };
 
+const REFRESH_FLOOR_MS = 2_000;
+
 export function registerComputerUseRoutes(deps: ComputerUseRouteDeps): void {
   const { routes, jsonResponse } = deps;
-  const state = async () => {
+  const state = async (read?: boolean) => {
     const dir = computerUseDir(deps.stateDir());
     const setting = computerUseSettingFor(dir);
     const mode = permissionModeName(await deps.approvalMode().catch(() => null));
-    const chat = deps.chats.resolve(await deps.runningSessions().catch(() => null));
+    // The chat "Allow for this chat" is kept for: the one prompted chat that runs, else none (asked every time).
+    const chat = deps.chats.only(await deps.runningSessions().catch(() => null));
     return {
       enabled: setting.enabled,
-      setting: { enabled: setting.enabled, real_screen: setting.real_screen, virtual_display: setting.virtual_display, limits: setting.limits, deny_apps: setting.deny_apps, models: setting.models, message: setting.message, ask_send_delete: setting.ask_send_delete === true, reason: setting.reason, source: setting.source },
+      setting: { enabled: setting.enabled, real_screen: setting.real_screen, virtual_display: setting.virtual_display, limits: setting.limits, deny_apps: setting.deny_apps, models: setting.models, message: setting.message, ask_send_delete: setting.ask_send_delete === true, grant_epoch: setting.grant_epoch ?? null, chat_bound_read: setting.chat_bound_read === true, reason: setting.reason, source: setting.source },
       mode,
       dir,
       spool: mediaSpoolDir(deps.stateDir()),
       host: readHostFile(dir) !== null,
       chat,
+      ...(read === undefined ? {} : { read }),
     };
   };
 
   addRoute(routes, "GET", "/computer-use/state", "client", async () => jsonResponse(await state()));
 
-  addRoute(routes, "POST", "/computer-use/refresh", "client", async () => {
+  // `max_age_ms` (2000..60000, default 60000): how old a cached answer may be; the host asks with 0 before each
+  // open, so a stricter server value applies at once. `read`: whether the server answered.
+  addRoute(routes, "POST", "/computer-use/refresh", "client", async (ctx) => {
+    const body = await deps.readJsonBody(ctx.request).catch(() => ({} as Record<string, unknown>));
+    // At most one real read per REFRESH_FLOOR_MS (a loop on this route cannot flood the server): an answer
+    // that recent counts as read now.
+    const maxAge = typeof body.max_age_ms === "number" && Number.isFinite(body.max_age_ms) ? Math.min(60_000, Math.max(REFRESH_FLOOR_MS, Math.round(body.max_age_ms))) : 60_000;
+    let read = false;
     try {
-      const capabilities = await deps.readCapabilities(60_000);
+      const capabilities = await deps.readCapabilities(maxAge);
       if (rememberComputerUseSwitch(deps.stateDir(), capabilities)) void deps.applyEngine().catch(() => undefined);
+      read = true;
     } catch {
       // A failed read keeps the last answer.
     }
-    return jsonResponse(await state());
+    return jsonResponse(await state(read));
   });
 
   // Host and event: only Electron main (its per-launch secret, held in this process); the client token is

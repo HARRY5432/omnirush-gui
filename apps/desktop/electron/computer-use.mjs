@@ -153,14 +153,14 @@ function settled(requestId) {
 const approve = {
   async open(request) {
     const icon = await iconOf(request.app.bundle_or_exe);
-    const answer = await ask({ kind: "open", ...request, icon, chat: server?.chat ?? null });
+    const answer = await ask({ kind: "open", ...request, icon, chat: request.chat ?? null });
     settled(request.request_id);
     return answer;
   },
   async act(request) {
     const { policyModule } = await sharedModules();
     const reasons = request.reasons.map((r) => ({ ...r, text: `${policyModule.ASK_REASONS[r.code] ?? r.code}${r.detail ? ` (${r.detail})` : ""}` }));
-    const answer = await ask({ kind: "act", ...request, reasons, icon: await iconOf(request.app.bundle_or_exe), chat: server?.chat ?? null });
+    const answer = await ask({ kind: "act", ...request, reasons, icon: await iconOf(request.app.bundle_or_exe), chat: request.chat ?? null });
     settled(request.request_id);
     return { allow: answer.decision === "allow" };
   },
@@ -168,7 +168,7 @@ const approve = {
 
 function hostSettings() {
   const setting = server?.setting ?? {};
-  return { enabled: server?.enabled === true, real_screen: setting.real_screen !== false, limits: setting.limits ?? null, deny_apps: setting.deny_apps ?? [], mode: server?.mode ?? "normal", message: setting.message ?? null, ask_send_delete: setting.ask_send_delete === true };
+  return { enabled: server?.enabled === true, real_screen: setting.real_screen !== false, limits: setting.limits ?? null, deny_apps: setting.deny_apps ?? [], mode: server?.mode ?? "normal", message: setting.message ?? null, ask_send_delete: setting.ask_send_delete === true, grant_epoch: Number.isSafeInteger(setting.grant_epoch) ? setting.grant_epoch : null, chat_bound_read: setting.chat_bound_read === true };
 }
 
 async function hostContext() {
@@ -176,7 +176,16 @@ async function hostContext() {
   // The chat now (the one that just called), not the last poll's.
   const fresh = await serverFetch("/computer-use/state").catch(() => null);
   if (fresh) server = fresh;
-  return { ancestors: shared?.ancestors ?? [], self_pids: [process.pid, ...metrics], chat: server?.chat ?? null };
+  // No fresh answer: no chat (no "Allow for this chat" is kept or reused), never the last poll's.
+  return { ancestors: shared?.ancestors ?? [], self_pids: [process.pid, ...metrics], chat: fresh ? fresh.chat ?? null : null };
+}
+
+/** Before each open: the server's switch and limits read now (not a cached answer). False when unread. */
+async function hostRefresh() {
+  const fresh = await serverFetch("/computer-use/refresh", { method: "POST", body: JSON.stringify({ max_age_ms: 0 }) }).catch(() => null);
+  if (!fresh) return false;
+  server = fresh;
+  return fresh.read === true;
 }
 
 async function reportEvent(event) {
@@ -190,7 +199,7 @@ async function startHost() {
     const { hostModule, mediaModule, policyModule, contractModule, imageModule } = await sharedModules();
     const spool = server?.spool ? mediaModule.createMediaSpool(server.spool) : null;
     const callbacks = {
-      spool, settings: hostSettings, context: hostContext, approve,
+      spool, settings: hostSettings, context: hostContext, refresh: hostRefresh, approve,
       onEvent: (event) => { void reportEvent(event); },
       onState: () => { pushStatus(); scheduleRefresh(); },
       onFrame: (frame) => preview?.image(frame.data_url),
@@ -292,7 +301,9 @@ async function getComputerUseMcpCommand() {
   if (!server?.enabled) throw new Error(server?.setting?.message ?? "Computer use is turned off.");
   await startHost();
   const relay = app.isPackaged ? path.join(process.resourcesPath, "computer-use", "relay.mjs") : path.join(__dirname, "computer-use-relay.mjs");
-  return [process.execPath, relay, listener.discoveryPath];
+  // The copied CLI connection: its own token (cli-connection.json), so its calls belong to no chat of this app
+  // and never keep or reuse "Allow for this chat". The engine's relay alone reads engine-connection.json.
+  return [process.execPath, relay, listener.externalDiscoveryPath];
 }
 
 // ---------------------------------------------------------------------------
