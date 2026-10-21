@@ -246,7 +246,8 @@
         "Computer use: \"Allow for this chat\" now applies to that one chat only, and a Deny withdraws the app's approval everywhere it was given.",
         "Computer use from the terminal: copy the CLI connection again in the desktop app (its file was renamed).",
         "Windows: messages that mention a local file send again.",
-        "Library: opening an item and going back works again (the page no longer gets stuck)."
+        "Library: opening an item and going back works again (the page no longer gets stuck).",
+        "A chat saved with a model that is no longer available switches to the default OmniRush model and says so, instead of leaving Send disabled."
       ]
     },
     {
