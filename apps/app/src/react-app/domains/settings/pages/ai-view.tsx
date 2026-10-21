@@ -84,7 +84,9 @@ export function AiSettingsView(props: AiSettingsViewProps) {
         <LayoutSectionHeader>
           <LayoutSectionTitle>Choose how models run</LayoutSectionTitle>
           <LayoutSectionDescription>
-            Use the omnirush.ai internal proxy or connect a major AI provider. Model names are always shown exactly as reported by their provider.
+            {providerLock.locked
+              ? "Models run through the omnirush.ai inference proxy. Model names are always shown exactly as reported by their provider."
+              : "Use the omnirush.ai internal proxy or connect a major AI provider. Model names are always shown exactly as reported by their provider."}
           </LayoutSectionDescription>
         </LayoutSectionHeader>
 
@@ -96,7 +98,7 @@ export function AiSettingsView(props: AiSettingsViewProps) {
             status={internalModelsReady ? "Ready" : "Unavailable"}
             tone={internalModelsReady ? "ready" : "neutral"}
           />
-          <ModelAccessCard
+          {providerLock.locked ? null : <ModelAccessCard
             icon={<KeyRound className="size-4" />}
             title="Provider connections"
             description="Connect OpenAI, Anthropic, Google, or OpenRouter without changing model identities."
@@ -107,7 +109,7 @@ export function AiSettingsView(props: AiSettingsViewProps) {
                 Connect
               </Button>
             ) : null}
-          />
+          />}
         </div>
       </LayoutSection>
 

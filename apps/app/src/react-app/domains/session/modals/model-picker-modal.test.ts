@@ -21,4 +21,13 @@ describe("resolveModelPickerEmptyState", () => {
     expect(state?.showRefreshOrganizationModels).toBe(true);
     expect(state?.showOrganizationModelsSettings).toBe(true);
   });
+
+  test("while providers are locked, the empty list names OmniRush sign-in and offers no provider connect", () => {
+    const locked = resolveModelPickerEmptyState({ providerGroupCount: 0, query: "", organizationModelsEmpty: false, restrictToCloud: false, providerLocked: true });
+    expect(locked?.messageKey).toBe("models.no_models_locked");
+    expect(locked?.showConnectProvider).toBe(false);
+    const open = resolveModelPickerEmptyState({ providerGroupCount: 0, query: "", organizationModelsEmpty: false, restrictToCloud: false, providerLocked: false });
+    expect(open?.messageKey).toBe("models.no_models_available");
+    expect(open?.showConnectProvider).toBe(true);
+  });
 });
