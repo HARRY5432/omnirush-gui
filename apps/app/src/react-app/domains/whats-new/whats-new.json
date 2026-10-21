@@ -3,6 +3,20 @@
   "schema": 1,
   "cli": [
     {
+      "version": "2.6.7",
+      "date": "2026-10-21",
+      "new": [
+        "omnirush cleanup frees disk space that older versions left behind (old sandbox images and downloads); --dry-run shows what would go."
+      ],
+      "improved": [
+        "Uploads wait and retry while the server is busy, instead of being given up after a number of tries.",
+        "Computer use reads your account's current settings before each app it opens."
+      ],
+      "fixed": [
+        "Computer use: \"Allow for this chat\" now applies to that one chat only, and a Deny withdraws the app's approval everywhere it was given."
+      ]
+    },
+    {
       "version": "2.6.6",
       "date": "2026-10-21",
       "new": [],
@@ -212,6 +226,29 @@
     }
   ],
   "desktop": [
+    {
+      "version": "3.7.1",
+      "date": "2026-10-21",
+      "new": [
+        "See a command's output in the chat, while it runs and when it is done.",
+        "How your allowance works: a help page for your daily tokens and the Good session checklist.",
+        "Settings > General > Storage > Free up space removes files older versions left behind."
+      ],
+      "improved": [
+        "Windows: after an update installs when you quit, the app opens again on the new version, and its shortcuts stay in place.",
+        "The built-in browser keeps working when you switch away, and asks for approval the way computer use does.",
+        "Clearer browser sign-in card: using your existing sign-ins is optional.",
+        "The window and the message box fit on short screens.",
+        "A shorter notice for settings not loaded from a project's config, and the chat title is no longer covered in the header.",
+        "The run status note shows only when something needs you (waiting for an answer, a message not yet confirmed, a retry), not during routine work."
+      ],
+      "fixed": [
+        "Computer use: \"Allow for this chat\" now applies to that one chat only, and a Deny withdraws the app's approval everywhere it was given.",
+        "Computer use from the terminal: copy the CLI connection again in the desktop app (its file was renamed).",
+        "Windows: messages that mention a local file send again.",
+        "Library: opening an item and going back works again (the page no longer gets stuck)."
+      ]
+    },
     {
       "version": "3.7.0",
       "date": "2026-10-21",
