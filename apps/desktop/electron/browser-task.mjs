@@ -58,8 +58,16 @@ export function observePage(id) {
   observation.observer = new MutationObserver(() => { observation.changed = true; });
   observation.observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
   globalThis[key] = observation;
-  const focused = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? controlName(document.activeElement) : "";
-  return { title: document.title.slice(0, 300), focusedName: focused, text: (document.body?.innerText || "").slice(0, 16000), elements,
+  // Enter in a text field submits its form: the field's own label says nothing
+  // about what that does, so a text field reports no name (the page title and
+  // the form's submit button decide instead).
+  const active = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null;
+  const textEntry = active && (active instanceof HTMLTextAreaElement || active.isContentEditable || (active instanceof HTMLInputElement && !["submit", "button", "reset", "image", "checkbox", "radio", "file", "range", "color"].includes(active.type)));
+  const submit = textEntry ? active.form?.querySelector('button[type="submit"],button:not([type]),input[type="submit"],input[type="image"]') : null;
+  const focusedName = active && !textEntry ? controlName(active) : "";
+  const focusedSubmitName = submit instanceof HTMLElement ? controlName(submit) : "";
+  const focusedSensitive = active?.matches('input[type="password"],input[autocomplete="one-time-code"]') === true;
+  return { title: document.title.slice(0, 300), focusedName, focusedSubmitName, focusedSensitive, text: (document.body?.innerText || "").slice(0, 16000), elements,
     viewport: { width: innerWidth, height: innerHeight }, hasPasswordField: [...document.querySelectorAll('input[type="password"],input[autocomplete="one-time-code"]')].some((element) => { const rect = element.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; }),
     webmcp: "modelContext" in document ? "available" : "check_site_tools",
     limitations: ["DOM references cover the top document and open controls; use a fresh image for frames or canvas."] };
@@ -122,7 +130,10 @@ const BROWSER_KEYS = { Enter: "enter", Space: "space", Tab: "tab", Escape: "esca
 export function browserActInput(mode, action, observed) {
   // Keys go to the focused control and scrolls press nothing: a ref on them is ignored.
   const element = action.ref && (action.type === "click" || action.type === "fill") ? observed.elements.find((item) => item.ref === action.ref) : null;
-  const focused = action.type === "key" && (action.key === "Enter" || action.key === "Space") && observed.focusedName ? { text: observed.focusedName } : {};
+  const presses = action.type === "key" && (action.key === "Enter" || action.key === "Space");
+  const focused = presses && observed.focusedName ? { text: observed.focusedName } : {};
+  // Enter from a text field submits its form: its submit button's name joins the page title.
+  const submitName = action.type === "key" && action.key === "Enter" && !observed.focusedName ? observed.focusedSubmitName ?? "" : "";
   const act = action.type === "fill" ? { type: "type", text: action.text }
     : action.type === "key" ? { type: "key", key: BROWSER_KEYS[action.key] ?? String(action.key ?? "").toLowerCase() }
       : { type: action.type };
@@ -131,7 +142,7 @@ export function browserActInput(mode, action, observed) {
     action: act,
     // No readable name (icon-only control): no text, so the page title decides, as on hosts that read none.
     target: element ? { text: element.name || undefined, secure: element.sensitive === true } : focused,
-    window: { title: observed.title ?? "" },
+    window: { title: [observed.title ?? "", submitName].filter(Boolean).join(" - ") },
   };
 }
 
@@ -310,7 +321,7 @@ export function createBrowserTaskHost({ getTab, tabsFor, ownerOf, activeFor, isV
     if (!await allowed(url)) fail("website_blocked", "Your organization does not allow this website.");
     if (revision !== tab.webMcpRevision || url !== tab.view.webContents.getURL()) fail("page_changed", "The page changed during observation. Observe again.");
     signal.throwIfAborted();
-    state.observation = { id, at: Date.now(), revision, url, title: page.title, focusedName: page.focusedName, viewport: page.viewport, elements: page.elements, digest };
+    state.observation = { id, at: Date.now(), revision, url, title: page.title, focusedName: page.focusedName, focusedSubmitName: page.focusedSubmitName, focusedSensitive: page.focusedSensitive === true, viewport: page.viewport, elements: page.elements, digest };
     return { ok: true, tabId: tab.tabId, observationId: id, url: safeUrl(url), trust: TRUST, ...page, ...(image ? { image } : {}) };
   }
   /**
@@ -414,13 +425,16 @@ export function createBrowserTaskHost({ getTab, tabsFor, ownerOf, activeFor, isV
         const keys = { Enter: "Enter", Tab: "Tab", Escape: "Escape", ArrowDown: "Down", ArrowUp: "Up", ArrowLeft: "Left", ArrowRight: "Right", Backspace: "Backspace", Space: "Space" };
         if (action.type === "key" && !Object.hasOwn(keys, action.key)) fail("invalid_key", "Use Enter, Tab, Escape, arrows, Backspace or Space. System shortcuts are unavailable.");
         if (action.type === "scroll" && (!Number.isFinite(action.deltaY) || Math.abs(action.deltaY) > 1200)) fail("invalid_scroll", "Scroll distance must be between -1200 and 1200.");
+        // Password and one-time-code fields are refused outright, before any ask.
+        const targeted = action.ref && (action.type === "click" || action.type === "fill") ? observed.elements.find((item) => item.ref === action.ref) : null;
+        if (targeted?.sensitive || (action.type === "key" && observed.focusedSensitive)) fail("sign_in_required", "Take over and sign in directly in the browser, then resume.");
         const decision = await actApproval(browserActInput(await modeNow(), action, observed));
         controller.signal.throwIfAborted();
         if (decision.ask) {
           if (!isVisible(tab.tabId)) fail("needs_attention", "This action needs your approval. Select this tab in its conversation's browser panel, then retry from a fresh observation.");
           publish(tab.tabId, "needs_attention", `Approve ${action.type}`);
           const why = (decision.reasons ?? []).map((reason) => reason.text).filter(Boolean).join(" ");
-          const accepted = await confirm({ tabId: tab.tabId, title: "Allow browser action?", message: `Allow ${action.type} on ${new URL(observed.url).origin}?`, detail: `${why ? `${why} ` : ""}Target: ${observed.elements.find((item) => item.ref === action.ref)?.name || (action.key ? `key ${action.key}` : `position ${action.x}, ${action.y}`)}.${action.type === "fill" ? ` Text to enter: ${action.text}` : ""} This can submit information or change website data. Review your requested task before allowing it.`, signal: controller.signal });
+          const accepted = await confirm({ tabId: tab.tabId, title: "Allow browser action?", message: `Allow ${action.type} on ${new URL(observed.url).origin}?`, detail: `${why ? `${why} ` : ""}Target: ${observed.elements.find((item) => item.ref === action.ref)?.name || (action.key ? `key ${action.key}${observed.focusedName ? ` on ${observed.focusedName}` : ""}` : `position ${action.x}, ${action.y}`)}.${action.type === "fill" ? ` Text to enter: ${action.text}` : ""} This can submit information or change website data. Review your requested task before allowing it.`, signal: controller.signal });
           controller.signal.throwIfAborted();
           if (!accepted) fail("user_denied", "The browser action was not allowed.");
         }

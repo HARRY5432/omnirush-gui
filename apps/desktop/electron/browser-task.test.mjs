@@ -6,7 +6,7 @@ import { actApproval, ASK_REASONS } from "../../server/src/computer-use/shared/p
 
 const PAGE_URL = "https://shop.example.com/cart";
 
-function fakeTab(elements, { title = "Example shop" } = {}) {
+function fakeTab(elements, { title = "Example shop", page = {} } = {}) {
   let url = PAGE_URL;
   const calls = { inserted: [], keys: [], clicks: 0 };
   const webContents = {
@@ -20,7 +20,7 @@ function fakeTab(elements, { title = "Example shop" } = {}) {
     debugger: { isAttached: () => false, attach() {}, detach() {}, sendCommand: async () => { calls.clicks += 1; } },
     executeJavaScriptInIsolatedWorld: async (_world, [{ code }]) => {
       if (code.startsWith("(function observePage")) {
-        return { title, text: "", elements, viewport: { width: 800, height: 600 }, hasPasswordField: false };
+        return { title, text: "", elements, viewport: { width: 800, height: 600 }, hasPasswordField: false, ...page };
       }
       return { x: 10, y: 10 };
     },
@@ -28,8 +28,8 @@ function fakeTab(elements, { title = "Example shop" } = {}) {
   return { tab: { tabId: "t1", view: { webContents }, webMcpRevision: 0 }, calls, setUrl: (next) => { url = next; } };
 }
 
-function hostFor({ mode = "normal", visible = false, rules = true, allowedUrl = () => true, elements = [], title } = {}) {
-  const { tab, calls, setUrl } = fakeTab(elements, { title });
+function hostFor({ mode = "normal", visible = false, rules = true, allowedUrl = () => true, elements = [], title, page } = {}) {
+  const { tab, calls, setUrl } = fakeTab(elements, { title, page });
   const asked = [];
   const navigated = [];
   const host = createBrowserTaskHost({
@@ -257,4 +257,31 @@ test("observed names include button values, alt text and tooltips, never typed f
   } finally {
     restore?.();
   }
+});
+
+test("Normal: Enter in a labelled text field on a checkout page asks", async () => {
+  const { act, asked } = hostFor({ mode: "normal", visible: true, elements: BUTTONS, title: "Checkout - Example shop", page: { focusedName: "", focusedSubmitName: "" } });
+  const result = await act({ type: "key", key: "Enter" });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(asked.length, 1);
+});
+
+test("Normal: Enter in a text field whose form submit says Place order asks, even off a checkout title", () => {
+  const observed = { title: "Example shop", focusedName: "", focusedSubmitName: "Place order", elements: BUTTONS };
+  assert.equal(actApproval(browserActInput("normal", { type: "key", key: "Enter" }, observed)).ask, true);
+  assert.equal(actApproval(browserActInput("normal", { type: "key", key: "Enter" }, { ...observed, focusedSubmitName: "Search" })).ask, false);
+});
+
+test("password fields are refused before any ask", async () => {
+  const secret = [{ ref: "e1", tag: "input", role: null, name: "Password", disabled: false, sensitive: true, bounds: { x: 0, y: 0, width: 20, height: 20 } }];
+  for (const mode of ["careful", "normal"]) {
+    const { act, asked } = hostFor({ mode, visible: true, elements: secret });
+    const result = await act({ type: "fill", ref: "e1", text: "x" });
+    assert.equal(result.code, "sign_in_required", mode);
+    assert.equal(asked.filter((item) => item.title === "Allow browser action?").length, 0, mode);
+  }
+  const focused = hostFor({ mode: "careful", visible: true, elements: BUTTONS, page: { focusedSensitive: true } });
+  const key = await focused.act({ type: "key", key: "Enter" });
+  assert.equal(key.code, "sign_in_required");
+  assert.equal(focused.asked.filter((item) => item.title === "Allow browser action?").length, 0);
 });
