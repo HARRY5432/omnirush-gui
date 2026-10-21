@@ -90,7 +90,7 @@ export function AiSettingsView(props: AiSettingsViewProps) {
           </LayoutSectionDescription>
         </LayoutSectionHeader>
 
-        <div className="grid gap-3 lg:grid-cols-2">
+        <div className={providerLock.locked ? "grid gap-3" : "grid gap-3 lg:grid-cols-2"}>
           <ModelAccessCard
             icon={<ShieldCheck className="size-4" />}
             title="Internal models"

@@ -102,12 +102,12 @@ export function TaskSuggestions({ className }: TaskSuggestionsProps) {
   const orgRestrictions = useOrgRestrictions()
   const organizationPrompts = orgRestrictions.onboardingPrompts
   const organizationPromptDescriptions = orgRestrictions.onboardingPromptDescriptions
+  const providerLock = useProviderLock()
 
   if (!displaySuggestions) {
     return null
   }
 
-  const providerLock = useProviderLock()
   const noProviders = providerConnectedCount === 0 && !providerLock.locked
   const hasOrganizationPrompts = organizationPrompts !== undefined
 
