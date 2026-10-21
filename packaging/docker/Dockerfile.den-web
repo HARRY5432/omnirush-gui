@@ -28,6 +28,8 @@ COPY ee/apps/den-web /app/ee/apps/den-web
 # this image builds it; without this step a cold (cache-miss) image build fails
 # in next build with "Can't resolve '@omnirush-ee/utils'".
 RUN pnpm --dir /app/ee/packages/utils run build
+# @omnirush/types resolves to its dist/ in a production build: build it here.
+RUN pnpm --dir /app/packages/types run build
 
 WORKDIR /app/ee/apps/den-web
 
