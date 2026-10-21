@@ -3,6 +3,7 @@
 import { Fragment, useState } from "react"
 import { AlertTriangle, Check, ChevronUp, CircleHelp, CirclePause, Copy, MoreHorizontal } from "lucide-react"
 
+import { CommandOutput } from "@/components/chat/command-output"
 import { FileChip } from "@/components/chat/file-chip"
 import { ShellCommandText } from "@/components/chat/shell-command-text"
 import { ReasoningBlock } from "@/components/chat/reasoning-block"
@@ -22,6 +23,7 @@ import {
 } from "@/lib/tool-aggregate"
 import { isToolPartInFlight } from "@/lib/tool-activity"
 import { isBashToolPart } from "@/lib/build-in-tools"
+import { getCommandOutput } from "@/lib/command-output"
 import { displayRuntimeBrand } from "@/lib/display-runtime-brand"
 import { trackToolCallDuration } from "@/lib/tool-call-duration"
 import { cn } from "@/lib/utils"
@@ -405,6 +407,12 @@ export function ToolAggregateGroup({ parts, thoughts = [], className }: ToolAggr
             const commandDescription = bash
               ? part.input?.description?.trim() || "command"
               : ""
+            // Live output only reads as running while the call is observed
+            // running; an unobserved or waiting call shows what arrived so far.
+            const rawCommandOutput = bash ? getCommandOutput(part) : null
+            const commandOutput = rawCommandOutput?.running && status !== "running"
+              ? (rawCommandOutput.text ? { ...rawCommandOutput, running: false, partial: true } : null)
+              : rawCommandOutput
             const search = bash ? null : getAggregateRowSearch(part)
             return (
               <Fragment key={part.toolCallId}>
@@ -476,6 +484,7 @@ export function ToolAggregateGroup({ parts, thoughts = [], className }: ToolAggr
                   </div>
                 ) : null}
                 {bash && command ? detailBox("command", part.toolCallId, command) : null}
+                {commandOutput ? <CommandOutput output={commandOutput} /> : null}
                 {search ? detailBox("pattern", part.toolCallId, search.pattern) : null}
                 {failure ? detailBox("error", part.toolCallId, failure) : null}
               </div>
