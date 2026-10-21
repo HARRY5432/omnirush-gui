@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import { isProviderLocked, providerLockMessage } from "@/app/lib/provider-lock";
+import { isProviderLocked, providerLockAnswered, providerLockMessage, useProviderLock } from "@/app/lib/provider-lock";
 import { useEditorStore } from "../domains/session/editor/editor-store";
 import { isElectronRuntime } from "../../app/utils";
 import {
@@ -1109,12 +1109,15 @@ export function SessionRoute() {
   // locked or blocked, or the model left the catalog: e.g. a chat from before an
   // update) moves to the working default with a notice, instead of a disabled
   // composer and a picker to sort out.
+  // Re-renders when the server's lock answer arrives (providerLockAnswered below).
+  useProviderLock();
   const sessionFallbackModel = activeComposerTargetsSession
     ? sessionModelFallback({
       sessionModel: selectedSessionModelSelection?.model,
       sessionAvailability: activeComposerAvailability,
       defaultModel: local.prefs.defaultModel,
       defaultAvailability: resolveModelAvailability(local.prefs.defaultModel ?? null),
+      lockAnswered: providerLockAnswered(),
     })
     : null;
   const sessionFallbackKey = sessionFallbackModel && selectedSessionId && selectedSessionModelSelection
@@ -1157,8 +1160,10 @@ export function SessionRoute() {
       signedIn: denAuth.isSignedIn,
       cloudProviderSyncReady,
       // Silent default repair only applies when the broken selection IS the
-      // default; a conversation's own unavailable model must surface the
-      // picker for that conversation instead.
+      // default. A conversation's own unavailable model moves to the default
+      // with a notice when that is definite (sessionModelFallback: a blocked
+      // provider, a retired OmniRush model); otherwise the picker surfaces
+      // for that conversation.
       entitledOrgDefaultModel: activeComposerTargetsSession ? false : Boolean(entitledOrgDefaultModel),
       organizationModelsEmpty,
       autoOpenedUnavailableModelKey: autoOpenedUnavailableModelRef.current,

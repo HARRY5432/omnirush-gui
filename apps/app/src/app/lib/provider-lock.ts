@@ -47,11 +47,31 @@ export function providerLockState(): ProviderLockState {
   return state;
 }
 
+/** Whether the app's server has answered at least once (until then the start state, locked, is assumed). */
+let answered = false;
+
+export function providerLockAnswered(): boolean {
+  return answered;
+}
+
 /** Sets the state from a server answer (null: no answer, locked). */
 export function setProviderLockState(value: unknown): void {
   const next = parseProviderLockState(value);
-  if (next.locked === state.locked && next.message === state.message && next.allow.join(",") === state.allow.join(",")) return;
-  state = next;
+  const nowAnswered = answered || isRecord(value);
+  if (
+    nowAnswered === answered
+    && next.locked === state.locked && next.message === state.message && next.allow.join(",") === state.allow.join(",")
+  ) return;
+  answered = nowAnswered;
+  // A new object, so subscribers re-render when only `answered` changed.
+  state = { ...next };
+  for (const listener of listeners) listener();
+}
+
+/** Back to the start state: locked, not answered (tests). */
+export function resetProviderLockState(): void {
+  answered = false;
+  state = LOCKED;
   for (const listener of listeners) listener();
 }
 

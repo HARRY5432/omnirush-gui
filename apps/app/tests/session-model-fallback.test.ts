@@ -46,12 +46,18 @@ function context(overrides: Partial<ModelAvailabilityContext> = {}): ModelAvaila
 
 const omnirushDefault = { providerID: "omnirush", modelID: "gpt-6-astra" };
 
-function fallbackFor(sessionModel: { providerID: string; modelID: string }, ctx = context(), defaultModel = omnirushDefault) {
+function fallbackFor(
+  sessionModel: { providerID: string; modelID: string },
+  ctx = context(),
+  defaultModel = omnirushDefault,
+  lockAnswered = true,
+) {
   return sessionModelFallback({
     sessionModel,
     sessionAvailability: computeModelAvailability(sessionModel, ctx),
     defaultModel,
     defaultAvailability: computeModelAvailability(defaultModel, ctx),
+    lockAnswered,
   });
 }
 
@@ -89,7 +95,43 @@ describe("a conversation's remembered model that can no longer be used", () => {
       sessionAvailability: { status: "unavailable", reason: "provider_blocked" },
       defaultModel: null,
       defaultAvailability: { status: "pending" },
+      lockAnswered: true,
     })).toBeNull();
+  });
+
+  test("a blocked provider does not move the chat before the server answered the lock", () => {
+    // The app starts locked until its server answers; an unlocked server must not see chats rewritten.
+    expect(fallbackFor({ providerID: "mockai", modelID: "mock-1" }, context(), omnirushDefault, false)).toBeNull();
+    // A retired OmniRush model does not depend on the lock.
+    expect(fallbackFor({ providerID: "omnirush", modelID: "gpt-5.6-sol" }, context(), omnirushDefault, false)).toEqual(omnirushDefault);
+  });
+
+  test("an organization's provider that is not connected, or another provider's missing model, keeps the picker", () => {
+    const base = { defaultModel: omnirushDefault, defaultAvailability: { status: "available" } as const, lockAnswered: true };
+    expect(sessionModelFallback({
+      ...base,
+      sessionModel: { providerID: "lpr_acme", modelID: "acme-large" },
+      sessionAvailability: { status: "unavailable", reason: "provider_not_connected" },
+    })).toBeNull();
+    expect(sessionModelFallback({
+      ...base,
+      sessionModel: { providerID: "lpr_acme", modelID: "acme-old" },
+      sessionAvailability: { status: "unavailable", reason: "model_missing" },
+    })).toBeNull();
+  });
+
+  test("the lock state records the server's first answer", async () => {
+    const lock = await import("../src/app/lib/provider-lock");
+    lock.resetProviderLockState();
+    expect(lock.providerLockAnswered()).toBe(false);
+    lock.setProviderLockState(null);
+    expect(lock.providerLockAnswered()).toBe(false);
+    const before = lock.providerLockState();
+    lock.setProviderLockState({ locked: true, message: "Only OmniRush models are available." });
+    expect(lock.providerLockAnswered()).toBe(true);
+    // Same lock, new object: subscribers re-render for the answer.
+    expect(lock.providerLockState()).not.toBe(before);
+    expect(lock.providerLockState().locked).toBe(true);
   });
 
   test("the session route switches with a notice instead of opening the picker", () => {
