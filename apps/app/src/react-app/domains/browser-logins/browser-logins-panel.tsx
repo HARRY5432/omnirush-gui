@@ -113,7 +113,7 @@ export function BrowserLoginsPanel() {
           ) : !syncState.configured ? (
             loginSync.policyAllowed ? (
               <div>
-                <Button size="sm" onClick={() => setDialogOpen(true)} data-testid="login-sync-setup">Set up sync</Button>
+                <Button size="sm" onClick={() => setDialogOpen(true)} data-testid="login-sync-setup">Choose sites</Button>
               </div>
             ) : null
           ) : (
