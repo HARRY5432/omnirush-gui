@@ -132,6 +132,7 @@ import {
   type ComposerSessionState,
   useComposerStateStore,
 } from "./composer-state-store";
+import { revertConfirmText, revertNeedsConfirm, turnsFromRevertPoint } from "./revert-scope";
 import { MessageList } from "@/components/chat/message-list";
 import { MessageListProvider, type DispatchAction } from "@/components/chat/message-list-provider";
 import type {
@@ -1105,7 +1106,7 @@ function SessionErrorCard({ error, developerMode, onDismiss, onChangeModel, onOp
 function RevertedMessagesBanner(props: { hiddenCount: number; restoring: boolean; onRestore: () => void }) {
   return (
     <div
-      className="mb-3 flex items-center gap-3 rounded-2xl border border-amber-7/40 bg-amber-2/30 px-4 py-3 text-sm text-warning"
+      className="mx-3 mb-2 flex items-center gap-3 rounded-xl border border-amber-7/40 bg-amber-2/30 px-3 py-2 text-xs text-warning"
       data-testid="reverted-messages-banner"
       role="status"
     >
@@ -1197,6 +1198,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
   const replaceComposerDraft = useComposerStateStore((state) => state.replaceDraft);
   const hydrateComposerDraft = useComposerStateStore((state) => state.hydrateDraft);
   const clearComposerRevertTarget = useComposerStateStore((state) => state.clearRevertTarget);
+  const composerEditTarget = useComposerStateStore((state) => getComposerRevertMessageId(state, props.sessionId));
   const setComposerAttachments = useComposerStateStore((state) => state.setAttachments);
   const setComposerMentions = useComposerStateStore((state) => state.setMentions);
   const setComposerPasteParts = useComposerStateStore((state) => state.setPasteParts);
@@ -2283,6 +2285,11 @@ export function SessionSurface(props: SessionSurfaceProps) {
       ...buildDraft(text, sourceAttachments, sourceComposer),
       messageId: createPromptMessageID(),
     };
+    // An edited earlier message replaces every turn after it, and their file changes, for good: ask first.
+    if (nextDraft.revertMessageId) {
+      const turns = turnsFromRevertPoint(baseRenderedMessages, nextDraft.revertMessageId);
+      if (revertNeedsConfirm(turns) && !window.confirm(revertConfirmText("edit", turns))) return;
+    }
     // Immediate sends and queued sends share the same slot across all panes.
     dispatchQueuedDrain(props.sessionId, { type: "user_retry" });
     if (!claimQueuedSend(props.sessionId, nextDraft.messageId, true)) return;
@@ -3193,6 +3200,9 @@ export function SessionSurface(props: SessionSurfaceProps) {
   }, [attachments, buildDraft, props.onDraftChange, props.sessionId, props.workspaceId, typeComposerText]);
 
   const handleRevertToUserMessage = useCallback((messageId: string) => {
+    // One click under an older message used to take hours of turns and their file changes back unasked.
+    const turns = turnsFromRevertPoint(renderedMessagesRef.current, messageId);
+    if (revertNeedsConfirm(turns) && !window.confirm(revertConfirmText("revert", turns))) return;
     void props.onRevertToMessage?.(messageId, props.sessionId);
   }, [props.onRevertToMessage, props.sessionId]);
 
@@ -3335,13 +3345,6 @@ export function SessionSurface(props: SessionSurfaceProps) {
           {/* Chat column: tighter than the composer (800px) so messages
                keep a comfortable reading width and don't feel "too big". */}
           <div ref={contentRef} className="mx-auto w-full max-w-[720px]">
-            {revertMessageId ? (
-              <RevertedMessagesBanner
-                hiddenCount={revertedMessageCount}
-                restoring={restoringRevertedMessages}
-                onRestore={handleRestoreRevertedSession}
-              />
-            ) : null}
             {error && snapshot && snapshot.messages.length > 0 ? (
               <SessionErrorCard
                 developerMode={props.developerMode}
@@ -3473,6 +3476,32 @@ export function SessionSurface(props: SessionSurfaceProps) {
       </div>
 
       <div ref={composerShellRef} data-composer-shell className="shrink-0 px-0 pb-2 pt-2">
+        {/* Next to the composer, not above the first message: in a long chat the top is far off screen. */}
+        {revertMessageId ? (
+          <RevertedMessagesBanner
+            hiddenCount={revertedMessageCount}
+            restoring={restoringRevertedMessages}
+            onRestore={handleRestoreRevertedSession}
+          />
+        ) : null}
+        {composerEditTarget && !revertMessageId ? (
+          <div
+            className="mx-3 mb-2 flex items-center gap-3 rounded-xl border border-amber-7/40 bg-amber-2/30 px-3 py-2 text-xs text-warning"
+            data-testid="composer-edit-target"
+            role="status"
+          >
+            <span className="min-w-0 flex-1">
+              Editing an earlier message: sending replaces it and every turn after it, with their file changes.
+            </span>
+            <button
+              type="button"
+              className="shrink-0 font-medium hover:underline"
+              onClick={() => clearComposerRevertTarget(props.sessionId)}
+            >
+              Send as a new message
+            </button>
+          </div>
+        ) : null}
         {(props.providerConnectedCount ?? 0) === 0 ? (
           <button
             type="button"
