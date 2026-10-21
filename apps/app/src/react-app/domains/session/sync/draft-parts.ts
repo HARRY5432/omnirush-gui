@@ -12,8 +12,9 @@ import {
 import {
   firstLineLocalFileParts,
   isReadInlineablePath,
+  isWindowsWorkspaceRoot,
   joinWorkspaceRelativePath,
-  toFileUrl,
+  promptFileUrl,
 } from "./prompt-file-parts";
 import { mentionPromptParts } from "./mention-parts";
 import { parseConnectSkillToken } from "../surface/composer/connect-skill-token";
@@ -34,8 +35,9 @@ export async function draftToParts(
   const toAbsolutePath = (path: string) => {
     const trimmed = path.trim();
     if (!trimmed) return "";
-    if (trimmed.startsWith("/")) return trimmed;
-    if (/^[a-zA-Z]:[\\/]/.test(trimmed)) return trimmed;
+    if (/^[a-zA-Z]:[\\/]/.test(trimmed) || /^(\\\\|\/\/)[^\\/]/.test(trimmed)) return trimmed;
+    // On Windows a leading slash is not a full path; treat it as workspace-relative.
+    if (trimmed.startsWith("/") && !isWindowsWorkspaceRoot(root)) return trimmed;
     if (!root) return "";
     return joinWorkspaceRelativePath(root, trimmed);
   };
@@ -122,15 +124,15 @@ export async function draftToParts(
         }
         if (mentionPart?.type === "file") {
           const absolute = toAbsolutePath(mentionPart.path);
-          if (!absolute) continue;
-          if (!isReadInlineablePath(absolute)) {
-            parts.push({ type: "text", text: absolute });
+          const url = absolute ? promptFileUrl(absolute, root) : "";
+          if (!absolute || !url || !isReadInlineablePath(absolute)) {
+            parts.push({ type: "text", text: absolute || mentionPart.path });
             continue;
           }
           parts.push({
             type: "file",
             mime: "text/plain",
-            url: toFileUrl(absolute),
+            url,
             filename: filenameFromPath(mentionPart.path),
           });
           continue;
@@ -162,14 +164,15 @@ export async function draftToParts(
       if (part.type === "file") {
         const absolute = toAbsolutePath(part.path);
         if (!absolute) continue;
-        if (!isReadInlineablePath(absolute)) {
+        const url = promptFileUrl(absolute, root);
+        if (!url || !isReadInlineablePath(absolute)) {
           parts.push({ type: "text", text: absolute });
           continue;
         }
         parts.push({
           type: "file",
           mime: "text/plain",
-          url: toFileUrl(absolute),
+          url,
           filename: filenameFromPath(part.path),
         });
       }

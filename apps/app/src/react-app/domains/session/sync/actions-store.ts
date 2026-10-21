@@ -32,7 +32,13 @@ import type {
 } from "../../../../app/types";
 import { addOpencodeCacheHint, safeStringify } from "../../../../app/utils";
 import { clearSessionDraft, LOCAL_SESSION_DRAFT_SCOPE, saveSessionDraft } from "./draft-store";
-import { firstLineLocalFileParts, isReadInlineablePath } from "./prompt-file-parts";
+import {
+  firstLineLocalFileParts,
+  isReadInlineablePath,
+  isWindowsWorkspaceRoot,
+  joinWorkspaceRelativePath,
+  promptFileUrl,
+} from "./prompt-file-parts";
 import { composerAttachmentToFilePart } from "./attachment-file-part";
 import { mentionPromptParts } from "./mention-parts";
 import { personUserMessages } from "../commands/turn-messages";
@@ -148,10 +154,10 @@ export function createSessionActionsStore(options: {
     const toAbsolutePath = (path: string) => {
       const trimmed = path.trim();
       if (!trimmed) return "";
-      if (trimmed.startsWith("/")) return trimmed;
-      if (/^[a-zA-Z]:\\/.test(trimmed)) return trimmed;
+      if (/^[a-zA-Z]:[\\/]/.test(trimmed) || /^(\\\\|\/\/)[^\\/]/.test(trimmed)) return trimmed;
+      if (trimmed.startsWith("/") && !isWindowsWorkspaceRoot(root)) return trimmed;
       if (!root) return "";
-      return (root + "/" + trimmed).replace("//", "/");
+      return joinWorkspaceRelativePath(root, trimmed);
     };
     const filenameFromPath = (path: string) => {
       const normalized = path.replace(/\\/g, "/");
@@ -173,14 +179,15 @@ export function createSessionActionsStore(options: {
       if (part.type === "file") {
         const absolute = toAbsolutePath(part.path);
         if (!absolute) continue;
-        if (!isReadInlineablePath(absolute)) {
+        const url = promptFileUrl(absolute, root);
+        if (!url || !isReadInlineablePath(absolute)) {
           parts.push({ type: "text", text: absolute } as TextPartInput);
           continue;
         }
         parts.push({
           type: "file",
           mime: "text/plain",
-          url: `file://${absolute}`,
+          url,
           filename: filenameFromPath(part.path),
         } as FilePartInput);
       }
@@ -200,10 +207,10 @@ export function createSessionActionsStore(options: {
     const toAbsolutePath = (path: string) => {
       const trimmed = path.trim();
       if (!trimmed) return "";
-      if (trimmed.startsWith("/")) return trimmed;
-      if (/^[a-zA-Z]:\\/.test(trimmed)) return trimmed;
+      if (/^[a-zA-Z]:[\\/]/.test(trimmed) || /^(\\\\|\/\/)[^\\/]/.test(trimmed)) return trimmed;
+      if (trimmed.startsWith("/") && !isWindowsWorkspaceRoot(root)) return trimmed;
       if (!root) return "";
-      return (root + "/" + trimmed).replace("//", "/");
+      return joinWorkspaceRelativePath(root, trimmed);
     };
 
     const filenameFromPath = (path: string) => {
@@ -215,11 +222,12 @@ export function createSessionActionsStore(options: {
     for (const part of draft.parts) {
       if (part.type !== "file") continue;
       const absolute = toAbsolutePath(part.path);
-      if (!absolute || !isReadInlineablePath(absolute)) continue;
+      const url = absolute ? promptFileUrl(absolute, root) : "";
+      if (!url || !isReadInlineablePath(absolute)) continue;
       parts.push({
         type: "file",
         mime: "text/plain",
-        url: `file://${absolute}`,
+        url,
         filename: filenameFromPath(part.path),
       } as FilePartInput);
     }

@@ -2,7 +2,7 @@ import type { FilePartInput, TextPartInput } from "@opencode-ai/sdk/v2/client";
 
 import type { ComposerAttachment } from "../../../../app/types";
 import { compressImageFile } from "./image-compression";
-import { joinWorkspaceRelativePath, toFileUrl } from "./prompt-file-parts";
+import { isUsableUncPath, isWindowsWorkspaceRoot, joinWorkspaceRelativePath, toFileUrl } from "./prompt-file-parts";
 
 type AttachmentKind = "image" | "file";
 
@@ -362,7 +362,10 @@ export async function composerAttachmentsToWorkspaceFileParts(input: {
   if (input.attachments.length === 0) return null;
 
   const workspaceRoot = input.workspaceRoot.trim();
-  if (!workspaceRoot) {
+  // A device-path (`\\?\`, `\\.\`) or localhost UNC root has no file URL the
+  // engine can read back, so it is as unusable as no root.
+  const uncRoot = /^(\\\\|\/\/)/.test(workspaceRoot) && isWindowsWorkspaceRoot(workspaceRoot);
+  if (!workspaceRoot || (uncRoot && !isUsableUncPath(workspaceRoot))) {
     throw new Error("Workspace path is unavailable; attachments could not be copied for tool access.");
   }
 
@@ -413,7 +416,7 @@ export async function composerAttachmentsToWorkspaceFileParts(input: {
       mime: metadata.mime,
       bytes: result.bytes,
       workspacePath,
-      url: toFileUrl(absolutePath),
+      url: toFileUrl(absolutePath, isWindowsWorkspaceRoot(workspaceRoot)),
       file,
     });
   }

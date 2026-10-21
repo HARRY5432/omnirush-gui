@@ -29,6 +29,8 @@ function normalizeFileUri(value: string) {
     if (parsed.hostname && parsed.hostname.toLowerCase() !== "localhost") {
       return `//${parsed.hostname}${pathname}`;
     }
+    // `file:///C:/x` has the pathname `/C:/x`; the drive path is `C:/x`.
+    if (/^\/[A-Za-z]:\//.test(pathname)) return pathname.slice(1);
     return pathname;
   } catch {
     return "";
@@ -65,10 +67,74 @@ function encodeFilePath(path: string) {
   return path.replace(/\\/g, "/").split("/").map(encodeURIComponent).join("/");
 }
 
-export function toFileUrl(path: string) {
+export function toFileUrl(path: string, windows = false) {
   const normalized = path.replace(/\\/g, "/");
   if (/^[A-Za-z]:\//.test(normalized)) return `file:///${encodeFilePath(normalized).replace(/^([A-Za-z])%3A/, "$1:")}`;
+  // UNC share on Windows (`\\server\share\...`): the server is the URL host.
+  // `file:////server` has an empty host, which Windows cannot turn back into a
+  // path. Elsewhere a host is invalid, so `//x` keeps the empty-host form.
+  const unc = windows ? normalized.match(/^\/\/([^/]+)(\/.*)$/) : null;
+  if (unc) {
+    const url = `file://${unc[1] ?? ""}${encodeFilePath(unc[2] ?? "")}`;
+    return isUncHost(unc[1] ?? "") && parsedHost(url) === (unc[1] ?? "").toLowerCase() ? url : "";
+  }
+  // A share-less or malformed `//` path (`\\srv`, `\\?`) has no Windows file URL.
+  if (windows && normalized.startsWith("//")) return "";
   return `file://${encodeFilePath(normalized)}`;
+}
+
+function parsedHost(url: string) {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * A plain UNC server name. Device paths (`\\?\`, `\\.\`), `localhost` (the URL
+ * parser drops it, leaving no host) and odd hosts are not.
+ */
+function isUncHost(host: string) {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(host) && host.toLowerCase() !== "localhost";
+}
+
+/** A Windows UNC root or path the engine can open (`\\server\share\...`). */
+export function isUsableUncPath(path: string) {
+  return toFileUrl(path, true) !== "";
+}
+
+function windowsPlatform() {
+  return typeof navigator !== "undefined" && /^win/i.test(navigator.platform ?? "");
+}
+
+/** A workspace on Windows: a drive (`C:\\`) or UNC (`\\\\server\\share`) root. */
+export function isWindowsWorkspaceRoot(workspaceRoot: string) {
+  const root = workspaceRoot.trim();
+  if (!root) return windowsPlatform();
+  if (/^[A-Za-z]:([\\/]|$)/.test(root) || /^\\\\[^\\/]/.test(root)) return true;
+  // `//x` is a valid POSIX root too; it is a UNC share only on Windows.
+  return /^\/\/[^\\/]/.test(root) && windowsPlatform();
+}
+
+/**
+ * The `file://` URL the engine reads for `path`, or "" when the engine on that
+ * workspace's system cannot open it. On Windows the engine only accepts drive
+ * and UNC paths: a POSIX-style path such as `/api/users.json` becomes
+ * `file:///api/users.json`, which fails the whole message with "File URL path
+ * must be an absolute path". Relative paths are never sent.
+ */
+export function promptFileUrl(path: string, workspaceRoot: string) {
+  const normalized = path.trim().replace(/\\/g, "/");
+  if (!normalized) return "";
+  const drive = /^[A-Za-z]:\//.test(normalized);
+  if (isWindowsWorkspaceRoot(workspaceRoot)) {
+    const unc = normalized.match(/^\/\/([^/]+)\/[^/]/);
+    if (!drive && !unc) return "";
+    return toFileUrl(normalized, true);
+  }
+  if (!drive && !normalized.startsWith("/")) return "";
+  return toFileUrl(normalized);
 }
 
 export function joinWorkspaceRelativePath(workspaceRoot: string, relativePath: string) {
@@ -119,10 +185,12 @@ export function firstLineLocalFileParts(text: string, workspaceRoot: string): Fi
     if (!absolute || seen.has(absolute)) continue;
     seen.add(absolute);
     if (!isReadInlineablePath(absolute)) continue;
+    const url = promptFileUrl(absolute, workspaceRoot);
+    if (!url) continue;
     parts.push({
       type: "file",
       mime: "text/plain",
-      url: toFileUrl(absolute),
+      url,
       filename: filenameFromPath(raw),
     });
   }
