@@ -28,14 +28,14 @@ export function LoginSyncCard() {
         >
           <KeyRound className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
           <div className="min-w-0 flex-1">
-            <p className="text-[13px] font-medium text-dls-text">Keep selected logins in sync</p>
+            <p className="text-[13px] font-medium text-dls-text">Optional: use your existing sign-ins</p>
             <p className="text-xs text-muted-foreground">
-              Choose one browser profile and the sites omnirush.ai may keep reading. Nothing starts until you enable sync.
+              The browser works without this. To let the agent open sites you are already signed in to, choose one browser profile and the exact sites to copy sign-ins from. Nothing is read until you turn it on.
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-1">
             <Button size="sm" variant="ghost" onClick={loginSync.dismissPrompt} data-testid="login-sync-not-now">Not now</Button>
-            <Button size="sm" onClick={() => setDialogOpen(true)} data-testid="login-sync-open">Set up sync</Button>
+            <Button size="sm" onClick={() => setDialogOpen(true)} data-testid="login-sync-open">Choose sites</Button>
           </div>
         </div>
       ) : null}
