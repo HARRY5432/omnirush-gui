@@ -140,6 +140,9 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink, che
   const suspendedTabs = new Map();
   const registry = createBrowserTabRegistry();
   let browserViewVisible = false;
+  // The main window is minimized or hidden: nothing of it reaches the screen,
+  // and Chromium stops producing frames for every view attached to it.
+  let mainWindowConcealed = false;
   let backgroundWindow = null;
   // Last browser panel bounds reported by the renderer, in renderer CSS pixels.
   // Converted to window device-independent pixels at every setBounds call.
@@ -1127,10 +1130,30 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink, che
     });
   }
 
+  /**
+   * Whether the main window can show the browser panel right now: the panel
+   * is open with real bounds and the window is neither minimized nor hidden.
+   */
+  function panelOnScreen() {
+    return browserViewVisible && !mainWindowConcealed && !!window()
+      && !!lastBrowserBounds && lastBrowserBounds.width > 0 && lastBrowserBounds.height > 0;
+  }
+
+  /**
+   * The visible conversation's active tab may be driven by an agent while the
+   * panel is closed or the window is minimized. A detached view, or one in a
+   * minimized window, produces no frames: animation frames, observers and
+   * screenshots stall until the user comes back. Park that tab in the hidden
+   * host instead, like a background conversation's tab.
+   */
+  function parksActiveTab(tab) {
+    return !panelOnScreen() && tab.tabId === registry.onScreenTabId() && !tab.suspending;
+  }
+
   /** Re-evaluate every tab after the on-screen conversation changed. */
   function applySurfacing() {
     for (const tab of browserTabs.values()) {
-      if (registry.surfacingFor(tab.tabId) === "background") enterBackgroundMode(tab);
+      if (registry.surfacingFor(tab.tabId) === "background" || parksActiveTab(tab)) enterBackgroundMode(tab);
       else exitBackgroundMode(tab);
     }
     releaseEmptyBackgroundWindow();
@@ -1220,8 +1243,13 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink, che
 
   function attachActiveBrowserView() {
     const mainWindow = window();
-    if (!mainWindow || !browserViewVisible) return;
-    if (!lastBrowserBounds || lastBrowserBounds.width <= 0 || lastBrowserBounds.height <= 0) return;
+    if (!mainWindow) return;
+    if (!panelOnScreen()) {
+      // Off screen: keep the active tab live in the hidden host (applySurfacing).
+      detachIdleBrowserViews(getActiveBrowserView());
+      applySurfacing();
+      return;
+    }
     const tab = getBrowserTab();
     if (!tab) { detachIdleBrowserViews(); return; }
     exitBackgroundMode(tab);
@@ -1232,6 +1260,7 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink, che
     if (!mainWindow.contentView.children.includes(tab.view)) {
       mainWindow.contentView.addChildView(tab.view);
     }
+    releaseEmptyBackgroundWindow();
   }
 
   function selectBrowserTab(tabId) {
@@ -1245,6 +1274,8 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink, che
       if (previousView && previousView !== tab.view && !tabForView(previousView)?.background) {
         detachBrowserView(previousView);
       }
+      // A previously parked active tab leaves the hidden host.
+      applySurfacing();
       attachActiveBrowserView();
     }
     sendBrowserState();
@@ -1460,7 +1491,22 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink, che
     hideMenuOverlay();
     browserViewVisible = false;
     if (!window()) return;
-    detachIdleBrowserViews();
+    attachActiveBrowserView();
+  }
+
+  /**
+   * The main window was minimized, hidden, restored or shown. While nothing
+   * of it is on screen, the displayed tab moves to the hidden host so an
+   * agent driving it keeps a live, paintable page; it returns on restore.
+   */
+  function setMainWindowConcealed(concealed) {
+    const next = concealed === true;
+    if (next === mainWindowConcealed) return;
+    mainWindowConcealed = next;
+    if (next) hideMenuOverlay();
+    applySurfacing();
+    attachActiveBrowserView();
+    sendBrowserState();
   }
 
   function destroyBrowserView() {
@@ -1632,6 +1678,7 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink, che
 
   return {
     destroy: destroyBrowserView,
+    setMainWindowConcealed,
     isMainWindowAllowedNavigation,
     setMainWindowEntryUrl,
     allowMainWindowInternalUrl,

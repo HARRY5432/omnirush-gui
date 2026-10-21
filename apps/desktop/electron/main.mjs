@@ -41,6 +41,7 @@ import { createApplicationMenu } from "./app-menu.mjs";
 import { applyBrandAppName } from "./brand-app-name.mjs";
 import { createBrowserLoginSync } from "./browser-login-sync.mjs";
 import { createBrowserPanel } from "./browser-panel.mjs";
+import { applyBackgroundRenderingSwitches } from "./background-rendering.mjs";
 import { createWorkspaceStore } from "./workspace-store.mjs";
 import {
   START_REPORT_FILE,
@@ -1088,6 +1089,8 @@ if (extraLaunchArgs) {
     }
   }
 }
+// Keep the built-in browser rendering while the app is behind other windows.
+applyBackgroundRenderingSwitches(app.commandLine);
 // Linux: Chromium falls back to its insecure basic_text store when it cannot
 // name the desktop (Hyprland, sway, i3, ...), even with gnome-keyring,
 // KeePassXC or KWallet on the session bus. Point it at that keyring before
@@ -3142,6 +3145,18 @@ async function createMainWindow() {
       if (win && !win.isDestroyed()) win.close();
     });
   });
+
+  // Minimized or hidden windows produce no frames; the built-in browser parks
+  // its displayed tab in a hidden host meanwhile so agent work keeps going.
+  const syncBrowserWindowPresence = () => {
+    const win = mainWindow;
+    if (!win || win.isDestroyed()) return;
+    browserPanel.setMainWindowConcealed(win.isMinimized() || !win.isVisible());
+  };
+  mainWindow.on("minimize", syncBrowserWindowPresence);
+  mainWindow.on("restore", syncBrowserWindowPresence);
+  mainWindow.on("hide", syncBrowserWindowPresence);
+  mainWindow.on("show", syncBrowserWindowPresence);
 
   mainWindow.on("closed", () => {
     browserPanel.destroy();
