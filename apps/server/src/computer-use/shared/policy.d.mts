@@ -53,20 +53,16 @@ export function nestedAgent(options?: { env?: Record<string, string | undefined>
 export const RISKY_WORDS: readonly string[];
 export function riskyWords(value: unknown): string[];
 export function looksLikeCredential(value: unknown): boolean;
-export function riskyChord(action: unknown): "paste" | "close_quit_delete" | null;
 export function documentOf(title: unknown, appName?: unknown): string;
 
-export type AskReasonCode = "careful" | "risky_intent" | "risky_target" | "secure_field" | "credential_text" | "paste" | "close_quit_delete" | "other_window" | "document_changed" | "after_takeover" | "submit_after_typing" | "target_unknown";
+export type AskReasonCode = "careful" | "risky_intent" | "risky_target" | "secure_field" | "credential_text" | "credential_intent" | "other_window";
 export type ApprovalInput = {
   mode?: PermissionMode | string;
   action?: Action | Record<string, unknown>;
   intent?: string;
-  target?: { text?: string; secure?: boolean; url_host?: string };
-  window?: { id?: string | number; app_id?: string; title?: string; app_name?: string; url_host?: string };
-  approved?: { window_id?: string | number; app_id?: string; title?: string; url_host?: string };
-  after_takeover?: boolean;
-  /** The agent's previous act in this window typed text (and no click or Enter since). */
-  typed_before?: boolean;
+  target?: { text?: string; secure?: boolean };
+  window?: { id?: string | number; app_id?: string };
+  approved?: { window_id?: string | number; app_id?: string };
 };
 export function actApproval(input?: ApprovalInput): { ask: boolean; reasons: Array<{ code: AskReasonCode; detail?: string }> };
 export const ASK_REASONS: Readonly<Record<AskReasonCode, string>>;

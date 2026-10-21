@@ -145,7 +145,7 @@ export function ComputerUseRequestCard(props: { request: ComputerUseRequest }) {
             <Check data-icon="inline-start" />
             <span className="flex flex-col items-start leading-4">
               <span>Allow for this chat</span>
-              <span className="text-[10px] font-normal opacity-80">Same app, up to {Math.round(request.chat_seconds / 60)} minutes</span>
+              <span className="text-[10px] font-normal opacity-80">{request.chat_seconds > 0 ? `Same app, up to ${Math.max(1, Math.round(request.chat_seconds / 60))} minutes` : "Same app, until this chat ends"}</span>
             </span>
           </Button>
           <Button type="button" variant="outline" size="sm" disabled={busy} onClick={(event) => answer("once", event)} data-computer-use-answer="once">

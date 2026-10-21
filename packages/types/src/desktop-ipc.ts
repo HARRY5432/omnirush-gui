@@ -916,6 +916,7 @@ export type ComputerUseRequest =
     purpose: string;
     os: string;
     seconds: number;
+    /** How long "Allow for this chat" lasts: 0 = until the chat ends, else at most this many seconds (the server's bound). */
     chat_seconds: number;
     chat: string | null;
   }

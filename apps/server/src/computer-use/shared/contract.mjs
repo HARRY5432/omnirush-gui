@@ -62,7 +62,8 @@ export const DEFAULT_LIMITS = Object.freeze({
   full_long_side: 3840,
   observation_ttl_seconds: 15,
   approval_timeout_seconds: 120,
-  chat_approval_seconds: 1800,
+  // "Allow for this chat": 0 = until the chat ends; a server value above 0 is an upper bound.
+  chat_approval_seconds: 0,
   media_full_bytes: 300 * 1024 * 1024,
   media_model_bytes: 200 * 1024 * 1024,
 });
@@ -77,7 +78,7 @@ export const LIMIT_RANGES = Object.freeze({
   full_long_side: [640, 7680],
   observation_ttl_seconds: [2, 120],
   approval_timeout_seconds: [10, 600],
-  chat_approval_seconds: [60, 7200],
+  chat_approval_seconds: [0, 30 * 86400],
   media_full_bytes: [0, 2 * 1024 * 1024 * 1024],
   media_model_bytes: [0, 2 * 1024 * 1024 * 1024],
 });

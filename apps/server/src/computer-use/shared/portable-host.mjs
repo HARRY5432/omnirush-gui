@@ -382,7 +382,7 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
       if (compare.stale) return finish({ ...common, ok: false, code: "stale_observation", message: "The window changed since the observation. Observe again.", next: "computer_observe" });
     }
     // Per-action approval by permission mode (host channel, never the engine's).
-    const decision = actApproval({ mode: settings()?.mode, action, intent: args.intent, target: await targetAt(observed, action, current, s), window: { id: String(current.id), app_id: current.appId, app_name: current.appName, title: current.title }, approved: s.approved, after_takeover: s.afterTakeover, typed_before: s.typedIn === String(current.id) });
+    const decision = actApproval({ mode: settings()?.mode, action, intent: args.intent, target: await targetAt(observed, action, current, s), window: { id: String(current.id), app_id: current.appId }, approved: s.approved });
     let approval = { asked: false };
     if (decision.ask) {
       // The same action with the same intent, allowed a moment ago (a retry after a fresh observation), is not asked again.
@@ -403,13 +403,11 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
         s.allowed.set(key, Date.now() + 30_000);
         if (s.allowed.size > 64) s.allowed.delete(s.allowed.keys().next().value);
       }
-      if (decision.reasons.some((r) => r.code === "document_changed")) s.approved = { ...s.approved, title: current.title };
       // While the person answered, the window may have moved or been covered: geometry and hits again (no image compare).
       const after = await native.call("window", { id: s.window.id });
       if (after.identity !== current.identity || JSON.stringify(after.bounds) !== JSON.stringify(current.bounds)) return finish({ ...common, approval, ok: false, code: "window_changed", message: "The window moved or changed. Observe again.", next: "computer_observe" });
       if (!(await hitAll(after))) return finish({ ...common, approval, ok: false, code: "window_occluded", message: "Another window covers this point, or it is outside the approved window. Observe again." });
     }
-    s.afterTakeover = false;
     const cursorBefore = await native.call("cursor").catch(() => null);
     const point = mapped.length === 1 ? { model: mapped[0].model, screen: mapped[0].screen } : undefined;
     const path = action.type === "drag" ? mapped.map((m) => ({ model: m.model, screen: m.screen })) : undefined;
@@ -424,10 +422,8 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
       return finish({ ...common, approval, point, path, cursor_before: cursorBefore, ok: false, code, message: error.message, may_have_acted: action.type !== "wait", next: "computer_session_status" });
     }
     s.lastOperation = Date.now();
-    // "Submit after typing" (Normal, when the host reads no text): typing arms it, a click or Enter after it asks.
+    // Typing goes to the control the last click focused: its secure-field check reads this point.
     if (["click", "double_click"].includes(action.type) && mapped.length === 1) s.focusPoint = { window: String(current.id), screen: mapped[0].screen };
-    if (action.type === "type") s.typedIn = String(current.id);
-    else if (["click", "double_click"].includes(action.type) || (action.type === "key" && String(action.key).toLowerCase() === "enter")) s.typedIn = null;
     const cursorAfter = await native.call("cursor").catch(() => null);
     const done = { ...common, approval, point, path, cursor_before: cursorBefore, cursor_after: cursorAfter, ok: true, may_have_acted: action.type !== "wait" };
     if (!args.observe_after) return finish({ ...done, next: "computer_observe" });
@@ -437,9 +433,6 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
       const w = await native.call("window", { id: s.window.id });
       const after = await observation(s, w);
       s.window = w; s.observation = { ...after, generation: s.generation };
-      // The agent's own act may retitle the window (an editor's title follows its text): the next
-      // "document changed" check compares with the title right after this act, not the approval-time one.
-      s.approved = { ...s.approved, title: w.title };
       return finish({ ...done, frame_after: { sha256: after.sha }, observation: after.ref, window: windowRef(w), next: "computer_act" }, { data: after.bytes, mime: after.mime });
     } catch (error) {
       return finish({ ...done, next: "computer_observe", message: `The action was done, but the window could not be observed: ${error.message}` });
@@ -492,12 +485,12 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     const s = {
       id: randomUUID(), connection, window: preferred, windows, mode: args.mode, purpose: args.purpose, phase: "approval", status: "",
       approval: null, chat: ctx.chat ?? null, actions: 0, requests: new Set(), observation: null, resumeObservation: null, log: [],
-      lastOperation: Date.now(), lastAct: 0, afterTakeover: false, generation: 0, allowed: new Map(), expiresAt: Date.now() + l.approval_timeout_seconds * 1000, screen: await screenOf(preferred),
+      lastOperation: Date.now(), lastAct: 0, generation: 0, allowed: new Map(), expiresAt: Date.now() + l.approval_timeout_seconds * 1000, screen: await screenOf(preferred),
     };
     lease = s.id; sessions.set(s.id, s);
     update();
     const grantKey = `${s.chat ?? ""}\0${preferred.appId}\0${s.mode}`;
-    const grant = grants.get(grantKey);
+    const grant = s.chat ? grants.get(grantKey) : null;
     let answer;
     if (grant && grant.until > Date.now()) answer = { decision: "chat", window_id: String(preferred.id), reused: true };
     else {
@@ -531,10 +524,13 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
       return mcpResult(failure(error.code ?? "window_unavailable", error.message));
     }
     s.approval = answer.decision;
-    if (answer.decision === "chat" && !answer.reused) grants.set(grantKey, { until: Date.now() + l.chat_approval_seconds * 1000 });
+    // "Allow for this chat": this app, this chat, until the chat ends (chat_approval_seconds 0), or for at most the
+    // server's chat_approval_seconds. Kept in memory only, keyed to the chat: never another chat, never a restart.
+    // A call no chat can be named for gets no grant (it works as "Allow once").
+    if (answer.decision === "chat" && !answer.reused && s.chat) grants.set(grantKey, { until: l.chat_approval_seconds > 0 ? Date.now() + l.chat_approval_seconds * 1000 : Infinity });
     s.phase = "working"; s.lastOperation = Date.now();
     s.expiresAt = Date.now() + l.session_seconds * 1000;
-    s.approved = { window_id: String(s.window.id), app_id: s.window.appId, title: s.window.title };
+    s.approved = { window_id: String(s.window.id), app_id: s.window.appId };
     emit(s, "opened", "agent", restartedNote ? { reason: "worker_restarted" } : {});
     restartedNote = false;
     emit(s, "approved", answer.reused ? "agent" : "person", answer.reused ? { reused: true } : {});
@@ -650,7 +646,7 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     if (s.mode === "control") await native.call("focus", { window: current });
     const started = await native.call("start");
     s.generation = started?.generation ?? s.generation;
-    s.window = current; s.phase = "working"; s.status = ""; s.lastOperation = Date.now(); s.afterTakeover = true;
+    s.window = current; s.phase = "working"; s.status = ""; s.lastOperation = Date.now();
     emit(s, "continued", "person");
     // One observation now, so what the person changed is in the next result.
     try { s.resumeObservation = await observation(s, current); } catch { s.resumeObservation = null; }
