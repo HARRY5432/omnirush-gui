@@ -1,3 +1,4 @@
+import { appSecretHeaders, rememberLocalServer } from "./app-request-secret.mjs";
 import { randomUUID, X509Certificate } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
@@ -731,6 +732,7 @@ async function fetchJson(url, options = {}, timeoutMs = 3000) {
       signal: controller.signal,
       headers: {
         Accept: "application/json",
+        ...appSecretHeaders(url),
         ...(options.headers ?? {}),
       },
     });
@@ -2282,6 +2284,7 @@ export function createRuntimeManager({
     omnirushServerState.host = host;
     omnirushServerState.port = boundPort;
     omnirushServerState.baseUrl = baseUrl;
+    rememberLocalServer(baseUrl);
     omnirushServerState.clientToken = tokens.clientToken;
     omnirushServerState.hostToken = tokens.hostToken;
     recordRestart({ action: "started", reason: nextStartReason ?? "startup", source: "runtime" });

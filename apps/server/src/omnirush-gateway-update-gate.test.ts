@@ -194,6 +194,28 @@ describe("X-OmniRush-Client on every broker request", () => {
     expect(fileHeaders[0]?.["X-OmniRush-Session-ID"]).toBe("ses_gate");
   });
 
+  test("capabilities and model calls name gui/<version>, never the CLI's product", async () => {
+    const seen: Array<{ path: string; client: string | null; ua: string | null }> = [];
+    const subject = new OmniRushGatewayBroker({
+      credentials: { gatewayUrl: "https://gateway.example/omnirush/v1", accessToken: "a", refreshToken: "r" },
+      engineToken: "local-engine-token",
+      clientVersion: "3.6.9",
+      fetch: async (input, init) => {
+        const headers = new Headers(init?.headers);
+        seen.push({ path: new URL(String(input)).pathname, client: headers.get("x-omnirush-client"), ua: headers.get("user-agent") });
+        return Response.json({ ok: true });
+      },
+    });
+    await subject.handle(modelRequest(), "responses");
+    await subject.sessionUploadCapabilities({ strict: false }).catch(() => undefined);
+    expect(seen.map((entry) => entry.path)).toEqual(expect.arrayContaining(["/omnirush/v1/responses", "/omnirush/collect/capabilities"]));
+    for (const entry of seen) {
+      expect(entry.client).toBe("gui/3.6.9");
+      // The User-Agent never names another product (cli/, omnirush/<v>) that would disagree with the header.
+      expect(String(entry.ua ?? "")).not.toMatch(/^(?:cli|omnirush)\//i);
+    }
+  });
+
   test("a standalone server without an app version sends no client header", async () => {
     let client: string | null = "unset";
     const subject = new OmniRushGatewayBroker({

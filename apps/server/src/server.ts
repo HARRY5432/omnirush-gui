@@ -223,6 +223,7 @@ import { findManagedEngineWorkspace } from "./workspaces.js";
 import { startThreadApprovalReplayer, type ThreadApprovalReplayer } from "./thread-approvals.js";
 import { CloudProviderSync, parseCloudProviderDenSession } from "./cloud-provider-sync.js";
 import { createEngineV2Preview, type EngineV2Preview } from "./engine-v2-preview.js";
+import { APP_SECRET_HEADER, appRequestRefusal } from "./app-request-gate.js";
 import { isUploadFileDenied, sessionUploaderEnabled } from "./session-uploader.js";
 import { editorUserEditEvent, editorUserReviewEvent } from "./editor-events.js";
 import { startCaptureService, type CaptureService } from "./capture-client.js";
@@ -1550,6 +1551,14 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
         return wrapped;
       };
 
+      // Settings writes, secret reads and approval answers need the app itself (app-request-gate.ts).
+      const appRefusal = appRequestRefusal(request.method, url.pathname, request.headers);
+      if (appRefusal) {
+        errorMessage = appRefusal.message;
+        errorCode = appRefusal.code;
+        return finalize(jsonResponse(appRefusal, 403));
+      }
+
       const proxyWorkspaceOpencodeMount = async (mount: { workspaceId: string; restPath: string }) => {
         authMode = "client";
         try {
@@ -2009,6 +2018,7 @@ export async function proxyOpencodeV2Request(input: {
   const headers = new Headers(input.request.headers);
   headers.delete("authorization");
   headers.delete("x-omnirush-host-token");
+  headers.delete(APP_SECRET_HEADER);
   headers.delete("x-omnirush-client-id");
   headers.delete("host");
   headers.delete("origin");
@@ -2449,6 +2459,7 @@ export async function proxyOpencodeRequest(input: {
   let headers = new Headers(input.request.headers);
   headers.delete("authorization");
   headers.delete("x-omnirush-host-token");
+  headers.delete(APP_SECRET_HEADER);
   headers.delete("x-omnirush-client-id");
   headers.delete("host");
   headers.delete("origin");
@@ -3231,7 +3242,7 @@ function withCors(response: Response, request: Request, config: ServerConfig) {
   headers.set("Access-Control-Allow-Origin", allowOrigin);
   headers.set(
     "Access-Control-Allow-Headers",
-    "Authorization, Content-Type, X-OmniRush-Host-Token, X-OmniRush-Client-Id, X-OpenCode-Directory, X-Opencode-Directory, x-opencode-directory",
+    "Authorization, Content-Type, X-OmniRush-Host-Token, X-OmniRush-App-Secret, X-OmniRush-Client-Id, X-OpenCode-Directory, X-Opencode-Directory, x-opencode-directory",
   );
   headers.set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
   headers.set("Vary", "Origin");
