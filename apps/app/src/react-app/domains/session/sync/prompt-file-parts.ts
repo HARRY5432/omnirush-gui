@@ -78,6 +78,8 @@ export function toFileUrl(path: string, windows = false) {
     const url = `file://${unc[1] ?? ""}${encodeFilePath(unc[2] ?? "")}`;
     return isUncHost(unc[1] ?? "") && parsedHost(url) === (unc[1] ?? "").toLowerCase() ? url : "";
   }
+  // A share-less or malformed `//` path (`\\srv`, `\\?`) has no Windows file URL.
+  if (windows && normalized.startsWith("//")) return "";
   return `file://${encodeFilePath(normalized)}`;
 }
 

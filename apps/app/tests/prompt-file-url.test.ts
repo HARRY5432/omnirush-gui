@@ -78,6 +78,11 @@ describe("prompt file URLs", () => {
     expect(toFileUrl("//?/C:/x", true)).not.toStartWith("file://?");
   });
 
+  test("share-less or malformed UNC paths have no Windows URL", () => {
+    for (const path of ["//srv", "//localhost", "//?", "//", "///x"]) expect(toFileUrl(path, true)).toBe("");
+    expect(promptFileUrl("\\\\srv", "C:\\Users\\omar\\code")).toBe("");
+  });
+
   test("UNC hosts the URL parser would rewrite or drop are not sent", () => {
     const root = "C:\\Users\\omar\\code";
     for (const host of ["localhost", "LOCALHOST", "nas.01", "192.168.1", "0x7f.1"]) {
