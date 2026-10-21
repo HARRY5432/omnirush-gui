@@ -132,6 +132,8 @@ import {
   type ComposerSessionState,
   useComposerStateStore,
 } from "./composer-state-store";
+import { editConfirmText, editTargetText, hiddenDeleteConfirmText, revertConfirmText, revertNeedsConfirm, revertPointMessageId, turnsFromRevertPoint } from "./revert-scope";
+import { isSessionReverted, markSessionReverted } from "../sync/reverted-sessions";
 import { MessageList } from "@/components/chat/message-list";
 import { MessageListProvider, type DispatchAction } from "@/components/chat/message-list-provider";
 import type {
@@ -1105,7 +1107,7 @@ function SessionErrorCard({ error, developerMode, onDismiss, onChangeModel, onOp
 function RevertedMessagesBanner(props: { hiddenCount: number; restoring: boolean; onRestore: () => void }) {
   return (
     <div
-      className="mb-3 flex items-center gap-3 rounded-2xl border border-amber-7/40 bg-amber-2/30 px-4 py-3 text-sm text-warning"
+      className="mx-3 mb-2 flex items-center gap-3 rounded-xl border border-amber-7/40 bg-amber-2/30 px-3 py-2 text-xs text-warning"
       data-testid="reverted-messages-banner"
       role="status"
     >
@@ -1166,6 +1168,9 @@ function composerSessionHasContent(state: ComposerSessionState | undefined) {
   ));
 }
 
+/** Messages a chat's snapshot asks the engine for, newest first; "Load earlier messages" adds this many more. */
+const SNAPSHOT_PAGE = 140;
+
 function hiddenMessageCount(snapshot: OmniRushSessionSnapshot, revertMessageId: string): number {
   const index = snapshot.messages.findIndex((message) => message.info.id === revertMessageId);
   return index < 0 ? snapshot.messages.length : snapshot.messages.length - index;
@@ -1197,6 +1202,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
   const replaceComposerDraft = useComposerStateStore((state) => state.replaceDraft);
   const hydrateComposerDraft = useComposerStateStore((state) => state.hydrateDraft);
   const clearComposerRevertTarget = useComposerStateStore((state) => state.clearRevertTarget);
+  const composerEditTarget = useComposerStateStore((state) => getComposerRevertMessageId(state, props.sessionId));
   const setComposerAttachments = useComposerStateStore((state) => state.setAttachments);
   const setComposerMentions = useComposerStateStore((state) => state.setMentions);
   const setComposerPasteParts = useComposerStateStore((state) => state.setPasteParts);
@@ -1403,6 +1409,11 @@ export function SessionSurface(props: SessionSurfaceProps) {
     [props.opencodeBaseUrl, props.omnirushToken, props.workspaceRoot],
   );
 
+  // The engine sends a chat's newest messages only; "Load earlier messages" asks for more of them.
+  const [snapshotLimit, setSnapshotLimit] = useState(SNAPSHOT_PAGE);
+  const snapshotLimitRef = useRef(SNAPSHOT_PAGE);
+  snapshotLimitRef.current = snapshotLimit;
+  useEffect(() => setSnapshotLimit(SNAPSHOT_PAGE), [props.sessionId]);
   const snapshotQueryKey = useMemo(
     () => reactSnapshotKey(props.workspaceId, props.sessionId),
     [props.workspaceId, props.sessionId],
@@ -1428,12 +1439,12 @@ export function SessionSurface(props: SessionSurfaceProps) {
         ? await opencodeSessionNative.composeNativeSessionSnapshotWithRetry(
           sessionOwner,
           () => snapshotTargetRef.current,
-          { limit: 140, signal },
+          { limit: snapshotLimitRef.current, signal },
         )
         : await opencodeSessionNative.composeNativeSessionSnapshot(
           { opencodeBaseUrl: props.opencodeBaseUrl, token: props.omnirushToken },
           props.sessionId,
-          { limit: 140, signal },
+          { limit: snapshotLimitRef.current, signal },
         );
       markSessionSnapshotFetchStart(item, startedAt);
       return item;
@@ -2283,6 +2294,15 @@ export function SessionSurface(props: SessionSurfaceProps) {
       ...buildDraft(text, sourceAttachments, sourceComposer),
       messageId: createPromptMessageID(),
     };
+    // An edited earlier message replaces every turn after it, and their file changes, for good: ask first.
+    if (nextDraft.revertMessageId) {
+      const turns = turnsFromRevertPoint(baseRenderedMessages, nextDraft.revertMessageId);
+      const hidden = revertMessageId ? revertedMessageCount : 0;
+      if ((revertNeedsConfirm(turns) || hidden > 0) && !window.confirm(editConfirmText(turns, hidden))) return;
+    } else if (revertMessageId && !window.confirm(hiddenDeleteConfirmText(revertedMessageCount))) {
+      // The engine deletes hidden (reverted) turns on the next prompt: never as a side effect of a send.
+      return;
+    }
     // Immediate sends and queued sends share the same slot across all panes.
     dispatchQueuedDrain(props.sessionId, { type: "user_retry" });
     if (!claimQueuedSend(props.sessionId, nextDraft.messageId, true)) return;
@@ -2378,7 +2398,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
     } finally {
       setAttachmentsUploading(false);
     }
-  }, [attachments, baseRenderedMessages, buildDraft, clearComposer, draft, liveStatus.type, persistedDraftKey, props.onDraftChange, props.sessionId, sendDraft, sessionOwner]);
+  }, [attachments, baseRenderedMessages, buildDraft, clearComposer, draft, liveStatus.type, persistedDraftKey, props.onDraftChange, props.sessionId, revertMessageId, revertedMessageCount, sendDraft, sessionOwner]);
 
   // A chat command from a button ("/review", "/fix 1, 3"): sent like a typed one, the composer's draft left alone.
   const runChatCommand = useCallback(async (text: string) => {
@@ -2459,6 +2479,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
     const item = getComposerQueuedDrafts(useComposerStateStore.getState(), props.sessionId).find((queued) => queued.id === id);
     const target = withoutRevertTarget(item?.draft ?? null);
     if (!item || !target) return;
+    if (revertMessageId && !window.confirm(hiddenDeleteConfirmText(revertedMessageCount))) return;
     if (!claimQueuedSend(props.sessionId, item.id, true)) return;
     const generation = getQueuedSendGeneration(props.sessionId);
     setSendingQueued(true);
@@ -2485,6 +2506,8 @@ export function SessionSurface(props: SessionSurfaceProps) {
     prependQueuedDrafts,
     props.sessionId,
     removeQueuedDraftFromStore,
+    revertMessageId,
+    revertedMessageCount,
     sendDraft,
     sendingQueued,
   ]);
@@ -2607,6 +2630,8 @@ export function SessionSurface(props: SessionSurfaceProps) {
     if (cloudQueueBlockedRef.current) return;
     if (queuedItems.length === 0) return;
     if (chatStreaming || liveStatus.type !== "idle") return;
+    // A reverted chat (or one being reverted): this send would delete its hidden turns. Held until Restore or a confirmed send.
+    if (revertMessageId || isSessionReverted(props.sessionId)) return;
     if (!canAdmitNextQueuedItem(queuedDrainState)) return;
     const nextItem = getComposerQueuedDrafts(useComposerStateStore.getState(), props.sessionId)[0];
     if (!nextItem) return;
@@ -2644,7 +2669,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
         drainingQueueRef.current = false;
       }
     })();
-  }, [chatStreaming, cloudQueueRetryVersion, liveStatus.type, prependQueuedDrafts, props.sessionId, queuedDrainState, queuedItems, removeQueuedDraftFromStore, sendDraft, sendingQueued]);
+  }, [chatStreaming, cloudQueueRetryVersion, liveStatus.type, prependQueuedDrafts, props.sessionId, queuedDrainState, queuedItems, removeQueuedDraftFromStore, revertMessageId, sendDraft, sendingQueued]);
 
   useEffect(() => {
     if (props.cloudMcpSubmissionState.status !== "failed") {
@@ -3042,6 +3067,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
   const [resuming, setResuming] = useState(false);
   const handleResumeInterrupted = useCallback(async (recoveryPrompt: string) => {
     await resumeGuardRef.current.run(async () => {
+      if (revertMessageId && !window.confirm(hiddenDeleteConfirmText(revertedMessageCount))) return;
       const messageID = createPromptMessageID();
       dispatchQueuedDrain(props.sessionId, { type: "user_retry" });
       if (!claimQueuedSend(props.sessionId, messageID, true)) return;
@@ -3060,7 +3086,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
         setResuming(false);
       }
     });
-  }, [props.sessionId, sendDraft]);
+  }, [props.sessionId, revertMessageId, revertedMessageCount, sendDraft]);
   const handleAutoRetry = useCallback((prompt: string) => {
     void handleResumeInterrupted(prompt);
   }, [handleResumeInterrupted]);
@@ -3193,8 +3219,24 @@ export function SessionSurface(props: SessionSurfaceProps) {
   }, [attachments, buildDraft, props.onDraftChange, props.sessionId, props.workspaceId, typeComposerText]);
 
   const handleRevertToUserMessage = useCallback((messageId: string) => {
-    void props.onRevertToMessage?.(messageId, props.sessionId);
-  }, [props.onRevertToMessage, props.sessionId]);
+    // One click under an older message used to take hours of turns and their file changes back unasked.
+    const messages = renderedMessagesRef.current;
+    const turns = turnsFromRevertPoint(messages, messageId);
+    if (!window.confirm(revertConfirmText(turns, liveStatus.type !== "idle"))) return;
+    // From a reply: rewind at the prompt that started its turn, so the turn's earlier steps' file changes go too
+    // (the engine reverting at the reply's own message keeps them on disk while the transcript hides them).
+    // Hold queued drafts from here: stopping the running turn first would otherwise let one go out ahead of the revert.
+    const sessionId = props.sessionId;
+    markSessionReverted(sessionId, "pending");
+    void Promise.resolve(props.onRevertToMessage?.(revertPointMessageId(messages, messageId) ?? messageId, sessionId))
+      .then((reverted) => reverted === true, () => false)
+      .then((reverted) => {
+        if (reverted) return;
+        // No revert: the held queue may go again.
+        markSessionReverted(sessionId, null);
+        dispatchQueuedDrain(sessionId, { type: "user_retry" });
+      });
+  }, [liveStatus.type, props.onRevertToMessage, props.sessionId]);
 
   const handleForkAtMessage = useCallback((messageId: string) => {
     // OpenCode's fork copies messages strictly before the given id, so pass
@@ -3328,19 +3370,33 @@ export function SessionSurface(props: SessionSurfaceProps) {
             sessionScroll.markScrollGesture(event.currentTarget);
           }}
           onScroll={sessionScroll.handleScroll}
+          // Focusable by a click, never by Tab: Cmd/Ctrl+Z undoes a chat turn only with focus here (undo-key.ts).
+          data-chat-transcript
+          tabIndex={-1}
           // Extra top padding while the find bar is open so it never covers
           // the first message (short transcripts cannot scroll it clear).
-          className={`absolute inset-0 overflow-x-hidden overflow-y-auto overscroll-y-contain touch-pan-y px-3 pb-4 sm:px-5 ${findOwned ? "pt-16" : "pt-4"}`}
+          className={`absolute inset-0 outline-none overflow-x-hidden overflow-y-auto overscroll-y-contain touch-pan-y px-3 pb-4 sm:px-5 ${findOwned ? "pt-16" : "pt-4"}`}
         >
           {/* Chat column: tighter than the composer (800px) so messages
                keep a comfortable reading width and don't feel "too big". */}
           <div ref={contentRef} className="mx-auto w-full max-w-[720px]">
-            {revertMessageId ? (
-              <RevertedMessagesBanner
-                hiddenCount={revertedMessageCount}
-                restoring={restoringRevertedMessages}
-                onRestore={handleRestoreRevertedSession}
-              />
+            {snapshot && snapshot.messages.length >= snapshotLimit ? (
+              <div className="mb-3 flex justify-center">
+                <button
+                  type="button"
+                  data-testid="load-earlier-messages"
+                  disabled={snapshotQuery.isFetching}
+                  className="rounded-full border border-dls-border bg-dls-surface px-3 py-1.5 text-xs font-medium text-dls-secondary transition-colors hover:bg-dls-hover disabled:opacity-50"
+                  onClick={() => {
+                    // Nothing was deleted: an older part of a long chat is only not loaded yet.
+                    snapshotLimitRef.current = snapshotLimit + SNAPSHOT_PAGE;
+                    setSnapshotLimit(snapshotLimitRef.current);
+                    void snapshotQuery.refetch();
+                  }}
+                >
+                  {snapshotQuery.isFetching ? "Loading…" : "Load earlier messages"}
+                </button>
+              </div>
             ) : null}
             {error && snapshot && snapshot.messages.length > 0 ? (
               <SessionErrorCard
@@ -3473,6 +3529,40 @@ export function SessionSurface(props: SessionSurfaceProps) {
       </div>
 
       <div ref={composerShellRef} data-composer-shell className="shrink-0 px-0 pb-2 pt-2">
+        {/* Next to the composer, not above the first message: in a long chat the top is far off screen. */}
+        {revertMessageId ? (
+          <RevertedMessagesBanner
+            hiddenCount={revertedMessageCount}
+            restoring={restoringRevertedMessages}
+            onRestore={handleRestoreRevertedSession}
+          />
+        ) : null}
+        {composerEditTarget ? (
+          <div
+            className="mx-3 mb-2 flex items-center gap-3 rounded-xl border border-amber-7/40 bg-amber-2/30 px-3 py-2 text-xs text-warning"
+            data-testid="composer-edit-target"
+            role="status"
+          >
+            <span className="min-w-0 flex-1">
+              {editTargetText(turnsFromRevertPoint(baseRenderedMessages, composerEditTarget))}
+            </span>
+            <button
+              type="button"
+              className="shrink-0 font-medium hover:underline"
+              onClick={() => clearComposerRevertTarget(props.sessionId)}
+            >
+              Send as new
+            </button>
+            <button
+              type="button"
+              className="shrink-0 font-medium hover:underline"
+              data-testid="composer-edit-cancel"
+              onClick={() => replaceComposerDraft(props.sessionId, "")}
+            >
+              Cancel
+            </button>
+          </div>
+        ) : null}
         {(props.providerConnectedCount ?? 0) === 0 ? (
           <button
             type="button"

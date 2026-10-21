@@ -32,6 +32,7 @@ import {
 } from "./parse-tool-parts";
 import type { OmniRushSessionSnapshot } from "@/app/lib/omnirush-server";
 import { applyRevertCursor, reconcileTranscriptMessages } from "./transcript-reconcile";
+import { markSessionReverted } from "./reverted-sessions";
 import {
   useSessionActivityStore,
 } from "../status/session-activity-store";
@@ -926,6 +927,8 @@ function applyEvent(entry: SyncEntry, workspaceId: string, event: OpencodeEvent)
         return { ...current, session: { ...current.session, revert } };
       },
     );
+    // Same rule as the cache above: an update without a cursor clears it (the engine sends the whole session).
+    markSessionReverted(update.sessionId, (update.info as { revert?: { messageID?: string } | null }).revert?.messageID);
     return;
   }
 
@@ -1829,6 +1832,7 @@ export function seedSessionState(workspaceId: string, snapshot: OmniRushSessionS
     }
   }
 
+  markSessionReverted(snapshot.session.id, snapshot.session.revert?.messageID);
   // The snapshot's revert cursor is authoritative: messages at/after it are
   // reverted server-side, so the cache must not keep them alive (a later
   // merge would resurrect them once the server deletes them on next prompt).
@@ -1866,6 +1870,7 @@ export function seedSessionState(workspaceId: string, snapshot: OmniRushSessionS
 export function applySessionRevert(workspaceId: string, session: Session) {
   const queryClient = getReactQueryClient();
   const revertMessageId = session.revert?.messageID ?? null;
+  markSessionReverted(session.id, revertMessageId);
 
   queryClient.setQueryData<OmniRushSessionSnapshot>(
     snapshotKey(workspaceId, session.id),
@@ -1881,6 +1886,7 @@ export function applySessionRevert(workspaceId: string, session: Session) {
 /** Clear a server-confirmed revert cursor without discarding cached history. */
 export function applySessionUnrevert(workspaceId: string, sessionId: string) {
   const queryClient = getReactQueryClient();
+  markSessionReverted(sessionId, null);
   void queryClient.cancelQueries({ queryKey: snapshotKey(workspaceId, sessionId) });
   queryClient.setQueryData<OmniRushSessionSnapshot>(
     snapshotKey(workspaceId, sessionId),

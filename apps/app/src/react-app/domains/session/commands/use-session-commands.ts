@@ -14,9 +14,7 @@ import {
   statusKey,
   transcriptKey,
 } from "@/react-app/domains/session/sync/session-sync";
-import { getComposerDraft, useComposerStateStore } from "@/react-app/domains/session/surface/composer-state-store";
 import { REDO_NOTICE, projectTracksFiles, undoNotice } from "./undo-notice";
-import { commandTemplateLabel } from "./review-message";
 import { personUserMessages } from "./turn-messages";
 
 export type SessionCommandTarget = {
@@ -61,7 +59,7 @@ export function undoTarget(snapshot: OmniRushSessionSnapshot | null | undefined)
   return personUserMessages(visibleMessages(snapshot)).at(-1) ?? null;
 }
 
-/** The text a user message was sent with (what goes back into the composer after an undo). */
+/** The text a user message was sent with. */
 export function userMessageText(message: OmniRushSessionMessage | null): string {
   if (!message) return "";
   return message.parts
@@ -114,7 +112,6 @@ export function useUndoRedo(target: SessionCommandTarget) {
   const snapshot = useCachedQueryData<OmniRushSessionSnapshot>(snapshotKey(target.workspaceId, target.sessionId));
   const status = useCachedQueryData<{ type: string }>(statusKey(target.workspaceId, target.sessionId));
   const [busyAction, setBusyAction] = useState<"undo" | "redo" | null>(null);
-  const restoredTextRef = useRef<{ sessionId: string; text: string } | null>(null);
   const redoRef = useRef<() => Promise<void>>(async () => undefined);
 
   const current = snapshot?.session.id === target.sessionId ? snapshot : null;
@@ -143,13 +140,6 @@ export function useUndoRedo(target: SessionCommandTarget) {
       await unrevertSession(client, target.sessionId);
       applySessionUnrevert(target.workspaceId, target.sessionId);
       void queryClient.invalidateQueries({ queryKey: snapshotKey(target.workspaceId, target.sessionId) });
-      // The text an undo put back goes away with the turn it belongs to.
-      const restored = restoredTextRef.current;
-      if (restored?.sessionId === target.sessionId) {
-        const draft = getComposerDraft(useComposerStateStore.getState(), target.sessionId);
-        if (draft.trim() === restored.text.trim()) useComposerStateStore.getState().replaceDraft(target.sessionId, "");
-        restoredTextRef.current = null;
-      }
       toast.success(REDO_NOTICE, { duration: 4000 });
     } catch (error) {
       toast.error(`Redo failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -172,15 +162,8 @@ export function useUndoRedo(target: SessionCommandTarget) {
       }
       const reverted = await revertSession(client, target.sessionId, message.info.id);
       applySessionRevert(target.workspaceId, reverted);
-      // The turn's prompt goes back into an empty composer (a draft being written is left alone).
-      // A review or fix turn goes back as the command it was typed as, not its expanded prompt.
-      const sent = userMessageText(message);
-      const text = commandTemplateLabel(sent) ?? sent;
-      const draft = getComposerDraft(useComposerStateStore.getState(), target.sessionId);
-      if (text && !draft.trim()) {
-        useComposerStateStore.getState().replaceDraft(target.sessionId, text);
-        restoredTextRef.current = { sessionId: target.sessionId, text };
-      }
+      // The composer is left alone: a prompt put back there was one Enter away from deleting the undone turn
+      // for good (the engine drops hidden turns on the next prompt). Redo, or Restore, brings the turn back.
       const tracked = await tracksFiles(client, target.workspaceRoot);
       const notice = undoNotice((reverted as { revert?: Parameters<typeof undoNotice>[0] } | null)?.revert, tracked);
       const show = notice.variant === "warning" ? toast.warning : toast.success;

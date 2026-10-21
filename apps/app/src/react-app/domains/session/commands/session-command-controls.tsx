@@ -63,7 +63,7 @@ export function SessionCommandControls(props: SessionCommandControlsProps) {
   }, [canRedo, canUndo, props.sessionId, redo, setHeaderActions, undo]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      const action = chatUndoKey(event, isMac());
+      const action = chatUndoKey(event, isMac(), props.sessionId);
       if (!action) return;
       // Only with the chat on screen: no dialog or menu in front of it.
       if (document.querySelector("[role=dialog][data-open], [role=alertdialog], [role=menu]")) return;
@@ -76,11 +76,13 @@ export function SessionCommandControls(props: SessionCommandControlsProps) {
         toast.info("Stop the turn first (Esc), then undo", { duration: 4000 });
         return;
       }
+      // A key press is easy to make by accident: the undo (the turn and its file changes) asks first.
+      if (action === "undo" && !window.confirm("Undo the last turn? Its messages are hidden and its file changes taken back. Redo or Restore brings them back.")) return;
       void (action === "undo" ? undo() : redo());
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [canRedo, canUndo, redo, running, undo]);
+  }, [canRedo, canUndo, props.sessionId, redo, running, undo]);
 
   const mod = isMac() ? "⌘" : "Ctrl+";
   return (
