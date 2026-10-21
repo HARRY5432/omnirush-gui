@@ -213,6 +213,15 @@
   ],
   "desktop": [
     {
+      "version": "3.7.0",
+      "date": "2026-10-21",
+      "new": [],
+      "improved": [],
+      "fixed": [
+        "The Mac app starts again: 3.6.7 and 3.6.9 stopped with \"The bundled engine was changed\"."
+      ]
+    },
+    {
       "version": "3.6.9",
       "date": "2026-10-21",
       "new": [],
