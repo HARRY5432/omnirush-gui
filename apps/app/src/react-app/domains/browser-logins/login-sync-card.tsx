@@ -30,7 +30,7 @@ export function LoginSyncCard() {
           <div className="min-w-0 flex-1">
             <p className="text-[13px] font-medium text-dls-text">Optional: use your existing sign-ins</p>
             <p className="text-xs text-muted-foreground">
-              The browser works without this. To let the agent open sites you are already signed in to, choose one browser profile and the exact sites whose sign-ins to keep in step. Nothing is copied until you turn it on.
+              The browser works without this. To let the agent open sites you are already signed in to, choose one browser profile and the exact sites whose sign-ins to keep in step. Nothing is copied until you enable sync.
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-1">
