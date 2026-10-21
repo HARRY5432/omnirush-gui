@@ -81,11 +81,12 @@ describe("Library item page", () => {
     expect(commits - settled).toBe(0);
     expect(settled).toBeLessThan(20);
     expect(host.textContent).toContain("/init");
+    expect(host.textContent).not.toContain("/review");
 
     // Leaving the page (the back link or any navigation) shows the list again.
     flushSync(() => root.render(view(null)));
     await sleep(100);
-    expect(host.textContent).not.toContain("guided AGENTS.md setupAvailable in composer");
+    expect(host.textContent).toContain("/review");
     flushSync(() => root.unmount());
     host.remove();
     // Let the unmount's passive effects run while the DOM globals are still registered.
