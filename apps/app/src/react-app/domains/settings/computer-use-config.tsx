@@ -3,10 +3,13 @@ import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, CircleAlert, Copy, Eye, Hand, Loader2, MousePointer2, RefreshCw, ShieldCheck } from "lucide-react";
 
+import type { ComputerUseRealScreen } from "@omnirush/types/desktop-ipc";
+
 import { desktopBridge } from "@/app/lib/desktop";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { registerExtensionConfig } from "./extension-registry";
 
@@ -56,6 +59,8 @@ function parsePermissionResult(value: unknown): PermissionResult {
 }
 
 const PERMISSIONS_QUERY_KEY = ["computer-use", "permissions"];
+const REAL_SCREEN_QUERY_KEY = ["computer-use", "real-screen"];
+export const COMPUTER_USE_HELP = "The agent works on its own display — a separate screen with its own cursor and a fresh browser — and never asks for approval there. Your own screen is off unless you turn it on here; when on, the agent uses it without asking. Stop any time with the Stop button.";
 const modes = [
   { mode: "observe", icon: Eye, name: "Read a window", description: "See its text and screenshots. No clicks or typing." },
   { mode: "assist", icon: Hand, name: "Use app controls", description: "Work through accessible controls while your pointer stays free." },
@@ -101,6 +106,16 @@ export function ComputerUseConfig({ connected, connecting, onConnect, onRefresh,
     },
     onSettled: () => setWaitingForConnection(false),
   });
+  const realScreen = useQuery({
+    queryKey: REAL_SCREEN_QUERY_KEY,
+    queryFn: async (): Promise<ComputerUseRealScreen> => desktopBridge.getComputerUseRealScreen(),
+    enabled: hasDesktopBridge(),
+    retry: false,
+  });
+  const setRealScreen = useMutation({
+    mutationFn: async (on: boolean) => desktopBridge.setComputerUseRealScreen(on),
+    onSuccess: (next) => queryClient.setQueryData(REAL_SCREEN_QUERY_KEY, next),
+  });
   const setup = useMutation({
     mutationFn: async () => parsePermissionResult(await desktopBridge.openComputerUsePermissionSetup()),
     onSuccess: (next) => queryClient.setQueryData(PERMISSIONS_QUERY_KEY, next),
@@ -118,20 +133,19 @@ export function ComputerUseConfig({ connected, connecting, onConnect, onRefresh,
 
   const mac = result?.platform === "darwin";
   const availableModes = result?.modes ?? ["observe", "control"];
-  const error = (connect.error ?? setup.error ?? copyCli.error ?? checkError)?.message ?? result?.error;
-  const supported = hasDesktopBridge() && result?.supported !== false;
-  const permissionsReady = result?.ok === true;
-  const ready = connected && permissionsReady;
+  const error = (connect.error ?? setup.error ?? copyCli.error ?? setRealScreen.error ?? checkError)?.message ?? (realScreen.data?.on ? result?.error : undefined);
+  // The agent's own display needs no desktop access; only the person's own screen does.
+  const supported = hasDesktopBridge();
+  const ready = connected;
+  const realScreenOn = realScreen.data?.on === true;
   const busy = isFetching || waitingForConnection || setup.isPending;
   const refresh = async () => { setup.reset(); connect.reset(); await refetch(); await onRefresh?.(); };
 
   return (
     <Card variant="outline" size="sm">
       <CardHeader>
-        <CardTitle>Work in an app you choose</CardTitle>
-        <CardDescription>
-          Approve one app, choose its window, and decide how omnirush.ai can help. Your input interrupts control; Stop in the preview ends access.
-        </CardDescription>
+        <CardTitle>Computer use</CardTitle>
+        <CardDescription data-computer-use-help>{COMPUTER_USE_HELP}</CardDescription>
         <CardAction>
           <Button variant="ghost" size="icon-sm" aria-label="Refresh Computer Use status" onClick={() => void refresh()} disabled={busy}>
             <RefreshCw className={cn(busy && "animate-spin")} />
@@ -141,17 +155,33 @@ export function ComputerUseConfig({ connected, connecting, onConnect, onRefresh,
       <CardContent className="space-y-5">
         <div className="flex items-center gap-2 rounded-xl border border-border bg-muted/40 px-3 py-3 text-sm" role="status" aria-live="polite">
           {ready ? <CheckCircle2 className="size-4 shrink-0 text-green-11" /> : <ShieldCheck className="size-4 shrink-0 text-muted-foreground" />}
-          <span>{ready ? "Ready · app access is approved when a session starts" : !supported ? "Desktop access is unavailable on this session" : !connected ? permissionsReady ? "Permissions are ready. Enable Computer Use for this workspace." : "Set up Computer Use for this workspace" : mac ? "Connected · finish macOS permissions below" : "Connected · check desktop access below"}</span>
+          <span>{ready ? "Ready · the agent works on its own display" : !supported ? "Computer use needs the desktop app" : "Set up Computer Use for this workspace"}</span>
         </div>
         {!ready ? (
-          <Button className="w-full" onClick={() => { if (!connected) connect.mutate(); else setup.mutate(); }} disabled={!supported || connecting || waitingForConnection || connect.isPending || setup.isPending || (!connected && !onConnect)}>
-            {connecting || waitingForConnection || connect.isPending || setup.isPending ? <Loader2 className="size-4 animate-spin" /> : null}
-            {connecting || waitingForConnection || connect.isPending ? "Enabling…" : !connected ? "Enable Computer Use" : mac ? "Allow macOS access" : "Check desktop access"}
+          <Button className="w-full" onClick={() => connect.mutate()} disabled={!supported || connecting || waitingForConnection || connect.isPending || !onConnect}>
+            {connecting || waitingForConnection || connect.isPending ? <Loader2 className="size-4 animate-spin" /> : null}
+            {connecting || waitingForConnection || connect.isPending ? "Enabling…" : "Enable Computer Use"}
           </Button>
         ) : null}
         {error ? <Alert variant="destructive"><CircleAlert /><AlertDescription className="break-words">{error}</AlertDescription></Alert> : null}
-        <div className="space-y-3">
-          <p className="text-sm font-medium">You choose the scope</p>
+        <div className="flex items-start justify-between gap-3 rounded-xl border border-border p-3">
+          <div>
+            <p className="text-sm font-medium">Use my own screen</p>
+            <p className="mt-1 text-xs leading-relaxed text-muted-foreground" id="computer-use-real-screen-help">
+              {realScreen.data?.allowed === false ? "Turned off for your account." : realScreen.data?.forced ? "Set by the OMNIRUSH_COMPUTER_USE_REAL_SCREEN environment variable." : "Off by default. When on, the agent sees and uses the apps on your screen without asking. Your own mouse or keyboard pauses it until you choose Continue."}
+            </p>
+          </div>
+          <Switch
+            aria-label="Use my own screen"
+            aria-describedby="computer-use-real-screen-help"
+            checked={realScreenOn}
+            disabled={!supported || !realScreen.data || realScreen.data.forced || realScreen.data.allowed === false || setRealScreen.isPending}
+            onCheckedChange={(on: boolean) => setRealScreen.mutate(on)}
+            data-computer-use-real-screen
+          />
+        </div>
+        {realScreenOn ? <div className="space-y-3">
+          <p className="text-sm font-medium">On your own screen</p>
           <div className="grid gap-2">
             {modes.filter(({ mode }) => availableModes.includes(mode)).map(({ icon: Icon, name, description }) => (
               <div key={name} className="flex gap-3 rounded-xl border border-border p-3">
@@ -160,30 +190,27 @@ export function ComputerUseConfig({ connected, connecting, onConnect, onRefresh,
               </div>
             ))}
           </div>
-        </div>
-        <div className="space-y-3 border-t border-border pt-4">
-          <div><p className="text-sm font-medium">{mac ? "macOS permissions" : "Desktop access"}</p><p className="mt-1 text-xs leading-relaxed text-muted-foreground">These let the helper work. App access still needs your approval for each session.</p></div>
+        </div> : null}
+        {realScreenOn ? <div className="space-y-3 border-t border-border pt-4">
+          <div><p className="text-sm font-medium">{mac ? "macOS permissions" : "Desktop access"}</p><p className="mt-1 text-xs leading-relaxed text-muted-foreground">Needed only for your own screen, not for the agent's display.</p></div>
           {mac ? <PermissionRow title="Accessibility" description="Read and use app controls" granted={result?.accessibility} /> : <PermissionRow title="Mouse and keyboard" description="Foreground input; your input pauses control" granted={result?.accessibility} />}
-          <PermissionRow title={mac ? "Screen Recording" : "Window screenshots"} description="See only the window you approve" granted={result?.screenRecording} />
+          <PermissionRow title={mac ? "Screen Recording" : "Window screenshots"} description="See only the window in use" granted={result?.screenRecording} />
           <Button variant="outline" className="min-h-10 w-full whitespace-normal" disabled={!supported || setup.isPending} onClick={() => setup.mutate()}>
             {setup.isPending ? <Loader2 className="size-4 animate-spin" /> : null}
             Open permissions and session controls
           </Button>
-        </div>
-        {permissionsReady ? <div className="space-y-2 border-t border-border pt-4">
-          <Button variant="outline" disabled={copyCli.isPending} onClick={() => copyCli.mutate()}><Copy className="size-4" />{copyCli.isSuccess ? "CLI connection copied" : "Copy CLI connection"}</Button>
-          <p className="text-xs leading-relaxed text-muted-foreground">Keep OmniRush.ai open. Add the copied server to ~/.omnirush/mcp.json, then run /mcp reconnect in the CLI. Window approval stays in this app.</p>
         </div> : null}
-        <p className="text-xs leading-relaxed text-muted-foreground" data-computer-use-asks>
-          You approve each app once per chat, in every mode. Normal then works without asking, except before paying, buying or ordering and before typing a password. Careful asks before every action; Auto asks only that first time.
-        </p>
+        {connected ? <div className="space-y-2 border-t border-border pt-4">
+          <Button variant="outline" disabled={copyCli.isPending} onClick={() => copyCli.mutate()}><Copy className="size-4" />{copyCli.isSuccess ? "CLI connection copied" : "Copy CLI connection"}</Button>
+          <p className="text-xs leading-relaxed text-muted-foreground">Keep OmniRush.ai open. Add the copied server to ~/.omnirush/mcp.json, then run /mcp reconnect in the CLI. Stop stays in this app.</p>
+        </div> : null}
         <p className="text-xs leading-relaxed text-muted-foreground">
-          {!mac ? "Keep the target app visible on an unlocked desktop. Computer Use moves the mouse and types in the foreground; choose Continue after taking over. Choose a model that accepts images. For background Blender work, ask for a Blender Python script or use an app connector. " : null}
-          Hide the preview if it covers app controls; Stop stays available in the OmniRush.ai window. Sessions end after 15 minutes and pause when idle. Window content is processed by your selected model provider. Enter passwords yourself. For websites, use the built-in browser.
+          {realScreenOn && !mac ? "On your own screen, keep the target app visible on an unlocked desktop: Computer Use moves the mouse and types in the foreground; choose Continue after taking over. " : null}
+          Choose a model that accepts images. Hide the preview if it covers something; Stop stays available in the OmniRush.ai window. Sessions end after 15 minutes. What the agent sees is processed by your selected model provider.
         </p>
       </CardContent>
       <CardFooter className="flex flex-wrap items-center justify-between gap-3 border-t border-border">
-        <p className="max-w-sm text-xs text-muted-foreground">{ready ? "Mention an app in your next message, then approve the window when asked." : !connected ? "Desktop access and enabling tools for this workspace are separate steps." : "Allow access, then return here. Status updates automatically."}</p>
+        <p className="max-w-sm text-xs text-muted-foreground">{ready ? "Ask for a task on the web or in an app; the agent opens its own display." : "Enable Computer Use for this workspace. Status updates automatically."}</p>
         {ready ? <Button variant="outline" onClick={() => void refresh()} disabled={busy}>Check readiness</Button> : null}
       </CardFooter>
     </Card>

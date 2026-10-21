@@ -877,8 +877,10 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink, che
     return browserProxyState();
   }
 
-  app.on("login", (event, _webContents, _details, authInfo, callback) => {
+  app.on("login", (event, webContents, _details, authInfo, callback) => {
     if (!authInfo?.isProxy || !browserProxy?.username) return;
+    // The browser panel's proxy credentials are never given to computer use's own browser (its own sessions).
+    if (webContents?.session !== browserSession) return;
     event.preventDefault();
     callback(browserProxy.username, browserProxy.password);
   });

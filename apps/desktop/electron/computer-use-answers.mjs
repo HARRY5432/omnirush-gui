@@ -1,6 +1,6 @@
-// Whether a rig may answer computer use questions without a physical press (remote-debugging clicks).
-// Only in a build run from source: a packaged app ignores OMNIRUSH_COMPUTER_USE_TEST_ANSWERS, so relaunching
-// it with that environment can never approve on the person's behalf.
+// Whether a rig may press Continue (after the person took over their own screen) without a physical press
+// (remote-debugging clicks). Only in a build run from source: a packaged app ignores
+// OMNIRUSH_COMPUTER_USE_TEST_ANSWERS, so relaunching it with that environment can never resume on the person's behalf.
 /**
  * @param {Record<string, string | undefined> | undefined} env
  * @param {boolean} isPackaged

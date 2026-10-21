@@ -1,6 +1,12 @@
 // Computer use, policy: the server switch (capabilities `computer_use`), the
-// apps the agent may never open, and which actions ask the person first in
-// each permission mode.
+// person's one-time real-screen setting, the apps the agent may never open,
+// and (for the desktop's built-in browser only) which actions ask first.
+//
+// Computer use itself never asks (owner decision 2026-10-21): the agent's own
+// display needs no approval at all, and the person's real screen is a
+// setting the person turns on once (off by default), then runs with no
+// per-session or per-action questions. What stays: the indicator and Stop,
+// the deny list and hit-testing, stuck-input release, the server switch.
 //
 // The same file ships in omnirush-cli (src/computer-use/) and omnirush-gui
 // (apps/server/src/computer-use/shared/); PARITY.sha256 lists it in both. No
@@ -35,11 +41,11 @@ function text(value, limit = 400) {
  * missing or malformed block is off. The server already applied
  * `rollout_percent` (and the account) to `enabled`.
  * Shape: { enabled, clients, os, models, real_screen, virtual_display,
- * deny_apps, limits, message, ask_send_delete, grant_epoch, chat_bound_read }
+ * deny_apps, limits, message, ask_send_delete }
  * (null lists: no restriction).
  */
 export function normalizeComputerUse(block) {
-  if (!isRecord(block)) return { enabled: false, clients: null, os: null, models: null, real_screen: false, virtual_display: false, deny_apps: [], limits: normalizeLimits(null), message: null, ask_send_delete: false, grant_epoch: null, chat_bound_read: false };
+  if (!isRecord(block)) return { enabled: false, clients: null, os: null, models: null, real_screen: false, virtual_display: false, deny_apps: [], limits: normalizeLimits(null), message: null, ask_send_delete: false };
   const denyApps = Array.isArray(block.deny_apps)
     ? block.deny_apps.flatMap((item) => {
       if (typeof item === "string" && item.trim()) return [{ match: item.trim().slice(0, 200), reason: null }];
@@ -57,13 +63,8 @@ export function normalizeComputerUse(block) {
     deny_apps: denyApps,
     limits: normalizeLimits(block.limits),
     message: text(block.message),
-    // The send/delete asks in Normal (actApproval options.sendDelete): only an explicit true turns them on.
+    // The desktop's built-in browser tool only (actApproval options.sendDelete): only an explicit true turns them on.
     ask_send_delete: block.ask_send_delete === true,
-    // "Allow for this chat" is reused only under the epoch it was given in (the server bumps it when the
-    // switch or the bound changes) and only when the server sent the bound itself: else null / false.
-    grant_epoch: Number.isSafeInteger(block.grant_epoch) && block.grant_epoch >= 0 ? block.grant_epoch : null,
-    // (A block normalized here once already keeps its answer: its limits are filled in by then.)
-    chat_bound_read: block.chat_bound_read === false ? false : isRecord(block.limits) && typeof block.limits.chat_approval_seconds === "number" && Number.isFinite(block.limits.chat_approval_seconds),
   };
 }
 
@@ -98,6 +99,52 @@ export function modelAllowed(setting, modelId) {
 /** The message people see when computer use is off. */
 export function offMessage(setting) {
   return setting?.message ?? OFF_MESSAGE;
+}
+
+// ------------------------------------------------------------- real screen
+
+/** The person's real screen is off until the person turns it on (Settings / `omnirush computer real-screen on`). */
+export const REAL_SCREEN_DEFAULT = false;
+/** The key both apps save the person's choice under, in <state or profile>/computer-use/real-screen.json. */
+export const REAL_SCREEN_SETTING = "computerUseRealScreen";
+export const REAL_SCREEN_FILE = "real-screen.json";
+/** OMNIRUSH_COMPUTER_USE_REAL_SCREEN=0 turns it off; =1 turns it on only in builds run from source (tests, support). */
+export const REAL_SCREEN_ENV = "OMNIRUSH_COMPUTER_USE_REAL_SCREEN";
+export const REAL_SCREEN_OFF_MESSAGE = "Computer use on the person's own screen is off. Work on your own display instead (app_id \"virtual:main\"). Only the person can change this setting; never change it yourself and never ask to.";
+
+/**
+ * Engine permission rules for every mode (computer use on or off): the agent can neither run the command that
+ * turns the real screen on nor write the setting. Appended after the mode's own rules (the last match wins); the
+ * engine's matcher treats \\ as / (Windows paths match too).
+ */
+export const REAL_SCREEN_DENY_RULES = Object.freeze({
+  bash: Object.freeze({ "*computer real-screen*": "deny", "*computerUseRealScreen*": "deny", "*OMNIRUSH_COMPUTER_USE_REAL_SCREEN*": "deny", "*computer-use/real-screen.json*": "deny" }),
+  edit: Object.freeze({ "*computer-use/real-screen.json": "deny" }),
+});
+
+/**
+ * Whether the person turned the real screen on: the saved setting, else REAL_SCREEN_DEFAULT. The environment can
+ * always force it OFF; it can force it ON only in builds run from source (`allowEnvOn`: the CLI's dev builds, an
+ * unpackaged desktop app), so a line an agent slips into a shell profile never turns it on in a released app.
+ */
+export function realScreenOptIn({ env = process.env, saved, allowEnvOn = false } = {}) {
+  const asked = String(env?.[REAL_SCREEN_ENV] ?? "").trim().toLowerCase();
+  if (["0", "off", "false", "no"].includes(asked)) return false;
+  if (allowEnvOn && ["1", "on", "true", "yes"].includes(asked)) return true;
+  return typeof saved === "boolean" ? saved : REAL_SCREEN_DEFAULT;
+}
+
+/**
+ * How a session opens, by display: `virtual` (the agent's own display) always opens with no question;
+ * `real` (the person's screen) opens with no question when the server allows it and the person turned it
+ * on, and is refused otherwise (never asked). Acts never ask on either.
+ * Returns { open: true, asks: false } or { open: false, asks: false, code, message }.
+ */
+export function sessionRules({ display, server = {}, optIn = REAL_SCREEN_DEFAULT } = {}) {
+  if (display === "virtual") return server.virtual_display === false ? { open: false, asks: false, code: "virtual_unavailable", message: "The agent's own display is turned off for this account." } : { open: true, asks: false };
+  if (server.real_screen === false) return { open: false, asks: false, code: "real_screen_unavailable", message: "Computer use on the person's screen is turned off for this account. Use your own display (app_id \"virtual:main\")." };
+  if (optIn !== true) return { open: false, asks: false, code: "real_screen_off", message: REAL_SCREEN_OFF_MESSAGE };
+  return { open: true, asks: false };
 }
 
 // ---------------------------------------------------------------- deny list
@@ -348,7 +395,8 @@ export function looksLikeCredential(value) {
 }
 
 /**
- * Whether one computer_act asks the person first, by permission mode:
+ * The desktop's built-in browser tool only (computer use never asks; see sessionRules).
+ * Whether one browser act asks the person first, by permission mode:
  * - careful: every act asks;
  * - normal: only paying, buying or ordering (the intent, the text at a click
  *   or Enter/Space target, or, where the host reads no text there, a page
@@ -442,7 +490,7 @@ export const SCREEN_BASH_RULES = Object.freeze({
   "*mouse_event*": "ask",
 });
 
-/** Engine permission rules for the tools of the built-in server: the host asks, so the engine never does. */
+/** Engine permission rules for the tools of the built-in server: computer use never asks, the engine neither. */
 export function computerPermissionRules() {
   return { [`${SERVER_ID}_*`]: "allow" };
 }

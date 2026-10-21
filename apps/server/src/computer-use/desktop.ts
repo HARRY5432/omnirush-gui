@@ -149,7 +149,8 @@ export function computerUseBuiltins(dir: string | null | undefined, env: Record<
   // The command comes from the app (the engine's environment); host.json only says the host runs, and must agree.
   let expected: ComputerUseHostFile | null = null;
   try { expected = JSON.parse(env[COMPUTER_USE_COMMAND_ENV] ?? "null") as ComputerUseHostFile | null; } catch { expected = null; }
-  const host = setting.enabled && setting.real_screen ? readHostFile(dir) : null;
+  // Either display (the person's screen or the agent's own) needs the host.
+  const host = setting.enabled && (setting.real_screen || setting.virtual_display) ? readHostFile(dir) : null;
   if (!host || !expected || !sameHostCommand(host, expected) || !existsSync(expected.command[0] ?? "")) return { [SERVER_ID]: null };
   return { [SERVER_ID]: { type: "local", command: expected.command, environment: expected.environment, enabled: true, timeout: COMPUTER_USE_MCP_TIMEOUT_MS, title: "Computer use" } };
 }
@@ -209,6 +210,7 @@ export function sessionEventOf(value: unknown): Record<string, unknown> | null {
     if (typeof value[key] === "string" && String(value[key]).length <= 4096) out[key] = value[key];
   }
   if (value.reused === true) out.reused = true;
+  if (value.by_setting === true) out.by_setting = true;
   if (isRecord(value.screen)) {
     const s = value.screen;
     out.screen = { id: String(s.id ?? ""), width: Number(s.width) || 0, height: Number(s.height) || 0, scale: Number(s.scale) || 1 };

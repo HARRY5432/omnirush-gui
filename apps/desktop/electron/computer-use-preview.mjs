@@ -43,11 +43,13 @@ export function createComputerPreview() {
     /** Host states (portable-host.mjs): the first working or paused session shows the pill. */
     update(states) {
       const value = states.find((s) => s.phase === "working" || s.phase === "paused");
-      current = value ? { id: value.id, phase: value.phase, mode: value.mode, status: value.status, appName: value.app.app_name, remainingSeconds: value.seconds_left, previewVisible: !value.hidden, windowBounds: value.window_bounds ?? null } : null;
+      current = value ? { id: value.id, phase: value.phase, mode: value.mode, status: value.status, appName: value.app.app_name, remainingSeconds: value.seconds_left, previewVisible: !value.hidden, windowBounds: value.window_bounds ?? null, virtual: value.display === "virtual", cursor: value.cursor ?? null, frame: value.frame ? { width: value.frame.width, height: value.frame.height } : null } : null;
       if (!current || !current.previewVisible) { panel?.hide(); return; }
       show(); panel.webContents.send("omnirush-computer-use-preview-state", current);
     },
-    image(dataUrl) { panel?.webContents.send("omnirush-computer-use-preview-image", dataUrl); },
+    image(dataUrl, sessionId) { if (!sessionId || sessionId === current?.id) panel?.webContents.send("omnirush-computer-use-preview-image", dataUrl); },
+    /** The agent cursor's next move ({ from, to, width, height } in frame pixels): the pill glides its cursor there. */
+    cursor(move) { if (move.session_id === current?.id) panel?.webContents.send("omnirush-computer-use-preview-cursor", { from: move.from, to: move.to, width: move.width, height: move.height }); },
     close() { current = null; panel?.destroy(); panel = null; ipcMain.removeListener(channel, action); },
   };
 }

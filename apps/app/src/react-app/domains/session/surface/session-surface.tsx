@@ -1181,7 +1181,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
   const setFindLastFocused = useSessionFindStore((state) => state.setLastFocused);
   const findOwned = findOpen && findSessionId === props.sessionId;
   const computerUse = useComputerUseForChat(props.sessionId);
-  const hasComputerUse = computerUse.requests.length > 0 || computerUse.sessions.length > 0;
+  const hasComputerUse = computerUse.length > 0;
   const findHighlightQuery = findOwned && findAppliedQuery.trim().length >= 2 ? findAppliedQuery : "";
   const sessionActivityStatus = useSessionActivityStore(
     (state) => state.statusesByWorkspaceId[props.workspaceId]?.[props.sessionId] ?? "idle",
@@ -3647,7 +3647,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
                 ) : (props.todos ?? []).some((todo) => todo.content.trim()) ? (
                   <TodoPanel todos={props.todos ?? []} />
                 ) : null}
-                {hasComputerUse ? <ComputerUseInline requests={computerUse.requests} sessions={computerUse.sessions} /> : null}
+                {hasComputerUse ? <ComputerUseInline sessions={computerUse} /> : null}
                 {props.activePermission ? (
                   <PermissionApprovalPanel
                     permission={props.activePermission}
