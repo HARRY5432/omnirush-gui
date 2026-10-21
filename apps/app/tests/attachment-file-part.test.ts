@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 
 import { attachmentNoteToUIParts } from "../src/react-app/domains/session/sync/usechat-adapter";
@@ -406,6 +407,36 @@ describe("composer attachment file parts", () => {
       filename: "sitemap.xml",
       mime: "text/plain",
     });
+  });
+
+  test("a POSIX // workspace root keeps a URL the engine can read", async () => {
+    const { endpoint } = uploadRecorder("server-workspace-42");
+    const file = new File(["<a/>"], "sitemap.xml", { type: "text/xml" });
+
+    const parts = await composerAttachmentsToWorkspaceFileParts({
+      attachments: [attachmentFor(file)],
+      endpoint,
+      sessionId: "ses_xml",
+      workspaceRoot: "//srv/share/proj",
+      createId: () => "nonce-xml",
+    });
+
+    const url = filePartUrl(parts, 0);
+    expect(fileURLToPath(url, { windows: false })).toBe("//srv/share/proj/.opencode/omnirush/inbox/chat-attachments/ses_xml/nonce-xml-sitemap.xml");
+  });
+
+  test("device-path and localhost UNC roots are refused as unavailable", async () => {
+    for (const workspaceRoot of ["\\\\?\\C:\\proj", "\\\\.\\pipe\\proj", "\\\\localhost\\share\\proj"]) {
+      const { endpoint } = uploadRecorder("server-workspace-42");
+      const file = new File(["<a/>"], "sitemap.xml", { type: "text/xml" });
+      await expect(composerAttachmentsToWorkspaceFileParts({
+        attachments: [attachmentFor(file)],
+        endpoint,
+        sessionId: "ses_xml",
+        workspaceRoot,
+        createId: () => "nonce-xml",
+      })).rejects.toThrow("Workspace path is unavailable");
+    }
   });
 
   test("workspace binary attachments upload for tool access without a model-facing file part", async () => {

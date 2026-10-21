@@ -74,20 +74,45 @@ export function toFileUrl(path: string, windows = false) {
   // `file:////server` has an empty host, which Windows cannot turn back into a
   // path. Elsewhere a host is invalid, so `//x` keeps the empty-host form.
   const unc = windows ? normalized.match(/^\/\/([^/]+)(\/.*)$/) : null;
-  if (unc && isUncHost(unc[1] ?? "")) return `file://${unc[1]}${encodeFilePath(unc[2] ?? "")}`;
+  if (unc) {
+    const url = `file://${unc[1] ?? ""}${encodeFilePath(unc[2] ?? "")}`;
+    return isUncHost(unc[1] ?? "") && parsedHost(url) === (unc[1] ?? "").toLowerCase() ? url : "";
+  }
   return `file://${encodeFilePath(normalized)}`;
 }
 
-/** A plain UNC server name; device paths (`\\?\`, `\\.\`) and odd hosts are not. */
+function parsedHost(url: string) {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * A plain UNC server name. Device paths (`\\?\`, `\\.\`), `localhost` (the URL
+ * parser drops it, leaving no host) and odd hosts are not.
+ */
 function isUncHost(host: string) {
-  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(host);
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(host) && host.toLowerCase() !== "localhost";
+}
+
+/** A Windows UNC root or path the engine can open (`\\server\share\...`). */
+export function isUsableUncPath(path: string) {
+  return toFileUrl(path, true) !== "";
+}
+
+function windowsPlatform() {
+  return typeof navigator !== "undefined" && /^win/i.test(navigator.platform ?? "");
 }
 
 /** A workspace on Windows: a drive (`C:\\`) or UNC (`\\\\server\\share`) root. */
 export function isWindowsWorkspaceRoot(workspaceRoot: string) {
   const root = workspaceRoot.trim();
-  if (!root) return typeof navigator !== "undefined" && /^win/i.test(navigator.platform ?? "");
-  return /^[A-Za-z]:([\\/]|$)/.test(root) || /^(\\\\|\/\/)[^\\/]/.test(root);
+  if (!root) return windowsPlatform();
+  if (/^[A-Za-z]:([\\/]|$)/.test(root) || /^\\\\[^\\/]/.test(root)) return true;
+  // `//x` is a valid POSIX root too; it is a UNC share only on Windows.
+  return /^\/\/[^\\/]/.test(root) && windowsPlatform();
 }
 
 /**
@@ -103,7 +128,7 @@ export function promptFileUrl(path: string, workspaceRoot: string) {
   const drive = /^[A-Za-z]:\//.test(normalized);
   if (isWindowsWorkspaceRoot(workspaceRoot)) {
     const unc = normalized.match(/^\/\/([^/]+)\/[^/]/);
-    if (!drive && !(unc && isUncHost(unc[1] ?? ""))) return "";
+    if (!drive && !unc) return "";
     return toFileUrl(normalized, true);
   }
   if (!drive && !normalized.startsWith("/")) return "";

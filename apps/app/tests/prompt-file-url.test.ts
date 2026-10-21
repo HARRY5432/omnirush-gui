@@ -29,7 +29,8 @@ describe("Windows workspace roots", () => {
     expect(isWindowsWorkspaceRoot("C:\\Users\\omar\\code")).toBe(true);
     expect(isWindowsWorkspaceRoot("d:/work")).toBe(true);
     expect(isWindowsWorkspaceRoot("\\\\server\\share\\proj")).toBe(true);
-    expect(isWindowsWorkspaceRoot("//server/share/proj")).toBe(true);
+    // `//x` is a POSIX path too; only a Windows platform makes it a share.
+    expect(isWindowsWorkspaceRoot("//server/share/proj")).toBe(false);
     expect(isWindowsWorkspaceRoot("/home/omar/code")).toBe(false);
     expect(isWindowsWorkspaceRoot("/Users/omar/code")).toBe(false);
   });
@@ -75,6 +76,15 @@ describe("prompt file URLs", () => {
     expect(promptFileUrl("\\\\.\\pipe\\x", root)).toBe("");
     expect(promptFileUrl("\\\\my host\\share\\a.ts", root)).toBe("");
     expect(toFileUrl("//?/C:/x", true)).not.toStartWith("file://?");
+  });
+
+  test("UNC hosts the URL parser would rewrite or drop are not sent", () => {
+    const root = "C:\\Users\\omar\\code";
+    for (const host of ["localhost", "LOCALHOST", "nas.01", "192.168.1", "0x7f.1"]) {
+      expect(promptFileUrl(`\\\\${host}\\share\\a.ts`, root)).toBe("");
+    }
+    const ok = promptFileUrl("\\\\192.168.1.20\\share\\a.ts", root);
+    expect(windowsPath(ok)).toBe("\\\\192.168.1.20\\share\\a.ts");
   });
 });
 
