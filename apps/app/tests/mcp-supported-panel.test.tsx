@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import type { OmniRushMcpPolicyView, OmniRushMcpPreset } from "../src/app/lib/omnirush-server";
-import { projectCodeNotice } from "../src/lib/capability-call";
 import type { McpServerEntry } from "../src/app/types";
 import {
   MCP_BLOCKED_HINTS,
@@ -112,19 +111,14 @@ describe("Settings > MCP: supported servers", () => {
     expect(html).not.toContain("`");
   });
 
-  test("what the project's own config could not load is said once, in the panel and as a notice", () => {
+  test("what the project's own config could not load is said in the panel", () => {
     const line = "Not loaded from this project's config: plugins evil.ts.";
     const shown = line.replace(/'/g, "&#x27;");
     expect(render({ policy: policy({ ignoredNotice: line }) })).toContain(shown);
     expect(render({ policy: policy({ enabled: false, ignoredNotice: line }) })).toContain(shown);
     expect(render()).not.toContain("mcp-project-code-ignored");
-    expect(projectCodeNotice("ws_1", line)).toEqual({ id: "project-code-ignored:ws_1", text: line });
-    expect(projectCodeNotice("ws_1", line)).toBeNull();
-    expect(projectCodeNotice("ws_2", line)).not.toBeNull();
-    expect(projectCodeNotice("ws_3", null)).toBeNull();
     const providers = "Not loaded from this project's config: model provider settings. A project's own plugins, tools, commands and providers could run code just by opening it; the built-in language servers and formatters still work, and your own (user-level) settings apply as usual.";
     expect(render({ policy: policy({ ignored: [{ kind: "provider", name: "provider", source: "/repo/opencode.json" }], ignoredNotice: providers }) })).toContain("model provider settings");
-    expect(projectCodeNotice("ws_4", providers)?.text).toBe(providers);
   });
 
   test("a missing runner says how to fix it", () => {

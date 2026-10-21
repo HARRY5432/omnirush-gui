@@ -139,19 +139,6 @@ function verbPhrase(action: string, tense: "present" | "past"): string {
 // engine names their tools `<id>_<tool>`; those calls read "Used <title>: <tool>".
 const mcpServerTitles = new Map<string, string>()
 
-const projectCodeNoticesShown = new Set<string>()
-
-/**
- * The notice about a project's own config the engine left out (its plugins,
- * language server and formatter commands): once per project and app run.
- */
-export function projectCodeNotice(workspaceId: string, text: string | null | undefined): { id: string; text: string } | null {
-  const line = text?.trim()
-  if (!line || projectCodeNoticesShown.has(`${workspaceId}\0${line}`)) return null
-  projectCodeNoticesShown.add(`${workspaceId}\0${line}`)
-  return { id: `project-code-ignored:${workspaceId}`, text: line }
-}
-
 /** Remember the titles of supported MCP servers (from GET /workspace/:id/mcp). */
 export function registerMcpServerTitles(entries: ReadonlyArray<{ id?: string | null; title?: string | null }>): void {
   for (const entry of entries) {

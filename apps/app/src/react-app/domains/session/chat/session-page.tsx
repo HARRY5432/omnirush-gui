@@ -3,8 +3,8 @@ import type { CSSProperties } from "react";
 import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { usePanelRef } from "react-resizable-panels";
 import { DesktopUpdateButton } from "../../settings/state/desktop-updater-provider";
-import { BuildathonChip } from "../../buildathon/buildathon";
-import { ArrowLeft, Cloud, Code2, FileDiff, Layers, MessageSquare, LayoutGrid, Library, MessageSquareOff, PanelLeft, FileText, Gauge, Redo2, Undo2, Globe, ListChecks, Maximize2, MoreHorizontal, PanelRight, TextSearch, X, Zap } from "lucide-react";
+import { BuildathonChip, useBuildathonMenuItem } from "../../buildathon/buildathon";
+import { ArrowLeft, Cloud, Code2, FileDiff, Layers, MessageSquare, LayoutGrid, Library, MessageSquareOff, PanelLeft, FileText, Gauge, Redo2, Undo2, Globe, ListChecks, Maximize2, MoreHorizontal, PanelRight, TextSearch, Trophy, X, Zap } from "lucide-react";
 import { SessionCommandControls } from "../commands/session-command-controls";
 import { useSessionCommandBridge, useSessionCommandsStore } from "../commands/session-commands-store";
 
@@ -507,6 +507,8 @@ export function SessionPage(props: SessionPageProps) {
   const ideMode = editorAvailable && !isMobile && storedLayoutMode === "ide" && !props.primarySlot && !props.mainContentTakeover;
   const layoutMode: LayoutMode = ideMode ? "ide" : "chat";
   const ideChatCollapsed = useEditorStore((state) => state.ideChatCollapsed);
+  // After submissions close the header chip is gone; the "…" menu keeps My Buildathon reachable.
+  const buildathonMenu = useBuildathonMenuItem();
   const setLayoutMode = useCallback((mode: LayoutMode) => {
     if (mode === "ide" && !editorAvailable) return;
     useEditorStore.getState().setMode(props.selectedWorkspaceId, mode);
@@ -1511,8 +1513,9 @@ export function SessionPage(props: SessionPageProps) {
               below) is invisible — nothing scrolls beneath either — but each
               one forces an extra full-pane blur pass every frame the transcript
               repaints. Keep the pane as the only backdrop surface. */}
-          <header className="z-10 flex h-9 shrink-0 items-center justify-between border-b border-border px-3 max-lg:h-12 lg:px-6 mac:titlebar-drag @container/titlebar">
-            <div className="flex min-w-0 items-center gap-3">
+          <header className="z-10 flex h-9 shrink-0 items-center justify-between gap-2 border-b border-border px-3 max-lg:h-12 lg:px-6 mac:titlebar-drag @container/titlebar" data-session-header>
+            {/* Title side takes the room left over and truncates; the buttons side never shrinks under it. */}
+            <div className="flex min-w-0 flex-1 items-center gap-3" data-session-header-title>
               {ideMode ? (
                 <ChatSwitcher
                   chats={ideChats}
@@ -1547,7 +1550,7 @@ export function SessionPage(props: SessionPageProps) {
                   <TooltipContent>Back to parent chat</TooltipContent>
                 </Tooltip>
               ) : null}
-              <h1 className={cn("truncate text-[13px] font-medium text-dls-text", ideMode && "sr-only")}>
+              <h1 className={cn("min-w-0 truncate text-[13px] font-medium text-dls-text", ideMode && "sr-only")}>
                 {props.primaryTitle
                   ? props.primaryTitle
                   : props.mainContentTitle
@@ -1560,11 +1563,11 @@ export function SessionPage(props: SessionPageProps) {
                 // Pinned and archived sessions are listed across workspaces, so
                 // the header names the workspace the open session belongs to.
                 <span
-                  className="flex min-w-0 shrink-0 items-center gap-1.5 text-[12px] text-dls-secondary"
+                  className="flex shrink-[3] items-center gap-1.5 text-[12px] text-dls-secondary"
                   data-session-header-workspace={workspaceName}
                 >
                   <span aria-hidden="true">·</span>
-                  <span className="max-w-40 truncate @max-[30rem]/titlebar:max-w-20">{workspaceName}</span>
+                  <span className="min-w-12 max-w-40 truncate @max-[30rem]/titlebar:max-w-20">{workspaceName}</span>
                 </span>
               ) : null}
               {props.developerMode ? (
@@ -1579,7 +1582,7 @@ export function SessionPage(props: SessionPageProps) {
               ) : null}
             </div>
 
-            <div className="flex shrink-0 items-center gap-1.5 text-gray-10 mac:titlebar-no-drag">
+            <div className="flex min-w-0 shrink-0 items-center justify-end gap-1.5 text-gray-10 mac:titlebar-no-drag" data-session-header-actions>
               <BuildathonChip />
               <DesktopUpdateButton />
               {commandSessionId && props.runtimeWorkspaceId ? (
@@ -1667,7 +1670,7 @@ export function SessionPage(props: SessionPageProps) {
                     <Button
                       variant="ghost"
                       size="icon-sm"
-                      className={cn("rounded-xl text-gray-10 transition-colors hover:bg-muted hover:text-foreground", !ideMode && "@min-[40rem]/titlebar:hidden")}
+                      className={cn("rounded-xl text-gray-10 transition-colors hover:bg-muted hover:text-foreground", !ideMode && !buildathonMenu.visible && "@min-[40rem]/titlebar:hidden")}
                       aria-label="More actions"
                     >
                       <MoreHorizontal size={18} />
@@ -1734,6 +1737,12 @@ export function SessionPage(props: SessionPageProps) {
                     <FileText className="size-4" />
                     Files{artifactTargetCount > 0 ? ` (${artifactTargetCount})` : ""}
                   </DropdownMenuItem>
+                  {buildathonMenu.visible ? (
+                    <DropdownMenuItem onClick={buildathonMenu.open} data-menu-buildathon>
+                      <Trophy className="size-4" />
+                      Buildathon
+                    </DropdownMenuItem>
+                  ) : null}
                   {showCloudSignIn ? (
                     <DropdownMenuItem onClick={openCloudSignIn}>
                       <Cloud className="size-4" />
