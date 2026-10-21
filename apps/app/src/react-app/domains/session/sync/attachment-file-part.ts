@@ -2,7 +2,7 @@ import type { FilePartInput, TextPartInput } from "@opencode-ai/sdk/v2/client";
 
 import type { ComposerAttachment } from "../../../../app/types";
 import { compressImageFile } from "./image-compression";
-import { joinWorkspaceRelativePath, toFileUrl } from "./prompt-file-parts";
+import { isWindowsWorkspaceRoot, joinWorkspaceRelativePath, toFileUrl } from "./prompt-file-parts";
 
 type AttachmentKind = "image" | "file";
 
@@ -413,7 +413,7 @@ export async function composerAttachmentsToWorkspaceFileParts(input: {
       mime: metadata.mime,
       bytes: result.bytes,
       workspacePath,
-      url: toFileUrl(absolutePath),
+      url: toFileUrl(absolutePath, isWindowsWorkspaceRoot(workspaceRoot)),
       file,
     });
   }

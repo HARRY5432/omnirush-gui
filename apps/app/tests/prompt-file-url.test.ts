@@ -16,6 +16,10 @@ function windowsPath(url: string) {
   return fileURLToPath(url, { windows: true });
 }
 
+function posixPath(url: string) {
+  return fileURLToPath(url, { windows: false });
+}
+
 function fileUrls(parts: Array<{ type: string; url?: string }>) {
   return parts.filter((part) => part.type === "file").map((part) => part.url ?? "");
 }
@@ -54,8 +58,23 @@ describe("prompt file URLs", () => {
     expect(promptFileUrl("/home/omar/code/a.ts", "/home/omar/code")).toBe("file:///home/omar/code/a.ts");
   });
 
-  test("UNC paths get the server as the URL host", () => {
-    expect(toFileUrl("//server/share/x.ts")).toBe("file://server/share/x.ts");
+  test("UNC paths get the server as the URL host on Windows only", () => {
+    expect(toFileUrl("//server/share/x.ts", true)).toBe("file://server/share/x.ts");
+    expect(toFileUrl("//server/share/x.ts")).toBe("file:////server/share/x.ts");
+  });
+
+  test("double-slash paths on macOS and Linux stay valid POSIX URLs", () => {
+    const url = promptFileUrl("//server/share/x.ts", "/home/omar/code");
+    expect(posixPath(url)).toBe("//server/share/x.ts");
+    expect(posixPath(toFileUrl("//net/a.ts"))).toBe("//net/a.ts");
+  });
+
+  test("Windows device paths and odd hosts are not sent", () => {
+    const root = "C:\\Users\\omar\\code";
+    expect(promptFileUrl("\\\\?\\C:\\x\\a.ts", root)).toBe("");
+    expect(promptFileUrl("\\\\.\\pipe\\x", root)).toBe("");
+    expect(promptFileUrl("\\\\my host\\share\\a.ts", root)).toBe("");
+    expect(toFileUrl("//?/C:/x", true)).not.toStartWith("file://?");
   });
 });
 
@@ -73,6 +92,13 @@ describe("Windows first-line paths", () => {
     const urls = fileUrls(parts);
     expect(urls).toHaveLength(2);
     for (const url of urls) expect(() => windowsPath(url)).not.toThrow();
+  });
+});
+
+describe("POSIX first-line paths", () => {
+  test("a file URL with a host never becomes a URL the engine rejects", () => {
+    const parts = firstLineLocalFileParts("open file://server/share/a.ts and /home/omar/b.ts", "/home/omar/code");
+    for (const url of fileUrls(parts)) expect(() => posixPath(url)).not.toThrow();
   });
 });
 
@@ -112,5 +138,20 @@ describe("Windows draft mentions", () => {
       null,
     );
     expect(fileUrls(parts)).toEqual(["file:///etc/hosts"]);
+  });
+
+  test("POSIX double-slash mentions stay valid POSIX URLs", async () => {
+    const parts = await draftToParts(
+      {
+        mode: "prompt",
+        text: "look at @//srv/share/a.ts",
+        parts: [{ type: "file", path: "//srv/share/a.ts" }],
+        attachments: [],
+      },
+      "/home/omar/code",
+      "ses_test",
+      null,
+    );
+    for (const url of fileUrls(parts)) expect(() => posixPath(url)).not.toThrow();
   });
 });

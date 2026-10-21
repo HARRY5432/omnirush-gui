@@ -67,14 +67,20 @@ function encodeFilePath(path: string) {
   return path.replace(/\\/g, "/").split("/").map(encodeURIComponent).join("/");
 }
 
-export function toFileUrl(path: string) {
+export function toFileUrl(path: string, windows = false) {
   const normalized = path.replace(/\\/g, "/");
   if (/^[A-Za-z]:\//.test(normalized)) return `file:///${encodeFilePath(normalized).replace(/^([A-Za-z])%3A/, "$1:")}`;
-  // UNC share (`\\server\share\...`): the server is the URL host. `file:////server`
-  // has an empty host, which Windows cannot turn back into a path.
-  const unc = normalized.match(/^\/\/([^/]+)(\/.*)$/);
-  if (unc) return `file://${encodeURIComponent(unc[1] ?? "")}${encodeFilePath(unc[2] ?? "")}`;
+  // UNC share on Windows (`\\server\share\...`): the server is the URL host.
+  // `file:////server` has an empty host, which Windows cannot turn back into a
+  // path. Elsewhere a host is invalid, so `//x` keeps the empty-host form.
+  const unc = windows ? normalized.match(/^\/\/([^/]+)(\/.*)$/) : null;
+  if (unc && isUncHost(unc[1] ?? "")) return `file://${unc[1]}${encodeFilePath(unc[2] ?? "")}`;
   return `file://${encodeFilePath(normalized)}`;
+}
+
+/** A plain UNC server name; device paths (`\\?\`, `\\.\`) and odd hosts are not. */
+function isUncHost(host: string) {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(host);
 }
 
 /** A workspace on Windows: a drive (`C:\\`) or UNC (`\\\\server\\share`) root. */
@@ -95,12 +101,12 @@ export function promptFileUrl(path: string, workspaceRoot: string) {
   const normalized = path.trim().replace(/\\/g, "/");
   if (!normalized) return "";
   const drive = /^[A-Za-z]:\//.test(normalized);
-  const unc = /^\/\/[^/]+\/[^/]/.test(normalized);
   if (isWindowsWorkspaceRoot(workspaceRoot)) {
-    if (!drive && !unc) return "";
-  } else if (!drive && !normalized.startsWith("/")) {
-    return "";
+    const unc = normalized.match(/^\/\/([^/]+)\/[^/]/);
+    if (!drive && !(unc && isUncHost(unc[1] ?? ""))) return "";
+    return toFileUrl(normalized, true);
   }
+  if (!drive && !normalized.startsWith("/")) return "";
   return toFileUrl(normalized);
 }
 
