@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { BUILD_VARIANT, RELEASE_ENGINE_SHA256 } from "./build-variant.js";
-import { allowedGatewayUrlFromEnv, assertGatewayUrlAllowed, gatewayUrlAllowed, releaseEngineBinary } from "./release-guard.js";
+import { allowedGatewayUrlFromEnv, assertGatewayUrlAllowed, engineSignedByTeam, gatewayUrlAllowed, releaseEngineBinary } from "./release-guard.js";
 
 const DEV = { release: false, engineSha256: null };
 const roots: string[] = [];
@@ -50,6 +50,13 @@ describe("release build guard", () => {
     const other = join(root, "other");
     await writeFile(other, "#!/bin/sh\necho other\n");
     await expect(releaseEngineBinary(other, release)).rejects.toThrow("is not the bundled one");
+    // macOS: signing rewrites the engine after its sha256 is recorded; this team's signature counts instead.
+    expect(await releaseEngineBinary(other, release, async () => true)).toBe(other);
+    await expect(releaseEngineBinary(other, release, async () => false)).rejects.toThrow("is not the bundled one");
+    expect(await engineSignedByTeam(other, "linux")).toBe(false);
+    // On macOS only the bundled engine's folder is considered: any other path is refused without asking codesign.
+    expect(await engineSignedByTeam(other, "darwin")).toBe(false);
+    expect(await engineSignedByTeam(other, "win32")).toBe(false);
     // One hash per bundled architecture (macOS arm64 + x64), comma-separated.
     expect(await releaseEngineBinary(bin, { release: true, engineSha256: ["f".repeat(64), sha].join(",") })).toBe(bin);
     await expect(releaseEngineBinary(other, { release: true, engineSha256: ["f".repeat(64), sha].join(",") })).rejects.toThrow("is not the bundled one");

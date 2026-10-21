@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { createHash } from "node:crypto";
 
-import { gatewayUrlAllowedForBuild, readDesktopBuild, releaseEngineBinary } from "./build-variant.mjs";
+import { ENGINE_SIGNING_REQUIREMENT, engineSignedByTeam, gatewayUrlAllowedForBuild, readDesktopBuild, releaseEngineBinary } from "./build-variant.mjs";
 import { createDesktopOmniRushAccountStore } from "./omnirush-account.mjs";
 import { desktopVariant, stampBuildVariant } from "../scripts/stamp-build-variant.mjs";
 
@@ -105,4 +105,30 @@ test("packaging stamps release with the engine hash, or dev when asked at build 
   await rm(sidecarDir, { recursive: true, force: true });
   await mkdir(sidecarDir);
   assert.throws(() => stampBuildVariant({ env: {}, sidecarDir, serverDistDir, buildFilePath }), /one engine per architecture/);
+});
+
+test("macOS: signing changes the engine after its sha256 is recorded; this team's valid signature counts instead", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "omnirush-build-engine-mac-"));
+  await mkdir(path.join(directory, "sidecars"));
+  await writeFile(path.join(directory, "sidecars", "opencode-aarch64-apple-darwin"), "signed engine");
+  /** @type {DesktopBuild} */
+  const build = { variant: "release", engineSha256: "f".repeat(64), packaged: true };
+  const args = { build, resourcesPath: directory, fileNames: ["opencode-aarch64-apple-darwin"] };
+  assert.equal(releaseEngineBinary({ ...args, signedByTeam: () => true }).source, "bundled");
+  assert.throws(() => releaseEngineBinary({ ...args, signedByTeam: () => false }), /was changed/);
+  // The signature check asks codesign for this team's Developer ID, and only on macOS.
+  const calls = [];
+  const run = (cmd, argv) => { calls.push([cmd, ...argv]); return { status: 0 }; };
+  const stat = () => ({ size: 1, mtimeMs: 1 });
+  assert.equal(engineSignedByTeam("/x/opencode", { platform: "darwin", run, stat }), true);
+  assert.deepEqual(calls[0], ["/usr/bin/codesign", "--verify", "--strict", `-R=${ENGINE_SIGNING_REQUIREMENT}`, "/x/opencode"]);
+  assert.match(ENGINE_SIGNING_REQUIREMENT, /^identifier "ai\.omnirush\.desktop" and anchor apple generic and certificate leaf\[subject\.OU\] = "2KFG4BXC8K"$/);
+  assert.equal(engineSignedByTeam("/x/other", { platform: "darwin", run: () => ({ status: 1 }), stat }), false);
+  // A pass is cached (same file, size, time): codesign is not asked again.
+  assert.equal(engineSignedByTeam("/x/opencode", { platform: "darwin", run, stat }), true);
+  assert.equal(engineSignedByTeam("/x/opencode", { platform: "linux", run, stat }), false);
+  assert.equal(engineSignedByTeam("/x/opencode", { platform: "win32", run, stat }), false);
+  assert.equal(calls.length, 1, "codesign is never run off macOS");
+  // Off macOS a changed engine is still refused (the default check is false there).
+  if (process.platform !== "darwin") assert.throws(() => releaseEngineBinary(args), /was changed/);
 });
