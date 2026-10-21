@@ -37,6 +37,7 @@ import {
   Workflow,
   MessageCircleMore,
   Sparkles,
+  CircleHelp,
 } from "lucide-react";
 import { LazyMotion, Reorder, domMax, m, useDragControls } from "motion/react";
 
@@ -47,6 +48,8 @@ import { isDesktopRuntime } from "../../../../app/lib/runtime-env";
 import { refreshAccountStatus, setQualitySessionId, useAccountStatusStore, useQualityUiStore, type AccountQuality } from "../../../../app/lib/quality";
 import { goodSessionWording } from "../../../../app/lib/good-session";
 import { ProgressRing, QualityTierBadge, SpinCounts, spinRowTitle } from "../../quality/quality-parts";
+import { openAllowanceHelp } from "../../quality/allowance-help";
+import { ALLOWANCE_HELP_TITLE } from "../../../../app/lib/allowance-help";
 import { buildathonProjects, useBuildathonStore } from "../../../../app/lib/buildathon";
 import { OmniRushDenHelpLink } from "../../workspace/omnirush-den-help-link";
 import { NotificationBell } from "../../../shell/notification-center";
@@ -76,6 +79,7 @@ import {
   SidebarHeader,
   SidebarGroupContent,
   SidebarMenu,
+  SidebarMenuAction,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarFooter,
@@ -1101,7 +1105,7 @@ function NativeAccountFooter({ onOpenAccountSettings }: { onOpenAccountSettings:
         <SidebarMenuItem>
           <SidebarMenuButton
             type="button"
-            className="h-auto min-h-12 py-1.5"
+            className={cn("h-auto min-h-12 py-1.5", usage && "pe-7")}
             onClick={onOpenAccountSettings}
             tooltip={accountTooltip}
             aria-label={connected ? `${accountLabel} account` : "Sign in to omnirush.ai"}
@@ -1132,6 +1136,18 @@ function NativeAccountFooter({ onOpenAccountSettings }: { onOpenAccountSettings:
               ) : null}
             </span>
           </SidebarMenuButton>
+          {usage ? (
+            <SidebarMenuAction
+              type="button"
+              onClick={() => openAllowanceHelp()}
+              title={ALLOWANCE_HELP_TITLE}
+              aria-label={ALLOWANCE_HELP_TITLE}
+              data-testid="native-account-allowance-help"
+              className="text-muted-foreground"
+            >
+              <CircleHelp />
+            </SidebarMenuAction>
+          ) : null}
         </SidebarMenuItem>
         {quality ? <QualitySpinRow quality={quality} /> : null}
         {shellConfig.feedbackButton ? (

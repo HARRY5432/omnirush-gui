@@ -63,6 +63,7 @@ import {
 } from "../../../app/lib/good-session-integrity";
 import type { OmniRushGoodSession, OmniRushServerClient } from "../../../app/lib/omnirush-server";
 import { readPref, useAccountQuality, writePref } from "../../../app/lib/quality";
+import { AllowanceHelpLink } from "./allowance-help";
 import { isDesktopRuntime } from "../../../app/utils";
 import { hasLiveSessionActivity, useSessionActivityStore } from "../session/status/session-activity-store";
 
@@ -609,6 +610,7 @@ export function GoodSessionChecklistBar(props: GoodSessionChecklistBarProps) {
           </PopoverTrigger>
           <PopoverContent side="top" align="end" className="w-72 gap-2 rounded-2xl p-3">
             <GoodSessionGuide />
+            <AllowanceHelpLink tab="good-session" label="The full guide" testId="good-session-full-guide" />
           </PopoverContent>
         </Popover>
       </div>

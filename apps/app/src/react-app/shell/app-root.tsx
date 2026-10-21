@@ -50,6 +50,7 @@ import { DesktopUpdaterProvider } from "../domains/settings/state/desktop-update
 import { SyncRestartGate } from "./sync-restart-banner";
 import { UpdateGate } from "./update-gate";
 import { QualityRewards } from "../domains/quality/quality-notice";
+import { AllowanceHelpDialog } from "../domains/quality/allowance-help";
 import { BuildathonLayer } from "../domains/buildathon/buildathon";
 import { BuildathonPromoGate } from "../domains/buildathon/buildathon-promo";
 import { TurnRunningSync } from "../domains/quality/good-session";
@@ -530,6 +531,7 @@ export function AppRoot() {
                   <LoadingOverlay />
                   <CloudWorkspaceOverlay />
                   {isDesktopRuntime() ? <QualityRewards /> : null}
+                  <AllowanceHelpDialog />
                   {isDesktopRuntime() ? <BuildathonLayer /> : null}
                   {isDesktopRuntime() ? <TurnRunningSync /> : null}
                 </CloudWorkspaceStatusProvider>
