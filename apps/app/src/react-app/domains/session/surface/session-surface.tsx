@@ -133,6 +133,7 @@ import {
   useComposerStateStore,
 } from "./composer-state-store";
 import { editConfirmText, editTargetText, hiddenDeleteConfirmText, revertConfirmText, revertNeedsConfirm, revertPointMessageId, turnsFromRevertPoint } from "./revert-scope";
+import { isSessionReverted, markSessionReverted } from "../sync/reverted-sessions";
 import { MessageList } from "@/components/chat/message-list";
 import { MessageListProvider, type DispatchAction } from "@/components/chat/message-list-provider";
 import type {
@@ -2629,8 +2630,8 @@ export function SessionSurface(props: SessionSurfaceProps) {
     if (cloudQueueBlockedRef.current) return;
     if (queuedItems.length === 0) return;
     if (chatStreaming || liveStatus.type !== "idle") return;
-    // A reverted chat: this send would delete its hidden turns. Held until Restore or a confirmed send.
-    if (revertMessageId) return;
+    // A reverted chat (or one being reverted): this send would delete its hidden turns. Held until Restore or a confirmed send.
+    if (revertMessageId || isSessionReverted(props.sessionId)) return;
     if (!canAdmitNextQueuedItem(queuedDrainState)) return;
     const nextItem = getComposerQueuedDrafts(useComposerStateStore.getState(), props.sessionId)[0];
     if (!nextItem) return;
@@ -3224,7 +3225,17 @@ export function SessionSurface(props: SessionSurfaceProps) {
     if (!window.confirm(revertConfirmText(turns, liveStatus.type !== "idle"))) return;
     // From a reply: rewind at the prompt that started its turn, so the turn's earlier steps' file changes go too
     // (the engine reverting at the reply's own message keeps them on disk while the transcript hides them).
-    void props.onRevertToMessage?.(revertPointMessageId(messages, messageId) ?? messageId, props.sessionId);
+    // Hold queued drafts from here: stopping the running turn first would otherwise let one go out ahead of the revert.
+    const sessionId = props.sessionId;
+    markSessionReverted(sessionId, "pending");
+    void Promise.resolve(props.onRevertToMessage?.(revertPointMessageId(messages, messageId) ?? messageId, sessionId))
+      .then((reverted) => reverted === true, () => false)
+      .then((reverted) => {
+        if (reverted) return;
+        // No revert: the held queue may go again.
+        markSessionReverted(sessionId, null);
+        dispatchQueuedDrain(sessionId, { type: "user_retry" });
+      });
   }, [liveStatus.type, props.onRevertToMessage, props.sessionId]);
 
   const handleForkAtMessage = useCallback((messageId: string) => {
