@@ -8,6 +8,7 @@ import managedPolicy from "./managed-policy.js";
 import managedPolicyNext from "./managed-policy-next.js";
 import { DESTRUCTIVE_MARKER } from "../git-command-policy.js";
 import { annotateShellOutput, prepareShellCommand, readGitIdentity } from "./managed-policy-client.js";
+import { SHELL_SECRET_ENV } from "./shell-secret-env.js";
 
 type EvaluateCall = { action: string; input: Record<string, unknown> };
 
@@ -293,6 +294,21 @@ describe("managed-policy engine plugin: git workflows", () => {
     await hooks["shell.env"]({ cwd: "/" }, pty);
     expect(pty.env.OMNIRUSH_CALL).toBeUndefined();
     expect(pty.env.OMNIRUSH_SESSION).toBeUndefined();
+  });
+
+  test("shell.env blanks the app's own secrets for every shell call and terminal", async () => {
+    policyServer({ account: null });
+    for (const name of SHELL_SECRET_ENV) setEnv(name, `secret-${name.toLowerCase()}-0123456789`);
+    const hooks = await managedPolicy({ directory: "/" }) as unknown as Record<string, (event: unknown, output: unknown) => Promise<void>>;
+    for (const event of [{ cwd: "/", callID: "call_1", sessionID: "ses_1" }, { cwd: "/" }]) {
+      const output: { env: Record<string, string> } = { env: {} };
+      await hooks["shell.env"](event, output);
+      // What the engine gives the command: its own environment with the hook's values on top.
+      const shellEnv = { ...process.env, ...output.env };
+      for (const name of SHELL_SECRET_ENV) expect(shellEnv[name]).toBe("");
+      expect(Object.values(shellEnv).some((value) => typeof value === "string" && value.includes("0123456789"))).toBe(false);
+    }
+    expect([...SHELL_SECRET_ENV]).toEqual(expect.arrayContaining(["OPENCODE_SERVER_PASSWORD", "OPENCODE_SERVER_USERNAME", "OMNIRUSH_SERVER_TOKEN", "OMNIRUSH_POLICY_TOKEN", "OMNIRUSH_ACCESS_TOKEN"]));
   });
 
   test("the next-engine plugin applies the same rules through its structural hooks", async () => {
