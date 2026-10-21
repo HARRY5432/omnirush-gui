@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import { useEffect, useReducer, useRef, useState, type ReactNode, type SetStateAction } from "react";
+import { useEffect, useMemo, useReducer, useRef, useState, type ReactNode, type SetStateAction } from "react";
 import {
   BookOpen,
   ArrowUpRight,
@@ -377,7 +377,7 @@ function isToggleOnlyExtension(entry: McpDirectoryInfo) {
   ) === true;
 }
 
-type ExtensionDetailTarget =
+export type ExtensionDetailTarget =
   | { kind: "entry"; entry: McpDirectoryInfo }
   | { kind: "skill"; skill: SkillItem }
   | { kind: "command"; command: LibraryCommandItem }
@@ -409,6 +409,40 @@ function extensionDetailIdForTarget(target: ExtensionDetailTarget): string {
         : `org-mcp:${target.item.orgMcpConnection?.id ?? target.item.id}`;
   }
 }
+
+/** Whether two detail targets show the same item object (a list refresh hands out new objects). */
+export function sameExtensionDetailTarget(
+  a: ExtensionDetailTarget | null,
+  b: ExtensionDetailTarget | null,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b || a.kind !== b.kind) return false;
+  switch (a.kind) {
+    case "entry":
+    case "connect-mcp":
+      return a.entry === (b as typeof a).entry;
+    case "skill":
+      return a.skill === (b as typeof a).skill;
+    case "command":
+      return a.command === (b as typeof a).command;
+    case "agent":
+      return a.agent === (b as typeof a).agent;
+    case "plugin":
+      return a.plugin === (b as typeof a).plugin;
+    case "plugin-file":
+      return a.plugin === (b as typeof a).plugin && a.file === (b as typeof a).file;
+    case "org-mcp":
+      return a.item === (b as typeof a).item;
+  }
+}
+
+// Stable empty lists: a fresh [] per render would re-run the routed detail effect on every render.
+const NO_SKILLS: SkillItem[] = [];
+const NO_COMMANDS: LibraryCommandItem[] = [];
+const NO_AGENTS: LibraryAgentItem[] = [];
+const NO_PLUGINS: CloudImportedPlugin[] = [];
+const NO_CONNECT_MCPS: McpServerEntry[] = [];
+const NO_ORG_MCP_ITEMS: ExtensionItem[] = [];
 
 function resolveExtensionDetailTarget(
   detailId: string,
@@ -478,6 +512,8 @@ export function McpView(props: McpViewProps) {
   const skillCount = props.installedSkills?.length ?? 0;
   const useRoutedDetail = typeof props.onDetailIdChange === "function";
   const [detailTarget, setDetailTarget] = useState<ExtensionDetailTarget | null>(null);
+  const detailTargetRef = useRef(detailTarget);
+  detailTargetRef.current = detailTarget;
   const [mcpConnectFailure, setMcpConnectFailure] = useState<{ id: string; message: string } | null>(null);
   const [pendingPlugin, setPendingPlugin] = useState<CloudImportedPlugin | null>(null);
   const [detailSkillContent, setDetailSkillContent] = useState<string | null>(null);
@@ -543,13 +579,22 @@ export function McpView(props: McpViewProps) {
   // MCP servers come from the account's supported list (McpSupportedPanel).
   // The quick-connect services, Connect and organization MCPs are remote and
   // account-linked: never listed (a session that used them could not be repeated).
-  const quickConnectList = props.quickConnect.filter((entry) => !isMcpDirectoryEntry(entry));
-  const installedSkills = props.installedSkills ?? [];
-  const installedCommands = props.installedCommands ?? [];
-  const installedAgents = props.installedAgents ?? [];
-  const availableConnectMcpServers: McpServerEntry[] = [];
-  const installedPlugins = (props.installedPlugins ?? []).filter((plugin) => !plugin.files.some((file) => file.objectType === "mcp"));
-  const orgMcpItems: ExtensionItem[] = [];
+  // These lists feed the routed detail effect's dependencies, so each keeps its identity between
+  // renders: a new array every render re-ran it on every render, and its state write rendered again,
+  // a loop that starved route changes (the Library item page could not be left).
+  const quickConnectList = useMemo(
+    () => props.quickConnect.filter((entry) => !isMcpDirectoryEntry(entry)),
+    [props.quickConnect],
+  );
+  const installedSkills = props.installedSkills ?? NO_SKILLS;
+  const installedCommands = props.installedCommands ?? NO_COMMANDS;
+  const installedAgents = props.installedAgents ?? NO_AGENTS;
+  const availableConnectMcpServers = NO_CONNECT_MCPS;
+  const installedPlugins = useMemo(
+    () => (props.installedPlugins ?? NO_PLUGINS).filter((plugin) => !plugin.files.some((file) => file.objectType === "mcp")),
+    [props.installedPlugins],
+  );
+  const orgMcpItems = NO_ORG_MCP_ITEMS;
   // The supported-servers panel stands for the MCP part of the library.
   const mcpPanelShown = Boolean(mcpPolicy) && (filter === "all" || filter === "mcp") && inventoryState === "all";
   const addSupportedMcp = async (preset: OmniRushMcpPreset) => {
@@ -780,6 +825,8 @@ export function McpView(props: McpViewProps) {
       return;
     }
     const resolved = resolveExtensionDetailTarget(detailId, libraryDetailLists);
+    // The same item as before: nothing to set or read again.
+    if (resolved && sameExtensionDetailTarget(detailTargetRef.current, resolved)) return;
     setDetailTarget(resolved);
     if (resolved?.kind === "skill") {
       setDetailSkillContent(resolved.skill.content ?? null);
