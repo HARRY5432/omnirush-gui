@@ -25,11 +25,17 @@ test("the app window's requests to the local server get it; other pages, ports a
   rememberLocalServer("http://127.0.0.1:43123");
   let listener = null;
   const session = { webRequest: { onBeforeSendHeaders: (filter, fn) => { assert.ok(filter.urls.includes("http://127.0.0.1/*")); listener = fn; } } };
-  installAppRequestSecret(session, (id) => id === 7);
+  installAppRequestSecret(session, (details) => details.webContentsId === 7 && details.frame?.routingId === 1);
   const run = (details) => { let out = null; listener(details, (result) => { out = result.requestHeaders; }); return out; };
-  assert.equal(run({ webContentsId: 7, url: "http://127.0.0.1:43123/runtime-config/approvals", requestHeaders: { Authorization: "Bearer x" } })[APP_SECRET_HEADER], SECRET);
+  assert.equal(run({ webContentsId: 7, frame: { routingId: 1 }, url: "http://127.0.0.1:43123/runtime-config/approvals", requestHeaders: { Authorization: "Bearer x" } })[APP_SECRET_HEADER], SECRET);
+  // a frame inside the app window (an HTML preview, an MCP app)
+  assert.equal(run({ webContentsId: 7, frame: { routingId: 5 }, url: "http://127.0.0.1:43123/runtime-config/approvals", requestHeaders: {} })[APP_SECRET_HEADER], undefined);
   assert.equal(run({ webContentsId: 8, url: "http://127.0.0.1:43123/runtime-config/approvals", requestHeaders: {} })[APP_SECRET_HEADER], undefined);
-  assert.equal(run({ webContentsId: 7, url: "http://127.0.0.1:5173/", requestHeaders: {} })[APP_SECRET_HEADER], undefined);
+  assert.equal(run({ webContentsId: 7, frame: { routingId: 1 }, url: "http://127.0.0.1:5173/", requestHeaders: {} })[APP_SECRET_HEADER], undefined);
+  // only the current server address: after a restart on another port the old one gets nothing
+  rememberLocalServer("http://127.0.0.1:43999");
+  assert.equal(run({ webContentsId: 7, frame: { routingId: 1 }, url: "http://127.0.0.1:43123/tokens", requestHeaders: {} })[APP_SECRET_HEADER], undefined);
+  assert.equal(run({ webContentsId: 7, frame: { routingId: 1 }, url: "http://127.0.0.1:43999/tokens", requestHeaders: {} })[APP_SECRET_HEADER], SECRET);
   assert.equal(run({ webContentsId: undefined, url: "http://127.0.0.1:43123/tokens", requestHeaders: {} })[APP_SECRET_HEADER], undefined);
   const forged = run({ webContentsId: 9, url: "http://127.0.0.1:43123/tokens", requestHeaders: { "X-OmniRush-App-Secret": "forged" } });
   assert.ok(!Object.keys(forged).some((name) => name.toLowerCase() === APP_SECRET_HEADER));

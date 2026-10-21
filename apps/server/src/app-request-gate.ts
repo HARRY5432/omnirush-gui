@@ -59,12 +59,14 @@ const SECRET_READS: RegExp[] = [
 // Engine routes behind the proxy (path after the /opencode or /opencode2 segment), any method but
 // GET/HEAD/OPTIONS: answers to approval questions, and the engine's own config, keys and MCP list.
 const ENGINE_WRITES: RegExp[] = [
-  /(?:^|\/)(?:permission|question)\/[^/]+\/(?:reply|reject)$/,
-  /(?:^|\/)session\/[^/]+\/permissions\/[^/]+$/,
-  /^\/(?:global\/)?config(?:\/|$)/,
-  /^\/auth(?:\/|$)/,
-  /^\/mcp(?:\/|$)/,
-  /^\/(?:api\/)?(?:permission|question)(?:\/|$)/,
+  // any answer to a question: permission/permissions, question, or the preview engine's form replies,
+  // wherever the segment sits (a session id with an encoded slash must not move it out of place)
+  /(?:^|\/)(?:permission|permissions|question|form)(?:\/|$)/,
+  /^\/(?:api\/)?(?:global\/)?config(?:\/|$)/,
+  /^\/(?:api\/)?auth(?:\/|$)/,
+  /^\/(?:api\/)?mcp(?:\/|$)/,
+  /^\/(?:api\/)?provider(?:\/|$)/,
+  /^\/(?:api\/)?model\/default(?:\/|$)/,
 ];
 
 const READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);

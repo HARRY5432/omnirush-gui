@@ -22,10 +22,12 @@ function originOf(url) {
   }
 }
 
-/** The local server's address (each start may bind another port). */
+/** The local server's address: only the current one (each start may bind another port; an old port may be anyone's now). */
 export function rememberLocalServer(baseUrl) {
   const origin = originOf(baseUrl);
-  if (origin && /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/.test(origin)) origins.add(origin);
+  if (!origin || !/^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/.test(origin)) return;
+  origins.clear();
+  origins.add(origin);
 }
 
 /** Headers for Electron main's own request to `url`: the secret only for the local server. */
@@ -35,11 +37,12 @@ export function appSecretHeaders(url) {
 }
 
 /**
- * Adds the secret to the app window's requests to the local server (and only those: another page,
- * another webContents or another address never gets it), and drops any copy a page set itself.
- * `isAppContents(webContentsId)` names the app's own window(s).
+ * Adds the secret to the app window's own requests to the local server (and only those: a frame inside
+ * the window, such as an HTML preview or an MCP app, another webContents or another address never gets
+ * it), and drops any copy a page set itself. `isAppFrame(details)` says whether the request comes from
+ * the app window's main frame.
  */
-export function installAppRequestSecret(targetSession, isAppContents) {
+export function installAppRequestSecret(targetSession, isAppFrame) {
   targetSession.webRequest.onBeforeSendHeaders(
     { urls: ["http://127.0.0.1/*", "http://localhost/*", "http://[::1]/*"] },
     (details, callback) => {
@@ -49,7 +52,7 @@ export function installAppRequestSecret(targetSession, isAppContents) {
       }
       const origin = originOf(details.url);
       let fromApp = false;
-      try { fromApp = typeof details.webContentsId === "number" && isAppContents(details.webContentsId); } catch { fromApp = false; }
+      try { fromApp = typeof details.webContentsId === "number" && isAppFrame(details) === true; } catch { fromApp = false; }
       if (fromApp && origin && origins.has(origin)) requestHeaders[APP_SECRET_HEADER] = SECRET;
       callback({ requestHeaders });
     },

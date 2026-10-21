@@ -3456,7 +3456,13 @@ or use: pnpm dev:worktree`);
     const systemCaCertificates = await runtimeManager.systemCaCertificates();
     session.defaultSession.setCertificateVerifyProc(createSystemCaCertificateVerifyProc(systemCaCertificates));
     // Settings writes to the local server need this app's window (app-request-secret.mjs).
-    installAppRequestSecret(session.defaultSession, (id) => Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === id));
+    installAppRequestSecret(session.defaultSession, (details) => {
+      if (!mainWindow || mainWindow.isDestroyed()) return false;
+      const contents = mainWindow.webContents;
+      const frame = details.frame, main = contents.mainFrame;
+      // The window's own page only: a frame inside it (an HTML preview, an MCP app) is not the app.
+      return details.webContentsId === contents.id && Boolean(frame && main) && frame.processId === main.processId && frame.routingId === main.routingId;
+    });
     installMediaPermissionHandlers(session, () => mainWindow);
     await runPendingNukeCleanup({
       env: process.env,
