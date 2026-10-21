@@ -38,6 +38,7 @@ import { driverFor } from "./backends/index.js";
 import type { ListedBox, SpawnLike } from "./backends/types.js";
 import { detectStack, imageFor, type BoxImage, type ImagePins } from "./images.js";
 import { runCommand, type RunCommand, type RunOptions } from "./run.js";
+import { keptImages } from "./retention.mjs";
 
 type Env = NodeJS.ProcessEnv;
 
@@ -730,7 +731,7 @@ export class Box {
 
 // --- status, reset, gc --------------------------------------------------------------
 
-type Removed = Array<{ kind: string; name: string; reason: string }>;
+type Removed = Array<{ kind: string; name: string; reason: string; size?: string | null; path?: string; dryRun?: boolean }>;
 
 /** Boxes on this machine: { key, name, root, running, image, created }[] */
 /** Where boxsh asks the app to start a stopped boxd again (launch.ts boxRun). */
@@ -759,10 +760,10 @@ export async function stopBox(runtime: BoxRuntime, root: string, { env = process
 
 /**
  * Remove boxes whose folder is gone or that were not used for `maxIdleDays`,
- * and box images no box uses that are not the current pins. Only boxes and
+ * and box images no box uses that are neither the current nor the previous pins (retention.mjs). Only boxes and
  * images labelled/named as OmniRush boxes are touched; nothing is pruned.
  */
-export async function gcBoxes(runtime: BoxRuntime, { env = process.env, home = boxHome(env), run = runCommand, maxIdleDays = 30, pins = null, now = Date.now(), exists = existsSync }: { env?: Env; home?: string; run?: RunCommand; maxIdleDays?: number; pins?: ImagePins | null; now?: number; exists?: (file: string) => boolean } = {}): Promise<Removed> {
+export async function gcBoxes(runtime: BoxRuntime, { env = process.env, home = boxHome(env), run = runCommand, maxIdleDays = 30, pins = null, now = Date.now(), exists = existsSync, dryRun = false }: { env?: Env; home?: string; run?: RunCommand; maxIdleDays?: number; pins?: ImagePins | null; now?: number; exists?: (file: string) => boolean; dryRun?: boolean } = {}): Promise<Removed> {
   const driver = driverFor(runtime);
   const removed: Removed = [];
   const boxes = await driver.list(runtime, { run, env, home });
@@ -773,6 +774,7 @@ export async function gcBoxes(runtime: BoxRuntime, { env = process.env, home = b
     if (!rec || (rec.pid && rec.pid !== process.pid && alive(rec.pid)) || (rec.root && box.root && path.resolve(rec.root) !== path.resolve(box.root))) continue;
     const idle = rec.updated ? (now - rec.updated) / 86_400_000 : Infinity;
     if ((box.root && !exists(box.root)) || idle > maxIdleDays) {
+      if (dryRun) { removed.push({ kind: "container", name: box.name, reason: box.root && !exists(box.root) ? "folder gone" : "unused", dryRun: true }); continue; }
       const res = await driver.remove(runtime, box.key, { run, env, home });
       if (res.removed) {
         removed.push({ kind: "container", name: box.name, reason: box.root && !exists(box.root) ? "folder gone" : "unused" });
@@ -781,10 +783,13 @@ export async function gcBoxes(runtime: BoxRuntime, { env = process.env, home = b
       }
     }
   }
-  const current = new Set(Object.values(pins?.images ?? {}).map((pin) => pin.ref));
+  // Kept: the current pins, the box version before them, and every image a box uses.
+  const keep = keptImages(home, pins, { write: !dryRun, now });
+  // The first run knows only the current pins (the previous ones were never recorded): no image goes yet.
+  if (keep.firstRun) return removed;
   const used = new Set<string>();
   for (const box of await driver.list(runtime, { run, env, home })) used.add(box.image);
-  removed.push(...await driver.gcImages(runtime, { run, env, home, current, used }));
+  removed.push(...await driver.gcImages(runtime, { run, env, home, current: keep.refs, keep, used, dryRun, now }));
   return removed;
 }
 

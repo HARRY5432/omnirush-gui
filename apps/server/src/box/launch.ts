@@ -26,6 +26,7 @@ import { boxKey, containerName, gcBoxes, installShell, openBox, recordFile, revi
 import { driverFor, normalizeBackend } from "./backends/index.js";
 import type { BoxExec } from "./backends/types.js";
 import { detectStack, imageFor, loadPins, type BoxImage } from "./images.js";
+import { rememberPins } from "./retention.mjs";
 import { detectRuntime, runCommand, type RunCommand, type RuntimeResult } from "./runtime.js";
 
 export const MODES = ["off", "offer", "on"] as const;
@@ -277,6 +278,8 @@ export async function planBox({ env = process.env, home, root, log = () => {}, r
       return { box: null, notice: `Sandbox is downloading (${image.approxMb ? `about ${image.approxMb} MB, ` : ""}once${runtime.backend === "wsl" && !runtime.installed ? ", with the OmniRush WSL distro" : ""}); chats here run on this machine until it is ready.`, runtime, image, downloading: true };
     }
   }
+  // The pins this box starts on are remembered: the next box version keeps their images as the previous ones.
+  rememberPins(home, loadPins());
   if (env.OMNIRUSH_BOX_GC !== "off") setTimeout(() => gcInBackground(runtime, home, { log }), 30_000).unref?.();
   let opening: Promise<Box> | null = null;
   let phase: string | null = null;

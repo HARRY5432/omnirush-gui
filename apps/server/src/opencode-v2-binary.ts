@@ -1,7 +1,7 @@
 import { externalFetch } from "./server-fetch.js";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, chmod, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import artifacts from "./opencode-v2-artifacts.json" with { type: "json" };
@@ -21,7 +21,7 @@ export async function installOpencodeV2Binary(cacheRoot: string, version: string
   const directory = join(cacheRoot, version, key);
   const name = platform === "windows" ? "opencode2.exe" : "opencode2";
   const binary = join(directory, name);
-  try { await access(binary); return binary; } catch { /* First installation. */ }
+  try { await access(binary); void pruneOpencodeV2Versions(cacheRoot, version); return binary; } catch { /* First installation. */ }
   await mkdir(cacheRoot, { recursive: true, mode: 0o700 });
   await chmod(cacheRoot, 0o700);
   await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -39,8 +39,41 @@ export async function installOpencodeV2Binary(cacheRoot: string, version: string
     const extracted = join(staging, "package", "bin", name);
     await chmod(extracted, 0o755);
     await rename(extracted, binary);
+    void pruneOpencodeV2Versions(cacheRoot, version);
     return binary;
   } finally {
     await rm(staging, { recursive: true, force: true });
   }
+}
+
+function versionParts(value: string): number[] | null {
+  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(value);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+function olderThan(a: number[], b: number[]): boolean {
+  for (let i = 0; i < 3; i += 1) if (a[i] !== b[i]) return a[i] < b[i];
+  return false;
+}
+
+/**
+ * Downloaded engine versions other than the current one and the newest older
+ * one (what the previous app version runs) go; newer ones (an app version
+ * ahead of this one) and names that are not versions stay. Never throws.
+ */
+export async function pruneOpencodeV2Versions(cacheRoot: string, current: string): Promise<string[]> {
+  const now = versionParts(current);
+  if (!now) return [];
+  let names: string[] = [];
+  try { names = await readdir(cacheRoot); } catch { return []; }
+  const older = names
+    .map((name) => ({ name, parts: versionParts(name) }))
+    .filter((entry): entry is { name: string; parts: number[] } => Boolean(entry.parts) && entry.name !== current && /^\d+\.\d+\.\d+[0-9A-Za-z.+-]*$/.test(entry.name))
+    .filter((entry) => olderThan(entry.parts, now))
+    .sort((a, b) => (olderThan(a.parts, b.parts) ? -1 : olderThan(b.parts, a.parts) ? 1 : 0));
+  const removed: string[] = [];
+  for (const entry of older.slice(0, -1)) {
+    try { await rm(join(cacheRoot, entry.name), { recursive: true, force: true, maxRetries: 2 }); removed.push(entry.name); } catch { /* in use (Windows): next start */ }
+  }
+  return removed;
 }

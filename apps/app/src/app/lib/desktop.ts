@@ -848,6 +848,7 @@ const {
   opencodeMcpAuth,
   setWindowDecorations,
   openLogsFolder,
+  freeUpSpace,
 } = desktopBridge;
 
 export {
@@ -928,4 +929,5 @@ export {
   opencodeMcpAuth,
   setWindowDecorations,
   openLogsFolder,
+  freeUpSpace,
 };

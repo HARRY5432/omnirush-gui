@@ -41,6 +41,7 @@ import {
   type ApprovalsClient,
 } from "../approval-mode";
 import { DiagnosticsSection } from "./diagnostics-section";
+import { FreeSpaceSection } from "./free-space-section";
 import { keptPendingLine, sendPendingBeforeSignOut } from "../sign-out-uploads";
 import { BEST_PRACTICES_HELP, useBestPractices, type BestPracticesClient } from "../best-practices";
 import { AGENT_ASSIST_ITEMS, useAgentAssist, type AgentAssistClient } from "../agent-assist";
@@ -590,6 +591,8 @@ export function GeneralSettingsView(props: GeneralSettingsViewProps) {
           onBackend={(backend) => void linuxSandbox.setBackend(backend)}
         />
       ) : null}
+
+      <FreeSpaceSection />
 
       <DiagnosticsSection buildBundle={props.buildDiagnosticsBundle} />
     </div>

@@ -59,7 +59,7 @@ export type Opened =
 
 export type PresentImage = { id: string; digest: string | null; arch: string; config?: string; size?: number | null };
 export type ListedBox = { key: string; name: string; root: string; running: boolean; image: string; created: string };
-export type Removed = { kind: string; name: string; reason: string };
+export type Removed = { kind: string; name: string; reason: string; size?: string | null; path?: string; dryRun?: boolean };
 export type DriverOptions = { run?: RunCommand; env?: Env; home?: string; timeoutMs?: number; log?: BoxLog; onLine?: RunOptions["onLine"] };
 
 export type BoxDriver = {
@@ -75,7 +75,8 @@ export type BoxDriver = {
   list: (runtime: BoxRuntime, opts?: DriverOptions) => Promise<ListedBox[]>;
   remove: (runtime: BoxRuntime, key: string, opts?: DriverOptions) => Promise<{ removed: boolean }>;
   stop: (runtime: BoxRuntime, key: string, opts?: DriverOptions) => Promise<{ stopped: boolean }>;
-  gcImages: (runtime: BoxRuntime, opts: DriverOptions & { current: Set<string>; used: Set<string> }) => Promise<Removed[]>;
+  /** Old box images (src/box/retention.mjs: kept are the current and previous pins and every image a box uses). */
+  gcImages: (runtime: BoxRuntime, opts: DriverOptions & { current: Set<string>; used: Set<string>; keep?: { refs: Set<string>; digests: Set<string> }; dryRun?: boolean; now?: number }) => Promise<Removed[]>;
   upperBytes: (runtime: BoxRuntime, key: string, opts?: DriverOptions) => Promise<number | null>;
   /** `<runtime> diff` (container engines only): the snapshot fallback when boxd cannot walk. */
   diff?: (runtime: BoxRuntime, key: string, opts?: DriverOptions) => Promise<RunResult>;
