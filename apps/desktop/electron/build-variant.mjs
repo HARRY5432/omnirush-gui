@@ -67,7 +67,7 @@ function sha256File(file) {
 /** The Apple Developer ID team that signs the app and its bundled engine. */
 export const ENGINE_SIGNING_TEAM = "2KFG4BXC8K";
 /** codesign requirement: a Developer ID certificate (Apple anchor) of that team. */
-export const ENGINE_SIGNING_REQUIREMENT = `identifier "ai.omnirush.desktop" and anchor apple generic and certificate leaf[subject.OU] = "${ENGINE_SIGNING_TEAM}"`;
+export const ENGINE_SIGNING_REQUIREMENT = `anchor apple generic and certificate leaf[subject.OU] = "${ENGINE_SIGNING_TEAM}"`;
 
 /**
  * macOS: whether `file` carries a valid signature by this app's team. Signing and
