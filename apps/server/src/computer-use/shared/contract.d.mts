@@ -63,6 +63,7 @@ export function toolDefinitions(options?: { limits?: Partial<Limits> }): McpTool
 export function canonicalKey(value: unknown): string | null;
 export function canonicalModifiers(value: unknown): Modifier[] | null;
 export function validateAction(action: unknown, size: Size | null | undefined): { ok: true; action: Action } | Invalid;
+export function validStartUrl(value: unknown): boolean;
 export function validateCall(name: string, args: unknown): { ok: true; args: Record<string, unknown> } | Invalid;
 export function mapPoint(point: Point, observation: Size, bounds: Bounds): { model: Point; window: Point; screen: Point };
 export function modelSize(width: number, height: number, longSide?: number): Size;

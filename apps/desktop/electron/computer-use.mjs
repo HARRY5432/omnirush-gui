@@ -2,23 +2,27 @@
 // process, behind the server switch (the local server's /computer-use/state:
 // GET /collect/capabilities `computer_use`, or OMNIRUSH_COMPUTER_USE=0/1).
 //
-// - Windows and Linux X11: the shared portable host + native worker
-//   (apps/server/src/computer-use/shared/, the same files as the CLI's).
-// - macOS: the signed Swift helper (computer-use-host.mjs), same interface.
+// - The agent's own display (app_id "virtual:main", the default): Linux with
+//   Xvfb uses the shared Xvfb backend; macOS, Windows and Linux without Xvfb
+//   use the agent-only browser (computer-use-agent-browser.mjs). It never asks.
+// - The person's real screen: Windows and Linux X11 through the shared portable
+//   host + native worker (apps/server/src/computer-use/shared/, the same files
+//   as the CLI's); macOS through the signed Swift helper (computer-use-host.mjs).
+//   Off until the person turns it on once in Settings (desktop IPC from the
+//   main window only); then it runs without questions.
 //
 // The engine reaches the host only as the built-in MCP server `computer-use`
-// (the local server adds it from host.json; the id is reserved). Consent is
-// never the engine's: every open-session ask, and the per-action asks of the
-// chat's permission mode, are answered in the main window (desktop IPC from
-// its main frame, input checked for synthetic events), never by the agent.
+// (the local server adds it from host.json; the id is reserved). What stays:
+// the indicator and Stop, the deny list, stuck-input release, the server switch.
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { app, screen } from "electron";
+import { app, BrowserWindow, screen, session } from "electron";
+import { startAgentBrowser } from "./computer-use-agent-browser.mjs";
 import { testAnswersAllowed } from "./computer-use-answers.mjs";
 import { createComputerUseHost } from "./computer-use-host.mjs";
 import { createComputerPreview } from "./computer-use-preview.mjs";
@@ -33,8 +37,8 @@ globalThis[Symbol.for("omnirush.computer-use.host-secret")] = HOST_SECRET;
 const secretHeaders = { "x-omnirush-computer-use-secret": HOST_SECRET };
 // The profile folder the local server expects the host in (computer-use/desktop.ts expectedHostCommand).
 const profileDir = () => process.env.OMNIRUSH_DESKTOP_USER_DATA_DIR?.trim() || app.getPath("userData");
-const SYNTHETIC_MESSAGE = "Use your own mouse or keyboard to approve.";
-// Answers need a physical press in this app's window. OMNIRUSH_COMPUTER_USE_TEST_ANSWERS=1 accepts
+const SYNTHETIC_MESSAGE = "Use your own mouse or keyboard to continue.";
+// Continue (after the person took over the real screen) needs a physical press in this app's window. OMNIRUSH_COMPUTER_USE_TEST_ANSWERS=1 accepts
 // remote-debugging clicks, in builds run from source only (the e2e rig).
 // Packaged apps ignore it (computer-use-answers.mjs).
 const testAnswers = testAnswersAllowed(process.env, app.isPackaged, (message) => console.warn(`[computer-use] ${message}`));
@@ -69,7 +73,8 @@ let shared = null;
 let pollTimer = null;
 let refreshTimer = null;
 let failedAt = 0; // a host that did not start is tried again after a minute
-const pending = new Map(); // request_id → { request, resolve }
+const cursors = new Map(); // session id → the agent cursor's latest move (live view)
+let cursorSeq = 0;
 
 function shippedModule(name) {
   // Packaged: app.asar/server/dist; dev: apps/server/dist (OMNIRUSH_DEV_MODE prefers it).
@@ -86,8 +91,8 @@ function shippedModule(name) {
 
 async function sharedModules() {
   if (!shared) {
-    const [hostModule, mediaModule, policyModule, contractModule, imageModule] = await Promise.all(["portable-host.mjs", "media.mjs", "policy.mjs", "contract.mjs", "image.mjs"].map((name) => import(shippedModule(name))));
-    shared = { hostModule, mediaModule, policyModule, contractModule, imageModule, ancestors: policyModule.readAncestors() };
+    const [hostModule, mediaModule, policyModule, contractModule, imageModule, virtualModule, virtualWorker] = await Promise.all(["portable-host.mjs", "media.mjs", "policy.mjs", "contract.mjs", "image.mjs", "virtual-host.mjs", "virtual-worker.mjs"].map((name) => import(shippedModule(name))));
+    shared = { hostModule, mediaModule, policyModule, contractModule, imageModule, virtualModule, virtualWorker, ancestors: policyModule.readAncestors() };
   }
   return shared;
 }
@@ -107,68 +112,50 @@ function supported() {
 }
 
 function statusNow() {
-  const sessions = host ? host.state() : [];
+  // Each session carries its cursor's latest move, so the live view glides it from `from` to `to`.
+  const sessions = host ? host.state().map((s) => (cursors.has(s.id) ? { ...s, cursor_move: cursors.get(s.id) } : s)) : [];
   return {
     enabled: server?.enabled === true,
-    supported: Boolean(host?.availability?.supported ?? supported()),
-    message: server?.enabled ? (host && !host.availability?.supported ? host.availability?.error ?? "Computer use is unavailable on this desktop." : null) : server?.setting?.message ?? (server ? "Computer use is turned off." : null),
+    // The agent's own display works without desktop access (no helper, Wayland), so only "off" is unavailable.
+    supported: supported(),
+    message: server?.enabled ? (supported() ? null : "Computer use is unavailable on this desktop.") : server?.setting?.message ?? (server ? "Computer use is turned off." : null),
     mode: server?.mode ?? "normal",
     sessions,
-    requests: [...pending.values()].map((entry) => entry.request),
   };
 }
 
 function pushStatus() {
   const window = deps?.getWindow?.();
   if (window && !window.isDestroyed()) window.webContents.send(STATUS_CHANNEL, statusNow());
-  if (host) preview?.update(host.state());
+  // macOS: the helper shows its own pill for the real screen; the floating preview is for the agent's display.
+  if (host) preview?.update(host.state().filter((s) => process.platform !== "darwin" || s.display === "virtual"));
 }
 
-async function iconOf(file) {
-  try {
-    if (!file || !existsSync(file)) return null;
-    const image = await app.getFileIcon(file, { size: "normal" });
-    return image.isEmpty() ? null : image.toDataURL();
-  } catch {
-    return null;
-  }
-}
-
-function ask(request) {
-  return new Promise((resolve) => {
-    pending.set(request.request_id, { request, resolve });
-    void host?.watchInput?.();
-    // Bring the main window up: the question is answered there.
-    const window = deps?.getWindow?.();
-    if (window && !window.isDestroyed() && !window.isFocused()) window.flashFrame?.(true);
-    pushStatus();
-  });
-}
-
-function settled(requestId) {
-  pending.delete(requestId);
+function onCursor(move) {
+  cursors.set(move.session_id, { ...move, seq: ++cursorSeq, at: Date.now() });
   pushStatus();
+  preview?.cursor(move);
 }
 
-const approve = {
-  async open(request) {
-    const icon = await iconOf(request.app.bundle_or_exe);
-    const answer = await ask({ kind: "open", ...request, icon, chat: request.chat ?? null });
-    settled(request.request_id);
-    return answer;
-  },
-  async act(request) {
-    const { policyModule } = await sharedModules();
-    const reasons = request.reasons.map((r) => ({ ...r, text: `${policyModule.ASK_REASONS[r.code] ?? r.code}${r.detail ? ` (${r.detail})` : ""}` }));
-    const answer = await ask({ kind: "act", ...request, reasons, icon: await iconOf(request.app.bundle_or_exe), chat: request.chat ?? null });
-    settled(request.request_id);
-    return { allow: answer.decision === "allow" };
-  },
-};
+// The person's one-time real-screen setting (policy.mjs REAL_SCREEN_SETTING), saved in the profile, set only
+// from the main window (desktop IPC), never through the local server an agent's shell can reach.
+const realScreenFile = () => path.join(profileDir(), "computer-use", "real-screen.json");
+let realScreenSaved; // undefined: not read yet (read once; later writes count only through the setter)
+function savedRealScreen(policy) {
+  if (realScreenSaved === undefined) {
+    try { const value = JSON.parse(readFileSync(realScreenFile(), "utf8"))?.[policy.REAL_SCREEN_SETTING]; realScreenSaved = typeof value === "boolean" ? value : null; } catch { realScreenSaved = null; }
+  }
+  return realScreenSaved ?? undefined;
+}
+/** Whether the person turned the real screen on (false until the shared rules are loaded). */
+function realScreenOn() {
+  const policy = shared?.policyModule;
+  return policy ? policy.realScreenOptIn({ env: process.env, saved: savedRealScreen(policy) }) : false;
+}
 
 function hostSettings() {
   const setting = server?.setting ?? {};
-  return { enabled: server?.enabled === true, real_screen: setting.real_screen !== false, limits: setting.limits ?? null, deny_apps: setting.deny_apps ?? [], mode: server?.mode ?? "normal", message: setting.message ?? null, ask_send_delete: setting.ask_send_delete === true, grant_epoch: Number.isSafeInteger(setting.grant_epoch) ? setting.grant_epoch : null, chat_bound_read: setting.chat_bound_read === true };
+  return { enabled: server?.enabled === true, real_screen: setting.real_screen !== false, real_screen_on: realScreenOn(), virtual_display: setting.virtual_display !== false, limits: setting.limits ?? null, deny_apps: setting.deny_apps ?? [], message: setting.message ?? null };
 }
 
 async function hostContext() {
@@ -176,7 +163,7 @@ async function hostContext() {
   // The chat now (the one that just called), not the last poll's.
   const fresh = await serverFetch("/computer-use/state").catch(() => null);
   if (fresh) server = fresh;
-  // No fresh answer: no chat (no "Allow for this chat" is kept or reused), never the last poll's.
+  // No fresh answer: no chat, never the last poll's.
   return { ancestors: shared?.ancestors ?? [], self_pids: [process.pid, ...metrics], chat: fresh ? fresh.chat ?? null : null };
 }
 
@@ -196,25 +183,34 @@ async function reportEvent(event) {
 async function startHost() {
   if (hostPromise) return hostPromise;
   hostPromise = (async () => {
-    const { hostModule, mediaModule, policyModule, contractModule, imageModule } = await sharedModules();
+    const { hostModule, mediaModule, policyModule, contractModule, imageModule, virtualModule, virtualWorker } = await sharedModules();
     const spool = server?.spool ? mediaModule.createMediaSpool(server.spool) : null;
-    const callbacks = {
-      spool, settings: hostSettings, context: hostContext, refresh: hostRefresh, approve,
-      onEvent: (event) => { void reportEvent(event); },
-      onState: () => { pushStatus(); scheduleRefresh(); },
-      onFrame: (frame) => preview?.image(frame.data_url),
-    };
+    const onState = () => { pushStatus(); scheduleRefresh(); };
+    const onFrame = (frame) => preview?.image(frame.data_url, frame.session_id);
+    const onEvent = (event) => { if (["stopped", "closed", "expired"].includes(event.event)) cursors.delete(event.session_id); void reportEvent(event); };
+    const koffiPath = () => require.resolve("koffi");
+    const virtual = virtualModule.createVirtualHost({
+      // Linux with Xvfb (and a browser for it): a whole display of its own; elsewhere the agent-only browser in this app.
+      startBackend: (name, options) => (process.platform === "linux" && virtualModule.which("Xvfb") && (!options.browser || virtualModule.findBrowser())
+        ? virtualModule.startXvfbBackend({ name, ...options, nodePath: process.execPath, nodeEnv: { ELECTRON_RUN_AS_NODE: "1" }, koffiPath: koffiPath() })
+        : startAgentBrowser({ electron: { BrowserWindow, session }, glidePath: virtualWorker.glidePath, url: options.url })),
+      settings: hostSettings, context: hostContext, spool, onEvent, onState, onFrame, onCursor,
+    });
+    const callbacks = { spool, settings: hostSettings, context: hostContext, refresh: hostRefresh, virtual, onEvent, onState, onFrame };
+    // No desktop access (no helper, Wayland): the agent's own display still works on this host.
+    const stubNative = (error) => ({ ready: Promise.resolve({ supported: false, code: "native_unavailable", error }), held: { keys: [], buttons: [] }, onEvent() { return () => {}; }, call: async () => { throw Object.assign(new Error(error), { code: "native_unavailable" }); }, close: async () => {} });
     let created;
     if (process.platform === "darwin") {
       const executable = resolveComputerUseExecutable();
-      if (!executable) throw new Error("The Computer Use helper is unavailable. Rebuild or reinstall OmniRush.ai.");
-      created = await createComputerUseHost({ executable, ...callbacks, shared: { portable: hostModule, policy: policyModule, contract: contractModule, image: imageModule } });
+      created = executable
+        ? await createComputerUseHost({ executable, ...callbacks, shared: { portable: hostModule, policy: policyModule, contract: contractModule, image: imageModule } })
+        : await hostModule.createPortableHost({ native: stubNative("The Computer Use helper is unavailable. Rebuild or reinstall OmniRush.ai."), ...callbacks, platform: "darwin" });
     } else {
-      const nativeFactory = () => hostModule.createNativeWorker({ nodePath: process.execPath, nodeEnv: { ELECTRON_RUN_AS_NODE: "1" }, koffiPath: require.resolve("koffi") });
+      const nativeFactory = () => hostModule.createNativeWorker({ nodePath: process.execPath, nodeEnv: { ELECTRON_RUN_AS_NODE: "1" }, koffiPath: koffiPath() });
       created = await hostModule.createPortableHost({ native: nativeFactory(), nativeFactory, ...callbacks });
-      preview = createComputerPreview();
-      preview.bind(created);
     }
+    preview = createComputerPreview();
+    preview.bind(created);
     host = created;
     listener = await created.listen(path.join(profileDir(), "computer-use"));
     const relay = app.isPackaged ? path.join(process.resourcesPath, "computer-use", "relay.mjs") : path.join(__dirname, "computer-use-relay.mjs");
@@ -232,8 +228,7 @@ async function stopHost(by = "server") {
   await serverFetch("/computer-use/host", { method: "POST", headers: secretHeaders, body: JSON.stringify({ host: null }) }).catch(() => {});
   if (!current) return;
   await current.stopAll(by).catch(() => {});
-  for (const entry of pending.values()) entry.resolve({ decision: "deny" });
-  pending.clear();
+  cursors.clear();
   await listener?.close().catch(() => {});
   await current.close().catch(() => {});
   preview?.close(); preview = null;
@@ -278,14 +273,28 @@ async function getComputerUseState() {
   return statusNow();
 }
 
-/** An answer from the main window. Synthetic input (another program clicking Allow) is refused. */
-async function computerUseAnswer(answer) {
-  const entry = pending.get(answer?.request_id);
-  if (!entry) throw new Error("This request has ended.");
-  const allowing = answer.decision !== "deny";
-  if (allowing && !(await personAnswered(answer.rect))) throw new Error(SYNTHETIC_MESSAGE);
-  const decision = entry.request.kind === "open" ? (["chat", "once", "deny"].includes(answer.decision) ? answer.decision : "deny") : (answer.decision === "allow" ? "allow" : "deny");
-  entry.resolve({ decision, ...(typeof answer.window_id === "string" ? { window_id: answer.window_id } : {}) });
+/** The person's real-screen setting (main window only, main.mjs checks the sender). */
+async function getComputerUseRealScreen() {
+  const { policyModule } = await sharedModules();
+  // forced: OMNIRUSH_COMPUTER_USE_REAL_SCREEN decides, whatever is saved.
+  const forced = policyModule.realScreenOptIn({ env: process.env, saved: true }) === policyModule.realScreenOptIn({ env: process.env, saved: false });
+  // allowed: the server lets the person's screen be used at all.
+  return { on: realScreenOn(), forced, allowed: server?.setting?.real_screen !== false };
+}
+
+async function setComputerUseRealScreen(on) {
+  if (typeof on !== "boolean") throw new Error("Choose on or off.");
+  const { policyModule } = await sharedModules();
+  const file = realScreenFile();
+  mkdirSync(path.dirname(file), { recursive: true });
+  const temp = `${file}.${process.pid}.tmp`;
+  writeFileSync(temp, JSON.stringify({ [policyModule.REAL_SCREEN_SETTING]: on }), { mode: 0o600 });
+  renameSync(temp, file);
+  realScreenSaved = on;
+  // Off: sessions on the person's screen end now (the agent's own display keeps running).
+  if (!realScreenOn() && host) for (const s of host.state()) if (s.display !== "virtual" && s.phase !== "ended") await host.control({ session_id: s.id, action: "stop" }).catch(() => {});
+  pushStatus();
+  return getComputerUseRealScreen();
 }
 
 async function computerUseControl(value) {
@@ -301,8 +310,8 @@ async function getComputerUseMcpCommand() {
   if (!server?.enabled) throw new Error(server?.setting?.message ?? "Computer use is turned off.");
   await startHost();
   const relay = app.isPackaged ? path.join(process.resourcesPath, "computer-use", "relay.mjs") : path.join(__dirname, "computer-use-relay.mjs");
-  // The copied CLI connection: its own token (cli-connection.json), so its calls belong to no chat of this app
-  // and never keep or reuse "Allow for this chat". The engine's relay alone reads engine-connection.json.
+  // The copied CLI connection: its own token (cli-connection.json), so its calls belong to no chat of this app.
+  // The engine's relay alone reads engine-connection.json.
   return [process.execPath, relay, listener.externalDiscoveryPath];
 }
 
@@ -430,7 +439,8 @@ export {
   browserActApproval,
   browserPermissionMode,
   getComputerUseState,
-  computerUseAnswer,
+  getComputerUseRealScreen,
+  setComputerUseRealScreen,
   computerUseControl,
   getComputerUseMcpEnvironment,
   checkComputerUsePermissions,

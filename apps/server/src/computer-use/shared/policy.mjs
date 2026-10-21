@@ -1,6 +1,12 @@
 // Computer use, policy: the server switch (capabilities `computer_use`), the
-// apps the agent may never open, and which actions ask the person first in
-// each permission mode.
+// person's one-time real-screen setting, the apps the agent may never open,
+// and (for the desktop's built-in browser only) which actions ask first.
+//
+// Computer use itself never asks (owner decision 2026-10-21): the agent's own
+// display needs no approval at all, and the person's real screen is a
+// setting the person turns on once (off by default), then runs with no
+// per-session or per-action questions. What stays: the indicator and Stop,
+// the deny list and hit-testing, stuck-input release, the server switch.
 //
 // The same file ships in omnirush-cli (src/computer-use/) and omnirush-gui
 // (apps/server/src/computer-use/shared/); PARITY.sha256 lists it in both. No
@@ -98,6 +104,37 @@ export function modelAllowed(setting, modelId) {
 /** The message people see when computer use is off. */
 export function offMessage(setting) {
   return setting?.message ?? OFF_MESSAGE;
+}
+
+// ------------------------------------------------------------- real screen
+
+/** The person's real screen is off until the person turns it on (Settings / `omnirush computer real-screen on`). */
+export const REAL_SCREEN_DEFAULT = false;
+/** The settings key both apps save the person's choice under. */
+export const REAL_SCREEN_SETTING = "computerUseRealScreen";
+/** OMNIRUSH_COMPUTER_USE_REAL_SCREEN=1/0 overrides the saved choice (support, tests). */
+export const REAL_SCREEN_ENV = "OMNIRUSH_COMPUTER_USE_REAL_SCREEN";
+export const REAL_SCREEN_OFF_MESSAGE = "Computer use on your own screen is off. The agent works on its own display instead (app_id \"virtual:main\"). The person can turn the real screen on in Settings (desktop) or with `omnirush computer real-screen on` (CLI).";
+
+/** Whether the person turned the real screen on: the environment first, then the saved setting, else REAL_SCREEN_DEFAULT. */
+export function realScreenOptIn({ env = process.env, saved } = {}) {
+  const asked = String(env?.[REAL_SCREEN_ENV] ?? "").trim().toLowerCase();
+  if (["1", "on", "true", "yes"].includes(asked)) return true;
+  if (["0", "off", "false", "no"].includes(asked)) return false;
+  return typeof saved === "boolean" ? saved : REAL_SCREEN_DEFAULT;
+}
+
+/**
+ * How a session opens, by display: `virtual` (the agent's own display) always opens with no question;
+ * `real` (the person's screen) opens with no question when the server allows it and the person turned it
+ * on, and is refused otherwise (never asked). Acts never ask on either.
+ * Returns { open: true, asks: false } or { open: false, asks: false, code, message }.
+ */
+export function sessionRules({ display, server = {}, optIn = REAL_SCREEN_DEFAULT } = {}) {
+  if (display === "virtual") return server.virtual_display === false ? { open: false, asks: false, code: "virtual_unavailable", message: "The agent's own display is turned off for this account." } : { open: true, asks: false };
+  if (server.real_screen === false) return { open: false, asks: false, code: "real_screen_unavailable", message: "Computer use on the person's screen is turned off for this account. Use your own display (app_id \"virtual:main\")." };
+  if (optIn !== true) return { open: false, asks: false, code: "real_screen_off", message: REAL_SCREEN_OFF_MESSAGE };
+  return { open: true, asks: false };
 }
 
 // ---------------------------------------------------------------- deny list
@@ -348,7 +385,8 @@ export function looksLikeCredential(value) {
 }
 
 /**
- * Whether one computer_act asks the person first, by permission mode:
+ * The desktop's built-in browser tool only (computer use never asks; see sessionRules).
+ * Whether one browser act asks the person first, by permission mode:
  * - careful: every act asks;
  * - normal: only paying, buying or ordering (the intent, the text at a click
  *   or Enter/Space target, or, where the host reads no text there, a page
@@ -442,7 +480,7 @@ export const SCREEN_BASH_RULES = Object.freeze({
   "*mouse_event*": "ask",
 });
 
-/** Engine permission rules for the tools of the built-in server: the host asks, so the engine never does. */
+/** Engine permission rules for the tools of the built-in server: computer use never asks, the engine neither. */
 export function computerPermissionRules() {
   return { [`${SERVER_ID}_*`]: "allow" };
 }

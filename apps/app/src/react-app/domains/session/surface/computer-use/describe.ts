@@ -1,5 +1,5 @@
 // Plain-words helpers for computer use: what an action does, where its
-// points land on a displayed frame, and which chat a request belongs to.
+// points land on a displayed frame, and which chat a session belongs to.
 
 export type ComputerUsePoint = { x: number; y: number };
 
@@ -27,11 +27,6 @@ function keyLabel(key: string): string {
 export function describeKeyChord(action: Record<string, unknown>): string {
   const key = typeof action.key === "string" ? keyLabel(action.key) : "";
   return [...modifiersOf(action), key].filter(Boolean).join("+");
-}
-
-/** The text a `type` action types, shown in full; null for other actions. */
-export function typedText(action: unknown): string | null {
-  return isRecord(action) && action.type === "type" && typeof action.text === "string" ? action.text : null;
 }
 
 /**
@@ -108,7 +103,7 @@ export function scalePoints(
   return points.map((point) => ({ x: point.x * sx, y: point.y * sy }));
 }
 
-/** A request or session shows in a chat when it has no chat or that chat. */
+/** A session shows in a chat when it has no chat or that chat. */
 export function belongsToChat(chat: string | null, sessionId: string): boolean {
   return chat === null || chat === sessionId;
 }

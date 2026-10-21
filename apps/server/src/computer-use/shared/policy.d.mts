@@ -35,6 +35,14 @@ export function computerUseSetting(options?: { env?: Record<string, string | und
 export function modelAllowed(setting: ComputerUseSetting | ComputerUseBlock | null | undefined, modelId: unknown): boolean;
 export function offMessage(setting: { message?: string | null } | null | undefined): string;
 
+export const REAL_SCREEN_DEFAULT: boolean;
+export const REAL_SCREEN_SETTING: string;
+export const REAL_SCREEN_ENV: string;
+export const REAL_SCREEN_OFF_MESSAGE: string;
+export function realScreenOptIn(options?: { env?: Record<string, string | undefined>; saved?: unknown }): boolean;
+export type SessionRules = { open: true; asks: false } | { open: false; asks: false; code: "virtual_unavailable" | "real_screen_unavailable" | "real_screen_off"; message: string };
+export function sessionRules(options?: { display?: "virtual" | "real"; server?: { real_screen?: boolean; virtual_display?: boolean }; optIn?: boolean }): SessionRules;
+
 export const DENIED_APPS: Readonly<Record<"self" | "terminal" | "password_manager" | "credentials" | "lock_screen", readonly string[]>>;
 export const SETTINGS_APPS: readonly string[];
 export const SECURITY_PANE: RegExp;

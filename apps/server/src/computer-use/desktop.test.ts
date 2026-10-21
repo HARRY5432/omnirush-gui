@@ -46,6 +46,12 @@ describe("switch and built-in entry", () => {
     // The command comes only from the app's environment; host.json must agree with it.
     expect(computerUseBuiltins(dir, {})).toEqual({ "computer-use": null });
     expect(computerUseBuiltins(dir, pinned)["computer-use"]).toMatchObject({ type: "local", command: [process.execPath, "/x/relay.mjs", "/x/connection.json"], environment: { ELECTRON_RUN_AS_NODE: "1" }, enabled: true, timeout: 300_000 });
+    // The server allows only the agent's own display: the built-in still runs (it serves "virtual:main").
+    rememberComputerUseSwitch(state, { computer_use: { enabled: true, real_screen: false, virtual_display: true } });
+    expect(computerUseBuiltins(dir, pinned)["computer-use"]).not.toBeNull();
+    rememberComputerUseSwitch(state, { computer_use: { enabled: true, real_screen: false, virtual_display: false } });
+    expect(computerUseBuiltins(dir, pinned)).toEqual({ "computer-use": null });
+    rememberComputerUseSwitch(state, { computer_use: { enabled: true, limits: { actions_per_session: 9 } } });
     writeHostFile(dir, { command: [process.execPath, "/tmp/evil.mjs"], environment: {} });
     expect(computerUseBuiltins(dir, pinned)).toEqual({ "computer-use": null });
     writeHostFile(dir, { command: [process.execPath, "/x/relay.mjs", "/x/connection.json"], environment: { ELECTRON_RUN_AS_NODE: "1" } });
@@ -73,6 +79,9 @@ describe("switch and built-in entry", () => {
     expect(chats.only(["ses_unmarked"])).toBeNull();
     expect(sessionEventOf({ event: "opened", by: "agent", app_id: "/usr/bin/gedit", screen: { id: "0", width: 10, height: 5, scale: 1 }, junk: 1 })).toEqual({ event: "opened", by: "agent", app_id: "/usr/bin/gedit", screen: { id: "0", width: 10, height: 5, scale: 1 } });
     expect(sessionEventOf({ event: "hacked", by: "agent" })).toBeNull();
+    // No question was asked: the agent's own display (virtual) or the person's real-screen setting (by_setting).
+    expect(sessionEventOf({ event: "approved", by: "agent", approval: "virtual", virtual: { width: 1280, height: 800, kind: "agent-browser" } })).toEqual({ event: "approved", by: "agent", approval: "virtual", virtual: { width: 1280, height: 800, kind: "agent-browser" } });
+    expect(sessionEventOf({ event: "approved", by: "agent", approval: "setting", by_setting: true })).toEqual({ event: "approved", by: "agent", approval: "setting", by_setting: true });
   });
 });
 

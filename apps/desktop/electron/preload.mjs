@@ -92,7 +92,7 @@ contextBridge.exposeInMainWorld("__OMNIRUSH_ELECTRON__", {
     },
   },
   computerUse: {
-    /** Computer use status (asks, sessions, frames) from the host in Electron main. */
+    /** Computer use status (sessions, frames, the agent cursor's moves) from the host in Electron main. */
     onStatus(callback) {
       const handler = (_event, status) => callback(status);
       ipcRenderer.on("omnirush:computer-use:status", handler);

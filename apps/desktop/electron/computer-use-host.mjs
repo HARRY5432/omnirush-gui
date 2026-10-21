@@ -1,5 +1,5 @@
 // macOS computer use host (contract v2). The tool surface, validation,
-// results, per-action approvals, `computer.session` events, media spool and
+// results, `computer.session` events, media spool and
 // MCP transport are the shared portable host's
 // (apps/server/src/computer-use/shared/portable-host.mjs), exactly as on
 // Windows and Linux; the signed Swift helper (`ComputerUse worker`,
@@ -10,8 +10,8 @@
 // createComputerUseHost() returns the same interface as createPortableHost()
 // (availability, os, connect, listen(dir) → { discoveryPath, close }, control,
 // stopAll, syntheticInput, watchInput, state, close) and calls the same
-// callbacks (approve.open / approve.act, onEvent, onState, onFrame), so
-// Electron main treats both hosts alike. The engine reaches it through the
+// callbacks (onEvent, onState, onFrame), and serves the agent's own display
+// (`virtual`) on the same connections, so Electron main treats both hosts alike. The engine reaches it through the
 // bundled relay with the discovery file, as on the other platforms.
 import { spawn } from "node:child_process";
 
@@ -158,12 +158,12 @@ export function createMacNativeWorker({ executable, args = ["worker"], captureLo
 
 /**
  * The macOS host. Options as createPortableHost's (spool, settings, context, refresh,
- * approve, onEvent, onState, onFrame) plus `executable`, the helper binary
+ * virtual, onEvent, onState, onFrame) plus `executable`, the helper binary
  * (OmniRush.ai Computer Use.app/Contents/MacOS/ComputerUse). `shared` may
  * supply the shared modules ({ portable, policy, contract, image }) when they are
  * bundled elsewhere.
  */
-export async function createComputerUseHost({ executable, spool = null, settings, context, refresh = null, approve, onEvent, onState, onFrame, shared = /** @type {{ portable?: any, policy?: any, contract?: any, image?: any }} */ ({}) }) {
+export async function createComputerUseHost({ executable, spool = null, settings, context, refresh = null, virtual = null, onEvent, onState, onFrame, shared = /** @type {{ portable?: any, policy?: any, contract?: any, image?: any }} */ ({}) }) {
   if (!executable) throw new Error("Computer Use helper unavailable.");
   const portable = shared.portable ?? await import(new URL("portable-host.mjs", SHARED).href);
   const policy = shared.policy ?? await import(new URL("policy.mjs", SHARED).href);
@@ -177,6 +177,6 @@ export async function createComputerUseHost({ executable, spool = null, settings
   });
   // The archive copy records that the frame was read on the device (text recognition ran).
   const ocrSpool = spool ? Object.create(spool, { put: { value: (frame) => spool.put({ ...frame, ocr: native.ocr }) } }) : null;
-  const host = await portable.createPortableHost({ native, spool: ocrSpool, settings, context, refresh, approve, onEvent, onState, onFrame, platform: "darwin" });
+  const host = await portable.createPortableHost({ native, spool: ocrSpool, settings, context, refresh, virtual, onEvent, onState, onFrame, platform: "darwin" });
   return { ...host, executable };
 }

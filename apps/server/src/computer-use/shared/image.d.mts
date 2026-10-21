@@ -15,3 +15,5 @@ export function imageInfo(bytes: Uint8Array): { mime: string; width: number; hei
 export function extensionOf(mime: unknown): "png" | "jpg" | "gif" | "webp" | "bin";
 export function luminanceGrid(image: RgbaImage, cell?: number): Grid;
 export function compareGrids(a: Grid | null | undefined, b: Grid | null | undefined, options?: { mask?: Rect[]; threshold?: number; minMass?: number; fraction?: number }): { stale: boolean; changed: number; span?: number; mass?: number };
+export const AGENT_CURSOR_COLOR: readonly [number, number, number];
+export function drawCursor(image: RgbaImage, x: number, y: number, options?: { color?: readonly number[]; label?: boolean; scale?: number }): Rect;

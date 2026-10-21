@@ -392,3 +392,57 @@ export function compareGrids(a, b, { mask = [], threshold = 6, minMass = 60_000,
   const limit = Math.max(minMass, fraction * a.width * a.height * 128);
   return { stale: mass > limit, changed, span, mass: Math.round(mass) };
 }
+
+// ------------------------------------------------------------ agent cursor
+
+// The agent's own pointer, drawn into frames of its virtual display (the display itself has no visible
+// cursor in a capture): an arrow, 1 = outline, 2 = fill, then a small "AGENT" tag below-right of the tip.
+const ARROW = [
+  "1", "11", "121", "1221", "12221", "122221", "1222221", "12222221", "122222221", "1222222221",
+  "12222222221", "122222111111", "1222221", "12212221", "1211 12221", "11   12221", "      12221", "       121", "        1",
+];
+const GLYPHS = {
+  A: ["010", "101", "111", "101", "101"],
+  G: ["011", "100", "101", "101", "011"],
+  E: ["111", "100", "110", "100", "111"],
+  N: ["101", "111", "111", "111", "101"],
+  T: ["111", "010", "010", "010", "010"],
+};
+export const AGENT_CURSOR_COLOR = Object.freeze([124, 58, 237]);
+
+function put(image, x, y, rgb) {
+  if (x < 0 || y < 0 || x >= image.width || y >= image.height) return;
+  const o = (y * image.width + x) * 4;
+  image.data[o] = rgb[0]; image.data[o + 1] = rgb[1]; image.data[o + 2] = rgb[2]; image.data[o + 3] = 255;
+}
+
+/**
+ * Draws the agent cursor with its tip at (x, y), in place. `scale` sizes it (1 at 1280 px wide frames);
+ * `label` false leaves the tag out. Returns the box it covers ({x, y, width, height}) for masks.
+ */
+export function drawCursor(image, x, y, { color = AGENT_CURSOR_COLOR, label = true, scale = 1 } = {}) {
+  const s = Math.max(1, Math.round(scale));
+  const tipX = Math.round(x), tipY = Math.round(y);
+  const white = [255, 255, 255];
+  for (let r = 0; r < ARROW.length; r += 1) for (let c = 0; c < ARROW[r].length; c += 1) {
+    const v = ARROW[r][c];
+    if (v !== "1" && v !== "2") continue;
+    for (let dy = 0; dy < s; dy += 1) for (let dx = 0; dx < s; dx += 1) put(image, tipX + c * s + dx, tipY + r * s + dy, v === "1" ? white : color);
+  }
+  let width = 12 * s, height = ARROW.length * s;
+  if (label) {
+    const text = "AGENT", px = s, pad = 2 * s;
+    const tagX = tipX + 11 * s, tagY = tipY + 15 * s;
+    const tagW = text.length * 4 * px - px + pad * 2, tagH = 5 * px + pad * 2;
+    for (let yy = 0; yy < tagH; yy += 1) for (let xx = 0; xx < tagW; xx += 1) put(image, tagX + xx, tagY + yy, color);
+    [...text].forEach((ch, i) => {
+      const glyph = GLYPHS[ch];
+      for (let r = 0; r < 5; r += 1) for (let c = 0; c < 3; c += 1) {
+        if (glyph[r][c] !== "1") continue;
+        for (let dy = 0; dy < px; dy += 1) for (let dx = 0; dx < px; dx += 1) put(image, tagX + pad + (i * 4 + c) * px + dx, tagY + pad + r * px + dy, white);
+      }
+    });
+    width = Math.max(width, tagX + tagW - tipX); height = Math.max(height, tagY + tagH - tipY);
+  }
+  return { x: tipX, y: tipY, width, height };
+}

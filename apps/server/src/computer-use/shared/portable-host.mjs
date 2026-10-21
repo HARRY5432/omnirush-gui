@@ -5,11 +5,13 @@
 // The same file ships in omnirush-cli (src/computer-use/) and omnirush-gui
 // (apps/server/src/computer-use/shared/); PARITY.sha256 lists it in both.
 //
-// Consent never goes through the engine: every computer_open_session (and,
-// per permission mode, a computer_act) is answered by `approve.open` /
-// `approve.act`, which the app routes to the person over its own channel
-// (desktop: the main window; CLI: the TUI's host dialog). The model and
-// project configs cannot reach that channel.
+// No questions (owner decision 2026-10-21): a session on the person's screen
+// opens only when the person turned the real screen on (a setting, off by
+// default; policy.mjs sessionRules) and then acts without asking. What stays:
+// the deny list, hit-testing of every point, the person-input pause, the
+// stuck-input release, Stop and the server switch. `virtual` (virtual-host.mjs)
+// serves app_id "virtual:<name>", the agent's own display, on the same
+// connection.
 
 import { spawn } from "node:child_process";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
@@ -36,7 +38,7 @@ import {
 } from "./contract.mjs";
 import { compareGrids, encodeJpeg, encodePng, fitLongSide, luminanceGrid, paintBoxes } from "./image.mjs";
 import { sha256 } from "./media.mjs";
-import { actApproval, ASK_SEND_DELETE, deniedApp } from "./policy.mjs";
+import { deniedApp, sessionRules } from "./policy.mjs";
 
 const RPC = new Set(["initialize", "ping", "tools/list", "tools/call", "notifications/initialized", "notifications/cancelled"]);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -127,16 +129,14 @@ function describeAction(a) {
  * The host. Options:
  * - native: a createNativeWorker() (or the same interface)
  * - spool: a media spool (media.mjs createMediaSpool) frames go to, or null
- * - settings(): { enabled, real_screen, limits, deny_apps, mode, ask_send_delete } now
- *   (mode: the chat's permission mode careful|normal|auto; ask_send_delete: the server's send/delete asks)
+ * - settings(): { enabled, real_screen, real_screen_on, virtual_display, limits, deny_apps } now
+ *   (real_screen: the server allows the person's screen; real_screen_on: the person turned it on)
  * - refresh(): read the server's switch and limits now (before each open); false or a throw: unread
- * - context(): { ancestors, self_pids, tty_pids, chat } now, or a promise of it
- *   (chat: the chat using computer use, for "Allow for this chat" and per-chat counts)
- * - approve: { open(request) → { decision: "chat"|"once"|"deny", window_id? },
- *              act(request) → { allow: boolean } }
+ * - context(): { ancestors, self_pids, tty_pids, chat } now, or a promise of it (chat: per-chat counts)
+ * - virtual: a createVirtualHost() for app_id "virtual:<name>", or null
  * - onEvent(event): `computer.session` events; onState(states); onFrame(frame)
  */
-export async function createPortableHost({ native: firstNative, nativeFactory = null, spool = null, settings, context = () => ({}), refresh = null, approve, onEvent = () => {}, onState = () => {}, onFrame = () => {}, platform = process.platform }) {
+export async function createPortableHost({ native: firstNative, nativeFactory = null, spool = null, settings, context = () => ({}), refresh = null, virtual = null, onEvent = () => {}, onState = () => {}, onFrame = () => {}, platform = process.platform }) {
   let native = firstNative;
   let availability = await native.ready;
   let nativeDown = false;
@@ -144,8 +144,8 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
   let restartedNote = false;
   const os = osName(platform);
   const sessions = new Map();
-  const grants = new Map();
   const shots = new Map();
+  const virtualOwners = new Map(); // virtual session id → the connection that opened it
   let lease = null;
   let closed = false;
 
@@ -169,7 +169,6 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     if (!sessions.has(s.id)) return;
     sessions.delete(s.id);
     s.phase = "ended"; s.observation = null;
-    s.pendingApproval?.resolve?.({ decision: "deny" });
     if (lease === s.id) lease = null;
     await native.call("stop").catch(() => {});
     emit(s, event, by, extra);
@@ -184,8 +183,7 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
   }
   const attach = (worker) => worker.onEvent((value) => {
     if (worker !== native) return;
-    // The person's own answer to a question (a click or key in the app) is not a takeover.
-    if (value.event === "person-input") for (const s of sessions.values()) if (s.phase === "working" && s.mode === "control" && !s.waiting) pause(s, "person", "Your input paused computer use. Choose Continue when you are ready.");
+    if (value.event === "person-input") for (const s of sessions.values()) if (s.phase === "working" && s.mode === "control") pause(s, "person", "Your input paused computer use. Choose Continue when you are ready.");
     if (value.event === "unavailable") {
       nativeDown = true;
       for (const s of [...sessions.values()]) void stop(s, "stopped", "limit", { reason: "native_unavailable" });
@@ -300,7 +298,7 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     if (s.phase !== "working") return mcpResult(failure("paused_by_person", s.status || "Paused. Wait for the person to choose Continue.", { next: "computer_session_status" }));
     if (!countShot(s)) return mcpResult(failure("screenshot_limit", "This chat reached its screenshot limit. Finish the task another way."));
     const w = await native.call("window", { id: s.window.id });
-    if (w.identity !== s.window.identity) { await stop(s, "closed", "limit", { reason: "window_unavailable" }); return mcpResult(failure("window_unavailable", "The approved app closed or restarted. Start a new session.")); }
+    if (w.identity !== s.window.identity) { await stop(s, "closed", "limit", { reason: "window_unavailable" }); return mcpResult(failure("window_unavailable", "The session's app closed or restarted. Start a new session.")); }
     let obs = s.resumeObservation && Date.now() - s.resumeObservation.at < limits().observation_ttl_seconds * 1000 && s.resumeObservation.window.identity === w.identity ? s.resumeObservation : null;
     s.resumeObservation = null;
     if (!obs) obs = await observation(s, w);
@@ -310,37 +308,6 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     update();
     const l = limits();
     return mcpResult(observeResult({ session_id: s.id, observation: obs.ref, window: windowRef(w), screen: s.screen, scale: w.bounds.width / obs.model.width, dpi: w.dpi, monitor_id: w.monitor, cursor: await native.call("cursor").catch(() => null), os, expires_in_ms: l.observation_ttl_seconds * 1000, actions_left: Math.max(0, l.actions_per_session - s.actions), seconds_left: Math.max(0, Math.ceil((s.expiresAt - Date.now()) / 1000)) }), includeImage ? { data: obs.bytes, mime: obs.mime } : null);
-  }
-
-  /** The on-screen text at (or within 24 px of) a point of the image, and whether it is in a secure field. Unknown text: undefined. */
-  async function targetAtPoint(observed, current, p) {
-    const inside = (r, pad) => p.x >= r.x - pad && p.x <= r.x + r.width + pad && p.y >= r.y - pad && p.y <= r.y + r.height + pad;
-    let secure = (observed.secureFields ?? []).some((r) => inside(r, 0));
-    if (!observed.texts) {
-      // The control under the point, as the OS describes it (Windows MSAA); none elsewhere.
-      const answer = await native.call("target", { points: [mapPoint(p, observed.model, current.bounds).screen] }).catch(() => null);
-      const found = Array.isArray(answer?.targets) ? answer.targets[0] : null;
-      if (found?.protected) secure = true;
-      if (found && typeof found.name === "string" && found.name) return { text: found.name, ...(secure ? { secure } : {}) };
-      return secure ? { secure } : {};
-    }
-    const near = observed.texts.filter((t) => inside(t, 24)).sort((a, b) => (inside(a, 0) ? 0 : 1) - (inside(b, 0) ? 0 : 1)).slice(0, 4);
-    return { text: near.map((t) => t.text).join(" "), ...(secure ? { secure } : {}) };
-  }
-
-  async function targetAt(observed, action, current, s) {
-    const p = action.type === "drag" ? action.path.at(-1) : action.x !== undefined ? { x: action.x, y: action.y } : null;
-    if (p) return targetAtPoint(observed, current, p);
-    // Typing, Enter and Space have no point: they go to the control the last click in this window focused
-    // (none after a Tab moved the focus: unknown).
-    const key = action.type === "key" ? String(action.key ?? "").toLowerCase() : "";
-    if (action.type !== "type" && key !== "enter" && key !== "space") return {};
-    const f = s?.focusPoint;
-    if (!f || f.window !== String(current.id)) return {};
-    const model = { x: ((f.screen.x - current.bounds.x) * observed.model.width) / current.bounds.width, y: ((f.screen.y - current.bounds.y) * observed.model.height) / current.bounds.height };
-    const found = await targetAtPoint(observed, current, model);
-    // Typing: only whether the field is secure (its label is not what is typed).
-    return action.type === "type" ? (found.secure ? { secure: true } : {}) : found;
   }
 
   async function actTool(s, args) {
@@ -371,11 +338,11 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     const current = await native.call("window", { id: s.window.id });
     const common = { action, frame_before: { sha256: observed.sha }, window: windowRef(current), screen: s.screen, dpi: current.dpi, monitor_id: current.monitor, scale: current.bounds.width / observed.model.width };
     if (current.identity !== observed.window.identity || JSON.stringify(current.bounds) !== JSON.stringify(observed.window.bounds)) return finish({ ...common, ok: false, code: "window_changed", message: "The window moved or changed. Observe again.", next: "computer_observe" });
-    // Native coordinates; every point must hit the approved window.
+    // Native coordinates; every point must hit the session's window (never another app's).
     const mapped = action.type === "drag" ? action.path.map((p) => mapPoint(p, observed.model, current.bounds)) : action.x !== undefined ? [mapPoint(action, observed.model, current.bounds)] : [];
     const hitAll = async (w) => !mapped.length || (await native.call("hit", { window: w, points: mapped.map((m) => m.screen) })).inside.every(Boolean);
-    if (!(await hitAll(current))) return finish({ ...common, ok: false, code: "window_occluded", message: "Another window covers this point, or it is outside the approved window. Observe again." });
-    // Tolerant stale check (caret masked), before any question: the person is asked about what the model saw.
+    if (!(await hitAll(current))) return finish({ ...common, ok: false, code: "window_occluded", message: "Another window covers this point, or it is outside the session's window. Observe again." });
+    // Tolerant stale check (caret masked): the action targets what the model saw.
     if (action.type !== "wait") {
       const fresh = await native.call("capture", { window: current }, 15_000);
       // The observation's grid was taken after masking: mask the fresh frame the same way.
@@ -384,37 +351,11 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
       const compare = compareGrids(observed.grid, grid, { mask: observed.caret ? [observed.caret] : [] });
       if (compare.stale) return finish({ ...common, ok: false, code: "stale_observation", message: "The window changed since the observation. Observe again.", next: "computer_observe" });
     }
-    // Per-action approval by permission mode (host channel, never the engine's).
-    const decision = actApproval({ mode: settings()?.mode, action, intent: args.intent, target: await targetAt(observed, action, current, s), window: { id: String(current.id), app_id: current.appId, title: current.title }, approved: s.approved, typed_before: s.typedIn === String(current.id) }, { sendDelete: settings()?.ask_send_delete === true || ASK_SEND_DELETE });
-    let approval = { asked: false };
-    if (decision.ask) {
-      // The same action with the same intent, allowed a moment ago (a retry after a fresh observation), is not asked again.
-      // Keyed to the image too: the same screen, the same action, the same reason.
-      const key = JSON.stringify([action, args.intent, observed.sha]);
-      const remembered = s.allowed.get(key);
-      if (remembered && remembered > Date.now()) {
-        approval = { asked: false, reasons: decision.reasons.map((r) => r.code), by: "person" };
-      } else {
-        const pointList = action.type === "drag" ? action.path : action.x !== undefined ? [{ x: action.x, y: action.y }] : [];
-        const answer = await askAct(s, { action, intent: args.intent, reasons: decision.reasons, points: pointList, frame: observed });
-        if (answer.cancelled || s.connection.cancelled) return finish({ ...common, approval: { asked: answer.asked !== false, reasons: decision.reasons.map((r) => r.code), by: "agent", reason: "cancelled" }, ok: false, code: "approval_denied", message: "The request was cancelled.", may_have_acted: false });
-        approval = { asked: true, reasons: decision.reasons.map((r) => r.code), by: "person" };
-        if (!answer.allow) return finish({ ...common, approval, ok: false, code: "approval_denied", message: "The person did not allow this action. Ask them or choose another way." });
-        if (sessions.get(s.id) !== s || s.phase !== "working") return finish({ ...common, approval, ok: false, code: "paused_by_person", message: "The session was paused or ended." });
-        // Input from answering moved the worker's input generation on: act from the current one.
-        const now = await native.call("state").catch(() => null);
-        if (now && Number.isInteger(now.generation)) s.generation = now.generation;
-        s.allowed.set(key, Date.now() + 30_000);
-        if (s.allowed.size > 64) s.allowed.delete(s.allowed.keys().next().value);
-      }
-      // While the person answered, the window may have moved or been covered: geometry and hits again (no image compare).
-      const after = await native.call("window", { id: s.window.id });
-      if (after.identity !== current.identity || JSON.stringify(after.bounds) !== JSON.stringify(current.bounds)) return finish({ ...common, approval, ok: false, code: "window_changed", message: "The window moved or changed. Observe again.", next: "computer_observe" });
-      if (!(await hitAll(after))) return finish({ ...common, approval, ok: false, code: "window_occluded", message: "Another window covers this point, or it is outside the approved window. Observe again." });
-    }
+    // No question: the person turned the real screen on, which is the consent (sessionRules).
+    const approval = { asked: false, by: "setting" };
     const cursorBefore = await native.call("cursor").catch(() => null);
-    // The engine gave up on this call (before or while it was asked): no input with nobody waiting for it.
-    if (s.connection.cancelled) return finish({ ...common, approval: { ...approval, ...(approval.asked ? {} : { by: "agent" }), reason: "cancelled" }, ok: false, code: "approval_denied", message: "The request was cancelled.", may_have_acted: false });
+    // The engine gave up on this call: no input with nobody waiting for it.
+    if (s.connection.cancelled) return finish({ ...common, approval, ok: false, code: "cancelled", message: "The request was cancelled.", may_have_acted: false });
     const point = mapped.length === 1 ? { model: mapped[0].model, screen: mapped[0].screen } : undefined;
     const path = action.type === "drag" ? mapped.map((m) => ({ model: m.model, screen: m.screen })) : undefined;
     const screenAction = action.type === "drag" ? { ...action, path: mapped.map((m) => m.screen) } : mapped.length ? { ...action, x: mapped[0].screen.x, y: mapped[0].screen.y } : action;
@@ -428,12 +369,6 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
       return finish({ ...common, approval, point, path, cursor_before: cursorBefore, ok: false, code, message: error.message, may_have_acted: action.type !== "wait", next: "computer_session_status" });
     }
     s.lastOperation = Date.now();
-    // Typing goes to the control the last click focused: its secure-field check reads this point.
-    if (["click", "double_click"].includes(action.type) && mapped.length === 1) s.focusPoint = { window: String(current.id), screen: mapped[0].screen };
-    else if (action.type === "key" && String(action.key).toLowerCase() === "tab") s.focusPoint = null;
-    // Typing arms "Enter right after typing" (the send/delete switch); a click or Enter disarms it.
-    if (action.type === "type") s.typedIn = String(current.id);
-    else if (["click", "double_click"].includes(action.type) || (action.type === "key" && String(action.key).toLowerCase() === "enter")) s.typedIn = null;
     const cursorAfter = await native.call("cursor").catch(() => null);
     const done = { ...common, approval, point, path, cursor_before: cursorBefore, cursor_after: cursorAfter, ok: true, may_have_acted: action.type !== "wait" };
     if (!args.observe_after) return finish({ ...done, next: "computer_observe" });
@@ -449,25 +384,6 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     }
   }
 
-  async function askAct(s, request) {
-    // The engine already gave up on this call: no question.
-    if (s.connection.cancelled) return { allow: false, cancelled: true, asked: false };
-    const l = limits();
-    const expired = timeout(l.approval_timeout_seconds * 1000).then(() => ({ allow: false }));
-    // The engine cancelling the call (notifications/cancelled) ends the question: the act is not done.
-    const cancelled = new Promise((resolve) => { s.pendingAct = { resolve }; }).then(() => ({ allow: false, cancelled: true, asked: true }));
-    s.waiting = true; update();
-    try {
-      return await Promise.race([
-        cancelled,
-        Promise.resolve(approve.act({ session_id: s.id, request_id: randomUUID(), chat: s.chat ?? null, app: { app_id: s.window.appId, app_name: s.window.appName, bundle_or_exe: s.window.executable, pid: s.window.pid }, window_title: s.window.title, purpose: s.purpose, intent: request.intent, action: request.action, reasons: request.reasons, points: request.points, frame: { width: request.frame.model.width, height: request.frame.model.height, sha256: request.frame.sha, data_url: `data:${request.frame.mime};base64,${request.frame.bytes.toString("base64")}` } })).then((v) => ({ allow: v?.allow === true })),
-        expired,
-      ]);
-    } catch {
-      return { allow: false };
-    } finally { s.pendingAct = null; s.waiting = false; update(); }
-  }
-
   async function discover() {
     const ctx = (await context()) ?? {};
     const config = settings() ?? {};
@@ -481,17 +397,18 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
       if (!denied) apps.get(key).windows.push({ id: String(w.id), title: w.title });
     }
     const screens = await native.call("screens").catch(() => []);
-    return mcpResult({ ok: true, os, contract: CONTRACT_VERSION, screens: screens.map((s) => ({ id: String(s.id), width: s.width, height: s.height, scale: s.scale, primary: Boolean(s.primary) })), apps: [...apps.values()], modes: ["observe", "control"], virtual_display: false });
+    const virtualOk = Boolean(virtual) && config.virtual_display !== false;
+    return mcpResult({ ok: true, os, contract: CONTRACT_VERSION, screens: screens.map((s) => ({ id: String(s.id), width: s.width, height: s.height, scale: s.scale, primary: Boolean(s.primary) })), apps: [...apps.values()], modes: ["observe", "control"], real_screen: true, virtual_display: virtualOk, ...(virtualOk ? { virtual_hint: virtual.hint } : {}) });
   }
 
   async function openSession(connection, args) {
-    // The server's switch and limits as of now, so a stricter value (off, a shorter chat bound) applies at once.
-    // When they could not be read, no "Allow for this chat" is reused (the person is asked).
-    const policyRead = typeof refresh === "function" ? await Promise.resolve().then(refresh).then((v) => v !== false, () => false) : true;
+    // The server's switch and limits as of now, so a stricter value (off) applies at once.
+    if (typeof refresh === "function") await Promise.resolve().then(refresh).catch(() => false);
     const config = settings() ?? {};
     const ctx = (await context()) ?? {};
     if (!config.enabled) return mcpResult(failure("disabled", config.message || "Computer use is turned off."));
-    if (config.real_screen === false) return mcpResult(failure("real_screen_unavailable", "Computer use on this screen is turned off."));
+    const rules = sessionRules({ display: "real", server: config, optIn: config.real_screen_on === true });
+    if (!rules.open) return mcpResult(failure(rules.code, rules.message));
     if (lease) return mcpResult(failure("session_busy", "Another computer use session is open. Close it first."));
     const windows = (await native.call("list")).filter((w) => w.appId === args.app_id && (args.pid === undefined || w.pid === args.pid));
     if (!windows.length) return mcpResult(failure("app_unavailable", "That app has no visible window. Open it yourself, then call computer_discover again."));
@@ -499,89 +416,66 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     if (denied) return mcpResult(failure(denied.code, denied.reason));
     const preferred = args.window_id !== undefined ? windows.find((w) => String(w.id) === args.window_id) : windows[0];
     if (!preferred) return mcpResult(failure("window_unavailable", "That window is not open. Call computer_discover again."));
+    if (connection.cancelled) return mcpResult(failure("cancelled", "The request was cancelled."));
     const l = limits();
     const s = {
-      id: randomUUID(), connection, window: preferred, windows, mode: args.mode, purpose: args.purpose, phase: "approval", status: "",
-      approval: null, chat: connection.internal === false ? null : ctx.chat ?? null, actions: 0, requests: new Set(), observation: null, resumeObservation: null, log: [],
-      lastOperation: Date.now(), lastAct: 0, generation: 0, allowed: new Map(), expiresAt: Date.now() + l.approval_timeout_seconds * 1000, screen: await screenOf(preferred),
+      id: randomUUID(), connection, window: preferred, windows, mode: args.mode, purpose: args.purpose, phase: "working", status: "",
+      approval: "setting", chat: connection.internal === false ? null : ctx.chat ?? null, actions: 0, requests: new Set(), observation: null, resumeObservation: null, log: [],
+      lastOperation: Date.now(), lastAct: 0, generation: 0, expiresAt: Date.now() + l.session_seconds * 1000, screen: await screenOf(preferred),
     };
-    lease = s.id; sessions.set(s.id, s);
-    update();
-    const grantKey = `${s.chat ?? ""}\0${preferred.appId}\0${s.mode}`;
-    // A grant is kept and reused only with a fresh read that carries the server's grant epoch and its own
-    // chat bound, under the same epoch it was given in (off -> on, or a new bound, bumps the epoch).
-    const epoch = Number.isSafeInteger(config.grant_epoch) ? config.grant_epoch : null;
-    const grantable = Boolean(s.chat) && policyRead && epoch !== null && config.chat_bound_read === true;
-    const grant = grantable ? grants.get(grantKey) : null;
-    // The server's bound now (it may have been lowered since): 0 = until the chat ends.
-    const fresh = grant && grant.epoch === epoch && (l.chat_approval_seconds === 0 || Date.now() - grant.at < l.chat_approval_seconds * 1000);
-    let answer;
-    if (connection.cancelled) answer = { decision: "deny", cancelled: true };
-    else if (fresh) answer = { decision: "chat", window_id: String(preferred.id), reused: true };
-    else {
-      const pendingAnswer = new Promise((resolve) => { s.pendingApproval = { resolve }; });
-      const request = { session_id: s.id, request_id: randomUUID(), app: { app_id: preferred.appId, app_name: preferred.appName, bundle_or_exe: preferred.executable, pid: preferred.pid }, windows: windows.map((w) => ({ id: String(w.id), title: w.title })), window_id: String(preferred.id), mode: s.mode, purpose: s.purpose, os, seconds: l.session_seconds, chat_seconds: l.chat_approval_seconds, chat: s.chat ?? null };
-      answer = await Promise.race([
-        Promise.resolve(approve.open(request)).catch(() => ({ decision: "deny" })),
-        pendingAnswer,
-        timeout(l.approval_timeout_seconds * 1000).then(() => ({ decision: "deny", timeout: true })),
-      ]);
-      s.pendingApproval = null;
-    }
-    if (!sessions.has(s.id)) return mcpResult(failure("approval_denied", "The request ended without access."));
-    // Cancelled while the answer came in: nobody waits for this session, so it does not open.
-    if (connection.cancelled && answer?.decision !== "deny") answer = { decision: "deny", cancelled: true };
-    if (!answer || !["chat", "once"].includes(answer.decision)) {
-      // A Deny (or no answer) withdraws any earlier "Allow for this chat" for this app: in this chat, or, when
-      // no chat is named (several running, or the copied CLI connection), in every chat. A call the engine
-      // cancelled is no answer from the person: it changes no grant and opens nothing.
-      if (!answer?.cancelled) {
-        for (const key of [...grants.keys()]) {
-          const [chat, app] = key.split("\0");
-          if (app === preferred.appId && (!s.chat || chat === s.chat)) grants.delete(key);
-        }
-      }
-      sessions.delete(s.id); if (lease === s.id) lease = null;
-      s.approval = null;
-      emit(s, "denied", answer?.cancelled ? "agent" : answer?.timeout ? "limit" : "person", answer?.cancelled ? { reason: "cancelled" } : {});
-      update();
-      return mcpResult(failure("approval_denied", answer?.cancelled ? "The request was cancelled." : answer?.timeout ? "Nobody answered the request. Ask the person before trying again." : "The person did not allow access to this window."));
-    }
-    const chosen = windows.find((w) => String(w.id) === String(answer.window_id ?? preferred.id)) ?? preferred;
     try {
-      const current = await native.call("window", { id: chosen.id });
-      if (current.identity !== chosen.identity) throw Object.assign(new Error("The app restarted. Start a new session."), { code: "window_unavailable" });
+      const current = await native.call("window", { id: preferred.id });
+      if (current.identity !== preferred.identity) throw Object.assign(new Error("The app restarted. Start a new session."), { code: "window_unavailable" });
       if (s.mode === "control") await native.call("focus", { window: current });
       const started = await native.call("start");
       s.generation = started?.generation ?? 0;
       s.window = current; s.screen = await screenOf(current);
     } catch (error) {
-      sessions.delete(s.id); if (lease === s.id) lease = null; update();
       return mcpResult(failure(error.code ?? "window_unavailable", error.message));
     }
-    s.approval = answer.decision;
-    // "Allow for this chat": this app, this chat, until the chat ends (chat_approval_seconds 0), or for at most the
-    // server's chat_approval_seconds (checked again at each reuse). Kept in memory only, keyed to the chat: never
-    // another chat, never a restart; the person's Stop and the server's switch clear it. A call no chat can be
-    // named for gets no grant (it works as "Allow once").
-    if (answer.decision === "chat" && !answer.reused && grantable) grants.set(grantKey, { at: Date.now(), epoch });
-    s.phase = "working"; s.lastOperation = Date.now();
-    s.expiresAt = Date.now() + l.session_seconds * 1000;
+    lease = s.id; sessions.set(s.id, s);
     s.approved = { window_id: String(s.window.id), app_id: s.window.appId };
     emit(s, "opened", "agent", restartedNote ? { reason: "worker_restarted" } : {});
     restartedNote = false;
-    emit(s, "approved", answer.reused ? "agent" : "person", answer.reused ? { reused: true } : {});
+    // The person's real-screen setting is the approval: no question was asked.
+    emit(s, "approved", "agent", { by_setting: true });
     update();
     return mcpResult({ ok: true, session_id: s.id, state: "active", mode: s.mode, approval: s.approval, window: windowRef(s.window), screen: s.screen, os, expires_in_seconds: l.session_seconds, actions_left: l.actions_per_session });
   }
 
   async function call(connection, name, rawArgs) {
     if (!TOOLS.includes(name)) return mcpResult(failure("unknown_tool", "Unknown computer use tool."));
-    if (nativeDown && !(await ensureNative())) return mcpResult(failure("native_unavailable", "Desktop access stopped. Try again in a few minutes, or restart the app."));
-    if (!availability.supported) return mcpResult(failure(availability.code ?? "desktop_unavailable", availability.error ?? "Computer use is unavailable on this desktop."));
     const valid = validateCall(name, rawArgs);
     if (!valid.ok) return mcpResult(failure(valid.code, valid.message));
     const args = valid.args;
+    // The agent's own display: no native access to the person's screen is involved.
+    if (virtual && name === "computer_open_session" && args.app_id.startsWith("virtual:")) {
+      // The server's switch as of now, as for the person's screen.
+      if (typeof refresh === "function") await Promise.resolve().then(refresh).catch(() => false);
+      if (!(settings() ?? {}).enabled) return mcpResult(failure("disabled", settings()?.message || "Computer use is turned off."));
+      const opened = await virtual.open(args);
+      if (opened.ok) virtualOwners.set(opened.session_id, connection);
+      return mcpResult(opened);
+    }
+    if (virtual && args.session_id && virtual.owns(args.session_id)) {
+      if (virtualOwners.get(args.session_id) !== connection) return mcpResult(failure("session_unavailable", "This session has ended. Open a new one."));
+      return virtual.call(name, args);
+    }
+    // The person's screen is off (the default): refused (and its windows not listed) before any desktop access.
+    if (name === "computer_open_session") {
+      const config = settings() ?? {};
+      const rules = sessionRules({ display: "real", server: config, optIn: config.real_screen_on === true });
+      if (!rules.open) return mcpResult(failure(rules.code, rules.message));
+    }
+    if (name === "computer_discover") {
+      const config = settings() ?? {};
+      const rules = sessionRules({ display: "real", server: config, optIn: config.real_screen_on === true });
+      if (rules.open && nativeDown) await ensureNative();
+      const why = !rules.open ? rules.message : !availability.supported || nativeDown ? availability.error ?? "Desktop access is unavailable." : null;
+      if (why) return mcpResult({ ok: true, os, contract: CONTRACT_VERSION, real_screen: false, real_screen_unavailable: why, screens: [], apps: [], modes: ["observe", "control"], virtual_display: Boolean(virtual) && config.virtual_display !== false, ...(virtual ? { virtual_hint: virtual.hint } : {}) });
+    }
+    if (nativeDown && !(await ensureNative())) return mcpResult(failure("native_unavailable", "Desktop access stopped. Try again in a few minutes, or restart the app."));
+    if (!availability.supported) return mcpResult(failure(availability.code ?? "desktop_unavailable", availability.error ?? "Computer use is unavailable on this desktop."));
     if (name === "computer_discover") return discover();
     if (name === "computer_open_session") return openSession(connection, args);
     const s = sessions.get(args.session_id);
@@ -591,7 +485,6 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
       const l = limits();
       return mcpResult({ ok: true, session_id: s.id, state: s.phase === "working" ? "active" : s.phase, mode: s.mode, approval: s.approval, message: s.status || undefined, actions_left: Math.max(0, l.actions_per_session - s.actions), seconds_left: Math.max(0, Math.ceil((s.expiresAt - Date.now()) / 1000)), window: windowRef(s.window), os });
     }
-    if (s.phase === "approval") return mcpResult(failure("approval_pending", "Wait for the person to answer."));
     if (name === "computer_observe") return observeTool(s, args.include_image);
     return actTool(s, args);
   }
@@ -614,11 +507,6 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
           const id = message.params?.requestId;
           if (id !== undefined && id !== null && id === connection.inflight) {
             connection.cancelled = true;
-            for (const s of sessions.values()) {
-              if (s.connection !== connection) continue;
-              s.pendingApproval?.resolve?.({ decision: "deny", cancelled: true });
-              s.pendingAct?.resolve?.({ allow: false });
-            }
           }
           return null;
         }
@@ -644,6 +532,7 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
       async close() {
         connection.closed = true;
         for (const s of [...sessions.values()]) if (s.connection === connection) await stop(s, "closed", "agent", { reason: "disconnected" });
+        for (const [id, owner] of [...virtualOwners]) if (owner === connection) { virtualOwners.delete(id); if (virtual?.owns(id)) await virtual.control({ session_id: id, action: "stop" }).catch(() => {}); }
       },
     };
   }
@@ -652,7 +541,7 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
   async function listen(dir) {
     await mkdir(dir, { recursive: true, mode: 0o700 });
     // Two tokens: the app's own engine relay reads engine-connection.json; the copied CLI connection reads
-    // cli-connection.json, and its connections are external (no chat, no grants). (A CLI connection copied
+    // cli-connection.json, and its connections are external (no chat). (A CLI connection copied
     // before these names pointed at connection.json, which is no longer written: it fails to connect.)
     const discoveryPath = path.join(dir, "engine-connection.json");
     const externalDiscoveryPath = path.join(dir, "cli-connection.json");
@@ -700,9 +589,10 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
 
   /** Controls from the person (host channel only): stop | takeover | continue | hide | show. */
   async function control({ session_id, action }) {
+    if (virtual?.owns(session_id)) return virtual.control({ session_id, action });
     const s = sessions.get(session_id);
     if (!s) throw new Error("This computer use session has ended.");
-    if (action === "stop") { grants.clear(); return stop(s, "stopped", "person"); }
+    if (action === "stop") return stop(s, "stopped", "person");
     if (action === "takeover") return pause(s, "person", "You took over. Choose Continue when you are ready.");
     if (action === "hide" || action === "show") { s.hidden = action === "hide"; update(); return undefined; }
     if (action !== "continue" || s.phase !== "paused") throw new Error("This action is unavailable.");
@@ -721,9 +611,8 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
 
   /** Ends every session (server switch off, app quitting). */
   async function stopAll(by = "server", event = "stopped") {
-    // Stop by the person or the server: "Allow for this chat" is asked again.
-    if (by === "person" || by === "server") grants.clear();
     for (const s of [...sessions.values()]) await stop(s, event, by);
+    await virtual?.stopAll(by, event);
   }
 
   /** Whether the latest press (key or button) within `withinMs` was synthetic (injected by a program). */
@@ -757,9 +646,11 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     if (closed) return;
     closed = true; clearInterval(ticker);
     await stopAll("agent", "closed");
+    await virtual?.close();
     await native.close();
   }
 
   update();
-  return { get availability() { return availability; }, os, connect, listen, control, stopAll, syntheticInput, physicalInput, watchInput, state: publicState, close };
+  const allState = () => [...publicState(), ...(virtual ? virtual.state() : [])];
+  return { get availability() { return availability; }, os, connect, listen, control, stopAll, syntheticInput, physicalInput, watchInput, state: allState, close };
 }

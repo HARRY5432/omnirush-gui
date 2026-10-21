@@ -31,8 +31,9 @@ import {
   getComputerUseMcpCommand,
   getComputerUseMcpEnvironment,
   getComputerUseState,
-  computerUseAnswer,
   computerUseControl,
+  getComputerUseRealScreen,
+  setComputerUseRealScreen,
   initComputerUse,
   listRunningApps,
   openComputerUseSetupApp,
@@ -2323,10 +2324,11 @@ const desktopCommandHandlers = {
       return omnirushUiMcpLaunch().command;
   },
   "getComputerUseState": async () => getComputerUseState(),
-  // Only the person answers, in the main window's own frame (never the agent, a page or a config).
-  "computerUseAnswer": async (event, value) => {
-    if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error("Computer use controls require the main OmniRush.ai window.");
-    return computerUseAnswer(value);
+  // The person's real-screen setting and the session controls: the main window's own frame only (never the agent, a page or a config).
+  "getComputerUseRealScreen": async () => getComputerUseRealScreen(),
+  "setComputerUseRealScreen": async (event, value) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error("Computer use settings require the main OmniRush.ai window.");
+    return setComputerUseRealScreen(value);
   },
   "computerUseControl": async (event, value) => {
     if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error("Computer use controls require the main OmniRush.ai window.");

@@ -876,70 +876,46 @@ export type RunningAppsResult = {
   apps: string[];
 };
 
-/** Computer use (contract v2): the app identity the host verified (exe path / bundle id, pid). */
-export type ComputerUseAppRef = { app_id: string; app_name: string; bundle_or_exe: string; pid: number };
+/** Computer use (contract v2): the app identity the host verified (exe path / bundle id, pid; none on the agent's own display). */
+export type ComputerUseAppRef = { app_id: string; app_name: string; bundle_or_exe: string; pid: number | null };
 
-/** One computer use session as the host sees it (apps/server/src/computer-use/shared/portable-host.mjs). */
+/** A point in the session's frame pixels. */
+export type ComputerUsePoint = { x: number; y: number };
+
+/** The agent cursor's latest move (before a pointer act): the live view glides it from `from` to `to`. */
+export type ComputerUseCursorMove = { session_id: string; from: ComputerUsePoint | null; to: ComputerUsePoint; path: ComputerUsePoint[]; action: string; width: number; height: number; seq: number; at: number };
+
+/** One computer use session as the host sees it (apps/server/src/computer-use/shared/portable-host.mjs, virtual-host.mjs). */
 export type ComputerUseSessionState = {
   id: string;
-  phase: "approval" | "working" | "paused" | "ended";
+  phase: "working" | "paused" | "ended";
   mode: "observe" | "control";
   purpose: string;
   status: string;
   app: ComputerUseAppRef;
   window: { id: string; title: string };
   windows: Array<{ id: string; title: string }>;
-  approval: "once" | "chat" | null;
+  /** "setting": the person's screen (the person's real-screen setting); "virtual": the agent's own display. */
+  approval: "setting" | "virtual" | null;
   actions: number;
   actions_left: number;
   seconds_left: number;
   can_continue: boolean;
   log: Array<{ at: string; action: string; intent: string; ok: boolean; code: string | null }>;
-  frame: { sha: string; width: number; height: number; mime: string; data_url: string; at: string } | null;
+  frame: { sha: string; width: number; height: number; mime: string; data_url: string; at: string; cursor?: ComputerUsePoint | null } | null;
   chat: string | null;
   hidden?: boolean;
   window_bounds?: { x: number; y: number; width: number; height: number };
+  /** The agent's own display. */
+  display?: "virtual";
+  virtual?: { kind: string; display: string; browser: string | null };
+  /** The agent's cursor in frame pixels (the agent's own display). */
+  cursor?: ComputerUsePoint | null;
+  cursor_move?: ComputerUseCursorMove;
 };
 
-/** A question only the person answers, in the main window (never through the engine). */
-export type ComputerUseRequest =
-  | {
-    kind: "open";
-    request_id: string;
-    session_id: string;
-    app: ComputerUseAppRef;
-    /** The app's icon (PNG data URL) when the OS gives one. */
-    icon: string | null;
-    windows: Array<{ id: string; title: string }>;
-    window_id: string;
-    mode: "observe" | "control";
-    purpose: string;
-    os: string;
-    seconds: number;
-    /** How long "Allow for this chat" lasts: 0 = until the chat ends, else at most this many seconds (the server's bound). */
-    chat_seconds: number;
-    chat: string | null;
-  }
-  | {
-    kind: "act";
-    request_id: string;
-    session_id: string;
-    app: ComputerUseAppRef;
-    icon: string | null;
-    window_title: string;
-    purpose: string;
-    intent: string;
-    action: Record<string, unknown>;
-    reasons: Array<{ code: string; detail?: string; text: string }>;
-    /** Points of the action, in pixels of `frame`. */
-    points: Array<{ x: number; y: number }>;
-    frame: { width: number; height: number; sha256: string; data_url: string };
-    chat: string | null;
-  };
-
-/** The pressed button's box (CSS pixels of the main window): the person's own press must land in it. */
+/** The pressed button's box (CSS pixels of the main window): the person's own press must land in it (Continue). */
 export type ComputerUseButtonRect = { x: number; y: number; width: number; height: number };
-export type ComputerUseAnswer = { request_id: string; decision: "chat" | "once" | "deny" | "allow"; window_id?: string; rect?: ComputerUseButtonRect };
 export type ComputerUseControlAction = "stop" | "takeover" | "continue" | "hide" | "show";
 
 export type ComputerUseStatus = {
@@ -949,8 +925,10 @@ export type ComputerUseStatus = {
   message: string | null;
   mode: "careful" | "normal" | "auto";
   sessions: ComputerUseSessionState[];
-  requests: ComputerUseRequest[];
 };
+
+/** The person's one-time setting for their own screen (off by default). forced: the environment decides; allowed: the server allows it. */
+export type ComputerUseRealScreen = { on: boolean; forced: boolean; allowed: boolean };
 
 // ---------------------------------------------------------------------------
 // The command map
@@ -1039,7 +1017,8 @@ export type DesktopCommandMap = {
   getComputerUseMcpCommand: { args: []; result: string[] };
   getComputerUseMcpEnvironment: { args: []; result: Record<string, string> };
   getComputerUseState: { args: []; result: ComputerUseStatus };
-  computerUseAnswer: { args: [answer: ComputerUseAnswer]; result: void };
+  getComputerUseRealScreen: { args: []; result: ComputerUseRealScreen };
+  setComputerUseRealScreen: { args: [on: boolean]; result: ComputerUseRealScreen };
   computerUseControl: { args: [value: { session_id: string; action: ComputerUseControlAction; rect?: ComputerUseButtonRect }]; result: void };
   getOmniRushUiMcpEnvironment: { args: []; result: Record<string, string> };
 

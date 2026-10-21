@@ -1,13 +1,13 @@
 // Computer use status from Electron main: one read on first use, then the
-// pushes on "omnirush:computer-use:status" (every request, answer, session
-// change and new frame).
+// pushes on "omnirush:computer-use:status" (every session change, new frame
+// and agent cursor move).
 
 import { useEffect, useSyncExternalStore } from "react";
 import { create } from "zustand";
 
-import type { ComputerUseAnswer, ComputerUseButtonRect, ComputerUseControlAction, ComputerUseStatus } from "@omnirush/types/desktop-ipc";
+import type { ComputerUseButtonRect, ComputerUseControlAction, ComputerUseStatus } from "@omnirush/types/desktop-ipc";
 
-/** The pressed button's box, for main's check that the person pressed it themselves. */
+/** The pressed button's box, for main's check that the person pressed it themselves (Continue). */
 export function buttonRect(target: EventTarget | null): ComputerUseButtonRect | undefined {
   if (!(target instanceof Element)) return undefined;
   const r = target.getBoundingClientRect();
@@ -67,7 +67,7 @@ export function useComputerUseStatus(): ComputerUseStatus | null {
 /** Chats whose surface shows computer use inline (one entry per mounted surface). */
 export const useInlineComputerUseChats = create<{ chats: string[] }>(() => ({ chats: [] }));
 
-/** Registers a chat surface that shows computer use inline, so the global fallback skips its requests. */
+/** Registers a chat surface that shows computer use inline, so the global fallback skips its sessions. */
 export function useRegisterInlineComputerUse(sessionId: string) {
   useEffect(() => {
     useInlineComputerUseChats.setState((state) => ({ chats: [...state.chats, sessionId] }));
@@ -78,13 +78,6 @@ export function useRegisterInlineComputerUse(sessionId: string) {
       });
     };
   }, [sessionId]);
-}
-
-/** Answers a request; rejects with main's message when the answer is refused. */
-export async function answerComputerUse(answer: ComputerUseAnswer) {
-  const invoke = window.__OMNIRUSH_ELECTRON__?.invokeDesktop;
-  if (!invoke) throw new Error("Computer use needs the desktop app.");
-  await invoke("computerUseAnswer", answer);
 }
 
 /** Stop, take over or continue a session. */
