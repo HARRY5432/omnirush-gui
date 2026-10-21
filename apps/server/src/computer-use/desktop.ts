@@ -160,9 +160,10 @@ export function permissionModeName(mode: string | null | undefined): "careful" |
 }
 
 /**
- * The chat a computer use call belongs to: the latest prompted chat that is
- * still running (MCP calls carry no chat id). `mark` at every prompt
- * dispatch; `resolve` with the engine's running sessions.
+ * The chat a computer use call belongs to (MCP calls carry no chat id). `mark`
+ * at every prompt dispatch; `only` (grants: exactly one prompted chat running)
+ * and `resolve` (traces: the latest prompted chat still running) with the
+ * engine's running sessions.
  */
 export function createChatTracker(limit = 64) {
   const order: string[] = [];
@@ -173,6 +174,16 @@ export function createChatTracker(limit = 64) {
       order.push(sessionId);
       if (order.length > limit) order.splice(0, order.length - limit);
     },
+    /**
+     * The one chat a call can belong to, for "Allow for this chat": exactly one prompted chat is running.
+     * Running unknown (null), none or several: null, so no grant is kept or reused (the person is asked).
+     */
+    only(running: string[] | null): string | null {
+      if (!running) return null;
+      const live = order.filter((id) => running.includes(id));
+      return live.length === 1 ? live[0]! : null;
+    },
+    /** The chat to record a trace event on: the latest prompted chat still running, else the latest. */
     resolve(running: string[] | null): string | null {
       for (let i = order.length - 1; i >= 0; i -= 1) {
         const id = order[i];

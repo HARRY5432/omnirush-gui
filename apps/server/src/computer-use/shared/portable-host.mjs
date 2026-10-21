@@ -129,13 +129,14 @@ function describeAction(a) {
  * - spool: a media spool (media.mjs createMediaSpool) frames go to, or null
  * - settings(): { enabled, real_screen, limits, deny_apps, mode, ask_send_delete } now
  *   (mode: the chat's permission mode careful|normal|auto; ask_send_delete: the server's send/delete asks)
+ * - refresh(): read the server's switch and limits now (before each open); false or a throw: unread
  * - context(): { ancestors, self_pids, tty_pids, chat } now, or a promise of it
  *   (chat: the chat using computer use, for "Allow for this chat" and per-chat counts)
  * - approve: { open(request) → { decision: "chat"|"once"|"deny", window_id? },
  *              act(request) → { allow: boolean } }
  * - onEvent(event): `computer.session` events; onState(states); onFrame(frame)
  */
-export async function createPortableHost({ native: firstNative, nativeFactory = null, spool = null, settings, context = () => ({}), approve, onEvent = () => {}, onState = () => {}, onFrame = () => {}, platform = process.platform }) {
+export async function createPortableHost({ native: firstNative, nativeFactory = null, spool = null, settings, context = () => ({}), refresh = null, approve, onEvent = () => {}, onState = () => {}, onFrame = () => {}, platform = process.platform }) {
   let native = firstNative;
   let availability = await native.ready;
   let nativeDown = false;
@@ -476,6 +477,9 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
   }
 
   async function openSession(connection, args) {
+    // The server's switch and limits as of now, so a stricter value (off, a shorter chat bound) applies at once.
+    // When they could not be read, no "Allow for this chat" is reused (the person is asked).
+    const policyRead = typeof refresh === "function" ? await Promise.resolve().then(refresh).then((v) => v !== false, () => false) : true;
     const config = settings() ?? {};
     const ctx = (await context()) ?? {};
     if (!config.enabled) return mcpResult(failure("disabled", config.message || "Computer use is turned off."));
@@ -496,7 +500,7 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     lease = s.id; sessions.set(s.id, s);
     update();
     const grantKey = `${s.chat ?? ""}\0${preferred.appId}\0${s.mode}`;
-    const grant = s.chat ? grants.get(grantKey) : null;
+    const grant = s.chat && policyRead ? grants.get(grantKey) : null;
     // The server's bound now (it may have been lowered since): 0 = until the chat ends.
     const fresh = grant && (l.chat_approval_seconds === 0 || Date.now() - grant.at < l.chat_approval_seconds * 1000);
     let answer;

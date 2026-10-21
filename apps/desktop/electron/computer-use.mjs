@@ -176,7 +176,16 @@ async function hostContext() {
   // The chat now (the one that just called), not the last poll's.
   const fresh = await serverFetch("/computer-use/state").catch(() => null);
   if (fresh) server = fresh;
-  return { ancestors: shared?.ancestors ?? [], self_pids: [process.pid, ...metrics], chat: server?.chat ?? null };
+  // No fresh answer: no chat (no "Allow for this chat" is kept or reused), never the last poll's.
+  return { ancestors: shared?.ancestors ?? [], self_pids: [process.pid, ...metrics], chat: fresh ? fresh.chat ?? null : null };
+}
+
+/** Before each open: the server's switch and limits read now (not a cached answer). False when unread. */
+async function hostRefresh() {
+  const fresh = await serverFetch("/computer-use/refresh", { method: "POST", body: JSON.stringify({ max_age_ms: 0 }) }).catch(() => null);
+  if (!fresh) return false;
+  server = fresh;
+  return fresh.read === true;
 }
 
 async function reportEvent(event) {
@@ -190,7 +199,7 @@ async function startHost() {
     const { hostModule, mediaModule, policyModule, contractModule, imageModule } = await sharedModules();
     const spool = server?.spool ? mediaModule.createMediaSpool(server.spool) : null;
     const callbacks = {
-      spool, settings: hostSettings, context: hostContext, approve,
+      spool, settings: hostSettings, context: hostContext, refresh: hostRefresh, approve,
       onEvent: (event) => { void reportEvent(event); },
       onState: () => { pushStatus(); scheduleRefresh(); },
       onFrame: (frame) => preview?.image(frame.data_url),

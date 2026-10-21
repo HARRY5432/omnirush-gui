@@ -94,6 +94,8 @@ export function createPortableHost(options: {
   settings: () => HostSettings;
   /** May be async (read once per discover / open-session). */
   context?: () => HostContext | Promise<HostContext>;
+  /** Read the server's switch and limits now (before each open); false or a throw: unread, no grant is reused. */
+  refresh?: (() => Promise<boolean> | boolean) | null;
   approve: { open(request: OpenRequest): Promise<OpenAnswer> | OpenAnswer; act(request: ActRequest): Promise<{ allow: boolean }> | { allow: boolean } };
   onEvent?: (event: SessionEvent) => void;
   onState?: (states: HostSessionState[]) => void;

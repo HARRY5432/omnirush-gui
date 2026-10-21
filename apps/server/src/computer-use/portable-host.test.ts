@@ -214,6 +214,25 @@ describe("portable host: MCP surface and consent", () => {
     } finally { Date.now = realNow; }
   });
 
+  test("refresh before each open: a lowered bound applies at once; unread: no grant reused; off: refused", async () => {
+    const r = rig("normal", { decision: "chat" });
+    let reads = 0, ok = true;
+    const host = await createPortableHost({ native: r.native, settings: () => r.settings, context: () => ({ ancestors: [], chat: "ses_1" }), refresh: async () => { reads += 1; return ok; }, approve: { open: async (request: OpenRequest) => { r.opens.push(request); return { decision: "chat", window_id: request.window_id }; }, act: async () => ({ allow: true }) } });
+    const c = host.connect();
+    const once = async () => { const x = await call(c, "computer_open_session", { app_id: "/usr/bin/gedit", mode: "control", purpose: "Write" }); if (x.state.session_id) await call(c, "computer_close_session", { session_id: x.state.session_id }); return x; };
+    await once();
+    await once();
+    expect(r.opens.length).toBe(1);
+    ok = false;
+    await once();
+    expect(r.opens.length).toBe(2);
+    ok = true;
+    r.settings.enabled = false;
+    expect((await once()).state).toMatchObject({ ok: false, code: "disabled" });
+    expect(reads).toBe(4);
+    await host.close();
+  });
+
   test("off by the server: no session", async () => {
     const r = rig("normal", { enabled: false });
     const host = await r.hostPromise;

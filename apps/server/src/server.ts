@@ -4977,7 +4977,11 @@ function createRoutes(
     },
     applyEngine: () => applyComputerUseEngine(config),
     chats: computerUseChats(config),
-    runningSessions: async () => null,
+    // The engine's running sessions (null when any engine could not be read: no chat is named then).
+    runningSessions: async () => {
+      const busy = await collectBusyEngineSessions(config);
+      return busy.unknown > 0 ? null : busy.sessions;
+    },
     recordTrace: (sessionId, type, data) => recordOpenSessionTrace(config, sessionId, type, data),
   });
 
