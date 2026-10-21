@@ -122,7 +122,7 @@ test("macOS: signing changes the engine after its sha256 is recorded; this team'
   const stat = () => ({ size: 1, mtimeMs: 1 });
   assert.equal(engineSignedByTeam("/x/opencode", { platform: "darwin", run, stat }), true);
   assert.deepEqual(calls[0], ["/usr/bin/codesign", "--verify", "--strict", `-R=${ENGINE_SIGNING_REQUIREMENT}`, "/x/opencode"]);
-  assert.match(ENGINE_SIGNING_REQUIREMENT, /^identifier "ai\.omnirush\.desktop" and anchor apple generic and certificate leaf\[subject\.OU\] = "2KFG4BXC8K"$/);
+  assert.match(ENGINE_SIGNING_REQUIREMENT, /^anchor apple generic and certificate leaf\[subject\.OU\] = "2KFG4BXC8K"$/);
   assert.equal(engineSignedByTeam("/x/other", { platform: "darwin", run: () => ({ status: 1 }), stat }), false);
   // A pass is cached (same file, size, time): codesign is not asked again.
   assert.equal(engineSignedByTeam("/x/opencode", { platform: "darwin", run, stat }), true);
