@@ -483,16 +483,19 @@ export async function startAgentBrowser({ electron, glidePath, url = null, versi
   /**
    * The person's clipboard (and on Linux the middle-click selection, PRIMARY) is kept as it was: snapshotted before
    * each act and put back whenever it changes, during the act and for CLIPBOARD_GUARD_MS after it (the click's user
-   * activation, during which a page could write it from a frame the page guard has not reached).
+   * activation, during which a page could write it from a frame the page guard has not reached). Something the person
+   * copies themselves in that short window is put back too.
    */
   const cb = electron.clipboard ?? null;
   const linux = process.platform === "linux";
   let guard = null;
-  const snapshot = () => ({ text: cb.readText(), html: cb.readHTML?.() ?? "", rtf: cb.readRTF?.() ?? "", image: cb.readImage?.() ?? null, primary: linux ? cb.readText("selection") : null });
+  const formats = () => (cb.availableFormats?.() ?? []).join("\n");
+  const snapshot = () => ({ text: cb.readText(), html: cb.readHTML?.() ?? "", rtf: cb.readRTF?.() ?? "", image: cb.readImage?.() ?? null, formats: formats(), primary: linux ? cb.readText("selection") : null });
   function restoreClipboards() {
     if (!guard) return;
     try {
-      if (cb.readText() !== guard.saved.text || (cb.readHTML?.() ?? "") !== guard.saved.html) {
+      // Any change (text, html, rtf, or the set of formats: an image-only write) puts the person's copy back.
+      if (cb.readText() !== guard.saved.text || (cb.readHTML?.() ?? "") !== guard.saved.html || (cb.readRTF?.() ?? "") !== guard.saved.rtf || formats() !== guard.saved.formats) {
         const { text, html, rtf, image } = guard.saved;
         cb.write({ text, ...(html ? { html } : {}), ...(rtf ? { rtf } : {}), ...(image && !image.isEmpty?.() ? { image } : {}) });
       }
