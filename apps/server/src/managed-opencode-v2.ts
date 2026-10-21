@@ -117,6 +117,11 @@ export async function createManagedOpencodeV2Server(
   await chmod(options.rootDir, 0o700);
   await mkdir(configDir, { recursive: true, mode: 0o700 });
   await chmod(configDir, 0o700);
+  // The user's global opencode config (~/.config/opencode) is not read either: its MCP servers would start with
+  // this environment (the password and the policy token) before the app removes them. Its own empty folder instead.
+  const configHome = join(options.rootDir, "xdg-config");
+  await mkdir(configHome, { recursive: true, mode: 0o700 });
+  await chmod(configHome, 0o700);
   // Load enforcement on the first boot, before any session can run.
   await writeProviders();
   const child = spawn(options.bin, ["serve", "--hostname", hostname, "--port", String(port)], {
@@ -125,6 +130,7 @@ export async function createManagedOpencodeV2Server(
       OPENCODE_PASSWORD: password,
       OPENCODE_DB: join(options.rootDir, "opencode.db"),
       OPENCODE_CONFIG_DIR: configDir,
+      XDG_CONFIG_HOME: configHome,
       // No session sharing to an outside share service.
       OPENCODE_DISABLE_SHARE: "1",
       // A project's own config files are not read: this engine has no MCP filter, and it starts a project's

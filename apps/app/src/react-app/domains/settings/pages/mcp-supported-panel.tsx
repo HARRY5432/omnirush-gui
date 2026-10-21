@@ -32,6 +32,7 @@ export const MCP_BLOCKED_HINTS: Record<string, string> = {
   runner_missing: "Install Node.js (for npx) or uv (for uvx), then restart the app.",
   secret_missing: "Set the key in your environment, then restart the app.",
   remote_settings: "Remove the headers and settings: only the plain address is supported.",
+  protected_value: "Take the app's key out of the entry: give the server only its own settings.",
 };
 
 export type McpServerState =

@@ -171,6 +171,9 @@ describe("Settings > MCP: supported servers", () => {
     expect(signed).toContain("https://mcp.figma.com/mcp");
     expect(render({ policy: policy({ supported: [remote], decisions: on }), servers: [server("figma", { type: "remote", url: "https://mcp.figma.com/mcp" })] })).not.toContain("mcp-sign-in-figma");
     expect(MCP_BLOCKED_HINTS.secret_missing).toContain("environment");
+    // An entry holding one of the app's keys: the refusal says why, the hint what to change.
+    const held = mcpServerState(server("mem"), { name: "mem", status: "blocked", code: "protected_value", reason: "This MCP server entry holds one of the app's own keys (in its command, variables or folder), so it does not start." });
+    expect(held).toEqual({ kind: "blocked", reason: "This MCP server entry holds one of the app's own keys (in its command, variables or folder), so it does not start.", hint: MCP_BLOCKED_HINTS.protected_value });
   });
 
   test("a missing MCP filter: one clear warning (no MCP server starts), enabled or not", () => {
