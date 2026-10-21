@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { revertConfirmText, revertNeedsConfirm, turnsFromRevertPoint } from "../src/react-app/domains/session/surface/revert-scope";
+import { editConfirmText, editTargetText, hiddenDeleteConfirmText, revertConfirmText, revertNeedsConfirm, revertPointMessageId, turnsFromRevertPoint } from "../src/react-app/domains/session/surface/revert-scope";
 
 const chat = [
   { id: "u1", role: "user" },
@@ -38,9 +38,24 @@ describe("revertNeedsConfirm", () => {
     expect(revertNeedsConfirm(null)).toBe(true);
   });
 
-  test("the question names the turns and the file changes", () => {
-    expect(revertConfirmText("revert", 5)).toBe("Revert to this point? This hides the last 5 turns of this chat and takes back the file changes they made. Restore brings them back, until you send a new message.");
-    expect(revertConfirmText("edit", 3)).toBe("Send this in place of the earlier message? It removes the last 3 turns of this chat and takes back the file changes they made. This cannot be undone.");
-    expect(revertConfirmText("edit", null)).toContain("every turn from there on");
+  test("the questions name the later turns and the file changes", () => {
+    expect(revertConfirmText(5, false)).toBe("Hide this and the 4 later turns, and undo their file changes? Restore brings them back until you send a new message.");
+    expect(revertConfirmText(2, true)).toBe("Hide this and the 1 later turn, and undo their file changes? The running turn stops first. Restore brings them back until you send a new message.");
+    expect(revertConfirmText(1, false)).toBe("Hide this turn, and undo their file changes? Restore brings them back until you send a new message.");
+    expect(revertConfirmText(null, false)).toContain("every later turn");
+    expect(editTargetText(3)).toBe("Editing an earlier message: sending will remove the 2 later turns and undo their file changes.");
+    expect(editTargetText(1)).toBe("Editing your last message: sending replaces it and undoes its file changes.");
+    expect(editConfirmText(4)).toBe("Send this in place of the earlier message? It removes the 3 later turns for good and undoes their file changes.");
+    expect(hiddenDeleteConfirmText(6)).toBe("Sending removes the 6 hidden messages for good; their file changes stay undone. Send and remove them? (Cancel keeps them: Restore brings them back.)");
+  });
+});
+
+describe("revertPointMessageId", () => {
+  test("a reply rewinds at the prompt that started its turn, so the turn's earlier steps go too", () => {
+    expect(revertPointMessageId(chat, "a2b")).toBe("u2");
+    expect(revertPointMessageId(chat, "a3")).toBe("u3");
+    expect(revertPointMessageId(chat, "u1")).toBe("u1");
+    expect(revertPointMessageId(chat, "gone")).toBeNull();
+    expect(revertPointMessageId([{ id: "a0", role: "assistant" }], "a0")).toBeNull();
   });
 });

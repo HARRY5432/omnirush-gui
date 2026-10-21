@@ -1349,7 +1349,7 @@ export default {
   "session.redo_aria_label": "Redo last reverted message",
   "session.redo_label": "Redo",
   "session.redo_title": "Redo last reverted message",
-  "session.reverted_messages_hidden": "Reverted: {count} later messages and their file changes are set aside. Restore brings them back; a new message removes them for good.",
+  "session.reverted_messages_hidden": "{count} later messages are hidden and their file changes undone. Restore brings them back.",
   "session.restore": "Restore",
   "session.restoring": "Restoring...",
   "session.restore_failed": "Could not restore the hidden messages. Try again.",
