@@ -4,11 +4,16 @@
  * writes when its host listens, and the `computer.session` events it reports.
  *
  *   GET  /computer-use/state     { enabled, setting, mode, dir, spool, chat }
- *   POST /computer-use/refresh   reads /collect/capabilities again (≤ 60 s old), then the state
+ *   POST /computer-use/refresh   reads /collect/capabilities again (≤ 60 s old), then the state; with `read`
+ *                                true, `setting` is the answer just read (held in memory, never re-read from the
+ *                                state folder, which the agent's shell can write), so the person's real screen
+ *                                (`real_screen` and `real_screen_opt_in`, the account's server-held opt-in) can
+ *                                only come from the server
  *   POST /computer-use/host      { command, environment } | { host: null }
  *   POST /computer-use/event     a computer.session event → the chat's trace
  */
 import { addRoute, type Route } from "../routes/registry.js";
+import { computerUseSetting } from "./shared/policy.mjs";
 import {
   computerUseDir,
   computerUseSettingFor,
@@ -44,17 +49,24 @@ export type ComputerUseRouteDeps = {
 
 const REFRESH_FLOOR_MS = 2_000;
 
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 export function registerComputerUseRoutes(deps: ComputerUseRouteDeps): void {
   const { routes, jsonResponse } = deps;
-  const state = async (read?: boolean) => {
+  const state = async (read?: boolean, fresh?: unknown) => {
     const dir = computerUseDir(deps.stateDir());
-    const setting = computerUseSettingFor(dir);
+    // A fresh answer: the block it carries (an answer without one is off); else the block as last remembered.
+    const setting = fresh !== undefined
+      ? computerUseSetting({ env: process.env, block: isObject(fresh) && isObject(fresh.computer_use) ? fresh.computer_use : undefined, client: "desktop" })
+      : computerUseSettingFor(dir);
     const mode = permissionModeName(await deps.approvalMode().catch(() => null));
     // The chat "Allow for this chat" is kept for: the one prompted chat that runs, else none (asked every time).
     const chat = deps.chats.only(await deps.runningSessions().catch(() => null));
     return {
       enabled: setting.enabled,
-      setting: { enabled: setting.enabled, real_screen: setting.real_screen, virtual_display: setting.virtual_display, limits: setting.limits, deny_apps: setting.deny_apps, models: setting.models, message: setting.message, ask_send_delete: setting.ask_send_delete === true, reason: setting.reason, source: setting.source },
+      setting: { enabled: setting.enabled, real_screen: setting.real_screen, real_screen_opt_in: setting.real_screen_opt_in, virtual_display: setting.virtual_display, limits: setting.limits, deny_apps: setting.deny_apps, models: setting.models, message: setting.message, ask_send_delete: setting.ask_send_delete === true, reason: setting.reason, source: setting.source },
       mode,
       dir,
       spool: mediaSpoolDir(deps.stateDir()),
@@ -74,14 +86,16 @@ export function registerComputerUseRoutes(deps: ComputerUseRouteDeps): void {
     // that recent counts as read now.
     const maxAge = typeof body.max_age_ms === "number" && Number.isFinite(body.max_age_ms) ? Math.min(60_000, Math.max(REFRESH_FLOOR_MS, Math.round(body.max_age_ms))) : 60_000;
     let read = false;
+    let fresh: unknown;
     try {
       const capabilities = await deps.readCapabilities(maxAge);
       if (rememberComputerUseSwitch(deps.stateDir(), capabilities)) void deps.applyEngine().catch(() => undefined);
       read = true;
+      fresh = capabilities;
     } catch {
-      // A failed read keeps the last answer.
+      // A failed read keeps the last answer (`read` false: never enough for the person's real screen).
     }
-    return jsonResponse(await state(read));
+    return jsonResponse(await state(read, fresh));
   });
 
   // Host and event: only Electron main (its per-launch secret, held in this process); the client token is

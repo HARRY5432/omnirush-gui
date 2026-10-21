@@ -38,7 +38,7 @@ import {
 } from "./contract.mjs";
 import { compareGrids, encodeJpeg, encodePng, fitLongSide, luminanceGrid, paintBoxes } from "./image.mjs";
 import { sha256 } from "./media.mjs";
-import { deniedApp, sessionRules } from "./policy.mjs";
+import { deniedApp, REAL_SCREEN_NOT_OPTED_IN_MESSAGE, serverRealScreen, sessionRules } from "./policy.mjs";
 
 const RPC = new Set(["initialize", "ping", "tools/list", "tools/call", "notifications/initialized", "notifications/cancelled"]);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -129,9 +129,12 @@ function describeAction(a) {
  * The host. Options:
  * - native: a createNativeWorker() (or the same interface)
  * - spool: a media spool (media.mjs createMediaSpool) frames go to, or null
- * - settings(): { enabled, real_screen, real_screen_on, virtual_display, limits, deny_apps } now
- *   (real_screen: the server allows the person's screen; real_screen_on: the person turned it on)
- * - refresh(): read the server's switch and limits now (before each open); false or a throw: unread
+ * - settings(): { enabled, real_screen, real_screen_opt_in, real_screen_on, virtual_display, limits, deny_apps } now
+ *   (real_screen and real_screen_opt_in: the server allows the person's screen for this account, both true;
+ *   real_screen_on: this device's own setting is on)
+ * - refresh(): read the server's switch and limits now (before each open and each discover of the person's
+ *   screen); true only when the server answered. Without it, or when it is false or throws, the person's
+ *   screen is refused (the agent's own display is not affected)
  * - context(): { ancestors, self_pids, tty_pids, chat } now, or a promise of it (chat: per-chat counts)
  * - virtual: a createVirtualHost() for app_id "virtual:<name>", or null
  * - onEvent(event): `computer.session` events; onState(states); onFrame(frame)
@@ -212,6 +215,8 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
   }
   const ticker = setInterval(() => {
     const l = limits();
+    // The server no longer allows the person's screen for this account (its latest answer): those sessions end.
+    if (sessions.size && !serverRealScreen(settings() ?? {})) { void stopRealScreen("server"); return; }
     for (const s of [...sessions.values()]) {
       if (Date.now() >= s.expiresAt && s.phase !== "approval") void stop(s, "expired", "limit");
       else if (s.phase === "working" && Date.now() - s.lastOperation > l.idle_pause_seconds * 1000) pause(s, "limit", "Paused after a while without work. Choose Continue when ready.");
@@ -401,13 +406,18 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     return mcpResult({ ok: true, os, contract: CONTRACT_VERSION, screens: screens.map((s) => ({ id: String(s.id), width: s.width, height: s.height, scale: s.scale, primary: Boolean(s.primary) })), apps: [...apps.values()], modes: ["observe", "control"], real_screen: true, virtual_display: virtualOk, ...(virtualOk ? { virtual_hint: virtual.hint } : {}) });
   }
 
-  async function openSession(connection, args) {
-    // The server's switch and limits as of now, so a stricter value (off) applies at once.
-    if (typeof refresh === "function") await Promise.resolve().then(refresh).catch(() => false);
+  /** The server's switch read just now: true only when it answered (no refresh, a false or a throw: not read). */
+  async function freshRead() {
+    if (typeof refresh !== "function") return false;
+    return Promise.resolve().then(refresh).then((ok) => ok === true, () => false);
+  }
+
+  async function openSession(connection, args, verified) {
+    // The server's switch and limits as of now (`call` read them), so a stricter value (off) applies at once.
     const config = settings() ?? {};
     const ctx = (await context()) ?? {};
     if (!config.enabled) return mcpResult(failure("disabled", config.message || "Computer use is turned off."));
-    const rules = sessionRules({ display: "real", server: config, optIn: config.real_screen_on === true });
+    const rules = sessionRules({ display: "real", server: config, optIn: config.real_screen_on === true, verified });
     if (!rules.open) return mcpResult(failure(rules.code, rules.message));
     if (lease) return mcpResult(failure("session_busy", "Another computer use session is open. Close it first."));
     const windows = (await native.call("list")).filter((w) => w.appId === args.app_id && (args.pid === undefined || w.pid === args.pid));
@@ -462,14 +472,17 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
       return virtual.call(name, args);
     }
     // The person's screen is off (the default): refused (and its windows not listed) before any desktop access.
+    // It needs the server's yes for this account read just now (a cached answer, or none, is not enough).
+    let verified = false;
+    if (name === "computer_open_session" || name === "computer_discover") verified = await freshRead();
     if (name === "computer_open_session") {
       const config = settings() ?? {};
-      const rules = sessionRules({ display: "real", server: config, optIn: config.real_screen_on === true });
+      const rules = sessionRules({ display: "real", server: config, optIn: config.real_screen_on === true, verified });
       if (!rules.open) return mcpResult(failure(rules.code, rules.message));
     }
     if (name === "computer_discover") {
       const config = settings() ?? {};
-      const rules = sessionRules({ display: "real", server: config, optIn: config.real_screen_on === true });
+      const rules = sessionRules({ display: "real", server: config, optIn: config.real_screen_on === true, verified });
       if (rules.open && nativeDown) await ensureNative();
       const why = !rules.open ? rules.message : !availability.supported || nativeDown ? availability.error ?? "Desktop access is unavailable." : null;
       if (why) return mcpResult({ ok: true, os, contract: CONTRACT_VERSION, real_screen: false, real_screen_unavailable: why, screens: [], apps: [], modes: ["observe", "control"], virtual_display: Boolean(virtual) && config.virtual_display !== false, ...(virtual ? { virtual_hint: virtual.hint } : {}) });
@@ -477,9 +490,14 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     if (nativeDown && !(await ensureNative())) return mcpResult(failure("native_unavailable", "Desktop access stopped. Try again in a few minutes, or restart the app."));
     if (!availability.supported) return mcpResult(failure(availability.code ?? "desktop_unavailable", availability.error ?? "Computer use is unavailable on this desktop."));
     if (name === "computer_discover") return discover();
-    if (name === "computer_open_session") return openSession(connection, args);
+    if (name === "computer_open_session") return openSession(connection, args, verified);
     const s = sessions.get(args.session_id);
     if (!s || s.connection !== connection) return mcpResult(failure("session_unavailable", "This session has ended. Open a new one."));
+    // The server's latest answer no longer allows the person's screen: the session ends before anything else.
+    if (!serverRealScreen(settings() ?? {}) && name !== "computer_close_session") {
+      await stop(s, "stopped", "server");
+      return mcpResult(failure("real_screen_unavailable", REAL_SCREEN_NOT_OPTED_IN_MESSAGE));
+    }
     if (name === "computer_close_session") { await stop(s, "closed", "agent"); return mcpResult({ ok: true, session_id: s.id, state: "closed" }); }
     if (name === "computer_session_status") {
       const l = limits();
@@ -615,6 +633,11 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     await virtual?.stopAll(by, event);
   }
 
+  /** Ends the sessions on the person's screen only (the agent's own display keeps running). */
+  async function stopRealScreen(by = "server", event = "stopped") {
+    for (const s of [...sessions.values()]) await stop(s, event, by);
+  }
+
   /** Whether the latest press (key or button) within `withinMs` was synthetic (injected by a program). */
   /**
    * Whether a physical key or button press (not injected by a program, not a remote-debugging
@@ -652,5 +675,5 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
 
   update();
   const allState = () => [...publicState(), ...(virtual ? virtual.state() : [])];
-  return { get availability() { return availability; }, os, connect, listen, control, stopAll, syntheticInput, physicalInput, watchInput, state: allState, close };
+  return { get availability() { return availability; }, os, connect, listen, control, stopAll, stopRealScreen, syntheticInput, physicalInput, watchInput, state: allState, close };
 }

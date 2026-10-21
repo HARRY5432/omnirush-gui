@@ -20,6 +20,8 @@ export type HostSettings = {
   enabled: boolean;
   /** The server allows the person's screen. */
   real_screen?: boolean;
+  /** The account opted in from the web console (both this and real_screen true: the server allows it). */
+  real_screen_opt_in?: boolean;
   /** The person turned the real screen on (a setting, off by default): sessions there open and act with no question. */
   real_screen_on?: boolean;
   /** The server allows the agent's own display. */
@@ -85,6 +87,8 @@ export type PortableHost = {
   listen(dir: string): Promise<{ discoveryPath: string; externalDiscoveryPath: string; close(): Promise<void> }>;
   control(input: { session_id: string; action: "stop" | "takeover" | "continue" | "hide" | "show" }): Promise<void>;
   stopAll(by?: SessionEvent["by"], event?: SessionEvent["event"]): Promise<void>;
+  /** Ends the sessions on the person's screen only. */
+  stopRealScreen(by?: SessionEvent["by"], event?: SessionEvent["event"]): Promise<void>;
   syntheticInput(withinMs?: number): Promise<boolean>;
   /** A physical key or button press within `withinMs` (not injected, not a remote-debugging click). */
   /** Default 1.5 s; a pointer press must be inside `rect` (screen pixels) when given; a key press must be one of `keys` (default Enter, Space). */

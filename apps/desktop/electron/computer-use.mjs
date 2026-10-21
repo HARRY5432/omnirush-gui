@@ -76,6 +76,10 @@ let failedAt = 0; // a host that did not start is tried again after a minute
 const cursors = new Map(); // session id → the agent cursor's latest move (live view)
 let cursorSeq = 0;
 let realScreenNoticeShown = false;
+// The server's yes for this account's real screen (`real_screen` and `real_screen_opt_in`), taken only from a
+// fresh read (the refresh route answers from the server's answer in memory). The 5 s state poll reads the local
+// state folder, which the agent's shell can write: it can only take this back to no, never to yes.
+let serverRealScreen = false;
 
 function shippedModule(name) {
   // Packaged: app.asar/server/dist; dev: apps/server/dist (OMNIRUSH_DEV_MODE prefers it).
@@ -155,9 +159,21 @@ function realScreenOn() {
   return policy ? policy.realScreenOptIn({ env: process.env, saved: savedRealScreen(policy), allowEnvOn: !app.isPackaged }) : false;
 }
 
+/** Whether a state answer says yes for this account's real screen (both keys exactly true). */
+function saysRealScreen(answer) {
+  return Boolean(shared?.policyModule?.serverRealScreen?.(answer?.setting)) && answer?.enabled === true;
+}
+
+/** Ends the sessions on the person's screen (the agent's own display keeps running). */
+async function stopRealScreen() {
+  if (!host) return;
+  if (typeof host.stopRealScreen === "function") await host.stopRealScreen("server").catch(() => {});
+  else for (const s of host.state()) if (s.display !== "virtual" && s.phase !== "ended") await host.control({ session_id: s.id, action: "stop" }).catch(() => {});
+}
+
 function hostSettings() {
   const setting = server?.setting ?? {};
-  return { enabled: server?.enabled === true, real_screen: setting.real_screen !== false, real_screen_on: realScreenOn(), virtual_display: setting.virtual_display !== false, limits: setting.limits ?? null, deny_apps: setting.deny_apps ?? [], message: setting.message ?? null };
+  return { enabled: server?.enabled === true, real_screen: serverRealScreen, real_screen_opt_in: serverRealScreen, real_screen_on: realScreenOn(), virtual_display: setting.virtual_display !== false, limits: setting.limits ?? null, deny_apps: setting.deny_apps ?? [], message: setting.message ?? null };
 }
 
 async function hostContext() {
@@ -172,8 +188,10 @@ async function hostContext() {
 /** Before each open: the server's switch and limits read now (not a cached answer). False when unread. */
 async function hostRefresh() {
   const fresh = await serverFetch("/computer-use/refresh", { method: "POST", body: JSON.stringify({ max_age_ms: 0 }) }).catch(() => null);
-  if (!fresh) return false;
+  if (!fresh) { serverRealScreen = false; return false; }
   server = fresh;
+  // Only the server's answer just read can say yes; anything else is no.
+  serverRealScreen = fresh.read === true && saysRealScreen(fresh);
   return fresh.read === true;
 }
 
@@ -215,7 +233,7 @@ async function startHost() {
     preview.bind(created);
     host = created;
     // The real screen on: said once per launch (the setting is a file the agent's shell could also write).
-    if (!realScreenNoticeShown && realScreenOn() && server?.setting?.real_screen !== false) {
+    if (!realScreenNoticeShown && realScreenOn() && serverRealScreen) {
       realScreenNoticeShown = true;
       try { if (Notification.isSupported()) new Notification({ title: "Computer use can use your own screen", body: "The agent can click and type in your apps without asking. Stop it any time with Stop; turn it off in Settings > Computer use." }).show(); } catch { /* best effort */ }
     }
@@ -245,6 +263,11 @@ async function stopHost(by = "server") {
 
 async function apply(next) {
   server = next;
+  // A periodic answer can only take the account's real screen away; a fresh read gives it (hostRefresh).
+  if (next?.read === true) serverRealScreen = saysRealScreen(next);
+  // A refresh that could not read the server (read false) or a no: no (fail closed).
+  else if (next?.read === false || !saysRealScreen(next)) serverRealScreen = false;
+  if (!serverRealScreen) await stopRealScreen();
   if (server?.enabled && supported() && !hostPromise && Date.now() - failedAt < 60_000) { pushStatus(); return; }
   if (server?.enabled && supported()) await startHost().catch((error) => { failedAt = Date.now(); deps?.log?.("computer use host did not start", error); });
   else if (host) await stopHost("server");
@@ -256,7 +279,8 @@ function scheduleRefresh() {
   const open = host?.state().some((s) => s.phase !== "ended") ?? false;
   if (open && !refreshTimer) {
     refreshTimer = setInterval(() => {
-      void serverFetch("/computer-use/refresh", { method: "POST", body: "{}" }).then(apply).catch(() => {});
+      // A failed read is a no for the person's screen (fail closed); the agent's own display keeps running.
+      void serverFetch("/computer-use/refresh", { method: "POST", body: "{}" }).then(apply).catch(() => { serverRealScreen = false; void stopRealScreen(); });
     }, 60_000);
     refreshTimer.unref?.();
   } else if (!open && refreshTimer) {
@@ -285,8 +309,9 @@ async function getComputerUseRealScreen() {
   const { policyModule } = await sharedModules();
   // forced: OMNIRUSH_COMPUTER_USE_REAL_SCREEN decides, whatever is saved.
   const forced = policyModule.realScreenOptIn({ env: process.env, saved: true, allowEnvOn: !app.isPackaged }) === policyModule.realScreenOptIn({ env: process.env, saved: false, allowEnvOn: !app.isPackaged });
-  // allowed: the server lets the person's screen be used at all.
-  return { on: realScreenOn(), forced, allowed: server?.setting?.real_screen !== false };
+  // allowed: the server says yes for this account (its opt-in, set only in the web console), read just now.
+  await hostRefresh().catch(() => false);
+  return { on: realScreenOn(), forced, allowed: serverRealScreen };
 }
 
 async function setComputerUseRealScreen(on) {
