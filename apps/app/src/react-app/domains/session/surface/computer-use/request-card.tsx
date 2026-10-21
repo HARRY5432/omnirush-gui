@@ -10,6 +10,15 @@ import { answerComputerUse, buttonRect } from "./status-store";
 
 const APPROVE_WITH_OWN_INPUT = "Use your own mouse or keyboard to approve.";
 
+/** How long "Allow for this chat" lasts: 0 = until the chat ends, else the server's bound. */
+export function chatGrantText(seconds: number): string {
+  if (!(seconds > 0)) return "Same app, until this chat ends";
+  const minutes = Math.max(1, Math.round(seconds / 60));
+  if (minutes < 120) return `Same app, up to ${minutes} minutes`;
+  const hours = Math.round(minutes / 60);
+  return `Same app, up to ${hours} hours`;
+}
+
 /** The app the host verified: icon, name, executable or bundle id, process id. */
 export function ComputerUseAppIdentity(props: { app: ComputerUseAppRef; icon: string | null; compact?: boolean }) {
   const icon = props.icon?.startsWith("data:image/") ? props.icon : null;
@@ -145,7 +154,7 @@ export function ComputerUseRequestCard(props: { request: ComputerUseRequest }) {
             <Check data-icon="inline-start" />
             <span className="flex flex-col items-start leading-4">
               <span>Allow for this chat</span>
-              <span className="text-[10px] font-normal opacity-80">{request.chat_seconds > 0 ? `Same app, up to ${Math.max(1, Math.round(request.chat_seconds / 60))} minutes` : "Same app, until this chat ends"}</span>
+              <span className="text-[10px] font-normal opacity-80">{chatGrantText(request.chat_seconds)}</span>
             </span>
           </Button>
           <Button type="button" variant="outline" size="sm" disabled={busy} onClick={(event) => answer("once", event)} data-computer-use-answer="once">
