@@ -928,6 +928,7 @@ export type ComputerUseStatus = {
 };
 
 /** The person's one-time setting for their own screen (off by default). forced: the environment decides; allowed: the server allows it. */
+/** `on`: this computer's own setting; `allowed`: the server's yes for the account (its opt-in, set only in the web console), read just now. Both are needed. */
 export type ComputerUseRealScreen = { on: boolean; forced: boolean; allowed: boolean };
 
 // ---------------------------------------------------------------------------

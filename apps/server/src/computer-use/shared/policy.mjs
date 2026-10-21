@@ -1,11 +1,16 @@
 // Computer use, policy: the server switch (capabilities `computer_use`), the
-// person's one-time real-screen setting, the apps the agent may never open,
-// and (for the desktop's built-in browser only) which actions ask first.
+// person's real-screen opt-in (held by the server per account, set only from
+// the web console) and the device's own real-screen setting, the apps the
+// agent may never open, and (for the desktop's built-in browser only) which
+// actions ask first.
 //
 // Computer use itself never asks (owner decision 2026-10-21): the agent's own
 // display needs no approval at all, and the person's real screen is a
 // setting the person turns on once (off by default), then runs with no
-// per-session or per-action questions. What stays: the indicator and Stop,
+// per-session or per-action questions. The real screen needs BOTH the server
+// (`real_screen` and `real_screen_opt_in` true for this account, from a read
+// made just now) and this device's own setting: the server saying no, or not
+// answering, always wins; the device's setting can only keep it off. What stays: the indicator and Stop,
 // the deny list and hit-testing, stuck-input release, the server switch.
 //
 // The same file ships in omnirush-cli (src/computer-use/) and omnirush-gui
@@ -40,12 +45,15 @@ function text(value, limit = 400) {
  * The `computer_use` block of a /collect/capabilities answer, normalized. A
  * missing or malformed block is off. The server already applied
  * `rollout_percent` (and the account) to `enabled`.
- * Shape: { enabled, clients, os, models, real_screen, virtual_display,
- * deny_apps, limits, message, ask_send_delete }
- * (null lists: no restriction).
+ * Shape: { enabled, clients, os, models, real_screen, real_screen_opt_in,
+ * virtual_display, deny_apps, limits, message, ask_send_delete }
+ * (null lists: no restriction). `real_screen` (and `real_screen_opt_in`, the
+ * same value) is true only when the block says both `real_screen: true` and
+ * `real_screen_opt_in: true` (the account opted in from the web console):
+ * anything else, a missing key or an older server included, is off.
  */
 export function normalizeComputerUse(block) {
-  if (!isRecord(block)) return { enabled: false, clients: null, os: null, models: null, real_screen: false, virtual_display: false, deny_apps: [], limits: normalizeLimits(null), message: null, ask_send_delete: false };
+  if (!isRecord(block)) return { enabled: false, clients: null, os: null, models: null, real_screen: false, real_screen_opt_in: false, virtual_display: false, deny_apps: [], limits: normalizeLimits(null), message: null, ask_send_delete: false };
   const denyApps = Array.isArray(block.deny_apps)
     ? block.deny_apps.flatMap((item) => {
       if (typeof item === "string" && item.trim()) return [{ match: item.trim().slice(0, 200), reason: null }];
@@ -58,7 +66,8 @@ export function normalizeComputerUse(block) {
     clients: strings(block.clients, 8, 40),
     os: strings(block.os, 8, 40),
     models: strings(block.models, 64, 128),
-    real_screen: block.real_screen !== false,
+    real_screen: serverRealScreen(block),
+    real_screen_opt_in: serverRealScreen(block),
     virtual_display: block.virtual_display !== false,
     deny_apps: denyApps,
     limits: normalizeLimits(block.limits),
@@ -81,7 +90,8 @@ export function computerUseSetting({ env = process.env, block, client, platform 
   const server = normalizeComputerUse(block);
   const asked = String(env?.OMNIRUSH_COMPUTER_USE ?? "").trim().toLowerCase();
   if (OFF.includes(asked)) return { ...server, enabled: false, source: "env", reason: "env" };
-  if (ON.includes(asked)) return { ...server, enabled: true, real_screen: true, virtual_display: true, source: "env", reason: null };
+  // The environment turns computer use on (tests, support), never the person's real screen: that stays the server's.
+  if (ON.includes(asked)) return { ...server, enabled: true, virtual_display: true, source: "env", reason: null };
   if (!isRecord(block)) return { ...server, enabled: false, source: "default", reason: "no_switch" };
   if (!server.enabled) return { ...server, source: "server", reason: "off" };
   if (server.clients && client && !server.clients.includes(client)) return { ...server, enabled: false, source: "server", reason: "client" };
@@ -102,6 +112,20 @@ export function offMessage(setting) {
 }
 
 // ------------------------------------------------------------- real screen
+
+/**
+ * Whether the server lets this account use the person's real screen: `real_screen` (the global switch) and
+ * `real_screen_opt_in` (the account's own opt-in, set only from the web console) both exactly true. Works on a
+ * raw capabilities block and on a normalized one. Anything else (false, missing, malformed, no block) is no.
+ */
+export function serverRealScreen(block) {
+  return isRecord(block) && block.real_screen === true && block.real_screen_opt_in === true;
+}
+
+/** Said to the agent when the account has not opted in (or the server turned it off). */
+export const REAL_SCREEN_NOT_OPTED_IN_MESSAGE = "Computer use on the person's own screen is not turned on for this account. Work on your own display instead (app_id \"virtual:main\"). Only the person can turn it on, in their account; never try to change it and never ask to.";
+/** Said to the agent when the server could not confirm it just now. */
+export const REAL_SCREEN_UNVERIFIED_MESSAGE = "The person's screen cannot be used right now: the account's setting could not be confirmed with the server. Work on your own display instead (app_id \"virtual:main\").";
 
 /** The person's real screen is off until the person turns it on (Settings / `omnirush computer real-screen on`). */
 export const REAL_SCREEN_DEFAULT = false;
@@ -136,13 +160,16 @@ export function realScreenOptIn({ env = process.env, saved, allowEnvOn = false }
 
 /**
  * How a session opens, by display: `virtual` (the agent's own display) always opens with no question;
- * `real` (the person's screen) opens with no question when the server allows it and the person turned it
- * on, and is refused otherwise (never asked). Acts never ask on either.
+ * `real` (the person's screen) opens with no question only when the server allows it for this account
+ * (`serverRealScreen`), that answer was read from the server just now (`verified` true: a read that failed or
+ * was not made is no), and this device's own setting is on (`optIn`); it is refused otherwise (never asked).
+ * Acts never ask on either.
  * Returns { open: true, asks: false } or { open: false, asks: false, code, message }.
  */
-export function sessionRules({ display, server = {}, optIn = REAL_SCREEN_DEFAULT } = {}) {
+export function sessionRules({ display, server = {}, optIn = REAL_SCREEN_DEFAULT, verified = false } = {}) {
   if (display === "virtual") return server.virtual_display === false ? { open: false, asks: false, code: "virtual_unavailable", message: "The agent's own display is turned off for this account." } : { open: true, asks: false };
-  if (server.real_screen === false) return { open: false, asks: false, code: "real_screen_unavailable", message: "Computer use on the person's screen is turned off for this account. Use your own display (app_id \"virtual:main\")." };
+  if (!serverRealScreen(server)) return { open: false, asks: false, code: "real_screen_unavailable", message: REAL_SCREEN_NOT_OPTED_IN_MESSAGE };
+  if (verified !== true) return { open: false, asks: false, code: "real_screen_unverified", message: REAL_SCREEN_UNVERIFIED_MESSAGE };
   if (optIn !== true) return { open: false, asks: false, code: "real_screen_off", message: REAL_SCREEN_OFF_MESSAGE };
   return { open: true, asks: false };
 }

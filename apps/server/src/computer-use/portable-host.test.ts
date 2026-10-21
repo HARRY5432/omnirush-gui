@@ -92,19 +92,23 @@ function fakeVirtualBackend({ width = 320, height = 200 } = {}) {
   return { acts, backend, get closed() { return closed; }, get released() { return released; } };
 }
 
-/** Real-screen settings as Electron main gives them: the server's real_screen and virtual_display, the person's real_screen_on. */
-function rig(options: { limits?: Record<string, number>; enabled?: boolean; chats?: Array<string | null>; realScreenOn?: boolean; realScreen?: boolean; native?: ReturnType<typeof fakeNative> } = {}) {
+/**
+ * Real-screen settings as Electron main gives them: the server's real_screen and real_screen_opt_in (the account's
+ * opt-in, both true unless `realScreen` says no) and virtual_display, the person's real_screen_on; `refresh` is the
+ * server read before each open and discover (true: it answered).
+ */
+function rig(options: { limits?: Record<string, number>; enabled?: boolean; chats?: Array<string | null>; realScreenOn?: boolean; realScreen?: boolean; native?: ReturnType<typeof fakeNative>; refresh?: () => boolean | Promise<boolean> } = {}) {
   const native = options.native ?? fakeNative();
   const dir = mkdtempSync(path.join(os.tmpdir(), "cu-host-"));
   dirs.push(dir);
   const events: Array<Record<string, unknown>> = [];
   const cursors: CursorMove[] = [];
   const display = fakeVirtualBackend();
-  const settings: Record<string, unknown> & { enabled: boolean; limits: Record<string, number> } = { enabled: options.enabled ?? true, real_screen: options.realScreen ?? true, virtual_display: true, limits: options.limits ?? {}, deny_apps: [], ...(options.realScreenOn === false ? {} : { real_screen_on: true }) };
+  const settings: Record<string, unknown> & { enabled: boolean; limits: Record<string, number> } = { enabled: options.enabled ?? true, real_screen: options.realScreen ?? true, real_screen_opt_in: options.realScreen ?? true, virtual_display: true, limits: options.limits ?? {}, deny_apps: [], ...(options.realScreenOn === false ? {} : { real_screen_on: true }) };
   const context = () => ({ ancestors: [], chat: options.chats ? (options.chats.length > 1 ? options.chats.shift()! : options.chats[0]!) : "ses_1" });
   const onEvent = (event: Record<string, unknown>) => events.push(event);
   const virtual = createVirtualHost({ startBackend: async () => display.backend, settings: () => settings, context, onEvent, onCursor: (move: CursorMove) => cursors.push(move) });
-  const hostPromise = createPortableHost({ native, spool: createMediaSpool(path.join(dir, "spool")), settings: () => settings, context, virtual, onEvent });
+  const hostPromise = createPortableHost({ native, spool: createMediaSpool(path.join(dir, "spool")), settings: () => settings, context, refresh: options.refresh ?? (() => true), virtual, onEvent });
   return { native, hostPromise, events, settings, dir, display, cursors };
 }
 
@@ -328,6 +332,68 @@ describe("portable host: the agent's own display (virtual:main)", () => {
   });
 });
 
+describe("portable host: the account's real-screen opt-in is the server's", () => {
+  test("server no + this computer on: refused, nothing listed or started", async () => {
+    for (const server of [{ real_screen: false, real_screen_opt_in: false }, { real_screen: true, real_screen_opt_in: false }, { real_screen: true, real_screen_opt_in: undefined }, { real_screen: false, real_screen_opt_in: true }]) {
+      const r = rig();
+      Object.assign(r.settings, server);
+      const host = await r.hostPromise;
+      const c = host.connect();
+      const found = await call(c, "computer_discover", {});
+      expect(found.state).toMatchObject({ ok: true, real_screen: false, apps: [] });
+      expect((await call(c, "computer_open_session", { app_id: "/usr/bin/gedit", mode: "control", purpose: "Write" })).state).toMatchObject({ ok: false, code: "real_screen_unavailable" });
+      expect(r.native.calls.some((x) => ["list", "start", "focus"].includes(x.method))).toBe(false);
+      // The agent's own display still opens.
+      expect((await call(c, "computer_open_session", { app_id: "virtual:main", mode: "control", purpose: "Write" })).state).toMatchObject({ ok: true });
+      await host.close();
+    }
+  });
+
+  test("server yes + this computer on: opens with no question", async () => {
+    const r = rig();
+    const host = await r.hostPromise;
+    const c = host.connect();
+    expect((await call(c, "computer_open_session", { app_id: "/usr/bin/gedit", mode: "control", purpose: "Write" })).state).toMatchObject({ ok: true, approval: "setting" });
+    await host.close();
+  });
+
+  test("the server could not be read just now (or no reader): refused, even with a yes from before", async () => {
+    for (const refresh of [() => false, () => { throw new Error("offline"); }, async () => { throw new Error("offline"); }]) {
+      const r = rig({ refresh });
+      const host = await r.hostPromise;
+      const c = host.connect();
+      const found = await call(c, "computer_discover", {});
+      expect(found.state).toMatchObject({ real_screen: false, apps: [] });
+      expect((await call(c, "computer_open_session", { app_id: "/usr/bin/gedit", mode: "control", purpose: "Write" })).state).toMatchObject({ ok: false, code: "real_screen_unverified" });
+      expect(r.native.calls.some((x) => ["list", "start"].includes(x.method))).toBe(false);
+      await host.close();
+    }
+    const native = fakeNative();
+    const host = await createPortableHost({ native, settings: () => ({ enabled: true, real_screen: true, real_screen_opt_in: true, real_screen_on: true }), context: () => ({ chat: "ses_n" }) });
+    expect((await call(host.connect(), "computer_open_session", { app_id: "/usr/bin/gedit", mode: "control", purpose: "x" })).state).toMatchObject({ ok: false, code: "real_screen_unverified" });
+    await host.close();
+  });
+
+  test("turned off on the server while a session is open: the next call ends it; stopRealScreen leaves the agent's display", async () => {
+    const r = rig();
+    const { host, c, session } = await opened(r);
+    const agent = await call(c, "computer_open_session", { app_id: "virtual:main", mode: "control", purpose: "Write" });
+    expect(agent.state).toMatchObject({ ok: true });
+    r.settings.real_screen_opt_in = false;
+    expect((await call(c, "computer_observe", { session_id: session })).state).toMatchObject({ ok: false, code: "real_screen_unavailable" });
+    expect(r.events.some((e) => e.event === "stopped" && e.by === "server")).toBe(true);
+    expect((await call(c, "computer_observe", { session_id: String(agent.state.session_id) })).state).toMatchObject({ ok: true });
+    // stopRealScreen (Electron main on a no) ends only the person's screen.
+    r.settings.real_screen_opt_in = true;
+    const again = await call(c, "computer_open_session", { app_id: "/usr/bin/gedit", mode: "control", purpose: "Write" });
+    expect(again.state).toMatchObject({ ok: true });
+    await host.stopRealScreen("server");
+    expect(host.state().filter((x) => x.display !== "virtual" && x.phase !== "ended")).toEqual([]);
+    expect(host.state().some((x) => x.display === "virtual" && x.phase !== "ended")).toBe(true);
+    await host.close();
+  });
+});
+
 describe("portable host: a worker that died", () => {
   test("a dead worker: sessions stop; the next open starts a new one (noted on the event); at most 3 in 10 minutes", async () => {
     const workers: Array<ReturnType<typeof fakeNative>> = [];
@@ -336,7 +402,8 @@ describe("portable host: a worker that died", () => {
     const host = await createPortableHost({
       native: first,
       nativeFactory: () => { const w = fakeNative(); workers.push(w); return w; },
-      settings: () => ({ enabled: true, real_screen: true, real_screen_on: true }),
+      settings: () => ({ enabled: true, real_screen: true, real_screen_opt_in: true, real_screen_on: true }),
+      refresh: () => true,
       context: () => ({ chat: "ses_r" }),
       onEvent: (event: Record<string, unknown>) => events.push(event),
     });
@@ -393,7 +460,7 @@ describe("portable host on Windows: the agent's ancestors come from the worker",
       if (method === "ancestors") { asked += 1; return [{ pid: 690, name: "cmd", exe: "C:\\Windows\\System32\\cmd.exe" }, { pid: 700, name: "Code", exe: "C:\\Program Files\\Microsoft VS Code\\Code.exe" }]; }
       return call0(method, params);
     };
-    const host = await createPortableHost({ native, platform: "win32", settings: () => ({ enabled: true, real_screen: true, real_screen_on: true }), context: () => ({ chat: "ses_w" }) });
+    const host = await createPortableHost({ native, platform: "win32", settings: () => ({ enabled: true, real_screen: true, real_screen_opt_in: true, real_screen_on: true }), refresh: () => true, context: () => ({ chat: "ses_w" }) });
     const c = host.connect();
     const found = await call(c, "computer_discover", {});
     expect((found.state.apps as Array<{ name: string; available?: boolean }>).find((a) => a.name === "Code")).toMatchObject({ available: false });

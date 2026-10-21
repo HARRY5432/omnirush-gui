@@ -14,6 +14,7 @@ export type ComputerUseBlock = {
   os: string[] | null;
   models: string[] | null;
   real_screen: boolean;
+  real_screen_opt_in: boolean;
   virtual_display: boolean;
   deny_apps: DenyEntry[];
   limits: Limits;
@@ -36,10 +37,13 @@ export const REAL_SCREEN_SETTING: string;
 export const REAL_SCREEN_ENV: string;
 export const REAL_SCREEN_OFF_MESSAGE: string;
 export const REAL_SCREEN_FILE: string;
+export function serverRealScreen(block: unknown): boolean;
+export const REAL_SCREEN_NOT_OPTED_IN_MESSAGE: string;
+export const REAL_SCREEN_UNVERIFIED_MESSAGE: string;
 export const REAL_SCREEN_DENY_RULES: Readonly<{ bash: Readonly<Record<string, "deny">>; edit: Readonly<Record<string, "deny">> }>;
 export function realScreenOptIn(options?: { env?: Record<string, string | undefined>; saved?: unknown; allowEnvOn?: boolean }): boolean;
-export type SessionRules = { open: true; asks: false } | { open: false; asks: false; code: "virtual_unavailable" | "real_screen_unavailable" | "real_screen_off"; message: string };
-export function sessionRules(options?: { display?: "virtual" | "real"; server?: { real_screen?: boolean; virtual_display?: boolean }; optIn?: boolean }): SessionRules;
+export type SessionRules = { open: true; asks: false } | { open: false; asks: false; code: "virtual_unavailable" | "real_screen_unavailable" | "real_screen_unverified" | "real_screen_off"; message: string };
+export function sessionRules(options?: { display?: "virtual" | "real"; server?: { real_screen?: boolean; real_screen_opt_in?: boolean; virtual_display?: boolean }; optIn?: boolean; verified?: boolean }): SessionRules;
 
 export const DENIED_APPS: Readonly<Record<"self" | "terminal" | "password_manager" | "credentials" | "lock_screen", readonly string[]>>;
 export const SETTINGS_APPS: readonly string[];

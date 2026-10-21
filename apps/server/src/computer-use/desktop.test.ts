@@ -125,6 +125,46 @@ describe("routes: the chat in use, and the policy read before an open", () => {
   });
 });
 
+describe("routes: the account's real-screen opt-in comes from the server's answer only", () => {
+  test("refresh answers with the block just read (server yes/no), never a block written into the state folder; a failed read is not a yes", async () => {
+    const routes: Route[] = [];
+    const state = tmp();
+    let block: Record<string, unknown> | null = { enabled: true, real_screen: true, real_screen_opt_in: false };
+    let failRead = false;
+    registerComputerUseRoutes({ routes, stateDir: () => state, jsonResponse: (d, status = 200) => new Response(JSON.stringify(d), { status }), readJsonBody: async (r) => r.json(), approvalMode: async () => "guarded", readCapabilities: async () => { if (failRead) throw new Error("offline"); return { computer_use: block }; }, applyEngine: async () => undefined, chats: createChatTracker(), runningSessions: async () => null, recordTrace: () => undefined });
+    const hit = async (method: string, p: string, body?: unknown) => {
+      const route = routes.find((r) => r.method === method && r.regex.test(p));
+      if (!route) throw new Error("no route");
+      const response = await route.handler({ request: new Request(`http://x${p}`, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }), url: new URL(`http://x${p}`), params: {} } as never);
+      return (await response.json()) as Record<string, unknown> & { setting: Record<string, unknown> };
+    };
+    // The account never opted in: no, whatever the local switch.
+    let read = await hit("POST", "/computer-use/refresh", { max_age_ms: 0 });
+    expect(read.read).toBe(true);
+    expect(read.setting).toMatchObject({ real_screen: false, real_screen_opt_in: false });
+    // An older server (no real_screen_opt_in): no.
+    block = { enabled: true, real_screen: true };
+    read = await hit("POST", "/computer-use/refresh", { max_age_ms: 0 });
+    expect(read.setting).toMatchObject({ real_screen: false, real_screen_opt_in: false });
+    // The account opted in from the web console: yes.
+    block = { enabled: true, real_screen: true, real_screen_opt_in: true };
+    read = await hit("POST", "/computer-use/refresh", { max_age_ms: 0 });
+    expect(read.setting).toMatchObject({ real_screen: true, real_screen_opt_in: true });
+    // Turned off on the server: the next read says no.
+    block = { enabled: true, real_screen: true, real_screen_opt_in: false };
+    // Anything writing a yes into the state folder (the agent's shell can) changes nothing about the fresh answer.
+    writeFileSync(path.join(computerUseDir(state), "server.json"), JSON.stringify({ block: { enabled: true, real_screen: true, real_screen_opt_in: true }, at: Date.now() }));
+    read = await hit("POST", "/computer-use/refresh", { max_age_ms: 0 });
+    expect(read.read).toBe(true);
+    expect(read.setting).toMatchObject({ real_screen: false, real_screen_opt_in: false });
+    // A read that fails is no yes (read false: Electron main and the host refuse the person's screen).
+    writeFileSync(path.join(computerUseDir(state), "server.json"), JSON.stringify({ block: { enabled: true, real_screen: true, real_screen_opt_in: true }, at: Date.now() }));
+    failRead = true;
+    read = await hit("POST", "/computer-use/refresh", { max_age_ms: 0 });
+    expect(read.read).toBe(false);
+  });
+});
+
 describe("engine MCP plugin", () => {
   async function run(env: Record<string, string>, config: Record<string, unknown>) {
     const saved = { ...process.env };

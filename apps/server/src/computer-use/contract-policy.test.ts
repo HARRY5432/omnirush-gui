@@ -139,7 +139,7 @@ describe("contract v2: validation", () => {
 });
 
 describe("policy: server switch", () => {
-  const block = { enabled: true, clients: ["desktop"], os: ["linux", "windows"], models: ["gpt-6-astra"], real_screen: true, virtual_display: false, deny_apps: ["gimp", { match: "steam*", reason: "No games." }], limits: { actions_per_session: 50 }, message: null };
+  const block = { enabled: true, clients: ["desktop"], os: ["linux", "windows"], models: ["gpt-6-astra"], real_screen: true, real_screen_opt_in: true, virtual_display: false, deny_apps: ["gimp", { match: "steam*", reason: "No games." }], limits: { actions_per_session: 50 }, message: null };
 
   test("off without a block, off by the server, env override", () => {
     expect(computerUseSetting({ env: {}, block: undefined, client: "desktop" })).toMatchObject({ enabled: false, source: "default" });
