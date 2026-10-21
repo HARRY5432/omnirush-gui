@@ -375,6 +375,44 @@ describe("portable host: MCP surface and consent", () => {
     await host.close();
   });
 
+  test("a cancel before an act's question, or after its Allow, means no question and no input", async () => {
+    // (1) Cancel while the act is being prepared (the stale check's capture): no question, no input.
+    {
+      const r = rig("careful");
+      const { host, c, session, obs } = await opened(r);
+      const original = r.native.call.bind(r.native);
+      let fired = false;
+      r.native.call = async (method: string, params: Record<string, unknown> = {}) => {
+        if (method === "capture" && !fired) { fired = true; await c.handle({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 1 } }); }
+        return original(method, params);
+      };
+      const act = await call(c, "computer_act", { session_id: session, observation_id: obs.state.observation?.id, request_id: "a", intent: "Type", action: { type: "type", text: "x" } });
+      expect(act.state).toMatchObject({ ok: false, code: "approval_denied", may_have_acted: false, approval: { asked: false, by: "agent", reason: "cancelled" } });
+      expect(r.acts.length).toBe(0);
+      expect(r.native.calls.some((x) => x.method === "act")).toBe(false);
+      await host.close();
+    }
+    // (2) The person allows, then the cancel lands before the input: no input.
+    {
+      const r = rig("careful");
+      const { host, c, session, obs } = await opened(r);
+      const original = r.native.call.bind(r.native);
+      let armed = false;
+      const acts = r.acts;
+      const push = acts.push.bind(acts);
+      acts.push = (...items: ActRequest[]) => { armed = true; return push(...items); };
+      r.native.call = async (method: string, params: Record<string, unknown> = {}) => {
+        if (armed && method === "state") { armed = false; await c.handle({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 1 } }); }
+        return original(method, params);
+      };
+      const act = await call(c, "computer_act", { session_id: session, observation_id: obs.state.observation?.id, request_id: "b", intent: "Type", action: { type: "type", text: "x" } });
+      expect(act.state).toMatchObject({ ok: false, code: "approval_denied", may_have_acted: false });
+      expect(r.acts.length).toBe(1);
+      expect(r.native.calls.some((x) => x.method === "act")).toBe(false);
+      await host.close();
+    }
+  });
+
   test("off by the server: no session", async () => {
     const r = rig("normal", { enabled: false });
     const host = await r.hostPromise;

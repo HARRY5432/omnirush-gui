@@ -796,10 +796,13 @@ export class EnginePool {
     // Prompts on their way (the engine may not report them busy yet): chats the person prompted.
     for (const owned of this.activeSessionsByGeneration.values()) {
       for (const sessionId of owned) {
-        // A prompt on its way: its chat (the root of a known chain, else the session itself).
+        // A prompt on its way: its chat (the root of a known chain, else the session itself). A chain too
+        // long or a loop: unknown, like rootChats.
         let root = sessionId;
-        for (let i = 0; i < 16 && this.sessionParents.get(root); i += 1) root = this.sessionParents.get(root)!;
-        chats.add(root);
+        let steps = 0;
+        while (this.sessionParents.get(root) && steps <= 16) { root = this.sessionParents.get(root)!; steps += 1; }
+        if (steps > 16) unknown += 1;
+        else chats.add(root);
       }
     }
     return { sessions: [...chats], unknown };

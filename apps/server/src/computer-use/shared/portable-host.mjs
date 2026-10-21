@@ -397,6 +397,7 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
       } else {
         const pointList = action.type === "drag" ? action.path : action.x !== undefined ? [{ x: action.x, y: action.y }] : [];
         const answer = await askAct(s, { action, intent: args.intent, reasons: decision.reasons, points: pointList, frame: observed });
+        if (answer.cancelled || s.connection.cancelled) return finish({ ...common, approval: { asked: answer.asked !== false, reasons: decision.reasons.map((r) => r.code), by: "agent", reason: "cancelled" }, ok: false, code: "approval_denied", message: "The request was cancelled.", may_have_acted: false });
         approval = { asked: true, reasons: decision.reasons.map((r) => r.code), by: "person" };
         if (!answer.allow) return finish({ ...common, approval, ok: false, code: "approval_denied", message: "The person did not allow this action. Ask them or choose another way." });
         if (sessions.get(s.id) !== s || s.phase !== "working") return finish({ ...common, approval, ok: false, code: "paused_by_person", message: "The session was paused or ended." });
@@ -411,6 +412,8 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
       if (after.identity !== current.identity || JSON.stringify(after.bounds) !== JSON.stringify(current.bounds)) return finish({ ...common, approval, ok: false, code: "window_changed", message: "The window moved or changed. Observe again.", next: "computer_observe" });
       if (!(await hitAll(after))) return finish({ ...common, approval, ok: false, code: "window_occluded", message: "Another window covers this point, or it is outside the approved window. Observe again." });
     }
+    // The engine gave up on this call (before or while it was asked): no input with nobody waiting for it.
+    if (s.connection.cancelled) return finish({ ...common, approval: { ...approval, ...(approval.asked ? {} : { by: "agent" }), reason: "cancelled" }, ok: false, code: "approval_denied", message: "The request was cancelled.", may_have_acted: false });
     const cursorBefore = await native.call("cursor").catch(() => null);
     const point = mapped.length === 1 ? { model: mapped[0].model, screen: mapped[0].screen } : undefined;
     const path = action.type === "drag" ? mapped.map((m) => ({ model: m.model, screen: m.screen })) : undefined;
@@ -447,10 +450,12 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
   }
 
   async function askAct(s, request) {
+    // The engine already gave up on this call: no question.
+    if (s.connection.cancelled) return { allow: false, cancelled: true, asked: false };
     const l = limits();
     const expired = timeout(l.approval_timeout_seconds * 1000).then(() => ({ allow: false }));
     // The engine cancelling the call (notifications/cancelled) ends the question: the act is not done.
-    const cancelled = new Promise((resolve) => { s.pendingAct = { resolve }; });
+    const cancelled = new Promise((resolve) => { s.pendingAct = { resolve }; }).then(() => ({ allow: false, cancelled: true, asked: true }));
     s.waiting = true; update();
     try {
       return await Promise.race([
