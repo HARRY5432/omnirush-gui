@@ -25,6 +25,8 @@ import { createRuntimeManager, createSystemCaCertificateVerifyProc } from "./run
 import { installAppRequestSecret } from "./app-request-secret.mjs";
 import { registerUpdaterIpc } from "./updater.mjs";
 import {
+  browserActApproval,
+  browserPermissionMode,
   checkComputerUsePermissions,
   getComputerUseMcpCommand,
   getComputerUseMcpEnvironment,
@@ -1182,6 +1184,9 @@ const turnGuard = createTurnGuard({
 
 browserPanel = createBrowserPanel({
   remoteDebugPort,
+  // The built-in browser asks like computer use: the same mode and act rules.
+  permissionMode: browserPermissionMode,
+  actApproval: browserActApproval,
   getWindow: () => mainWindow,
   onDeepLink: (urls) => queueDeepLinks(urls),
   checkPolicy: async (input) => {

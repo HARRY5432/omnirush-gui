@@ -192,6 +192,8 @@ function createPanel(checkPolicy = async (_request) => {}, remoteDebugPort = 0) 
   const panel = createBrowserPanel({
     getWindow: () => mainWindow, remoteDebugPort, onDeepLink: (urls) => deepLinks.push(...urls),
     checkPolicy: async (request) => { policies.push(request); await checkPolicy(request); },
+    // These journeys cover the per-origin and per-act reviews, which only Careful keeps.
+    permissionMode: () => "careful",
   });
   panel.registerIpc(ipcMain);
   const mainContents = mainWindow.webContents;
