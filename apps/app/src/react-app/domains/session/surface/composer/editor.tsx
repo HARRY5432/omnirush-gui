@@ -1417,13 +1417,14 @@ export const LexicalPromptEditor = forwardRef<LexicalPromptEditorHandle, EditorP
         Tight start, bounded growth:
         - min-h holds the editor to a single-line look until the user starts typing.
         - max-h caps the composer — long pastes / multi-paragraph drafts scroll
-          inside the editor instead of pushing the transcript out of view.
+          inside the editor instead of pushing the transcript out of view; in
+          windows shorter than about 930 px it is 30% of the window height.
       */}
       <div className="relative">
         <PlainTextPlugin
           contentEditable={
             <ContentEditable
-              className="min-h-[60px] max-h-[280px] w-full resize-none overflow-y-auto bg-transparent text-base leading-6 text-dls-text outline-none placeholder:text-dls-secondary lg:text-[13px] lg:leading-[1.55] [&_p]:min-h-[1.5rem] [&_p]:m-0"
+              className="min-h-[60px] max-h-[clamp(120px,30vh,280px)] w-full resize-none overflow-y-auto bg-transparent text-base leading-6 text-dls-text outline-none placeholder:text-dls-secondary lg:text-[13px] lg:leading-[1.55] [&_p]:min-h-[1.5rem] [&_p]:m-0"
               aria-placeholder={props.placeholder}
               placeholder={<span />}
               onPaste={props.onPaste}

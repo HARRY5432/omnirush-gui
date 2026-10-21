@@ -24,6 +24,7 @@ import { registerMigrationIpc } from "./migration.mjs";
 import { createRuntimeManager, createSystemCaCertificateVerifyProc } from "./runtime.mjs";
 import { installAppRequestSecret } from "./app-request-secret.mjs";
 import { registerUpdaterIpc } from "./updater.mjs";
+import { initialWindowSize } from "./window-size.mjs";
 import {
   browserActApproval,
   browserPermissionMode,
@@ -149,6 +150,7 @@ const {
   powerMonitor,
   powerSaveBlocker,
   Notification: ElectronNotification,
+  screen,
   session,
   shell,
   systemPreferences,
@@ -3111,9 +3113,14 @@ async function createMainWindow() {
     app.dock.setIcon(windowIconImage);
   }
 
+  let workArea = null;
+  try {
+    workArea = screen.getPrimaryDisplay().workAreaSize;
+  } catch {
+    // No display information: the preferred size.
+  }
   mainWindow = new BrowserWindow({
-    width: 1180,
-    height: 820,
+    ...initialWindowSize(workArea),
     title: currentDisplayAppName,
     show: false,
     ...(process.platform === "win32" ? { skipTaskbar: true } : {}),
