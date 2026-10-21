@@ -262,6 +262,36 @@ jobs:
         shell: bash
         run: scripts/release/verify-macos-signing.sh apps/desktop/dist-electron
 
+      # The final, signed app must accept and start its own bundled engine: macOS signing and
+      # notarization rewrite the engine after packaging records its sha256 (3.6.7/3.6.9 shipped
+      # Mac builds that refused to start). Runs the app's own checks with its own runtime, then
+      # starts the app (macOS, Linux) and waits for its engine.
+      - name: Verify the packaged app accepts and starts its bundled engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          d=apps/desktop/dist-electron
+          case "${{ matrix.platform }}" in
+            macos)
+              app=$(find "$d" -maxdepth 2 -name '*.app' -type d | head -n 1)
+              exe="$app/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$app/Contents/Info.plist")"
+              res="$app/Contents/Resources" ;;
+            windows)
+              u=$(find "$d" -maxdepth 1 -type d -name 'win*-unpacked' | head -n 1)
+              exe=$(find "$u" -maxdepth 1 -name '*.exe' ! -iname 'uninstall*' | head -n 1)
+              res="$u/resources" ;;
+            linux)
+              u=$(find "$d" -maxdepth 1 -type d -name 'linux*-unpacked' | head -n 1)
+              exe="$u/omnirush"
+              res="$u/resources" ;;
+          esac
+          ELECTRON_RUN_AS_NODE=1 "$exe" apps/desktop/scripts/check-packaged-engine.mjs "$res"
+          if [ "${{ matrix.platform }}" = macos ]; then bash apps/desktop/scripts/launch-check.sh "$exe" 180; fi
+          if [ "${{ matrix.platform }}" = linux ]; then
+            command -v xvfb-run > /dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq xvfb; }
+            xvfb-run -a -s "-screen 0 1280x800x24" bash apps/desktop/scripts/launch-check.sh "$exe" 180
+          fi
+
       - name: Verify packaged server imports
         shell: bash
         run: node apps/desktop/scripts/verify-packaged-imports.mjs

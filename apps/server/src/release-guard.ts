@@ -8,6 +8,7 @@
  *     stamped into the build).
  * The dev variant takes any address and engine, as before.
  */
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { isAbsolute } from "node:path";
@@ -78,13 +79,33 @@ async function fileSha256(path: string): Promise<string> {
   return hash.digest("hex");
 }
 
+/** The Apple Developer ID team that signs the app and its bundled engine (electron/build-variant.mjs). */
+export const ENGINE_SIGNING_TEAM = "2KFG4BXC8K";
+export const ENGINE_SIGNING_REQUIREMENT = `anchor apple generic and certificate leaf[subject.OU] = "${ENGINE_SIGNING_TEAM}"`;
+
+/**
+ * macOS: whether `file` carries a valid signature by this app's team. Signing and
+ * notarization rewrite the engine after packaging records its sha256, so on macOS
+ * the signature, not the raw hash, says it is the bundled engine.
+ */
+export function engineSignedByTeam(file: string, platform: NodeJS.Platform = process.platform): Promise<boolean> {
+  if (platform !== "darwin") return Promise.resolve(false);
+  return new Promise((resolve) => {
+    try {
+      execFile("/usr/bin/codesign", ["--verify", "--strict", `-R=${ENGINE_SIGNING_REQUIREMENT}`, file], { timeout: 20_000 }, (error) => resolve(!error));
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
 /**
  * The engine binary to run. In a release build: `bin` must be an absolute
  * path to a file whose sha256 is the one stamped into the build (the bundled
  * engine); anything else, no path, or no stamped hash throws. In the dev
  * variant, `bin` as given.
  */
-export async function releaseEngineBinary(bin: string | undefined | null, facts: BuildFacts = buildFacts()): Promise<string | undefined> {
+export async function releaseEngineBinary(bin: string | undefined | null, facts: BuildFacts = buildFacts(), signedByTeam: (file: string) => Promise<boolean> = engineSignedByTeam): Promise<string | undefined> {
   if (!facts.release) return bin ?? undefined;
   const path = bin?.trim() ?? "";
   if (!facts.engineSha256 || !path || !isAbsolute(path)) throw new Error(`${RELEASE_ENGINE_ERROR} No bundled engine was found.`);
@@ -95,6 +116,7 @@ export async function releaseEngineBinary(bin: string | undefined | null, facts:
     throw new Error(`${RELEASE_ENGINE_ERROR} The bundled engine could not be read.`);
   }
   // One hash per bundled architecture, comma-separated (apps/desktop/scripts/stamp-build-variant.mjs).
-  if (!facts.engineSha256.split(",").includes(actual)) throw new Error(`${RELEASE_ENGINE_ERROR} The engine at ${path} is not the bundled one. Reinstall OmniRush.ai.`);
+  // The recorded sha256 (Linux, Windows), or on macOS this team's valid signature (signing changes the bytes).
+  if (!facts.engineSha256.split(",").includes(actual) && !(await signedByTeam(path))) throw new Error(`${RELEASE_ENGINE_ERROR} The engine at ${path} is not the bundled one. Reinstall OmniRush.ai.`);
   return path;
 }

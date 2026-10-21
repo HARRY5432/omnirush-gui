@@ -11,6 +11,7 @@
 //   - talks to https://omnirush.ai or https://<name>.omnirush.ai only, from
 //     every source of an address; another address is an error, not a fallback;
 //   - runs only the engine binary it bundles, checked by its sha256.
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
@@ -63,16 +64,37 @@ function sha256File(file) {
   return createHash("sha256").update(readFileSync(file)).digest("hex");
 }
 
+/** The Apple Developer ID team that signs the app and its bundled engine. */
+export const ENGINE_SIGNING_TEAM = "2KFG4BXC8K";
+/** codesign requirement: a Developer ID certificate (Apple anchor) of that team. */
+export const ENGINE_SIGNING_REQUIREMENT = `anchor apple generic and certificate leaf[subject.OU] = "${ENGINE_SIGNING_TEAM}"`;
+
+/**
+ * macOS: whether `file` carries a valid signature by this app's team. Signing and
+ * notarization rewrite the engine binary after packaging records its sha256, so on
+ * macOS the signature, not the raw hash, says it is the bundled engine.
+ */
+export function engineSignedByTeam(file, { platform = process.platform, run = spawnSync } = {}) {
+  if (platform !== "darwin") return false;
+  try {
+    const result = run("/usr/bin/codesign", ["--verify", "--strict", `-R=${ENGINE_SIGNING_REQUIREMENT}`, file], { stdio: "ignore", timeout: 20_000 });
+    return result?.status === 0;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The engine binary a release build runs: the bundled one in <resources>/sidecars,
  * when its sha256 is the one recorded at packaging. Throws otherwise.
  * @param {{ fileNames: string[], build?: DesktopBuild, resourcesPath?: string, exists?: (file: string) => boolean, hash?: (file: string) => string }} input
  * @returns {{ path: string, source: "bundled" }}
  */
-export function releaseEngineBinary({ build = desktopBuild, resourcesPath = process.resourcesPath, fileNames, exists = existsSync, hash = sha256File }) {
+export function releaseEngineBinary({ build = desktopBuild, resourcesPath = process.resourcesPath, fileNames, exists = existsSync, hash = sha256File, signedByTeam = engineSignedByTeam }) {
   const directory = resourcesPath ? path.join(resourcesPath, "sidecars") : null;
   const candidate = directory ? fileNames.map((name) => path.join(directory, name)).find((file) => exists(file)) : null;
   if (!candidate || !build.engineSha256) throw new Error(`${RELEASE_ENGINE_ERROR} No bundled engine was found. Reinstall OmniRush.ai.`);
-  if (!build.engineSha256.split(",").includes(hash(candidate))) throw new Error(`${RELEASE_ENGINE_ERROR} The bundled engine was changed. Reinstall OmniRush.ai.`);
+  // The recorded sha256 (Linux, Windows), or on macOS this team's valid signature (signing changes the bytes).
+  if (!build.engineSha256.split(",").includes(hash(candidate)) && !signedByTeam(candidate)) throw new Error(`${RELEASE_ENGINE_ERROR} The bundled engine was changed. Reinstall OmniRush.ai.`);
   return { path: candidate, source: "bundled" };
 }

@@ -84,6 +84,21 @@ jobs:
           OMNIRUSH_DESKTOP_SENTRY_TRACES_SAMPLE_RATE: ${{ vars.OMNIRUSH_DESKTOP_SENTRY_TRACES_SAMPLE_RATE || '0.01' }}
         run: pnpm --filter @omnirush/desktop package:electron:dir
 
+      # The packaged app must accept its own bundled engine (the app's own checks, its own runtime).
+      - name: Verify the packaged app accepts its bundled engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          d=apps/desktop/dist-electron
+          app=$(find "$d" -maxdepth 2 -name '*.app' -type d | head -n 1)
+          if [ -n "$app" ]; then
+            exe="$app/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$app/Contents/Info.plist")"; res="$app/Contents/Resources"
+          else
+            u=$(find "$d" -maxdepth 1 -type d -name '*-unpacked' | head -n 1)
+            exe=$(find "$u" -maxdepth 1 -type f \( -name 'omnirush' -o -name '*.exe' \) ! -iname 'uninstall*' | head -n 1); res="$u/resources"
+          fi
+          ELECTRON_RUN_AS_NODE=1 "$exe" apps/desktop/scripts/check-packaged-engine.mjs "$res"
+
       - name: Upload Electron artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -345,6 +360,16 @@ jobs:
           version=$("$engine" --version)
           echo "bundled engine: $version"
           test "$version" = "$(node -p "require('./apps/desktop/scripts/engine-release.json').version")"
+
+      # The notarized app must accept and start its own bundled engine (signing rewrites the engine
+      # after packaging records its sha256): the app's own checks with its own runtime, then a real start.
+      - name: Verify the notarized app accepts and starts its bundled engine
+        run: |
+          set -euo pipefail
+          app=$(find apps/desktop/dist-electron -maxdepth 2 -name '*.app' -type d | head -n 1)
+          exe="$app/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$app/Contents/Info.plist")"
+          ELECTRON_RUN_AS_NODE=1 "$exe" apps/desktop/scripts/check-packaged-engine.mjs "$app/Contents/Resources"
+          bash apps/desktop/scripts/launch-check.sh "$exe" 180
 
       - name: Check installer window, app name and in-place update
         run: scripts/release/check-macos-installer.sh apps/desktop/dist-electron "$RUNNER_TEMP/installer-check"
