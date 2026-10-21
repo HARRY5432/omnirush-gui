@@ -119,12 +119,15 @@ test("macOS: signing changes the engine after its sha256 is recorded; this team'
   // The signature check asks codesign for this team's Developer ID, and only on macOS.
   const calls = [];
   const run = (cmd, argv) => { calls.push([cmd, ...argv]); return { status: 0 }; };
-  assert.equal(engineSignedByTeam("/x/opencode", { platform: "darwin", run }), true);
+  const stat = () => ({ size: 1, mtimeMs: 1 });
+  assert.equal(engineSignedByTeam("/x/opencode", { platform: "darwin", run, stat }), true);
   assert.deepEqual(calls[0], ["/usr/bin/codesign", "--verify", "--strict", `-R=${ENGINE_SIGNING_REQUIREMENT}`, "/x/opencode"]);
   assert.match(ENGINE_SIGNING_REQUIREMENT, /anchor apple generic and certificate leaf\[subject\.OU\] = "2KFG4BXC8K"/);
-  assert.equal(engineSignedByTeam("/x/opencode", { platform: "darwin", run: () => ({ status: 1 }) }), false);
-  assert.equal(engineSignedByTeam("/x/opencode", { platform: "linux", run }), false);
-  assert.equal(engineSignedByTeam("/x/opencode", { platform: "win32", run }), false);
+  assert.equal(engineSignedByTeam("/x/other", { platform: "darwin", run: () => ({ status: 1 }), stat }), false);
+  // A pass is cached (same file, size, time): codesign is not asked again.
+  assert.equal(engineSignedByTeam("/x/opencode", { platform: "darwin", run, stat }), true);
+  assert.equal(engineSignedByTeam("/x/opencode", { platform: "linux", run, stat }), false);
+  assert.equal(engineSignedByTeam("/x/opencode", { platform: "win32", run, stat }), false);
   assert.equal(calls.length, 1, "codesign is never run off macOS");
   // Off macOS a changed engine is still refused (the default check is false there).
   if (process.platform !== "darwin") assert.throws(() => releaseEngineBinary(args), /was changed/);

@@ -10,8 +10,8 @@
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { isAbsolute } from "node:path";
+import { createReadStream, statSync } from "node:fs";
+import { basename, dirname, isAbsolute } from "node:path";
 
 import { BUILD_VARIANT, RELEASE_ENGINE_SHA256 } from "./build-variant.js";
 
@@ -88,11 +88,19 @@ export const ENGINE_SIGNING_REQUIREMENT = `anchor apple generic and certificate 
  * notarization rewrite the engine after packaging records its sha256, so on macOS
  * the signature, not the raw hash, says it is the bundled engine.
  */
+const signedCache = new Set<string>();
 export function engineSignedByTeam(file: string, platform: NodeJS.Platform = process.platform): Promise<boolean> {
-  if (platform !== "darwin") return Promise.resolve(false);
+  // Only the app's own bundled engine (<resources>/sidecars/...), and only on macOS.
+  if (platform !== "darwin" || basename(dirname(file)) !== "sidecars") return Promise.resolve(false);
+  let key: string;
+  try { const info = statSync(file); key = `${file}\0${info.size}\0${info.mtimeMs}`; } catch { return Promise.resolve(false); }
+  if (signedCache.has(key)) return Promise.resolve(true);
   return new Promise((resolve) => {
     try {
-      execFile("/usr/bin/codesign", ["--verify", "--strict", `-R=${ENGINE_SIGNING_REQUIREMENT}`, file], { timeout: 20_000 }, (error) => resolve(!error));
+      execFile("/usr/bin/codesign", ["--verify", "--strict", `-R=${ENGINE_SIGNING_REQUIREMENT}`, file], { timeout: 20_000 }, (error) => {
+        if (!error) signedCache.add(key);
+        resolve(!error);
+      });
     } catch {
       resolve(false);
     }

@@ -13,7 +13,7 @@
 //   - runs only the engine binary it bundles, checked by its sha256.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
 export const DESKTOP_BUILD_FILE = "omnirush-build.json";
@@ -74,14 +74,22 @@ export const ENGINE_SIGNING_REQUIREMENT = `anchor apple generic and certificate 
  * notarization rewrite the engine binary after packaging records its sha256, so on
  * macOS the signature, not the raw hash, says it is the bundled engine.
  */
-export function engineSignedByTeam(file, { platform = process.platform, run = spawnSync } = {}) {
+const signedCache = new Map();
+export function engineSignedByTeam(file, { platform = process.platform, run = spawnSync, stat = statSync } = {}) {
   if (platform !== "darwin") return false;
+  let key = null;
+  try { const info = stat(file); key = `${file}\0${info.size}\0${info.mtimeMs}`; } catch { return false; }
+  if (signedCache.has(key)) return signedCache.get(key);
+  let ok = false;
   try {
     const result = run("/usr/bin/codesign", ["--verify", "--strict", `-R=${ENGINE_SIGNING_REQUIREMENT}`, file], { stdio: "ignore", timeout: 20_000 });
-    return result?.status === 0;
+    ok = result?.status === 0;
   } catch {
-    return false;
+    ok = false;
   }
+  // Only a pass is kept (same path, size and modification time); a failure is asked again next time.
+  if (ok) signedCache.set(key, true);
+  return ok;
 }
 
 /**

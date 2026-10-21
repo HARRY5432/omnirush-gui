@@ -29,7 +29,8 @@ for (const name of engines) {
     fail(`Electron main refuses ${name}: ${error instanceof Error ? error.message : String(error)}`);
   }
   try {
-    await guard.releaseEngineBinary(path.join(sidecars, name), { release: true, engineSha256: build.engineSha256 });
+    // Its own stamped build facts (server/dist/build-variant.js), not Electron main's.
+    await guard.releaseEngineBinary(path.join(sidecars, name));
   } catch (error) {
     fail(`the local server refuses ${name}: ${error instanceof Error ? error.message : String(error)}`);
   }

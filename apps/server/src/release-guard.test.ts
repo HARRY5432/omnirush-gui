@@ -54,6 +54,8 @@ describe("release build guard", () => {
     expect(await releaseEngineBinary(other, release, async () => true)).toBe(other);
     await expect(releaseEngineBinary(other, release, async () => false)).rejects.toThrow("is not the bundled one");
     expect(await engineSignedByTeam(other, "linux")).toBe(false);
+    // On macOS only the bundled engine's folder is considered: any other path is refused without asking codesign.
+    expect(await engineSignedByTeam(other, "darwin")).toBe(false);
     expect(await engineSignedByTeam(other, "win32")).toBe(false);
     // One hash per bundled architecture (macOS arm64 + x64), comma-separated.
     expect(await releaseEngineBinary(bin, { release: true, engineSha256: ["f".repeat(64), sha].join(",") })).toBe(bin);
