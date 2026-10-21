@@ -265,7 +265,8 @@ async function apply(next) {
   server = next;
   // A periodic answer can only take the account's real screen away; a fresh read gives it (hostRefresh).
   if (next?.read === true) serverRealScreen = saysRealScreen(next);
-  else if (!saysRealScreen(next)) serverRealScreen = false;
+  // A refresh that could not read the server (read false) or a no: no (fail closed).
+  else if (next?.read === false || !saysRealScreen(next)) serverRealScreen = false;
   if (!serverRealScreen) await stopRealScreen();
   if (server?.enabled && supported() && !hostPromise && Date.now() - failedAt < 60_000) { pushStatus(); return; }
   if (server?.enabled && supported()) await startHost().catch((error) => { failedAt = Date.now(); deps?.log?.("computer use host did not start", error); });
