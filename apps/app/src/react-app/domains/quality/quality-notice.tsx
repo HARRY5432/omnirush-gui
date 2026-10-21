@@ -24,6 +24,7 @@ import { BiggestWinTicker, NextSpinHint, QualityTierBadge, StreakLine } from "./
 import { QualitySpinDialog } from "./quality-spin-dialog";
 import { useQualityPopups } from "./use-quality-popups";
 import { GoodSessionGuide } from "./good-session";
+import { AllowanceHelpLink } from "./allowance-help";
 import { goodSessionWording } from "../../../app/lib/good-session";
 
 /** Used only when the server sends no `fail_labels` entry for a code. */
@@ -178,6 +179,7 @@ export function QualityNoticeCard(props: QualityNoticeCardProps) {
         ) : null}
 
         <GoodSessionGuide className="rounded-lg border border-border px-3 py-2" />
+        <AllowanceHelpLink className="w-fit" testId="quality-notice-allowance-help" />
 
         {coaching ? (
           <div>

@@ -32,6 +32,8 @@ import {
 import type { OmniRushApprovalMode, OmniRushRuntimeApprovals } from "../../../../app/lib/omnirush-server";
 import { captureAnalyticsEvent, resetAnalyticsAccount, syncAnalyticsAccount } from "../../../../app/lib/analytics";
 import { omnirushUsageSummary } from "../../../../app/lib/omnirush-usage";
+import { ALLOWANCE_HELP_TITLE } from "../../../../app/lib/allowance-help";
+import { AllowanceHelpLink } from "../../quality/allowance-help";
 import { isElectronRuntime } from "../../../../app/utils";
 import {
   APPROVAL_MODES,
@@ -490,6 +492,9 @@ export function GeneralSettingsView(props: GeneralSettingsViewProps) {
                     style={{ width: `${usage.percent}%` }}
                   />
                 </div>
+              ) : null}
+              {usage ? (
+                <AllowanceHelpLink className="mt-1.5 text-[11px] text-dls-secondary" label={ALLOWANCE_HELP_TITLE} testId="account-allowance-help" />
               ) : null}
             </div>
             {account.connected ? (

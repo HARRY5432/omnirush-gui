@@ -34,6 +34,8 @@ import { t } from "@/i18n"
 import { useOpenTargets } from "@/lib/target-provider"
 import { openTargetFromUrl } from "@/react-app/domains/session/artifacts/open-target"
 import { sessionErrorPresentationFromUIMessage } from "@/react-app/domains/session/sync/session-error"
+import { gatewayRefusalEvent } from "@/app/lib/gateway-refusal"
+import { AllowanceHelpLink } from "@/react-app/domains/quality/allowance-help"
 import { ApplyPatchTool } from "@/components/tools/apply-patch"
 import { BashTool } from "@/components/tools/bash"
 import { ComputerUseToolLine } from "@/components/tools/computer-use"
@@ -876,6 +878,7 @@ const MessageComponent = React.memo(
           resumePrompt={presentation?.recoveryPrompt}
           technicalDetails={presentation?.technicalDetails}
           action={presentation?.action}
+          allowanceHelp={isAllowanceLimit(presentation)}
         />
       )
     }
@@ -975,6 +978,8 @@ interface ErrorMessageProps {
   technicalDetails?: string | null
   /** A page that fixes the error ("Open console"), opened in the browser. */
   action?: { label: string; link: string } | null
+  /** An out-of-tokens or paused-session refusal: link the allowance help. */
+  allowanceHelp?: boolean
 }
 
 /**
@@ -1039,7 +1044,13 @@ function SessionErrorTechnicalDetails({ details, tone }: { details: string; tone
   )
 }
 
-function ErrorMessage({ error, description, showDescriptionOnResume, resumePrompt, technicalDetails, action }: ErrorMessageProps) {
+/** Whether a session error is omnirush.ai's allowance (tokens used up, weekly cap) or a paused session. */
+function isAllowanceLimit(presentation: Parameters<typeof gatewayRefusalEvent>[0]): boolean {
+  const limit = gatewayRefusalEvent(presentation)?.properties.limit_type
+  return limit === "tokens" || limit === "session_cap"
+}
+
+function ErrorMessage({ error, description, showDescriptionOnResume, resumePrompt, technicalDetails, action, allowanceHelp }: ErrorMessageProps) {
   const { onResumeInterrupted, developerMode } = useMessageList()
   // Status codes, provider names, and response bodies are for developers,
   // admins, and support — not the plain-language card end users see. They
@@ -1100,6 +1111,7 @@ function ErrorMessage({ error, description, showDescriptionOnResume, resumePromp
                   {action.label}
                 </Button>
               ) : null}
+              {allowanceHelp ? <AllowanceHelpLink className="mt-0.5 w-fit" testId="session-error-allowance-help" /> : null}
             </div>
           </div>
           {details ? <SessionErrorTechnicalDetails details={details} tone="card" /> : null}
