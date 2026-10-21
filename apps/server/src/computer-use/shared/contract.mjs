@@ -77,7 +77,9 @@ export const LIMIT_RANGES = Object.freeze({
   model_long_side: [320, 1440],
   full_long_side: [640, 7680],
   observation_ttl_seconds: [2, 120],
-  approval_timeout_seconds: [10, 600],
+  // At most 120 s: a question must end inside the engine's computer-use call timeout (CLI 150 s, less its
+  // 7 s policy read; desktop 300 s), or a late answer would come with nobody waiting for it.
+  approval_timeout_seconds: [10, 120],
   chat_approval_seconds: [0, 30 * 86400],
   media_full_bytes: [0, 2 * 1024 * 1024 * 1024],
   media_model_bytes: [0, 2 * 1024 * 1024 * 1024],

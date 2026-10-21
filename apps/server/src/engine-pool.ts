@@ -440,6 +440,23 @@ export async function computeEngineConfigFingerprint(template: EngineSpawnTempla
     .digest("hex");
 }
 
+/**
+ * The chats behind busy sessions: each session's root (following parents up, at most `maxDepth` steps; a
+ * longer chain throws, so the caller names no chat). Exported for tests.
+ */
+export async function rootChats(busy: string[], parentOf: (sessionId: string) => Promise<string | null>, maxDepth = 16): Promise<string[]> {
+  const roots = await Promise.all([...new Set(busy)].map(async (sessionId) => {
+    let current = sessionId;
+    for (let step = 0; ; step += 1) {
+      const parent = await parentOf(current);
+      if (!parent) return current;
+      if (step >= maxDepth) throw new Error("session chain too deep");
+      current = parent;
+    }
+  }));
+  return [...new Set(roots)];
+}
+
 export class EnginePool {
   private readonly config: ServerConfig;
   private readonly template: EngineSpawnTemplate;
@@ -753,27 +770,40 @@ export class EnginePool {
         const payload: unknown = await response.json();
         if (!isRecord(payload)) throw new Error("unreadable status");
         const busy = Object.entries(payload).filter(([, status]) => isRecord(status) && status.type !== "idle").map(([sessionId]) => sessionId);
-        // Parents not known yet, read together (at most 32; more: unknown, so no chat is named).
-        const unread = busy.filter((sessionId) => !this.sessionParents.has(sessionId));
-        if (unread.length > 32) throw new Error("too many sessions to read");
-        await Promise.all(unread.map(async (sessionId) => {
+        // Each busy session counts as the chat at the root of its parent chain (a background sub-agent whose
+        // chat is idle still counts as that chat). Parents not known yet are read (at most 64 per pass; more:
+        // unknown, so no chat is named).
+        let reads = 0;
+        const parentOf = async (sessionId: string): Promise<string | null> => {
+          if (this.sessionParents.has(sessionId)) return this.sessionParents.get(sessionId) ?? null;
+          if (++reads > 64) throw new Error("too many sessions to read");
           const info = new URL(`/session/${encodeURIComponent(sessionId)}`, generation.handle.url);
           info.searchParams.set("directory", directory);
           const answer = await loopbackFetch(info.toString(), { headers, signal: AbortSignal.timeout(5_000) });
           if (!answer.ok) throw new Error(`session ${answer.status}`);
           const session: unknown = await answer.json();
           if (!isRecord(session)) throw new Error("unreadable session");
-          this.sessionParents.set(sessionId, typeof session.parentID === "string" && session.parentID ? session.parentID : null);
+          const parent = typeof session.parentID === "string" && session.parentID ? session.parentID : null;
+          this.sessionParents.set(sessionId, parent);
           if (this.sessionParents.size > 4096) this.sessionParents.delete(this.sessionParents.keys().next().value!);
-        }));
-        for (const sessionId of busy) if (this.sessionParents.get(sessionId) === null) chats.add(sessionId);
+          return parent;
+        };
+        for (const chat of await rootChats(busy, parentOf)) chats.add(chat);
       } catch {
         unknown += 1;
       }
     })));
     // Prompts on their way (the engine may not report them busy yet): chats the person prompted.
     for (const owned of this.activeSessionsByGeneration.values()) {
-      for (const sessionId of owned) if (!this.sessionParents.get(sessionId)) chats.add(sessionId);
+      for (const sessionId of owned) {
+        // A prompt on its way: its chat (the root of a known chain, else the session itself). A chain too
+        // long or a loop: unknown, like rootChats.
+        let root = sessionId;
+        let steps = 0;
+        while (this.sessionParents.get(root) && steps <= 16) { root = this.sessionParents.get(root)!; steps += 1; }
+        if (steps > 16) unknown += 1;
+        else chats.add(root);
+      }
     }
     return { sessions: [...chats], unknown };
   }

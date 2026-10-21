@@ -397,6 +397,7 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
       } else {
         const pointList = action.type === "drag" ? action.path : action.x !== undefined ? [{ x: action.x, y: action.y }] : [];
         const answer = await askAct(s, { action, intent: args.intent, reasons: decision.reasons, points: pointList, frame: observed });
+        if (answer.cancelled || s.connection.cancelled) return finish({ ...common, approval: { asked: answer.asked !== false, reasons: decision.reasons.map((r) => r.code), by: "agent", reason: "cancelled" }, ok: false, code: "approval_denied", message: "The request was cancelled.", may_have_acted: false });
         approval = { asked: true, reasons: decision.reasons.map((r) => r.code), by: "person" };
         if (!answer.allow) return finish({ ...common, approval, ok: false, code: "approval_denied", message: "The person did not allow this action. Ask them or choose another way." });
         if (sessions.get(s.id) !== s || s.phase !== "working") return finish({ ...common, approval, ok: false, code: "paused_by_person", message: "The session was paused or ended." });
@@ -412,6 +413,8 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
       if (!(await hitAll(after))) return finish({ ...common, approval, ok: false, code: "window_occluded", message: "Another window covers this point, or it is outside the approved window. Observe again." });
     }
     const cursorBefore = await native.call("cursor").catch(() => null);
+    // The engine gave up on this call (before or while it was asked): no input with nobody waiting for it.
+    if (s.connection.cancelled) return finish({ ...common, approval: { ...approval, ...(approval.asked ? {} : { by: "agent" }), reason: "cancelled" }, ok: false, code: "approval_denied", message: "The request was cancelled.", may_have_acted: false });
     const point = mapped.length === 1 ? { model: mapped[0].model, screen: mapped[0].screen } : undefined;
     const path = action.type === "drag" ? mapped.map((m) => ({ model: m.model, screen: m.screen })) : undefined;
     const screenAction = action.type === "drag" ? { ...action, path: mapped.map((m) => m.screen) } : mapped.length ? { ...action, x: mapped[0].screen.x, y: mapped[0].screen.y } : action;
@@ -447,17 +450,22 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
   }
 
   async function askAct(s, request) {
+    // The engine already gave up on this call: no question.
+    if (s.connection.cancelled) return { allow: false, cancelled: true, asked: false };
     const l = limits();
     const expired = timeout(l.approval_timeout_seconds * 1000).then(() => ({ allow: false }));
+    // The engine cancelling the call (notifications/cancelled) ends the question: the act is not done.
+    const cancelled = new Promise((resolve) => { s.pendingAct = { resolve }; }).then(() => ({ allow: false, cancelled: true, asked: true }));
     s.waiting = true; update();
     try {
       return await Promise.race([
+        cancelled,
         Promise.resolve(approve.act({ session_id: s.id, request_id: randomUUID(), chat: s.chat ?? null, app: { app_id: s.window.appId, app_name: s.window.appName, bundle_or_exe: s.window.executable, pid: s.window.pid }, window_title: s.window.title, purpose: s.purpose, intent: request.intent, action: request.action, reasons: request.reasons, points: request.points, frame: { width: request.frame.model.width, height: request.frame.model.height, sha256: request.frame.sha, data_url: `data:${request.frame.mime};base64,${request.frame.bytes.toString("base64")}` } })).then((v) => ({ allow: v?.allow === true })),
         expired,
       ]);
     } catch {
       return { allow: false };
-    } finally { s.waiting = false; update(); }
+    } finally { s.pendingAct = null; s.waiting = false; update(); }
   }
 
   async function discover() {
@@ -508,7 +516,8 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     // The server's bound now (it may have been lowered since): 0 = until the chat ends.
     const fresh = grant && grant.epoch === epoch && (l.chat_approval_seconds === 0 || Date.now() - grant.at < l.chat_approval_seconds * 1000);
     let answer;
-    if (fresh) answer = { decision: "chat", window_id: String(preferred.id), reused: true };
+    if (connection.cancelled) answer = { decision: "deny", cancelled: true };
+    else if (fresh) answer = { decision: "chat", window_id: String(preferred.id), reused: true };
     else {
       const pendingAnswer = new Promise((resolve) => { s.pendingApproval = { resolve }; });
       const request = { session_id: s.id, request_id: randomUUID(), app: { app_id: preferred.appId, app_name: preferred.appName, bundle_or_exe: preferred.executable, pid: preferred.pid }, windows: windows.map((w) => ({ id: String(w.id), title: w.title })), window_id: String(preferred.id), mode: s.mode, purpose: s.purpose, os, seconds: l.session_seconds, chat_seconds: l.chat_approval_seconds, chat: s.chat ?? null };
@@ -520,14 +529,23 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
       s.pendingApproval = null;
     }
     if (!sessions.has(s.id)) return mcpResult(failure("approval_denied", "The request ended without access."));
+    // Cancelled while the answer came in: nobody waits for this session, so it does not open.
+    if (connection.cancelled && answer?.decision !== "deny") answer = { decision: "deny", cancelled: true };
     if (!answer || !["chat", "once"].includes(answer.decision)) {
-      // A Deny (or no answer) withdraws any earlier "Allow for this chat" for this app in this chat.
-      for (const key of [...grants.keys()]) if (key.startsWith(`${s.chat ?? ""}\0${preferred.appId}\0`)) grants.delete(key);
+      // A Deny (or no answer) withdraws any earlier "Allow for this chat" for this app: in this chat, or, when
+      // no chat is named (several running, or the copied CLI connection), in every chat. A call the engine
+      // cancelled is no answer from the person: it changes no grant and opens nothing.
+      if (!answer?.cancelled) {
+        for (const key of [...grants.keys()]) {
+          const [chat, app] = key.split("\0");
+          if (app === preferred.appId && (!s.chat || chat === s.chat)) grants.delete(key);
+        }
+      }
       sessions.delete(s.id); if (lease === s.id) lease = null;
       s.approval = null;
-      emit(s, "denied", answer?.timeout ? "limit" : "person");
+      emit(s, "denied", answer?.cancelled ? "agent" : answer?.timeout ? "limit" : "person", answer?.cancelled ? { reason: "cancelled" } : {});
       update();
-      return mcpResult(failure("approval_denied", answer?.timeout ? "Nobody answered the request. Ask the person before trying again." : "The person did not allow access to this window."));
+      return mcpResult(failure("approval_denied", answer?.cancelled ? "The request was cancelled." : answer?.timeout ? "Nobody answered the request. Ask the person before trying again." : "The person did not allow access to this window."));
     }
     const chosen = windows.find((w) => String(w.id) === String(answer.window_id ?? preferred.id)) ?? preferred;
     try {
@@ -589,7 +607,21 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
       id: connection.id,
       async handle(message) {
         if (!record(message) || message.jsonrpc !== "2.0" || !RPC.has(message.method)) return { jsonrpc: "2.0", id: message?.id ?? null, error: { code: -32601, message: "Method not available." } };
-        if (message.method === "notifications/initialized" || message.method === "notifications/cancelled") return null;
+        if (message.method === "notifications/initialized") return null;
+        if (message.method === "notifications/cancelled") {
+          // The engine gave up on the call in flight (its timeout, or the person stopped the turn): a question
+          // it is waiting on ends unanswered, so nothing opens or acts after it.
+          const id = message.params?.requestId;
+          if (id !== undefined && id !== null && id === connection.inflight) {
+            connection.cancelled = true;
+            for (const s of sessions.values()) {
+              if (s.connection !== connection) continue;
+              s.pendingApproval?.resolve?.({ decision: "deny", cancelled: true });
+              s.pendingAct?.resolve?.({ allow: false });
+            }
+          }
+          return null;
+        }
         let result;
         try {
           if (message.method === "initialize") result = { protocolVersion: typeof message.params?.protocolVersion === "string" ? message.params.protocolVersion : "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: SERVER_NAME, version: CONTRACT_VERSION }, instructions: INSTRUCTIONS };
@@ -600,8 +632,8 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
             const light = name === "computer_session_status" || name === "computer_close_session";
             if (connection.busy && !light) result = mcpResult(failure("busy", "Wait for the previous computer use call to finish."));
             else {
-              if (!light) connection.busy = true;
-              try { result = await call(connection, name, args); } finally { if (!light) connection.busy = false; }
+              if (!light) { connection.busy = true; connection.inflight = message.id ?? null; connection.cancelled = false; }
+              try { result = await call(connection, name, args); } finally { if (!light) { connection.busy = false; connection.inflight = null; } }
             }
           }
         } catch (error) {

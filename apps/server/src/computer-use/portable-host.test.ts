@@ -328,6 +328,91 @@ describe("portable host: MCP surface and consent", () => {
     }
   });
 
+  test("a Deny with no chat named withdraws that app's grants in every chat; a named chat's Deny only its own", async () => {
+    const open = { app_id: "/usr/bin/gedit", mode: "control", purpose: "Write" };
+    const r = rig("normal");
+    let chat: string | null = "ses_A";
+    const answers: Array<"chat" | "deny"> = ["chat", "chat", "deny", "chat", "chat"];
+    const host = await createPortableHost({ native: r.native, settings: () => r.settings, context: () => ({ ancestors: [], chat }), approve: { open: async (request: OpenRequest) => { r.opens.push(request); return { decision: answers.shift() ?? "deny", window_id: request.window_id }; }, act: async () => ({ allow: true }) } });
+    const c = host.connect();
+    const cycle = async () => { const x = await call(c, "computer_open_session", open); if (x.state.session_id) await call(c, "computer_close_session", { session_id: x.state.session_id }); return x; };
+    await cycle(); chat = "ses_B"; await cycle();
+    expect(r.opens.length).toBe(2);
+    // Both granted: reused without asking.
+    chat = "ses_A"; await cycle(); chat = "ses_B"; await cycle();
+    expect(r.opens.length).toBe(2);
+    // Several chats run (no chat named): the person denies X. Both grants go.
+    chat = null;
+    expect((await cycle()).state).toMatchObject({ ok: false, code: "approval_denied" });
+    chat = "ses_A"; await cycle(); chat = "ses_B"; await cycle();
+    expect(r.opens.length).toBe(5);
+    await host.close();
+  });
+
+  test("the engine cancelling the call (notifications/cancelled) ends the question: nothing opens, no grant changes, the lease is free", async () => {
+    const r = rig("normal");
+    const gate: { release?: (v: { decision: "chat" }) => void } = {};
+    const host = await createPortableHost({ native: r.native, settings: () => r.settings, context: () => ({ ancestors: [], chat: "ses_1" }), approve: { open: async (request: OpenRequest) => { r.opens.push(request); return await new Promise((resolve) => { gate.release = resolve as never; }); }, act: async () => ({ allow: true }) } });
+    const c = host.connect();
+    const pending = c.handle({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "computer_open_session", arguments: { app_id: "/usr/bin/gedit", mode: "control", purpose: "Write" } } }) as Promise<{ result: { content: Array<{ text: string }> } }>;
+    while (!gate.release) await new Promise((resolve) => setTimeout(resolve, 10));
+    // A cancel for another request id changes nothing; the one in flight ends it.
+    expect(await c.handle({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 99 } })).toBeNull();
+    expect(await c.handle({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 7 } })).toBeNull();
+    const answer = JSON.parse((await pending).result.content[0]!.text) as Record<string, unknown>;
+    expect(answer).toMatchObject({ ok: false, code: "approval_denied" });
+    expect(String(answer.message)).toContain("cancelled");
+    // The person's late Allow opens nothing.
+    gate.release!({ decision: "chat" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(host.state()).toEqual([]);
+    expect(r.native.calls.some((x) => x.method === "start")).toBe(false);
+    // The next open is asked (no grant was kept), and is not session_busy.
+    const next = c.handle({ jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "computer_open_session", arguments: { app_id: "/usr/bin/gedit", mode: "control", purpose: "Write" } } }) as Promise<{ result: { content: Array<{ text: string }> } }>;
+    while (r.opens.length < 2) await new Promise((resolve) => setTimeout(resolve, 10));
+    gate.release!({ decision: "chat" });
+    expect(JSON.parse((await next).result.content[0]!.text)).toMatchObject({ ok: true });
+    await host.close();
+  });
+
+  test("a cancel before an act's question, or after its Allow, means no question and no input", async () => {
+    // (1) Cancel while the act is being prepared (the stale check's capture): no question, no input.
+    {
+      const r = rig("careful");
+      const { host, c, session, obs } = await opened(r);
+      const original = r.native.call.bind(r.native);
+      let fired = false;
+      r.native.call = async (method: string, params: Record<string, unknown> = {}) => {
+        if (method === "capture" && !fired) { fired = true; await c.handle({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 1 } }); }
+        return original(method, params);
+      };
+      const act = await call(c, "computer_act", { session_id: session, observation_id: obs.state.observation?.id, request_id: "a", intent: "Type", action: { type: "type", text: "x" } });
+      expect(act.state).toMatchObject({ ok: false, code: "approval_denied", may_have_acted: false, approval: { asked: false, by: "agent", reason: "cancelled" } });
+      expect(r.acts.length).toBe(0);
+      expect(r.native.calls.some((x) => x.method === "act")).toBe(false);
+      await host.close();
+    }
+    // (2) The person allows, then the cancel lands before the input: no input.
+    {
+      const r = rig("careful");
+      const { host, c, session, obs } = await opened(r);
+      const original = r.native.call.bind(r.native);
+      let armed = false;
+      const acts = r.acts;
+      const push = acts.push.bind(acts);
+      acts.push = (...items: ActRequest[]) => { armed = true; return push(...items); };
+      r.native.call = async (method: string, params: Record<string, unknown> = {}) => {
+        if (armed && method === "state") { armed = false; await c.handle({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 1 } }); }
+        return original(method, params);
+      };
+      const act = await call(c, "computer_act", { session_id: session, observation_id: obs.state.observation?.id, request_id: "b", intent: "Type", action: { type: "type", text: "x" } });
+      expect(act.state).toMatchObject({ ok: false, code: "approval_denied", may_have_acted: false });
+      expect(r.acts.length).toBe(1);
+      expect(r.native.calls.some((x) => x.method === "act")).toBe(false);
+      await host.close();
+    }
+  });
+
   test("off by the server: no session", async () => {
     const r = rig("normal", { enabled: false });
     const host = await r.hostPromise;
