@@ -22,7 +22,7 @@ import { readWorkspaceMcp } from "../mcp-allow/state.js";
 import { computerUseBuiltins, COMPUTER_USE_DIR_ENV } from "../computer-use/desktop.js";
 import { isComputerTool, SERVER_ID } from "../computer-use/shared/contract.mjs";
 import { pruneImages } from "../computer-use/shared/media.mjs";
-import { SCREEN_BASH_RULES, subagentPermissionRules } from "../computer-use/shared/policy.mjs";
+import { REAL_SCREEN_DENY_RULES, SCREEN_BASH_RULES, subagentPermissionRules } from "../computer-use/shared/policy.mjs";
 import { boxHome, desktopProjects, keyOf, record } from "../box/plugin-lib.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -62,6 +62,30 @@ function withScreenBashRules(permission: Record<string, unknown>): Record<string
     next[pattern] = action;
   }
   return { ...permission, bash: next };
+}
+
+/**
+ * Every mode, computer use on or off: the agent can neither run a command that turns the person's real screen on
+ * nor write that setting (policy.mjs REAL_SCREEN_DENY_RULES), appended after the mode's own rules (last match wins).
+ */
+export function withRealScreenDeny(value: unknown): Record<string, unknown> {
+  const permission: Record<string, unknown> = typeof value === "string" ? { "*": value } : isRecord(value) ? { ...value } : {};
+  for (const [key, denies] of Object.entries(REAL_SCREEN_DENY_RULES)) {
+    // Only the deny patterns are added: every other command or file keeps the rules it had.
+    const current = permission[key];
+    permission[key] = { ...(isRecord(current) ? current : typeof current === "string" ? { "*": current } : {}), ...denies };
+  }
+  return permission;
+}
+
+function applyRealScreenDeny(target: Record<string, unknown>): void {
+  target.permission = withRealScreenDeny(target.permission);
+  if (!isRecord(target.agent)) return;
+  const agents: Record<string, unknown> = { ...target.agent };
+  for (const [name, agent] of Object.entries(agents)) {
+    if (isRecord(agent) && agent.permission !== undefined) agents[name] = { ...agent, permission: withRealScreenDeny(agent.permission) };
+  }
+  target.agent = agents;
 }
 
 /** Adds the left-out `computer-use` entry to the project's MCP report (Settings > MCP). */
@@ -151,7 +175,7 @@ export default async function omnirushMcpPolicy(input?: { directory?: string; cl
         const envOnly = (target as Record<symbol, unknown>)[MCP_ENV_VALUES_MARK] === true;
         const environment = { ...mcpServerEnvironment(process.env, {}, [], process.platform, { envOnly }), ...own };
         target.mcp = { ...(isRecord(target.mcp) ? target.mcp : {}), [SERVER_ID]: { ...builtin, environment } };
-        // The host asks the person itself (never the engine's permission prompts), in every mode.
+        // Computer use never asks, so the engine never asks for its tools either, in every mode.
         const permission: Record<string, unknown> = typeof target.permission === "string" ? { "*": target.permission } : isRecord(target.permission) ? { ...target.permission } : {};
         delete permission[`${SERVER_ID}_*`];
         target.permission = withScreenBashRules({ ...permission, [`${SERVER_ID}_*`]: "allow" });
@@ -160,6 +184,7 @@ export default async function omnirushMcpPolicy(input?: { directory?: string; cl
         }
         withoutSubagentComputerTools(target);
       }
+      if (target) applyRealScreenDeny(target);
     },
     // Old screenshots of computer tools leave the model's context in blocks (keep 12, drop 8);
     // compaction requests serialize messages to text and carry no images anyway.

@@ -61,9 +61,8 @@ export const DEFAULT_LIMITS = Object.freeze({
   model_long_side: 1280,
   full_long_side: 3840,
   observation_ttl_seconds: 15,
+  // How long Continue (after the person's own input paused the real screen) waits for the person.
   approval_timeout_seconds: 120,
-  // "Allow for this chat": 0 = until the chat ends; a server value above 0 is an upper bound.
-  chat_approval_seconds: 0,
   media_full_bytes: 300 * 1024 * 1024,
   media_model_bytes: 200 * 1024 * 1024,
 });
@@ -80,7 +79,6 @@ export const LIMIT_RANGES = Object.freeze({
   // At most 120 s: a question must end inside the engine's computer-use call timeout (CLI 150 s, less its
   // 7 s policy read; desktop 300 s), or a late answer would come with nobody waiting for it.
   approval_timeout_seconds: [10, 120],
-  chat_approval_seconds: [0, 30 * 86400],
   media_full_bytes: [0, 2 * 1024 * 1024 * 1024],
   media_model_bytes: [0, 2 * 1024 * 1024 * 1024],
 });
@@ -101,7 +99,7 @@ export const INSTRUCTIONS = [
   "The person's own screen (other app_ids from computer_discover) is available only when the person turned it on in OmniRush's settings; it also runs without questions, so act there only for what the person asked.",
   "Work in steps: computer_observe, then computer_act with the observation_id you just got (each one works once and expires after a few seconds). computer_act waits for the screen to settle and returns the next observation when observe_after is true (the default), so act again with that one.",
   "Coordinates are pixels of the latest image you were given, measured from its top-left corner. Your cursor is drawn in the image (a purple arrow tagged AGENT).",
-  "Use the keyboard like a person: ctrl+l focuses the address bar, ctrl+t opens a tab, ctrl+tab / ctrl+shift+tab switch tabs, ctrl+w closes one, alt+tab switches windows.",
+  "Use the keyboard like a person: ctrl+l focuses the address bar, ctrl+t opens a tab, ctrl+tab / ctrl+shift+tab switch tabs, ctrl+w closes one, alt+tab switches windows. To run programs, use your shell tool, not the screen.",
   "Give every computer_act an intent: one short sentence saying why, in your words. It is recorded and shown to the person watching.",
   "On the person's screen, their own mouse or keyboard input pauses control until they choose Continue; check computer_session_status and do not try to resume yourself.",
   "Never retry an action whose result says may_have_acted: true; observe and check what happened.",

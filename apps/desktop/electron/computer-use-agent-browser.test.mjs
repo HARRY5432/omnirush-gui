@@ -171,11 +171,13 @@ test("agent browser: typing inserts text (IME-safe), newlines press Enter, keys 
   const b = await start({ url: "https://a.test/" });
   const page = b.active().webContents;
   page.commands.length = 0;
-  await b.act({ type: "type", text: "héllo 世界 👋" });
-  assert.deepEqual(page.commands, [["Input.insertText", { text: "héllo 世界 👋" }]]);
+  await b.act({ type: "type", text: "hé世👋" });
+  // One key event per character, the character as its text (surrogate pairs kept whole).
+  assert.deepEqual(page.commands.filter(([, p]) => p.type === "keyDown").map(([, p]) => p.text), ["h", "é", "世", "👋"]);
+  assert.equal(page.commands.filter(([, p]) => p.type === "keyUp").length, 4);
   page.commands.length = 0;
   await b.act({ type: "type", text: "a\nb" });
-  assert.deepEqual(page.commands.map(([method, p]) => (method === "Input.insertText" ? p.text : `${p.type}:${p.key}`)), ["a", "keyDown:Enter", "keyUp:Enter", "b"]);
+  assert.deepEqual(page.commands.map(([, p]) => `${p.type}:${p.key}`), ["keyDown:a", "keyUp:a", "keyDown:Enter", "keyUp:Enter", "keyDown:b", "keyUp:b"]);
   // Copy and paste use the browser's own clipboard: the selection is read from the page, never the OS clipboard.
   const send = page.debugger.sendCommand;
   page.debugger.sendCommand = async (method, params) => (method === "Runtime.evaluate" ? (page.commands.push([method, params]), { result: { value: "7Q-3381" } }) : send(method, params));
@@ -185,7 +187,7 @@ test("agent browser: typing inserts text (IME-safe), newlines press Enter, keys 
   assert.ok(!page.commands.some(([, p]) => p?.commands), "no OS clipboard command");
   page.commands.length = 0;
   await b.act({ type: "key", key: "v", modifiers: ["meta"] });
-  assert.deepEqual(page.commands, [["Input.insertText", { text: "7Q-3381" }]]);
+  assert.deepEqual(page.commands, [["Input.insertText", { text: "7Q-3381" }]], "paste inserts the private clipboard");
   await b.backend.close();
 });
 
@@ -238,5 +240,31 @@ test("agent browser: tabs from the chrome and the chords; window.open opens a ta
   assert.equal(b.pages().length, 2);
   // The chrome strip is redrawn with the tabs and the address.
   assert.match(b.fake.windows[0].webContents.scripts.at(-1), /New tab/);
+  await b.backend.close();
+});
+
+test("agent browser: every document gets the page guard (private clipboard binding, no print or dialogs), frames in other processes too", async () => {
+  const { PAGE_GUARD_JS } = await import("./computer-use-agent-browser.mjs");
+  const b = await start({ url: "https://a.test/" });
+  const page = b.active().webContents;
+  const setup = page.commands.map(([method, p]) => [method, p?.name ?? p?.source?.slice(0, 10) ?? null]);
+  assert.ok(setup.some(([m, n]) => m === "Runtime.addBinding" && n === "__omnirushClip"));
+  assert.ok(setup.some(([m]) => m === "Page.addScriptToEvaluateOnNewDocument") && page.commands.find(([m]) => m === "Page.addScriptToEvaluateOnNewDocument")[1].source === PAGE_GUARD_JS);
+  assert.ok(page.commands.some(([m, p]) => m === "Target.setAutoAttach" && p.autoAttach && p.flatten && p.waitForDebuggerOnStart));
+  assert.ok(page.commands.some(([m, p]) => m === "Input.setInterceptDrags" && p.enabled));
+  // The page's own Copy button (execCommand / navigator.clipboard) reaches the binding: then paste inserts it.
+  page.debugger.emit("message", {}, "Runtime.bindingCalled", { name: "__omnirushClip", payload: "from the page" });
+  page.commands.length = 0;
+  await b.act({ type: "key", key: "v", modifiers: ["ctrl"] });
+  assert.deepEqual(page.commands, [["Input.insertText", { text: "from the page" }]]);
+  // A frame in another process: guarded and only then resumed.
+  page.commands.length = 0;
+  page.debugger.emit("message", {}, "Target.attachedToTarget", { sessionId: "S1", targetInfo: { type: "iframe" } });
+  await new Promise((r) => setTimeout(r, 20));
+  const methods = page.commands.map(([m]) => m);
+  assert.deepEqual(methods.slice(-1), ["Runtime.runIfWaitingForDebugger"]);
+  assert.ok(methods.indexOf("Page.addScriptToEvaluateOnNewDocument") < methods.indexOf("Runtime.runIfWaitingForDebugger"));
+  // The guard itself: copy/cut/clipboard writes go to the binding, reads are refused, print is a no-op.
+  for (const needle of ["execCommand", "writeText", "readText", "window.print = () => {}", "__omnirushClip"]) assert.ok(PAGE_GUARD_JS.includes(needle), needle);
   await b.backend.close();
 });

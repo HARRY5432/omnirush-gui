@@ -64,7 +64,9 @@ function open() {
   const queryPointer = x.func("int XQueryPointer(void *display, ulong window, _Out_ ulong *root, _Out_ ulong *child, _Out_ int *root_x, _Out_ int *root_y, _Out_ int *win_x, _Out_ int *win_y, _Out_ uint *mask)");
   const downKeys = new Set();
   const downButtons = new Set();
-  let spare = null;
+  let spares = null; // keycodes with no symbols, lent to characters the layout does not have
+  const lent = new Map(); // keysym -> keycode currently mapped to it
+  let nextSpare = 0;
   const size = () => { const a = {}; if (!getAttributes(display, root, a)) fail("desktop_unavailable", "The virtual display is gone."); return { width: a.width, height: a.height }; };
   const pointer = () => { const r = [0], c = [0], rx = [0], ry = [0], wx = [0], wy = [0], m = [0]; queryPointer(display, root, r, c, rx, ry, wx, wy, m); return { x: rx[0], y: ry[0] }; };
   const held = () => send({ event: "held", keys: [...downKeys], buttons: [...downButtons] });
@@ -87,24 +89,28 @@ function open() {
     sync(display, 0);
   };
   const codeOf = (symbol) => keycode(display, typeof symbol === "number" ? symbol : keysym(symbol));
-  // A keycode with no symbols, borrowed to type a character the layout does not have (as xdotool does).
-  const spareCode = () => {
-    if (spare !== null) return spare;
+  // Keycodes with no symbols, lent to characters the layout does not have (as xdotool does). A pool, used in turn
+  // and kept mapped until reused, so an app reading the mapping late still sees the right character; all restored
+  // when the worker ends.
+  const spareCodes = () => {
+    if (spares) return spares;
+    spares = [];
     const min = [0], max = [0]; displayKeycodes(display, min, max);
     const per = [0], ptr = getMapping(display, min[0], max[0] - min[0] + 1, per);
-    if (!ptr) return (spare = 0);
+    if (!ptr) return spares;
     try {
       const syms = koffi.decode(ptr, "ulong", (max[0] - min[0] + 1) * per[0]);
-      for (let code = max[0]; code >= min[0]; code -= 1) {
+      for (let code = max[0]; code >= min[0] && spares.length < 16; code -= 1) {
         const row = Array.from(syms.slice((code - min[0]) * per[0], (code - min[0] + 1) * per[0]), Number);
-        if (row.every((s) => s === 0)) return (spare = code);
+        if (row.every((v) => v === 0)) spares.push(code);
       }
     } finally { free(ptr); }
-    return (spare = 0);
+    return spares;
   };
   const remap = (code, symbol) => { changeMapping(display, code, 1, [symbol], 1); sync(display, 0); };
-  // One character: its own key (Shift when it sits on level 2), else the spare keycode remapped to it,
-  // so any Unicode text arrives as the character itself (no IME composition involved).
+  const restoreSpares = () => { for (const code of lent.values()) remap(code, 0); lent.clear(); };
+  // One character: its own key (Shift when it sits on level 2), else a lent keycode mapped to it, so any Unicode
+  // text arrives as the character itself (no IME composition involved).
   async function typeSymbol(symbol) {
     const code = codeOf(symbol);
     const level0 = code ? Number(symbolAt(display, code, 0)) : 0, level1 = code ? Number(symbolAt(display, code, 1)) : 0;
@@ -116,11 +122,18 @@ function open() {
       if (shifted) press(shift, false);
       return;
     }
-    const borrowed = spareCode();
-    if (!borrowed) fail("unsupported_action", "This character cannot be typed in the virtual display.");
-    remap(borrowed, symbol);
-    await wait(12);
-    try { press(borrowed, true); press(borrowed, false); await wait(8); } finally { remap(borrowed, 0); }
+    let borrowed = lent.get(symbol);
+    if (!borrowed) {
+      const pool = spareCodes();
+      if (!pool.length) fail("unsupported_action", "This character cannot be typed in the virtual display.");
+      borrowed = pool[nextSpare++ % pool.length];
+      for (const [sym, c] of lent) if (c === borrowed) lent.delete(sym);
+      remap(borrowed, symbol);
+      lent.set(symbol, borrowed);
+      await wait(15);
+    }
+    press(borrowed, true); press(borrowed, false);
+    await wait(4);
   }
   const NAMES = { Enter: "Return", Tab: "Tab", Escape: "Escape", Backspace: "BackSpace", Delete: "Delete", Insert: "Insert", Space: "space", Left: "Left", Up: "Up", Right: "Right", Down: "Down", Home: "Home", End: "End", PageUp: "Prior", PageDown: "Next", CapsLock: "Caps_Lock", ContextMenu: "Menu", PrintScreen: "Print" };
   const MODS = { ctrl: "Control_L", shift: "Shift_L", alt: "Alt_L", meta: "Super_L" };
@@ -221,11 +234,16 @@ function open() {
     for (const b of new Set([1, 2, 3, ...buttons.filter((n) => Number.isInteger(n) && n >= 1 && n <= 9)])) rawButton(display, b, 0, 0);
     sync(display, 0);
   }
-  return { size, capture, act, pointer, release, up, close() { release(); close(display); } };
+  return { size, capture, act, pointer, release, up, close() { release(); restoreSpares(); close(display); } };
 }
 
 // Worker mode only when run as the process's script (importing it, as tests do, runs nothing).
 const isMain = (() => { try { return Boolean(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)); } catch { return false; } })();
+// `--release <json>`: a one-shot run after the worker died with input held (portable-host createNativeWorker).
+if (isMain && process.argv[2] === "--release") {
+  try { const b = open(); b.up(JSON.parse(process.argv[3] || "{}")); b.close(); } catch { /* the display is gone */ }
+  process.exit(0);
+}
 if (isMain && process.send) {
   let backend = null;
   try {

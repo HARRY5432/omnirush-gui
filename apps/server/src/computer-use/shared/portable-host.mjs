@@ -492,7 +492,7 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
   /** One MCP client (an engine connection): JSON-RPC in, JSON-RPC out. */
   /**
    * One MCP connection. `internal` false: a connection from outside the app's own engine (the copied CLI
-   * connection), whose calls belong to no chat of this app: it never keeps or reuses "Allow for this chat".
+   * connection), whose calls belong to no chat of this app.
    */
   function connect({ internal = true } = {}) {
     const connection = { id: randomUUID(), busy: false, closed: false, internal: internal !== false };

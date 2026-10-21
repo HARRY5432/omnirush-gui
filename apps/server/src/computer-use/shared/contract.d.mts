@@ -29,7 +29,6 @@ export type Limits = {
   full_long_side: number;
   observation_ttl_seconds: number;
   approval_timeout_seconds: number;
-  chat_approval_seconds: number;
   media_full_bytes: number;
   media_model_bytes: number;
 };

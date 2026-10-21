@@ -32,6 +32,7 @@ const ADDRESS = Object.freeze({ x: 110, right: SCREEN.width - 10 });
 const BLANK = "about:blank";
 const SEARCH = "https://duckduckgo.com/?q=";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const CLIP_BINDING = "__omnirushClip";
 /** `promise`, or a rejection after `ms` (setup steps never hang the session). */
 const withTimeout = (promise, ms) => Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error("timed out")), ms))]);
 const fail = (code, message) => Object.assign(new Error(message), { code });
@@ -146,6 +147,39 @@ export function clipboardOf(name, modifiers = []) {
   return { c: "copy", x: "cut", v: "paste" }[String(name).toLowerCase()] ?? null;
 }
 
+/**
+ * Runs in every document of the agent's browser (main world, every frame): the page's own copy and cut
+ * (document.execCommand, navigator.clipboard.write*) go to this browser's private clipboard through the
+ * __omnirushClip binding, never to the person's clipboard; reading the clipboard, printing and native dialogs
+ * are refused.
+ */
+export const PAGE_GUARD_JS = `(() => {
+  const send = (t) => { try { window.__omnirushClip(String(t ?? "").slice(0, 1000000)); } catch {} };
+  const fieldText = (el) => { try { return el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA") && typeof el.selectionStart === "number" && el.selectionEnd > el.selectionStart ? el.value.slice(el.selectionStart, el.selectionEnd) : ""; } catch { return ""; } };
+  // The focused field's selection, else a text field with a selection (copy helpers select a hidden textarea), else the page's.
+  const selected = () => fieldText(document.activeElement) || [...document.querySelectorAll("textarea, input")].map(fieldText).find(Boolean) || String(getSelection() ?? "");
+  const exec = Document.prototype.execCommand;
+  Object.defineProperty(Document.prototype, "execCommand", { configurable: false, writable: false, value: function (command, ...rest) {
+    const c = String(command).toLowerCase();
+    if (c === "copy" || c === "cut") {
+      let data = null;
+      try { const dt = new DataTransfer(); const ev = new ClipboardEvent(c, { clipboardData: dt, bubbles: true, cancelable: true }); if (!(document.activeElement || document.body).dispatchEvent(ev)) data = dt.getData("text/plain"); } catch {}
+      send(data ?? selected());
+      if (c === "cut") { try { exec.call(this, "delete"); } catch {} }
+      return true;
+    }
+    if (c === "paste") return false;
+    return exec.call(this, command, ...rest);
+  } });
+  const cb = navigator.clipboard;
+  if (cb) {
+    const refuse = async () => { throw new DOMException("The clipboard is not available here.", "NotAllowedError"); };
+    const write = async (items) => { for (const item of items ?? []) { if (item?.types?.includes("text/plain")) { send(await (await item.getType("text/plain")).text()); return; } } };
+    for (const [name, fn] of [["writeText", async (t) => send(t)], ["write", write], ["readText", refuse], ["read", refuse]]) Object.defineProperty(cb, name, { configurable: false, writable: false, value: fn });
+  }
+  window.print = () => {}; window.alert = () => {}; window.confirm = () => true; window.prompt = () => null;
+})();`;
+
 /** The selected text in the page: inside a focused text field, else the document selection. */
 export const SELECTION_JS = "(() => { const a = document.activeElement; if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA') && typeof a.selectionStart === 'number') return a.value.slice(a.selectionStart, a.selectionEnd); return String(getSelection() ?? ''); })()";
 
@@ -196,7 +230,7 @@ function blit(out, bgra, width, rows, top) {
 // ------------------------------------------------------------ the backend
 
 /**
- * Starts the agent's browser. `electron`: { BrowserWindow, session }; `glidePath(x0, y0, x1, y1)`: the shared
+ * Starts the agent's browser. `electron`: { BrowserWindow, session, clipboard? }; `glidePath(x0, y0, x1, y1)`: the shared
  * worker's glide (virtual-worker.mjs). Returns the virtual host's backend.
  */
 export async function startAgentBrowser({ electron, glidePath, url = null, versions = process.versions, wait = sleep }) {
@@ -217,7 +251,7 @@ export async function startAgentBrowser({ electron, glidePath, url = null, versi
   let clip = ""; // this browser's own clipboard
 
   const offscreen = (height) => new BrowserWindow({
-    show: false, width: SCREEN.width, height, useContentSize: true, frame: false, skipTaskbar: true, focusable: false, paintWhenInitiallyHidden: true,
+    show: false, width: SCREEN.width, height, useContentSize: true, frame: false, skipTaskbar: true, focusable: false, paintWhenInitiallyHidden: true, fullscreenable: false,
     webPreferences: { offscreen: { useSharedTexture: false, deviceScaleFactor: 1 }, partition, sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, spellcheck: false, devTools: false },
   });
   const latest = (wc, view) => { wc.setFrameRate?.(30); wc.on("paint", (_event, _dirty, image) => { view.image = image; }); };
@@ -245,7 +279,14 @@ export async function startAgentBrowser({ electron, glidePath, url = null, versi
     return drawing;
   };
 
-  const cdp = (tab, method, params = {}) => tab.window.webContents.debugger.sendCommand(method, params);
+  const cdp = (tab, method, params = {}, sessionId = undefined) => (sessionId ? tab.window.webContents.debugger.sendCommand(method, params, sessionId) : tab.window.webContents.debugger.sendCommand(method, params));
+  /** An out-of-process frame: the clipboard binding, the page guard, its own frames, then it may run. */
+  async function guardTarget(tab, sessionId) {
+    for (const [method, params] of [["Runtime.enable", {}], ["Runtime.addBinding", { name: CLIP_BINDING }], ["Page.enable", {}], ["Page.addScriptToEvaluateOnNewDocument", { source: PAGE_GUARD_JS }], ["Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }]]) {
+      await withTimeout(cdp(tab, method, params, sessionId), 3000).catch(() => undefined);
+    }
+    await cdp(tab, "Runtime.runIfWaitingForDebugger", {}, sessionId).catch(() => undefined);
+  }
 
   async function openTab(target, { activate = true } = {}) {
     const window = offscreen(PAGE_H);
@@ -262,16 +303,30 @@ export async function startAgentBrowser({ electron, glidePath, url = null, versi
     wc.on("did-start-loading", () => { tab.loading = true; void draw(); });
     wc.on("did-stop-loading", () => { tab.loading = false; void draw(); });
     wc.on("render-process-gone", () => { tab.title = "This page crashed"; void draw(); });
+    // No client certificate and no credentials from the person's other sessions: both are cancelled.
+    wc.on("select-client-certificate", (event, _url, _list, callback) => { event.preventDefault(); callback(); });
+    wc.on("login", (event, _details, _auth, callback) => { event.preventDefault(); callback(); });
     // A committed document first: DevTools commands on a window that never loaded anything do not answer.
     await withTimeout(window.loadURL(BLANK), 5000).catch(() => undefined);
     wc.debugger.attach("1.3");
-    wc.debugger.on("message", (_event, method, params) => {
+    wc.debugger.on("message", (_event, method, params, sessionId) => {
       // No native dialog or file picker ever reaches the person's screen.
-      if (method === "Page.javascriptDialogOpening") void cdp(tab, "Page.handleJavaScriptDialog", { accept: true }).catch(() => undefined);
+      if (method === "Page.javascriptDialogOpening") void cdp(tab, "Page.handleJavaScriptDialog", { accept: true }, sessionId).catch(() => undefined);
+      // The page's own copy (execCommand, navigator.clipboard) lands in this browser's clipboard.
+      if (method === "Runtime.bindingCalled" && params?.name === CLIP_BINDING && typeof params.payload === "string" && params.payload) clip = params.payload.slice(0, 1_000_000);
+      // Frames in other processes get the same guard before they run.
+      if (method === "Target.attachedToTarget" && params?.sessionId) void guardTarget(tab, params.sessionId);
+      // An HTML drag started by a page (draggable items): carried through as DevTools drag events.
+      if (method === "Input.dragIntercepted") tab.dragData = params?.data ?? null;
     });
     await withTimeout(cdp(tab, "Page.enable"), 3000).catch(() => undefined);
     await withTimeout(cdp(tab, "Page.setInterceptFileChooserDialog", { enabled: true }), 3000).catch(() => undefined);
-    await withTimeout(cdp(tab, "Page.addScriptToEvaluateOnNewDocument", { source: "window.alert=()=>{};window.confirm=()=>true;window.prompt=()=>null;" }), 3000).catch(() => undefined);
+    // Runtime events (the clipboard binding's calls) arrive only with the domain on.
+    await withTimeout(cdp(tab, "Runtime.enable"), 3000).catch(() => undefined);
+    await withTimeout(cdp(tab, "Runtime.addBinding", { name: CLIP_BINDING }), 3000).catch(() => undefined);
+    await withTimeout(cdp(tab, "Page.addScriptToEvaluateOnNewDocument", { source: PAGE_GUARD_JS }), 3000).catch(() => undefined);
+    await withTimeout(cdp(tab, "Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }), 3000).catch(() => undefined);
+    await withTimeout(cdp(tab, "Input.setInterceptDrags", { enabled: true }), 3000).catch(() => undefined);
     await withTimeout(cdp(tab, "Emulation.setFocusEmulationEnabled", { enabled: true }), 3000).catch(() => undefined);
     tabs.push(tab);
     if (activate) { active = tabs.length - 1; address.focused = target === null; address.text = ""; address.selected = false; }
@@ -413,11 +468,25 @@ export async function startAgentBrowser({ electron, glidePath, url = null, versi
       if (i > 0) await key("Enter");
       if (!lines[i]) continue;
       if (address.focused) await typeAddress(lines[i]);
-      else if (current()) await cdp(current(), "Input.insertText", { text: lines[i] });
+      else if (current()) {
+        // Like a person: one key event per character, the character as its text (any script or emoji, no IME involved).
+        for (const ch of lines[i]) {
+          await cdp(current(), "Input.dispatchKeyEvent", { type: "keyDown", key: ch, text: ch, unmodifiedText: ch });
+          await cdp(current(), "Input.dispatchKeyEvent", { type: "keyUp", key: ch });
+        }
+      }
     }
   }
 
+  /** Linux: a selection in the agent's pages must not become the person's middle-click selection (PRIMARY). */
   async function act(action) {
+    const primary = process.platform === "linux" && electron.clipboard ? electron.clipboard.readText("selection") : null;
+    try { return await actNow(action); } finally {
+      if (primary !== null && electron.clipboard.readText("selection") !== primary) electron.clipboard.writeText(primary, "selection");
+    }
+  }
+
+  async function actNow(action) {
     if (closed) throw fail("session_unavailable", "The agent's browser has closed.");
     const t = action.type;
     if (t === "wait") return wait(action.ms ?? 0);
@@ -441,9 +510,16 @@ export async function startAgentBrowser({ electron, glidePath, url = null, versi
       const start = hitTest(first.x, first.y, tabs.length);
       if (start.area !== "page") return undefined;
       held = "left";
+      const tab = current();
+      if (tab) tab.dragData = null;
       await mouse("mousePressed", start, { button: "left", buttons: 1, clickCount: 1 });
       for (const point of rest) await glide(point.x, Math.max(CHROME_H, point.y), { button: "left", buttons: 1 });
       const end = hitTest(pointer.x, Math.max(CHROME_H, pointer.y), tabs.length);
+      if (tab?.dragData) {
+        // A page drag (not a text selection): enter, over and drop where the agent's cursor stopped.
+        for (const type of ["dragEnter", "dragOver", "drop"]) await cdp(tab, "Input.dispatchDragEvent", { type, x: end.x, y: end.y, data: tab.dragData, modifiers: 0 }).catch(() => undefined);
+        tab.dragData = null;
+      }
       await mouse("mouseReleased", end, { button: "left", buttons: 0, clickCount: 1 });
       held = null;
       return undefined;

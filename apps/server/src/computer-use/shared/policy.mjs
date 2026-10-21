@@ -41,11 +41,11 @@ function text(value, limit = 400) {
  * missing or malformed block is off. The server already applied
  * `rollout_percent` (and the account) to `enabled`.
  * Shape: { enabled, clients, os, models, real_screen, virtual_display,
- * deny_apps, limits, message, ask_send_delete, grant_epoch, chat_bound_read }
+ * deny_apps, limits, message, ask_send_delete }
  * (null lists: no restriction).
  */
 export function normalizeComputerUse(block) {
-  if (!isRecord(block)) return { enabled: false, clients: null, os: null, models: null, real_screen: false, virtual_display: false, deny_apps: [], limits: normalizeLimits(null), message: null, ask_send_delete: false, grant_epoch: null, chat_bound_read: false };
+  if (!isRecord(block)) return { enabled: false, clients: null, os: null, models: null, real_screen: false, virtual_display: false, deny_apps: [], limits: normalizeLimits(null), message: null, ask_send_delete: false };
   const denyApps = Array.isArray(block.deny_apps)
     ? block.deny_apps.flatMap((item) => {
       if (typeof item === "string" && item.trim()) return [{ match: item.trim().slice(0, 200), reason: null }];
@@ -63,13 +63,8 @@ export function normalizeComputerUse(block) {
     deny_apps: denyApps,
     limits: normalizeLimits(block.limits),
     message: text(block.message),
-    // The send/delete asks in Normal (actApproval options.sendDelete): only an explicit true turns them on.
+    // The desktop's built-in browser tool only (actApproval options.sendDelete): only an explicit true turns them on.
     ask_send_delete: block.ask_send_delete === true,
-    // "Allow for this chat" is reused only under the epoch it was given in (the server bumps it when the
-    // switch or the bound changes) and only when the server sent the bound itself: else null / false.
-    grant_epoch: Number.isSafeInteger(block.grant_epoch) && block.grant_epoch >= 0 ? block.grant_epoch : null,
-    // (A block normalized here once already keeps its answer: its limits are filled in by then.)
-    chat_bound_read: block.chat_bound_read === false ? false : isRecord(block.limits) && typeof block.limits.chat_approval_seconds === "number" && Number.isFinite(block.limits.chat_approval_seconds),
   };
 }
 
@@ -110,11 +105,22 @@ export function offMessage(setting) {
 
 /** The person's real screen is off until the person turns it on (Settings / `omnirush computer real-screen on`). */
 export const REAL_SCREEN_DEFAULT = false;
-/** The settings key both apps save the person's choice under. */
+/** The key both apps save the person's choice under, in <state or profile>/computer-use/real-screen.json. */
 export const REAL_SCREEN_SETTING = "computerUseRealScreen";
+export const REAL_SCREEN_FILE = "real-screen.json";
 /** OMNIRUSH_COMPUTER_USE_REAL_SCREEN=1/0 overrides the saved choice (support, tests). */
 export const REAL_SCREEN_ENV = "OMNIRUSH_COMPUTER_USE_REAL_SCREEN";
-export const REAL_SCREEN_OFF_MESSAGE = "Computer use on your own screen is off. The agent works on its own display instead (app_id \"virtual:main\"). The person can turn the real screen on in Settings (desktop) or with `omnirush computer real-screen on` (CLI).";
+export const REAL_SCREEN_OFF_MESSAGE = "Computer use on the person's own screen is off. Work on your own display instead (app_id \"virtual:main\"). Only the person can change this setting; never change it yourself and never ask to.";
+
+/**
+ * Engine permission rules for every mode (computer use on or off): the agent can neither run the command that
+ * turns the real screen on nor write the setting. Appended after the mode's own rules (the last match wins); the
+ * engine's matcher treats \\ as / (Windows paths match too).
+ */
+export const REAL_SCREEN_DENY_RULES = Object.freeze({
+  bash: Object.freeze({ "*computer real-screen*": "deny", "*computerUseRealScreen*": "deny", "*OMNIRUSH_COMPUTER_USE_REAL_SCREEN*": "deny", "*computer-use/real-screen.json*": "deny" }),
+  edit: Object.freeze({ "*computer-use/real-screen.json": "deny" }),
+});
 
 /** Whether the person turned the real screen on: the environment first, then the saved setting, else REAL_SCREEN_DEFAULT. */
 export function realScreenOptIn({ env = process.env, saved } = {}) {

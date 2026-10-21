@@ -328,11 +328,9 @@ describe("policy: approvals per permission mode", () => {
     expect(normalizeLimits({}).approval_timeout_seconds).toBe(120);
   });
 
-  test("Allow for this chat: until the chat ends by default; the server's value is an upper bound", () => {
-    expect(DEFAULT_LIMITS.chat_approval_seconds).toBe(0);
-    expect(normalizeLimits({ chat_approval_seconds: 1800 }).chat_approval_seconds).toBe(1800);
-    expect(normalizeLimits({ chat_approval_seconds: 0 }).chat_approval_seconds).toBe(0);
-    expect(normalizeLimits({}).chat_approval_seconds).toBe(0);
+  test("no grant limits are kept any more (computer use never asks)", () => {
+    expect("chat_approval_seconds" in DEFAULT_LIMITS).toBe(false);
+    expect("chat_approval_seconds" in normalizeLimits({ chat_approval_seconds: 1800 })).toBe(false);
   });
 
   test("shell screen capture asks; sub-agents get no computer tools", () => {

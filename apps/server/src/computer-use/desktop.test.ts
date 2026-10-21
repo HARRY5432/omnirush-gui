@@ -1,6 +1,7 @@
 // Desktop computer use on the server side: the switch, the built-in MCP entry
 // (reserved id), the engine plugin's hooks, the media lane and its store.
 import { afterAll, describe, expect, test } from "bun:test";
+import { REAL_SCREEN_DENY_RULES } from "./shared/policy.mjs";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -85,7 +86,7 @@ describe("switch and built-in entry", () => {
   });
 });
 
-describe("routes: the chat a grant is kept for, and the policy read before an open", () => {
+describe("routes: the chat in use, and the policy read before an open", () => {
   test("state names a chat only when exactly one prompted chat runs; refresh reads the server now (max_age_ms) and says whether it did", async () => {
     const routes: Route[] = [];
     const state = tmp();
@@ -93,7 +94,7 @@ describe("routes: the chat a grant is kept for, and the policy read before an op
     let running: string[] | null = null;
     const ages: number[] = [];
     let failRead = false;
-    registerComputerUseRoutes({ routes, stateDir: () => state, jsonResponse: (d, status = 200) => new Response(JSON.stringify(d), { status }), readJsonBody: async (r) => r.json(), approvalMode: async () => "guarded", readCapabilities: async (maxAgeMs) => { ages.push(maxAgeMs); if (failRead) throw new Error("offline"); return { computer_use: { enabled: true, limits: { chat_approval_seconds: 600 } } }; }, applyEngine: async () => undefined, chats, runningSessions: async () => running, recordTrace: () => undefined });
+    registerComputerUseRoutes({ routes, stateDir: () => state, jsonResponse: (d, status = 200) => new Response(JSON.stringify(d), { status }), readJsonBody: async (r) => r.json(), approvalMode: async () => "guarded", readCapabilities: async (maxAgeMs) => { ages.push(maxAgeMs); if (failRead) throw new Error("offline"); return { computer_use: { enabled: true, limits: { session_seconds: 600 } } }; }, applyEngine: async () => undefined, chats, runningSessions: async () => running, recordTrace: () => undefined });
     const hit = async (method: string, p: string, body?: unknown) => {
       const route = routes.find((r) => r.method === method && r.regex.test(p));
       if (!route) throw new Error("no route");
@@ -105,17 +106,18 @@ describe("routes: the chat a grant is kept for, and the policy read before an op
     expect((await hit("GET", "/computer-use/state")).chat).toBeNull();
     running = ["ses_a"];
     expect((await hit("GET", "/computer-use/state")).chat).toBe("ses_a");
-    // Switching chat: the new one is named, so a grant from ses_a is not reused there.
+    // Switching chat: the new one is named.
     chats.mark("ses_b"); running = ["ses_b"];
     expect((await hit("GET", "/computer-use/state")).chat).toBe("ses_b");
-    // Both running: no chat (asked every time).
+    // Both running: no chat.
     running = ["ses_a", "ses_b"];
     expect((await hit("GET", "/computer-use/state")).chat).toBeNull();
     // Before an open the host asks with max_age_ms 0; the new bound is in force at once.
     const read = await hit("POST", "/computer-use/refresh", { max_age_ms: 0 });
     expect(read.read).toBe(true);
     expect(ages.at(-1)).toBe(2_000);
-    expect((read.setting as { limits: { chat_approval_seconds: number } }).limits.chat_approval_seconds).toBe(600);
+    expect((read.setting as { limits: { session_seconds: number } }).limits.session_seconds).toBe(600);
+    expect(Object.keys(read.setting as Record<string, unknown>)).not.toContain("grant_epoch");
     expect((await hit("POST", "/computer-use/refresh", {})).read).toBe(true);
     expect(ages.at(-1)).toBe(60_000);
     failRead = true;
@@ -152,7 +154,8 @@ describe("engine MCP plugin", () => {
     const mcp = config.mcp as Record<string, { command: string[] }>;
     expect(Object.keys(mcp)).toEqual(["computer-use"]);
     expect(mcp["computer-use"]?.command).toEqual([process.execPath, "/x/relay.mjs", "/x/c.json"]);
-    expect(Object.entries(config.permission as Record<string, string>).at(-1)).toEqual(["computer-use_*", "allow"]);
+    expect((config.permission as Record<string, string>)["computer-use_*"]).toBe("allow");
+    expect((config.permission as { bash: Record<string, string> }).bash["*computer real-screen*"]).toBe("deny");
     // The built-in server gets the allowlist's environment too: the engine's tokens empty for it, its own kept.
     const builtinEnv = (config.mcp as Record<string, { environment: Record<string, string> }>)["computer-use"]!.environment;
     expect(builtinEnv.OMNIRUSH_COMPUTER_USE_COMMAND).toBe("");
@@ -191,16 +194,17 @@ describe("engine MCP plugin", () => {
   test("off: nothing is added and the config is as before", async () => {
     const state = tmp();
     const { config } = await run({ OMNIRUSH_COMPUTER_USE_DIR: computerUseDir(state) }, { permission: { "*": "ask", bash: { "*": "allow", "rm -r*": "ask" } } });
-    expect(config).toEqual({ mcp: {}, permission: { "*": "ask", bash: { "*": "allow", "rm -r*": "ask" } } });
+    // As before, plus only the real-screen denies (every mode, computer use on or off).
+    expect(config).toEqual({ mcp: {}, permission: { "*": "ask", bash: { "*": "allow", "rm -r*": "ask", ...REAL_SCREEN_DENY_RULES.bash }, edit: { ...REAL_SCREEN_DENY_RULES.edit } } });
   });
 
-  test("on in Auto: the shell rules stay a single allow", async () => {
+  test("on in Auto: the shell rules stay a single allow (plus the real-screen denies)", async () => {
     const state = tmp();
     const dir = computerUseDir(state);
     writeHostFile(dir, { command: [process.execPath, "/x/relay.mjs", "/x/c.json"], environment: {} });
     const pinnedEnv = { OMNIRUSH_COMPUTER_USE_COMMAND: JSON.stringify({ command: [process.execPath, "/x/relay.mjs", "/x/c.json"], environment: {} }) };
     const { config } = await run({ ...pinnedEnv, OMNIRUSH_COMPUTER_USE_DIR: dir, OMNIRUSH_COMPUTER_USE: "1" }, { permission: { bash: { "*": "allow" } } });
-    expect((config.permission as { bash: Record<string, string> }).bash).toEqual({ "*": "allow" });
+    expect((config.permission as { bash: Record<string, string> }).bash).toEqual({ "*": "allow", ...REAL_SCREEN_DENY_RULES.bash });
   });
 
   test("model context pruning touches only computer tool parts", async () => {

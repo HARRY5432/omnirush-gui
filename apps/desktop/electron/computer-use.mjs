@@ -21,7 +21,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { app, BrowserWindow, screen, session } from "electron";
+import { app, BrowserWindow, clipboard, screen, session } from "electron";
 import { startAgentBrowser } from "./computer-use-agent-browser.mjs";
 import { testAnswersAllowed } from "./computer-use-answers.mjs";
 import { createComputerUseHost } from "./computer-use-host.mjs";
@@ -193,7 +193,7 @@ async function startHost() {
       // Linux with Xvfb (and a browser for it): a whole display of its own; elsewhere the agent-only browser in this app.
       startBackend: (name, options) => (process.platform === "linux" && virtualModule.which("Xvfb") && (!options.browser || virtualModule.findBrowser())
         ? virtualModule.startXvfbBackend({ name, ...options, nodePath: process.execPath, nodeEnv: { ELECTRON_RUN_AS_NODE: "1" }, koffiPath: koffiPath() })
-        : startAgentBrowser({ electron: { BrowserWindow, session }, glidePath: virtualWorker.glidePath, url: options.url })),
+        : startAgentBrowser({ electron: { BrowserWindow, session, clipboard }, glidePath: virtualWorker.glidePath, url: options.url })),
       settings: hostSettings, context: hostContext, spool, onEvent, onState, onFrame, onCursor,
     });
     const callbacks = { spool, settings: hostSettings, context: hostContext, refresh: hostRefresh, virtual, onEvent, onState, onFrame };

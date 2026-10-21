@@ -18,12 +18,8 @@ export type ComputerUseBlock = {
   deny_apps: DenyEntry[];
   limits: Limits;
   message: string | null;
-  /** The send/delete asks in Normal (off unless the server says true). */
+  /** The desktop built-in browser tool's send/delete asks (off unless the server says true). */
   ask_send_delete: boolean;
-  /** The server's grant epoch (null: not sent): a grant is reused only under the epoch it was given in. */
-  grant_epoch: number | null;
-  /** Whether the server sent limits.chat_approval_seconds itself (false: no grant is reused). */
-  chat_bound_read: boolean;
 };
 export type ComputerUseSetting = ComputerUseBlock & {
   source: "env" | "server" | "default";
@@ -39,6 +35,8 @@ export const REAL_SCREEN_DEFAULT: boolean;
 export const REAL_SCREEN_SETTING: string;
 export const REAL_SCREEN_ENV: string;
 export const REAL_SCREEN_OFF_MESSAGE: string;
+export const REAL_SCREEN_FILE: string;
+export const REAL_SCREEN_DENY_RULES: Readonly<{ bash: Readonly<Record<string, "deny">>; edit: Readonly<Record<string, "deny">> }>;
 export function realScreenOptIn(options?: { env?: Record<string, string | undefined>; saved?: unknown }): boolean;
 export type SessionRules = { open: true; asks: false } | { open: false; asks: false; code: "virtual_unavailable" | "real_screen_unavailable" | "real_screen_off"; message: string };
 export function sessionRules(options?: { display?: "virtual" | "real"; server?: { real_screen?: boolean; virtual_display?: boolean }; optIn?: boolean }): SessionRules;
