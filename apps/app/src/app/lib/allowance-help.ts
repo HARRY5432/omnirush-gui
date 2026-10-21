@@ -47,8 +47,8 @@ export const ALLOWANCE_SECTIONS: readonly HelpSection[] = Object.freeze([
     text: "You get a token allowance for each day, under a weekly cap. What is left shows in the sidebar and in Settings. Your daily tokens are the sum of:",
     points: [
       "Linked accounts: a linked Discord account and a linked GitHub account each add tokens every day. Link them on the console's Account page, which also shows when a link counts.",
-      "Good sessions: each session that passes the quality check adds tokens to every day for the next 7 days, up to a cap. Full, passing sessions add the most; sessions that pass but are cut off or very small add less.",
-      "Extras: approved project requests, referral and leaderboard bonuses and the like, while they last.",
+      "Passing sessions: each session that passes the quality check adds tokens to every day of the following week, up to a cap. A usable session on Windows or macOS adds the most, then one on Linux or WSL, then other passing sessions; sessions that are cut off or very small add the least.",
+      "Extras: approved project requests, ambassador boosts and other grants, while they last. A leaderboard win raises your linked-account and session parts by a percentage, and a referral raises your weekly cap.",
     ],
   },
   {
@@ -67,7 +67,7 @@ export const ALLOWANCE_SECTIONS: readonly HelpSection[] = Object.freeze([
     text: "Every request the agent sends to the model uses tokens: your message, the conversation so far, the files and tool results the agent reads, and its answer.",
     points: [
       "Input tokens: count in full.",
-      "Cached input: the part of the conversation the model already has from earlier turns counts at a quarter of its size.",
+      "Cached input: the part of the conversation the model already has from earlier turns counts at a fraction of its size (currently a quarter).",
       "Output tokens: the agent's answers, code and tool calls, in full.",
       "Reasoning tokens: the model's thinking, in full. A higher reasoning effort uses more.",
       "Sub-agents, automatic summaries and compaction are model requests too.",
@@ -78,11 +78,11 @@ export const ALLOWANCE_SECTIONS: readonly HelpSection[] = Object.freeze([
     id: "lower",
     title: "What can lower it",
     points: [
-      "Few passing sessions: if only a small share of your sessions from the last 7 days passes the quality check, your daily tokens are lowered to a percentage. The app shows a notice with the percent. Each session that passes today lifts you one step for the rest of the day. New accounts and accounts with only a few checked sessions keep their full allowance.",
+      "Few passing sessions: if only a small share of your recent work passes the quality check (measured by tokens, across your larger sessions of the last week), your daily tokens are lowered to a percentage. The app shows a notice with the percent. Each session that passes today lifts you one step for the rest of the day. New accounts and accounts with only a few checked sessions keep their full allowance, unless they use a lot of tokens without uploading sessions.",
       "Sessions not uploaded: heavy use with few uploaded sessions can lower it too. Keep the app updated and recording on.",
       "Quality tier: while your tier is Limited, your tokens are reduced. The tier badge next to your name shows by how much when you point at it.",
       "Off-track sessions: a session that is clearly off track (not recorded, most tool calls failing, or no project and no code changed) gets a warning first. If it carries on, its tokens cost more. If it passes the quality check in the end, the extra comes back to your bonus pot.",
-      "Paused session: a session that is not being recorded is paused after a set amount. Update OmniRush or turn recording back on, then start a new session. Your other sessions keep working.",
+      "Paused session: a session that is not being recorded is paused after a set amount. Update OmniRush or turn recording back on, then start a new session.",
     ],
   },
   {
@@ -100,9 +100,9 @@ export const GOOD_SESSION_SECTIONS: readonly HelpSection[] = Object.freeze([
   {
     id: "steps",
     title: "The checklist",
-    text: "The Good session chip above the message box checks these as you work. The star fills in after the server's check, once the session has uploaded.",
+    text: "A Good session (the star) is the strictest quality check, stricter than the pass that adds daily tokens, and each one earns spins. The Good session chip above the message box checks these as you work; the star fills in after the server's check, once the session has uploaded.",
     points: [
-      "In a project: open a real project folder before you start, not your home folder, Desktop or Downloads, and keep every edit inside it.",
+      "In a project: open your project's own folder before you start (a general folder such as your home folder, Desktop or Downloads usually isn't one) and keep every edit inside it.",
       "Code changed: build or change real code, at least 2 code files and 30 lines, or 5 files and 150 lines. Docs, images, lock files and build output don't count.",
       "Ran or tested: have the agent build it, run it or run its tests (a test runner, compiler, linter or type check).",
       "Finished: let the last turn finish with the agent's answer. If it asks you something, answer it. If a turn stops early, send \"continue\".",

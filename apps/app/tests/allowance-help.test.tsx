@@ -27,7 +27,7 @@ describe("allowance help content", () => {
     expect(text).toContain("00:00 UTC every day");
     expect(text).toContain("Monday at 00:00 UTC");
     expect(text).toContain("Cached input");
-    expect(text).toContain("a quarter of its size");
+    expect(text).toContain("a fraction of its size (currently a quarter)");
     expect(text).toContain("Reasoning tokens");
   });
 

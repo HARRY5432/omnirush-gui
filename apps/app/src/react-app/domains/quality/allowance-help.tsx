@@ -100,7 +100,7 @@ export function AllowanceHelpDialog() {
         <div className="pe-8">
           <DialogTitle className="text-base">{tab === "good-session" ? GOOD_SESSION_HELP_TITLE : ALLOWANCE_HELP_TITLE}</DialogTitle>
           <DialogDescription className="text-xs">
-            How tokens are counted, when they reset, and how good sessions raise them.
+            {tab === "good-session" ? "What the Good session check looks for." : "How tokens are counted, when they reset, and what changes them."}
           </DialogDescription>
         </div>
         <div className="max-h-[60vh] overflow-y-auto pe-1">
