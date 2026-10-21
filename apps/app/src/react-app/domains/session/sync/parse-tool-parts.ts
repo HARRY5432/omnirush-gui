@@ -7,6 +7,7 @@ import {
 
 import { safeStringify } from "@/app/utils";
 import { normalizeErrorText } from "@/lib/error-text";
+import { COMMAND_OUTPUT_METADATA_CHARS } from "@/lib/command-output";
 
 export const STRUCTURED_OUTPUT_TOOL = "StructuredOutput";
 
@@ -80,7 +81,9 @@ function toolCallProviderMetadata(part: ToolPart): ProviderMetadata {
   const subagentModelFallback = fallback && typeof fallback.requested === "string" && typeof fallback.used === "string"
     ? { requested: fallback.requested.slice(0, 128), used: fallback.used.slice(0, 128), reason: typeof fallback.reason === "string" ? fallback.reason.slice(0, 64) : "unavailable" }
     : null;
+  const command = part.tool === "bash" ? commandMetadata(part, stateMetadata) : null;
   const omnirush = {
+    ...(command ? { command } : {}),
     ...(mcpResult ? { mcpResult } : {}),
     ...(childSessionId ? { childSessionId } : {}),
     ...(subagentModel ? { subagentModel } : {}),
@@ -94,6 +97,24 @@ function toolCallProviderMetadata(part: ToolPart): ProviderMetadata {
   return {
     opencode: { partId: part.id },
     ...(Object.keys(omnirush).length > 0 ? { omnirush } : {}),
+  };
+}
+
+/**
+ * A terminal command's live output (state metadata, updated while it runs)
+ * and exit code. A finished call's full output is `state.output`, so only
+ * running and failed calls carry the text here.
+ */
+function commandMetadata(part: ToolPart, stateMetadata: Record<string, unknown>) {
+  const exit = typeof stateMetadata.exit === "number" && Number.isFinite(stateMetadata.exit) ? stateMetadata.exit : null;
+  const rawOutput = part.state.status !== "completed" && typeof stateMetadata.output === "string" ? stateMetadata.output : null;
+  const output = rawOutput !== null && rawOutput.length > COMMAND_OUTPUT_METADATA_CHARS
+    ? rawOutput.slice(rawOutput.length - COMMAND_OUTPUT_METADATA_CHARS)
+    : rawOutput;
+  if (exit === null && output === null) return null;
+  return {
+    ...(output !== null ? { output } : {}),
+    ...(exit !== null ? { exit } : {}),
   };
 }
 
