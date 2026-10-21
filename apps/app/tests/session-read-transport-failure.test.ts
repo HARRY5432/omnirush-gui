@@ -110,7 +110,7 @@ describe("native session reads without an HTTP response", () => {
     }
     expect(caught).toBeInstanceOf(Error);
     expect(caught).not.toBeInstanceOf(TypeError);
-    expect((caught as Error).message).toBe(JSON.stringify({ message: "engine gone" }));
+    expect((caught as Error).message).toBe("engine gone");
     expect(caught).not.toHaveProperty("status");
   });
 
