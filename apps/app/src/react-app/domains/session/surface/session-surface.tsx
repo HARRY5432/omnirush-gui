@@ -2296,7 +2296,8 @@ export function SessionSurface(props: SessionSurfaceProps) {
     // An edited earlier message replaces every turn after it, and their file changes, for good: ask first.
     if (nextDraft.revertMessageId) {
       const turns = turnsFromRevertPoint(baseRenderedMessages, nextDraft.revertMessageId);
-      if (revertNeedsConfirm(turns) && !window.confirm(editConfirmText(turns))) return;
+      const hidden = revertMessageId ? revertedMessageCount : 0;
+      if ((revertNeedsConfirm(turns) || hidden > 0) && !window.confirm(editConfirmText(turns, hidden))) return;
     } else if (revertMessageId && !window.confirm(hiddenDeleteConfirmText(revertedMessageCount))) {
       // The engine deletes hidden (reverted) turns on the next prompt: never as a side effect of a send.
       return;
@@ -2477,6 +2478,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
     const item = getComposerQueuedDrafts(useComposerStateStore.getState(), props.sessionId).find((queued) => queued.id === id);
     const target = withoutRevertTarget(item?.draft ?? null);
     if (!item || !target) return;
+    if (revertMessageId && !window.confirm(hiddenDeleteConfirmText(revertedMessageCount))) return;
     if (!claimQueuedSend(props.sessionId, item.id, true)) return;
     const generation = getQueuedSendGeneration(props.sessionId);
     setSendingQueued(true);
@@ -2503,6 +2505,8 @@ export function SessionSurface(props: SessionSurfaceProps) {
     prependQueuedDrafts,
     props.sessionId,
     removeQueuedDraftFromStore,
+    revertMessageId,
+    revertedMessageCount,
     sendDraft,
     sendingQueued,
   ]);
@@ -2625,6 +2629,8 @@ export function SessionSurface(props: SessionSurfaceProps) {
     if (cloudQueueBlockedRef.current) return;
     if (queuedItems.length === 0) return;
     if (chatStreaming || liveStatus.type !== "idle") return;
+    // A reverted chat: this send would delete its hidden turns. Held until Restore or a confirmed send.
+    if (revertMessageId) return;
     if (!canAdmitNextQueuedItem(queuedDrainState)) return;
     const nextItem = getComposerQueuedDrafts(useComposerStateStore.getState(), props.sessionId)[0];
     if (!nextItem) return;
@@ -2662,7 +2668,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
         drainingQueueRef.current = false;
       }
     })();
-  }, [chatStreaming, cloudQueueRetryVersion, liveStatus.type, prependQueuedDrafts, props.sessionId, queuedDrainState, queuedItems, removeQueuedDraftFromStore, sendDraft, sendingQueued]);
+  }, [chatStreaming, cloudQueueRetryVersion, liveStatus.type, prependQueuedDrafts, props.sessionId, queuedDrainState, queuedItems, removeQueuedDraftFromStore, revertMessageId, sendDraft, sendingQueued]);
 
   useEffect(() => {
     if (props.cloudMcpSubmissionState.status !== "failed") {
@@ -3060,6 +3066,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
   const [resuming, setResuming] = useState(false);
   const handleResumeInterrupted = useCallback(async (recoveryPrompt: string) => {
     await resumeGuardRef.current.run(async () => {
+      if (revertMessageId && !window.confirm(hiddenDeleteConfirmText(revertedMessageCount))) return;
       const messageID = createPromptMessageID();
       dispatchQueuedDrain(props.sessionId, { type: "user_retry" });
       if (!claimQueuedSend(props.sessionId, messageID, true)) return;
@@ -3078,7 +3085,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
         setResuming(false);
       }
     });
-  }, [props.sessionId, sendDraft]);
+  }, [props.sessionId, revertMessageId, revertedMessageCount, sendDraft]);
   const handleAutoRetry = useCallback((prompt: string) => {
     void handleResumeInterrupted(prompt);
   }, [handleResumeInterrupted]);
@@ -3519,7 +3526,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
             onRestore={handleRestoreRevertedSession}
           />
         ) : null}
-        {composerEditTarget && !revertMessageId ? (
+        {composerEditTarget ? (
           <div
             className="mx-3 mb-2 flex items-center gap-3 rounded-xl border border-amber-7/40 bg-amber-2/30 px-3 py-2 text-xs text-warning"
             data-testid="composer-edit-target"

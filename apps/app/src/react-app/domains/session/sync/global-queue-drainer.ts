@@ -1,5 +1,6 @@
 import type { SessionStatus } from "@opencode-ai/sdk/v2/client";
 
+import { isSessionReverted } from "./reverted-sessions";
 import { markTaskRunStart } from "@/app/lib/analytics";
 import { createClient, createPromptMessageID, hasAcceptedPromptMessage, isPromptAdmissionUnknown } from "@/app/lib/opencode";
 import { shellInSession } from "@/app/lib/opencode-session";
@@ -344,6 +345,8 @@ async function attemptDrain(sessionId: string) {
   const nextItem = getComposerQueuedDrafts(useComposerStateStore.getState(), sessionId)[0];
   if (!context || !nextItem || watched.lastObservedStatus?.type !== "idle") return;
   if (!canAdmitNextQueuedItem(getQueuedDrainState(sessionId))) return;
+  // A reverted chat: the engine would delete its hidden turns on this send. Held until Restore or a confirmed send.
+  if (isSessionReverted(sessionId)) return;
 
   const draft = { ...withoutRevertTarget(nextItem.draft), messageId: nextItem.draft.messageId ?? createPromptMessageID() };
   // Claim synchronously before any await so a mounted surface cannot win the

@@ -46,6 +46,8 @@ describe("revertNeedsConfirm", () => {
     expect(editTargetText(3)).toBe("Editing an earlier message: sending will remove the 2 later turns and undo their file changes.");
     expect(editTargetText(1)).toBe("Editing your last message: sending replaces it and undoes its file changes.");
     expect(editConfirmText(4)).toBe("Send this in place of the earlier message? It removes the 3 later turns for good and undoes their file changes.");
+    expect(editConfirmText(1, 20)).toBe("Send this in place of your last message? It undoes that turn's file changes. The 20 hidden messages go for good too.");
+    expect(editConfirmText(3, 1)).toContain("The 1 hidden message goes for good too.");
     expect(hiddenDeleteConfirmText(6)).toBe("Sending removes the 6 hidden messages for good; their file changes stay undone. Send and remove them? (Cancel keeps them: Restore brings them back.)");
   });
 });

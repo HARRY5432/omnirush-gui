@@ -59,8 +59,10 @@ export function editTargetText(turns: number | null): string {
 }
 
 /** The question before an edit of an earlier message goes out. */
-export function editConfirmText(turns: number | null): string {
-  return `Send this in place of the earlier message? It removes ${laterTurns(turns)} for good and undoes their file changes.`;
+export function editConfirmText(turns: number | null, hidden = 0): string {
+  const hiddenToo = hidden > 0 ? ` The ${hidden} hidden message${hidden === 1 ? " goes" : "s go"} for good too.` : "";
+  if (turns === 1) return `Send this in place of your last message? It undoes that turn's file changes.${hiddenToo}`;
+  return `Send this in place of the earlier message? It removes ${laterTurns(turns)} for good and undoes their file changes.${hiddenToo}`;
 }
 
 /** The question before a send that would delete hidden (reverted) messages for good. */

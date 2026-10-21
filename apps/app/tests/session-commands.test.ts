@@ -215,6 +215,18 @@ describe("chatUndoKey", () => {
     expect(chatUndoKey(key({ metaKey: true, target: null }), true)).toBeNull();
   });
 
+  test("only this chat's own transcript, not a split view's other chat", () => {
+    const inSurface = (id: string) => ({
+      tagName: "DIV",
+      isContentEditable: false,
+      closest: (selector: string) => selector === "[data-chat-transcript]" ? {}
+        : selector === "[data-session-surface-id]" ? { getAttribute: () => id } : null,
+    });
+    expect(chatUndoKey(key({ metaKey: true, target: inSurface("ses_a") }), true, "ses_a")).toBe("undo");
+    expect(chatUndoKey(key({ metaKey: true, target: inSurface("ses_b") }), true, "ses_a")).toBeNull();
+    expect(chatUndoKey(key({ metaKey: true, target: transcript }), true, "ses_a")).toBeNull();
+  });
+
   test("a held key undoes one turn at most, not one per auto-repeat", () => {
     expect(chatUndoKey(key({ metaKey: true, target: transcript, repeat: true }), true)).toBeNull();
     expect(chatUndoKey(key({ metaKey: true, shiftKey: true, target: transcript, repeat: true }), true)).toBeNull();

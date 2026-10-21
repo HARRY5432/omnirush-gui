@@ -63,7 +63,7 @@ export function SessionCommandControls(props: SessionCommandControlsProps) {
   }, [canRedo, canUndo, props.sessionId, redo, setHeaderActions, undo]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      const action = chatUndoKey(event, isMac());
+      const action = chatUndoKey(event, isMac(), props.sessionId);
       if (!action) return;
       // Only with the chat on screen: no dialog or menu in front of it.
       if (document.querySelector("[role=dialog][data-open], [role=alertdialog], [role=menu]")) return;
@@ -82,7 +82,7 @@ export function SessionCommandControls(props: SessionCommandControlsProps) {
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [canRedo, canUndo, redo, running, undo]);
+  }, [canRedo, canUndo, props.sessionId, redo, running, undo]);
 
   const mod = isMac() ? "⌘" : "Ctrl+";
   return (
