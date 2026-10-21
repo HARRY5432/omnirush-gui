@@ -390,7 +390,29 @@ async function openComputerUseSetupApp() {
   child.unref();
 }
 
+/** The chat permission mode the built-in browser follows, as computer use reads it. */
+function browserPermissionMode() {
+  return server?.mode ?? "normal";
+}
+
+/**
+ * Whether one built-in browser act asks first: the computer use rules
+ * (policy.mjs actApproval), reasons with their people-facing text. If the
+ * rules cannot load, every act asks.
+ */
+async function browserActApproval(input) {
+  try {
+    const { policyModule } = await sharedModules();
+    const decision = policyModule.actApproval(input, { sendDelete: server?.setting?.ask_send_delete === true });
+    return { ask: decision.ask, reasons: decision.reasons.map((reason) => ({ ...reason, text: policyModule.ASK_REASONS[reason.code] ?? null })) };
+  } catch {
+    return { ask: true, reasons: [] };
+  }
+}
+
 export {
+  browserActApproval,
+  browserPermissionMode,
   getComputerUseState,
   computerUseAnswer,
   computerUseControl,

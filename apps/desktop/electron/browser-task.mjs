@@ -102,8 +102,45 @@ async function isolated(webContents, fn, ...args) {
   return webContents.executeJavaScriptInIsolatedWorld(WORLD, [{ code: `(${fn.toString()})(...${JSON.stringify(args)})` }]);
 }
 
+const MODES = ["careful", "normal", "auto"];
+const BROWSER_KEYS = { Enter: "enter", Space: "space", Tab: "tab", Escape: "escape", Backspace: "backspace", ArrowDown: "down", ArrowUp: "up", ArrowLeft: "left", ArrowRight: "right" };
+
+/**
+ * One browser act in the computer use rules' terms (shared policy.mjs
+ * actApproval): a click or Enter/Space reads the observed control's name, a
+ * fill is typing, and a coordinate click or key press falls back to the page
+ * title, as on hosts that read no text at the target.
+ */
+export function browserActInput(mode, action, observed) {
+  const element = action.ref ? observed.elements.find((item) => item.ref === action.ref) : null;
+  const act = action.type === "fill" ? { type: "type", text: action.text }
+    : action.type === "key" ? { type: "key", key: BROWSER_KEYS[action.key] ?? String(action.key ?? "").toLowerCase() }
+      : { type: action.type };
+  return {
+    mode,
+    action: act,
+    target: element ? { text: element.name, secure: element.sensitive === true } : {},
+    window: { title: observed.title ?? "" },
+  };
+}
+
 export function createBrowserTaskHost({ getTab, tabsFor, ownerOf, activeFor, isVisible, openTab, navigate,
-  allowed, enabled, confirm, changed, siteTools, runSiteTool }) {
+  allowed, enabled, confirm, changed, siteTools, runSiteTool,
+  // The chat permission mode, as computer use reads it ("careful" | "normal" | "auto").
+  mode = () => "normal",
+  // The shared computer use act rules (policy.mjs actApproval, reasons with
+  // people-facing `text`); without them every act asks.
+  actApproval = () => ({ ask: true, reasons: [] }) }) {
+  // Normal and Auto never ask per website for reading or navigation, like
+  // computer use; Careful keeps the per-origin asks and asks before every act.
+  async function modeNow() {
+    try {
+      const value = await mode();
+      return MODES.includes(value) ? value : "normal";
+    } catch {
+      return "normal";
+    }
+  }
   const states = new Map();
   const grants = new Map();
   const pausedSessions = new Set();
@@ -138,7 +175,8 @@ export function createBrowserTaskHost({ getTab, tabsFor, ownerOf, activeFor, isV
     checkNavigation(scope);
     if (!await allowed(url.href)) fail("website_blocked", "Your organization does not allow this website.");
     checkNavigation(scope);
-    const needsConsent = !scope.origins.has(url.origin);
+    const needsConsent = !scope.origins.has(url.origin) && await modeNow() === "careful";
+    checkNavigation(scope);
     // In local auto-approval mode, a first agent open can finish while the
     // renderer mounts the browser side panel. Manual approval and subsequent
     // navigations still require the user-visible tab.
@@ -205,7 +243,8 @@ export function createBrowserTaskHost({ getTab, tabsFor, ownerOf, activeFor, isV
   async function access(sessionId, tab, signal) {
     const url = browserTaskUrl(tab.view.webContents.getURL());
     const key = `${sessionId}:${url.origin}`;
-    if (grants.has(key)) return;
+    if (grants.has(key) || await modeNow() !== "careful") return;
+    signal.throwIfAborted();
     if (!isVisible(tab.tabId)) fail("needs_attention", "Select this tab in its conversation's browser panel to review website access, then retry.");
     publish(tab.tabId, "needs_attention", "Website access");
     const accepted = await confirm({ tabId: tab.tabId, title: "Allow website access?", message: `Allow this conversation to read ${url.origin}?`, approveLabel: "Allow reading this origin", detail: "For this conversation until desktop restart, it can read pages and site tool descriptions using the built-in browser's signed-in account. Website content is untrusted. Actions that change the page require separate approval.", signal });
@@ -260,7 +299,7 @@ export function createBrowserTaskHost({ getTab, tabsFor, ownerOf, activeFor, isV
     if (!await allowed(url)) fail("website_blocked", "Your organization does not allow this website.");
     if (revision !== tab.webMcpRevision || url !== tab.view.webContents.getURL()) fail("page_changed", "The page changed during observation. Observe again.");
     signal.throwIfAborted();
-    state.observation = { id, at: Date.now(), revision, url, viewport: page.viewport, elements: page.elements, digest };
+    state.observation = { id, at: Date.now(), revision, url, title: page.title, viewport: page.viewport, elements: page.elements, digest };
     return { ok: true, tabId: tab.tabId, observationId: id, url: safeUrl(url), trust: TRUST, ...page, ...(image ? { image } : {}) };
   }
   /**
@@ -364,11 +403,16 @@ export function createBrowserTaskHost({ getTab, tabsFor, ownerOf, activeFor, isV
         const keys = { Enter: "Enter", Tab: "Tab", Escape: "Escape", ArrowDown: "Down", ArrowUp: "Up", ArrowLeft: "Left", ArrowRight: "Right", Backspace: "Backspace", Space: "Space" };
         if (action.type === "key" && !Object.hasOwn(keys, action.key)) fail("invalid_key", "Use Enter, Tab, Escape, arrows, Backspace or Space. System shortcuts are unavailable.");
         if (action.type === "scroll" && (!Number.isFinite(action.deltaY) || Math.abs(action.deltaY) > 1200)) fail("invalid_scroll", "Scroll distance must be between -1200 and 1200.");
-        if (!isVisible(tab.tabId)) fail("needs_attention", "Select this tab in its conversation's browser panel, then retry from a fresh observation.");
-        publish(tab.tabId, "needs_attention", `Approve ${action.type}`);
-        const accepted = await confirm({ tabId: tab.tabId, title: "Allow browser action?", message: `Allow ${action.type} on ${new URL(observed.url).origin}?`, detail: `Target: ${observed.elements.find((item) => item.ref === action.ref)?.name || (action.key ? `key ${action.key}` : `position ${action.x}, ${action.y}`)}.${action.type === "fill" ? ` Text to enter: ${action.text}` : ""} This can submit information or change website data. Review your requested task before allowing it.`, signal: controller.signal });
+        const decision = await actApproval(browserActInput(await modeNow(), action, observed));
         controller.signal.throwIfAborted();
-        if (!accepted) fail("user_denied", "The browser action was not allowed.");
+        if (decision.ask) {
+          if (!isVisible(tab.tabId)) fail("needs_attention", "This action needs your approval. Select this tab in its conversation's browser panel, then retry from a fresh observation.");
+          publish(tab.tabId, "needs_attention", `Approve ${action.type}`);
+          const why = (decision.reasons ?? []).map((reason) => reason.text).filter(Boolean).join(" ");
+          const accepted = await confirm({ tabId: tab.tabId, title: "Allow browser action?", message: `Allow ${action.type} on ${new URL(observed.url).origin}?`, detail: `${why ? `${why} ` : ""}Target: ${observed.elements.find((item) => item.ref === action.ref)?.name || (action.key ? `key ${action.key}` : `position ${action.x}, ${action.y}`)}.${action.type === "fill" ? ` Text to enter: ${action.text}` : ""} This can submit information or change website data. Review your requested task before allowing it.`, signal: controller.signal });
+          controller.signal.throwIfAborted();
+          if (!accepted) fail("user_denied", "The browser action was not allowed.");
+        }
         if (!await allowed(observed.url) || observed.revision !== tab.webMcpRevision || observed.url !== tab.view.webContents.getURL()) fail("page_changed", "The page changed or access was blocked while approval was pending. Observe again.");
         controller.signal.throwIfAborted();
         if (Date.now() - observed.at > OBSERVATION_MS) fail("stale_observation", "The observation expired while approval was pending. Observe again.");
@@ -381,7 +425,7 @@ export function createBrowserTaskHost({ getTab, tabsFor, ownerOf, activeFor, isV
           throw error;
         }
         state.observation = null; controller.signal.throwIfAborted();
-        if (!isVisible(tab.tabId)) fail("needs_attention", "The tab is no longer visible. Select it and observe again before acting.");
+        if (decision.ask && !isVisible(tab.tabId)) fail("needs_attention", "The tab is no longer visible. Select it and observe again before acting.");
         publish(tab.tabId, "running", action.type);
         const contents = tab.view.webContents;
         dispatched = true;

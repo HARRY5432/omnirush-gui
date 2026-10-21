@@ -77,7 +77,7 @@ const BROWSER_SECURITY_PREFERENCES = Object.freeze({
   webviewTag: false,
 });
 
-export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink, checkPolicy }) {
+export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink, checkPolicy, permissionMode, actApproval }) {
   let browserSessionHooksInstalled = false;
   function installBrowserSessionHooks() {
     if (browserSessionHooksInstalled) return;
@@ -841,6 +841,8 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink, che
     changed: (tabId, activity) => { const tab = getBrowserTab(tabId); if (tab) { tab.browserTask = activity; sendBrowserState(); } },
     siteTools: (args) => webMcpBroker.listTools(args),
     runSiteTool: (args, options) => webMcpBroker.executeTool(args, options),
+    ...(permissionMode ? { mode: permissionMode } : {}),
+    ...(actApproval ? { actApproval } : {}),
   });
 
   function scheduleWebMcpToolCountRefresh(tabId) {
