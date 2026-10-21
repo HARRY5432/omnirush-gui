@@ -37,7 +37,7 @@ export const REAL_SCREEN_ENV: string;
 export const REAL_SCREEN_OFF_MESSAGE: string;
 export const REAL_SCREEN_FILE: string;
 export const REAL_SCREEN_DENY_RULES: Readonly<{ bash: Readonly<Record<string, "deny">>; edit: Readonly<Record<string, "deny">> }>;
-export function realScreenOptIn(options?: { env?: Record<string, string | undefined>; saved?: unknown }): boolean;
+export function realScreenOptIn(options?: { env?: Record<string, string | undefined>; saved?: unknown; allowEnvOn?: boolean }): boolean;
 export type SessionRules = { open: true; asks: false } | { open: false; asks: false; code: "virtual_unavailable" | "real_screen_unavailable" | "real_screen_off"; message: string };
 export function sessionRules(options?: { display?: "virtual" | "real"; server?: { real_screen?: boolean; virtual_display?: boolean }; optIn?: boolean }): SessionRules;
 

@@ -108,7 +108,7 @@ export const REAL_SCREEN_DEFAULT = false;
 /** The key both apps save the person's choice under, in <state or profile>/computer-use/real-screen.json. */
 export const REAL_SCREEN_SETTING = "computerUseRealScreen";
 export const REAL_SCREEN_FILE = "real-screen.json";
-/** OMNIRUSH_COMPUTER_USE_REAL_SCREEN=1/0 overrides the saved choice (support, tests). */
+/** OMNIRUSH_COMPUTER_USE_REAL_SCREEN=0 turns it off; =1 turns it on only in builds run from source (tests, support). */
 export const REAL_SCREEN_ENV = "OMNIRUSH_COMPUTER_USE_REAL_SCREEN";
 export const REAL_SCREEN_OFF_MESSAGE = "Computer use on the person's own screen is off. Work on your own display instead (app_id \"virtual:main\"). Only the person can change this setting; never change it yourself and never ask to.";
 
@@ -122,11 +122,15 @@ export const REAL_SCREEN_DENY_RULES = Object.freeze({
   edit: Object.freeze({ "*computer-use/real-screen.json": "deny" }),
 });
 
-/** Whether the person turned the real screen on: the environment first, then the saved setting, else REAL_SCREEN_DEFAULT. */
-export function realScreenOptIn({ env = process.env, saved } = {}) {
+/**
+ * Whether the person turned the real screen on: the saved setting, else REAL_SCREEN_DEFAULT. The environment can
+ * always force it OFF; it can force it ON only in builds run from source (`allowEnvOn`: the CLI's dev builds, an
+ * unpackaged desktop app), so a line an agent slips into a shell profile never turns it on in a released app.
+ */
+export function realScreenOptIn({ env = process.env, saved, allowEnvOn = false } = {}) {
   const asked = String(env?.[REAL_SCREEN_ENV] ?? "").trim().toLowerCase();
-  if (["1", "on", "true", "yes"].includes(asked)) return true;
   if (["0", "off", "false", "no"].includes(asked)) return false;
+  if (allowEnvOn && ["1", "on", "true", "yes"].includes(asked)) return true;
   return typeof saved === "boolean" ? saved : REAL_SCREEN_DEFAULT;
 }
 

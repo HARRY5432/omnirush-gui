@@ -18,7 +18,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -146,12 +146,14 @@ export const OPENBOX_RC = `<?xml version="1.0" encoding="UTF-8"?>
  * A watchdog for when the host dies without cleaning up (SIGKILL, a crash): a detached /bin/sh that waits for
  * `hostPid` to go, then ends the process groups and removes the folders. Returns { stop() }.
  */
-export function startWatchdog({ hostPid = process.pid, groups = [], dirs = [], everyMs = 1000, spawnFn = spawn } = {}) {
+export function startWatchdog({ hostPid = process.pid, groups = [], dirs = [], listFile = null, everyMs = 1000, spawnFn = spawn } = {}) {
   const ids = groups.filter((g) => Number.isSafeInteger(g) && g > 1);
   // Only folders this backend made (omnirush-cu-*), never anything else.
   const paths = dirs.filter((d) => typeof d === "string" && /\/omnirush-cu-[^/'"]+$/.test(d));
   const quote = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
-  const script = `while kill -0 ${Number(hostPid)} 2>/dev/null; do sleep ${Math.max(0.2, everyMs / 1000)}; done; ${ids.map((g) => `kill -TERM -${g} 2>/dev/null;`).join(" ")} sleep 1; ${ids.map((g) => `kill -KILL -${g} 2>/dev/null;`).join(" ")} ${paths.length ? `rm -rf ${paths.map(quote).join(" ")}` : "true"}`;
+  // listFile: lines "g <pid>" / "d <folder>" added while the display starts (read when the host is gone).
+  const fromFile = listFile ? `G=$(sed -n 's/^g \\([0-9][0-9]*\\)$/\\1/p' ${quote(listFile)} 2>/dev/null); D=$(sed -n 's/^d \\(.*\\)$/\\1/p' ${quote(listFile)} 2>/dev/null);` : "G=; D=;";
+  const script = `while kill -0 ${Number(hostPid)} 2>/dev/null; do sleep ${Math.max(0.2, everyMs / 1000)}; done; ${fromFile} for g in ${ids.join(" ")} $G; do [ "$g" -gt 1 ] 2>/dev/null && kill -TERM -$g 2>/dev/null; done; sleep 1; for g in ${ids.join(" ")} $G; do [ "$g" -gt 1 ] 2>/dev/null && kill -KILL -$g 2>/dev/null; done; for d in ${paths.map(quote).join(" ")} $D; do case "$d" in */omnirush-cu-*) case "$d" in *..*) ;; *) rm -rf -- "$d";; esac;; esac; done`;
   const child = spawnFn("/bin/sh", ["-c", script], { stdio: "ignore", detached: true });
   child.on?.("error", () => undefined);
   child.unref?.();
@@ -178,12 +180,12 @@ export async function startXvfbBackend({ name = "main", env = process.env, nodeP
   const children = [];
   let profile = null, watchdog = null, closed = false;
   const kill = (child) => { if (!child?.pid) return; try { process.kill(-child.pid, "SIGTERM"); } catch { try { child.kill(); } catch { /* gone */ } } };
-  const removeDirs = () => { for (const dir of [profile, home]) if (dir) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } } };
+  const removeDirs = () => { for (const dir of [profile, home, `${home}.list`]) if (dir) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } } };
   // The host exiting normally (a thrown error included) takes its display, window manager and browser with it;
   // the watchdog covers a host that is killed.
   const onExit = () => { for (const child of children) kill(child); removeDirs(); };
   process.once("exit", onExit);
-  const fail = (code, message) => { process.removeListener("exit", onExit); for (const child of [...children].reverse()) kill(child); removeDirs(); return failure(code, message); };
+  const fail = (code, message) => { process.removeListener("exit", onExit); for (const child of [...children].reverse()) kill(child); removeDirs(); watchdog?.stop(); return failure(code, message); };
 
   // A display number from 90 up (never the usual :0-:10 of a person's desktop). The server says on fd 3 when it is
   // ready; one that exits (another server took the number between the check and the start) is retried higher.
@@ -204,6 +206,11 @@ export async function startXvfbBackend({ name = "main", env = process.env, nodeP
     else kill(child);
   }
   if (number === null || !xvfb) return fail("virtual_unavailable", "Xvfb did not start.");
+  // From here on a killed host leaves nothing: the watchdog reads what was started from this list.
+  const listFile = path.join(path.dirname(home), `${path.basename(home)}.list`);
+  const note = (line) => { try { appendFileSync(listFile, `${line}\n`, { mode: 0o600 }); } catch { /* best effort */ } };
+  note(`d ${home}`); note(`d ${listFile}`); note(`g ${xvfb.pid}`);
+  watchdog = (deps.watchdog ?? startWatchdog)({ hostPid: process.pid, listFile, dirs: [home] });
   const disp = `:${number}`;
   const displayEnv = agentEnv(env, { display: disp, xauthority: authFile, runtimeDir });
   let wm = null;
@@ -212,7 +219,7 @@ export async function startXvfbBackend({ name = "main", env = process.env, nodeP
     writeFileSync(rc, OPENBOX_RC, { mode: 0o600 });
     const child = spawn("openbox", ["--sm-disable", "--config-file", rc], { stdio: "ignore", env: displayEnv, detached: true });
     child.on("error", () => undefined);
-    children.push(child); wm = "openbox";
+    children.push(child); wm = "openbox"; note(`g ${child.pid}`);
   }
   const worker = deps.worker ? deps.worker(disp) : createNativeWorker({ workerPath: VIRTUAL_WORKER_PATH, nodePath, nodeEnv: { ...nodeEnv, DISPLAY: disp, XAUTHORITY: authFile, XDG_SESSION_TYPE: "x11", WAYLAND_DISPLAY: "" }, koffiPath });
   const ready = await worker.ready;
@@ -226,13 +233,17 @@ export async function startXvfbBackend({ name = "main", env = process.env, nodeP
     const base = snap && env.HOME ? path.join(env.HOME, "snap", found.name.replace(/-browser$/, ""), "common") : os.tmpdir();
     if (snap) mkdirSync(base, { recursive: true });
     profile = mkdtempSync(path.join(base, "omnirush-cu-browser-"));
+    note(`d ${profile}`);
+    // Its own HOME too (not for a snap, which keeps its own): no person's certificates, fonts cache or dotfiles.
+    const browserEnv = snap ? displayEnv : { ...displayEnv, HOME: path.join(home, "home") };
+    if (!snap) mkdirSync(browserEnv.HOME, { mode: 0o700 });
     const launch = (noSandbox) => {
-      const child = spawn(found.path, browserArgs(found, { profile, url: url ?? "about:blank", width: size.width, height: size.height, root: noSandbox }), { stdio: ["ignore", "ignore", "pipe"], env: displayEnv, detached: true });
+      const child = spawn(found.path, browserArgs(found, { profile, url: url ?? "about:blank", width: size.width, height: size.height, root: noSandbox }), { stdio: ["ignore", "ignore", "pipe"], env: browserEnv, detached: true });
       child.on("error", () => undefined);
       let stderr = "";
       child.stderr?.on("data", (d) => { if (stderr.length < 65_536) stderr += d; });
       child.stderr?.resume();
-      children.push(child);
+      children.push(child); note(`g ${child.pid}`);
       return { child, stderr: () => stderr };
     };
     // Chromium's sandbox, always, except as root (where it cannot run) or when the browser itself says it cannot
@@ -248,7 +259,6 @@ export async function startXvfbBackend({ name = "main", env = process.env, nodeP
     if (found.kind === "chromium" && !sandbox) warning = root ? "The agent's browser runs without Chromium's sandbox because OmniRush runs as root." : "The agent's browser runs without Chromium's sandbox: this system does not allow it (no unprivileged user namespaces). Install the browser's AppArmor profile to turn it back on.";
     opened = { name: found.name, kind: found.kind, version: versionOf(found.path, ["--version"], env), profile: "fresh", ...(found.kind === "chromium" ? { sandbox } : {}) };
   }
-  watchdog = (deps.watchdog ?? startWatchdog)({ hostPid: process.pid, groups: children.map((c) => c.pid), dirs: [home, profile].filter(Boolean) });
   const close = async () => {
     if (closed) return;
     closed = true;
@@ -260,7 +270,7 @@ export async function startXvfbBackend({ name = "main", env = process.env, nodeP
     watchdog?.stop();
   };
   const packages = deps.packages ?? virtualPackages(env);
-  return { ok: true, kind: "xvfb", name, display: disp, width: ready.size?.width ?? size.width, height: ready.size?.height ?? size.height, wm, packages, browser: opened, ...(warning ? { warning } : {}), worker, close, pids: children.map((c) => c.pid), dirs: [home, profile].filter(Boolean) };
+  return { ok: true, kind: "xvfb", name, display: disp, width: ready.size?.width ?? size.width, height: ready.size?.height ?? size.height, wm, packages, browser: opened, ...(warning ? { warning } : {}), worker, close, pids: children.map((c) => c.pid), dirs: [home, profile, `${home}.list`].filter(Boolean) };
 }
 
 // ------------------------------------------------------------------- host

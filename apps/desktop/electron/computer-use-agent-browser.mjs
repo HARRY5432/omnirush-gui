@@ -33,6 +33,8 @@ const BLANK = "about:blank";
 const SEARCH = "https://duckduckgo.com/?q=";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const CLIP_BINDING = "__omnirushClip";
+/** How long after an act the person's clipboard is still watched (a click's user activation lasts about 5 s). */
+export const CLIPBOARD_GUARD_MS = 6000;
 /** `promise`, or a rejection after `ms` (setup steps never hang the session). */
 const withTimeout = (promise, ms) => Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error("timed out")), ms))]);
 const fail = (code, message) => Object.assign(new Error(message), { code });
@@ -478,11 +480,33 @@ export async function startAgentBrowser({ electron, glidePath, url = null, versi
     }
   }
 
-  /** Linux: a selection in the agent's pages must not become the person's middle-click selection (PRIMARY). */
+  /**
+   * The person's clipboard (and on Linux the middle-click selection, PRIMARY) is kept as it was: snapshotted before
+   * each act and put back whenever it changes, during the act and for CLIPBOARD_GUARD_MS after it (the click's user
+   * activation, during which a page could write it from a frame the page guard has not reached).
+   */
+  const cb = electron.clipboard ?? null;
+  const linux = process.platform === "linux";
+  let guard = null;
+  const snapshot = () => ({ text: cb.readText(), html: cb.readHTML?.() ?? "", rtf: cb.readRTF?.() ?? "", image: cb.readImage?.() ?? null, primary: linux ? cb.readText("selection") : null });
+  function restoreClipboards() {
+    if (!guard) return;
+    try {
+      if (cb.readText() !== guard.saved.text || (cb.readHTML?.() ?? "") !== guard.saved.html) {
+        const { text, html, rtf, image } = guard.saved;
+        cb.write({ text, ...(html ? { html } : {}), ...(rtf ? { rtf } : {}), ...(image && !image.isEmpty?.() ? { image } : {}) });
+      }
+      if (linux && cb.readText("selection") !== guard.saved.primary) cb.writeText(guard.saved.primary ?? "", "selection");
+    } catch { /* best effort */ }
+    if (Date.now() > guard.until && !guard.acting) { clearInterval(guard.timer); guard = null; }
+  }
   async function act(action) {
-    const primary = process.platform === "linux" && electron.clipboard ? electron.clipboard.readText("selection") : null;
+    if (cb) {
+      if (!guard) { guard = { saved: snapshot(), until: 0, acting: 0, timer: setInterval(restoreClipboards, 150) }; guard.timer.unref?.(); }
+      guard.acting += 1;
+    }
     try { return await actNow(action); } finally {
-      if (primary !== null && electron.clipboard.readText("selection") !== primary) electron.clipboard.writeText(primary, "selection");
+      if (guard) { guard.acting -= 1; guard.until = Date.now() + CLIPBOARD_GUARD_MS; restoreClipboards(); }
     }
   }
 
@@ -549,6 +573,7 @@ export async function startAgentBrowser({ electron, glidePath, url = null, versi
 
   async function close() {
     if (closed) return;
+    if (guard) { guard.until = 0; guard.acting = 0; restoreClipboards(); }
     await release().catch(() => undefined);
     closed = true;
     for (const tab of tabs.splice(0)) { try { tab.window.webContents.debugger.detach(); } catch { /* gone */ } tab.window.destroy(); }

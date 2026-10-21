@@ -48,7 +48,7 @@ function fakeElectron() {
 async function start(options = {}) {
   const fake = fakeElectron();
   const delays = [];
-  const backend = await startAgentBrowser({ electron: fake.electron, glidePath, url: options.url ?? null, versions: { electron: "43.2.0", chrome: "150.0" }, wait: async (ms) => { delays.push(ms); } });
+  const backend = await startAgentBrowser({ electron: options.clipboard ? { ...fake.electron, clipboard: options.clipboard } : fake.electron, glidePath, url: options.url ?? null, versions: { electron: "43.2.0", chrome: "150.0" }, wait: async (ms) => { delays.push(ms); } });
   const pages = () => fake.windows.filter((w) => w.options.height !== CHROME_H && !w.destroyed);
   const active = () => pages()[backend.state().active];
   return { fake, backend, delays, pages, active, act: (action) => backend.worker.call("act", { action }) };
@@ -266,5 +266,26 @@ test("agent browser: every document gets the page guard (private clipboard bindi
   assert.ok(methods.indexOf("Page.addScriptToEvaluateOnNewDocument") < methods.indexOf("Runtime.runIfWaitingForDebugger"));
   // The guard itself: copy/cut/clipboard writes go to the binding, reads are refused, print is a no-op.
   for (const needle of ["execCommand", "writeText", "readText", "window.print = () => {}", "__omnirushClip"]) assert.ok(PAGE_GUARD_JS.includes(needle), needle);
+  await b.backend.close();
+});
+
+test("agent browser: the person's clipboard is put back if a page writes it (a same-origin frame), during the act and for a while after", async () => {
+  const board = { text: "PERSON", html: "", selection: "SEL" };
+  const clipboard = {
+    readText: (type) => (type === "selection" ? board.selection : board.text), readHTML: () => board.html, readRTF: () => "", readImage: () => ({ isEmpty: () => true }),
+    writeText: (value, type) => { if (type === "selection") board.selection = value; else board.text = value; }, write: ({ text, html = "" }) => { board.text = text; board.html = html; },
+  };
+  const b = await start({ url: "https://a.test/", clipboard });
+  const page = b.active().webContents;
+  const send = page.debugger.sendCommand;
+  // The click's activation lets a frame's unpatched execCommand('copy') write the OS clipboard: during the act...
+  page.debugger.sendCommand = async (method, params) => { if (method === "Input.dispatchMouseEvent" && params.type === "mousePressed") { board.text = "PASTEJACK"; board.selection = "X"; } return send(method, params); };
+  await b.act({ type: "click", x: 200, y: 300 });
+  assert.equal(board.text, "PERSON");
+  assert.equal(process.platform !== "linux" || board.selection === "SEL", true);
+  // ...and a second later (still inside the activation window).
+  board.text = "LATER";
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(board.text, "PERSON");
   await b.backend.close();
 });

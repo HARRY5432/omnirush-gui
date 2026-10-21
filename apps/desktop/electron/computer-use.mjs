@@ -21,7 +21,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { app, BrowserWindow, clipboard, screen, session } from "electron";
+import { app, BrowserWindow, clipboard, Notification, screen, session } from "electron";
 import { startAgentBrowser } from "./computer-use-agent-browser.mjs";
 import { testAnswersAllowed } from "./computer-use-answers.mjs";
 import { createComputerUseHost } from "./computer-use-host.mjs";
@@ -75,6 +75,7 @@ let refreshTimer = null;
 let failedAt = 0; // a host that did not start is tried again after a minute
 const cursors = new Map(); // session id → the agent cursor's latest move (live view)
 let cursorSeq = 0;
+let realScreenNoticeShown = false;
 
 function shippedModule(name) {
   // Packaged: app.asar/server/dist; dev: apps/server/dist (OMNIRUSH_DEV_MODE prefers it).
@@ -150,7 +151,8 @@ function savedRealScreen(policy) {
 /** Whether the person turned the real screen on (false until the shared rules are loaded). */
 function realScreenOn() {
   const policy = shared?.policyModule;
-  return policy ? policy.realScreenOptIn({ env: process.env, saved: savedRealScreen(policy) }) : false;
+  // The environment can turn it on only in an app run from source (never a line slipped into a shell profile).
+  return policy ? policy.realScreenOptIn({ env: process.env, saved: savedRealScreen(policy), allowEnvOn: !app.isPackaged }) : false;
 }
 
 function hostSettings() {
@@ -212,6 +214,11 @@ async function startHost() {
     preview = createComputerPreview();
     preview.bind(created);
     host = created;
+    // The real screen on: said once per launch (the setting is a file the agent's shell could also write).
+    if (!realScreenNoticeShown && realScreenOn() && server?.setting?.real_screen !== false) {
+      realScreenNoticeShown = true;
+      try { if (Notification.isSupported()) new Notification({ title: "Computer use can use your own screen", body: "The agent can click and type in your apps without asking. Stop it any time with Stop; turn it off in Settings > Computer use." }).show(); } catch { /* best effort */ }
+    }
     listener = await created.listen(path.join(profileDir(), "computer-use"));
     const relay = app.isPackaged ? path.join(process.resourcesPath, "computer-use", "relay.mjs") : path.join(__dirname, "computer-use-relay.mjs");
     const command = [process.execPath, relay, listener.discoveryPath];
@@ -277,7 +284,7 @@ async function getComputerUseState() {
 async function getComputerUseRealScreen() {
   const { policyModule } = await sharedModules();
   // forced: OMNIRUSH_COMPUTER_USE_REAL_SCREEN decides, whatever is saved.
-  const forced = policyModule.realScreenOptIn({ env: process.env, saved: true }) === policyModule.realScreenOptIn({ env: process.env, saved: false });
+  const forced = policyModule.realScreenOptIn({ env: process.env, saved: true, allowEnvOn: !app.isPackaged }) === policyModule.realScreenOptIn({ env: process.env, saved: false, allowEnvOn: !app.isPackaged });
   // allowed: the server lets the person's screen be used at all.
   return { on: realScreenOn(), forced, allowed: server?.setting?.real_screen !== false };
 }
