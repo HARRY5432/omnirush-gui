@@ -81,7 +81,7 @@ async function fileSha256(path: string): Promise<string> {
 
 /** The Apple Developer ID team that signs the app and its bundled engine (electron/build-variant.mjs). */
 export const ENGINE_SIGNING_TEAM = "2KFG4BXC8K";
-export const ENGINE_SIGNING_REQUIREMENT = `anchor apple generic and certificate leaf[subject.OU] = "${ENGINE_SIGNING_TEAM}"`;
+export const ENGINE_SIGNING_REQUIREMENT = `identifier "ai.omnirush.desktop" and anchor apple generic and certificate leaf[subject.OU] = "${ENGINE_SIGNING_TEAM}"`;
 
 /**
  * macOS: whether `file` carries a valid signature by this app's team. Signing and

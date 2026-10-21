@@ -19,7 +19,7 @@ trap cleanup EXIT
 # Linux CI and test boxes have no setuid sandbox helper.
 extra=(); [ "$(uname -s)" = Linux ] && extra=(--no-sandbox)
 OMNIRUSH_ELECTRON_USERDATA="$work/profile" OMNIRUSH_DATA_DIR="$work/data" OMNIRUSH_AUTO_UPDATE=0 \
-  OMNIRUSH_POSTHOG_HOST=http://127.0.0.1:9 "$exe" "${extra[@]}" > "$log" 2>&1 &
+  OMNIRUSH_POSTHOG_HOST=http://127.0.0.1:9 "$exe" ${extra[@]+"${extra[@]}"} > "$log" 2>&1 &
 app_pid=$!
 for _ in $(seq "$limit"); do
   if grep -qE "engineStart failed|only runs the engine it ships with|bundled engine was changed" "$log"; then
