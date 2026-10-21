@@ -276,7 +276,7 @@ describe("policy: approvals per permission mode", () => {
   for (const [label, change, codes] of table) {
     test(`Normal rules table: ${label}`, () => {
       const decision = actApproval({ ...plain, ...change });
-      expect(decision.reasons.map((r) => r.code)).toEqual(codes);
+      expect(decision.reasons.map((r) => r.code as string)).toEqual(codes);
       expect(decision.ask).toBe(codes.length > 0);
       expect(actApproval({ ...plain, ...change, mode: "careful" }).ask).toBe(true);
       expect(actApproval({ ...plain, ...change, mode: "auto" }).ask).toBe(false);
