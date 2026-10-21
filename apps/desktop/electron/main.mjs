@@ -22,6 +22,7 @@ import { globalOpencodeConfigDir, workspaceOpencodeConfigCandidates } from "@omn
 import { configureFakeMediaForTests, installMediaPermissionHandlers } from "./media-permissions.mjs";
 import { registerMigrationIpc } from "./migration.mjs";
 import { createRuntimeManager, createSystemCaCertificateVerifyProc } from "./runtime.mjs";
+import { installAppRequestSecret } from "./app-request-secret.mjs";
 import { registerUpdaterIpc } from "./updater.mjs";
 import {
   checkComputerUsePermissions,
@@ -3454,6 +3455,8 @@ or use: pnpm dev:worktree`);
     initComputerUse({ getWindow: () => mainWindow, serverInfo: () => runtimeManager.omnirushServerInfo(), log: (message, error) => console.warn(`[computer-use] ${message}`, error?.message ?? "") });
     const systemCaCertificates = await runtimeManager.systemCaCertificates();
     session.defaultSession.setCertificateVerifyProc(createSystemCaCertificateVerifyProc(systemCaCertificates));
+    // Settings writes to the local server need this app's window (app-request-secret.mjs).
+    installAppRequestSecret(session.defaultSession, (id) => Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === id));
     installMediaPermissionHandlers(session, () => mainWindow);
     await runPendingNukeCleanup({
       env: process.env,
