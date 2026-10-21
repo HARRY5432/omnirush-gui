@@ -6,10 +6,13 @@
       "version": "2.6.6",
       "date": "2026-10-21",
       "new": [],
-      "improved": [],
+      "improved": [
+        "Computer use: no approval on each step; one Allow per app per chat. In Normal mode it still asks before paying or buying and before typing a password."
+      ],
       "fixed": [
         "Security: commands the agent runs no longer receive the engine's sign-in or your account token.",
-        "Security: computer use no longer starts in auto just because settings.json says so; run with --permissions auto to allow it."
+        "Security: computer use no longer starts in auto just because settings.json says so; run with --permissions auto to allow it.",
+        "Computer use recognises your answers typed in a tmux pane."
       ]
     },
     {
@@ -213,7 +216,9 @@
       "version": "3.6.9",
       "date": "2026-10-21",
       "new": [],
-      "improved": [],
+      "improved": [
+        "Computer use: no approval on each step; one Allow per app per chat. In Normal mode it still asks before paying or buying and before typing a password."
+      ],
       "fixed": [
         "Security: commands the agent runs no longer receive the app's own keys.",
         "Security: approvals, permission mode, project settings, plugins, MCP servers and keys can only be changed from the app's own window, not with a key read from disk."
