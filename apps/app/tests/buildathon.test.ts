@@ -10,7 +10,10 @@ import {
   unreadAnnouncementIds,
   type BuildathonAnnouncement,
   type BuildathonPromo,
+  buildathonChipParts,
   buildathonChipText,
+  buildathonChipVisible,
+  buildathonMenuVisible,
   buildathonCountdown,
   buildathonProjectPaths,
   buildathonProjects,
@@ -89,6 +92,28 @@ describe("countdown", () => {
     expect(closed.kind).toBe("closed");
     expect(buildathonChipText(closed)).toBe("Buildathon · Submissions closed");
     expect(buildathonCountdown({ ...EVENT, phase: "judging" }, DEADLINE - HOUR * 10).kind).toBe("closed");
+  });
+
+  test("the header chip goes away once submissions close; narrow bars can drop the prefix", () => {
+    const open = buildathonCountdown(EVENT, DEADLINE - 2 * HOUR);
+    expect(buildathonChipVisible(open)).toBe(true);
+    expect(buildathonChipParts(open)).toEqual({ prefix: "Buildathon · ", rest: "2h 00m left" });
+    expect(buildathonChipVisible(buildathonCountdown(EVENT, Date.parse(EVENT.startsAt!) - HOUR))).toBe(true);
+    expect(buildathonChipVisible(buildathonCountdown(EVENT, DEADLINE + 1))).toBe(false);
+    expect(buildathonChipVisible(buildathonCountdown({ ...EVENT, phase: "results" }, DEADLINE - HOUR))).toBe(false);
+    expect(buildathonChipVisible(null)).toBe(false);
+  });
+
+  test("the menu item keeps My Buildathon reachable from close until the event is over, for people who joined", () => {
+    const status = (event: BuildathonEvent): BuildathonStatus => ({ enrolled: true, serverTime: null, event, participant: null, submission: null, repro: { box: "on", agentRules: "", checklist: [] }, announcements: [], github: null });
+    const at = (event: BuildathonEvent, now: number) => buildathonMenuVisible(status(event), buildathonCountdown(event, now));
+    expect(at(EVENT, DEADLINE - HOUR)).toBe(false);
+    expect(at(EVENT, DEADLINE + 1)).toBe(true);
+    expect(at({ ...EVENT, phase: "judging" }, DEADLINE - HOUR)).toBe(true);
+    expect(at({ ...EVENT, phase: "results" }, DEADLINE + 3 * 24 * HOUR)).toBe(true);
+    expect(at({ ...EVENT, phase: "closed" }, DEADLINE + 10 * 24 * HOUR)).toBe(false);
+    expect(buildathonMenuVisible(null, buildathonCountdown(EVENT, DEADLINE + 1))).toBe(false);
+    expect(buildathonMenuVisible({ ...status(EVENT), enrolled: false } as unknown as BuildathonStatus, buildathonCountdown(EVENT, DEADLINE + 1))).toBe(false);
   });
 
   test("before the start it counts to the start", () => {

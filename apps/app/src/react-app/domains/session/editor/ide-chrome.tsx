@@ -129,7 +129,7 @@ export function ChatSwitcher(props: {
       <DropdownMenu>
         <DropdownMenuTrigger
           render={(
-            <Button variant="ghost" size="sm" className="h-7 min-w-0 max-w-64 gap-1.5 rounded-lg px-2 text-[13px] font-medium" data-chat-switcher aria-label="Switch chat">
+            <Button variant="ghost" size="sm" className="h-7 min-w-0 max-w-64 shrink gap-1.5 rounded-lg px-2 text-[13px] font-medium" data-chat-switcher aria-label="Switch chat">
               <MessageSquare className="size-3.5 shrink-0 text-muted-foreground" />
               <span className="truncate">{props.title}</span>
               {props.chats.length > 1 ? <span className="shrink-0 text-[11px] font-normal text-muted-foreground">{props.chats.length}</span> : null}

@@ -25,7 +25,10 @@ import {
   readAnnouncementIds,
   rememberAnnouncementIds,
   unreadAnnouncementIds,
+  buildathonChipParts,
   buildathonChipText,
+  buildathonChipVisible,
+  buildathonMenuVisible,
   buildathonCountdown,
   compactTokens,
   formatEventTime,
@@ -83,30 +86,45 @@ function useUnreadAnnouncements(status: BuildathonStatus | null): string[] {
   );
 }
 
-/** Header chip: "Buildathon · 5d 03h left", red in the last hour, a dot for unread updates. Nothing unless enrolled. */
+/** True while the header's "…" menu should offer My Buildathon (joined, submissions closed, results not over). */
+export function useBuildathonMenuItem(): { visible: boolean; open: () => void } {
+  const status = useBuildathonStore((store) => store.status);
+  const countdown = useCountdown(status);
+  return { visible: buildathonMenuVisible(status, countdown), open: () => useBuildathonStore.getState().openPanel() };
+}
+
+/**
+ * Header chip: "Buildathon · 5d 03h left", red in the last hour, a dot for
+ * unread updates. Nothing unless enrolled, and nothing once submissions have
+ * closed. In a narrow title bar it drops the "Buildathon ·" words, then hides.
+ */
 export function BuildathonChip() {
   const status = useBuildathonStore((store) => store.status);
   const countdown = useCountdown(status);
   const unread = useUnreadAnnouncements(status);
-  if (!status || !countdown) return null;
+  if (!status || !countdown || !buildathonChipVisible(countdown)) return null;
+  const { prefix, rest } = buildathonChipParts(countdown);
   return (
     <button
       type="button"
       onClick={() => useBuildathonStore.getState().openPanel()}
       className={cn(
-        "inline-flex h-6 shrink-0 items-center gap-1.5 rounded-lg border px-2 text-[11.5px] font-medium tabular-nums transition-colors mac:titlebar-no-drag",
+        "inline-flex h-6 min-w-0 max-w-60 shrink items-center gap-1.5 overflow-hidden rounded-lg border px-2 text-[11.5px] font-medium tabular-nums transition-colors mac:titlebar-no-drag @max-[32rem]/titlebar:hidden",
         countdown.urgent
           ? "border-red-500/50 bg-red-500/10 text-red-600 hover:bg-red-500/15 dark:text-red-400"
           : countdown.kind === "closed"
             ? "border-border bg-muted/40 text-muted-foreground hover:bg-muted"
             : "border-[#b9f45a]/50 bg-[#b9f45a]/10 text-foreground hover:bg-[#b9f45a]/20",
       )}
-      title={`${status.event.name}: deadline ${formatEventTime(status.event.deadlineAt)}`}
+      title={`${buildathonChipText(countdown)} (${status.event.name}: deadline ${formatEventTime(status.event.deadlineAt)})`}
       data-testid="buildathon-chip"
       data-urgent={countdown.urgent ? "true" : undefined}
     >
-      <Trophy className="size-3.5" />
-      <span>{buildathonChipText(countdown)}</span>
+      <Trophy className="size-3.5 shrink-0" />
+      <span className="min-w-0 truncate">
+        <span className="@max-[48rem]/titlebar:hidden">{prefix}</span>
+        {rest}
+      </span>
       {unread.length ? (
         <span
           className="size-1.5 rounded-full bg-[#3A2DF5] dark:bg-[#D8FC38]"

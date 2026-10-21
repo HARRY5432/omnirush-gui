@@ -147,7 +147,9 @@ import {
   type ChatMcpReconnectScope,
 } from "./mcp-chat-reconnect";
 import { OpenTargetProvider, type OpenTargetOptions } from "@/lib/target-provider";
-import { projectCodeNotice, registerMcpServerTitles } from "@/lib/capability-call";
+import { registerMcpServerTitles } from "@/lib/capability-call";
+import { takeProjectCodeNotice } from "@/app/lib/project-code-notice";
+import { showProjectCodeNotice } from "./project-code-notice";
 import type { ThreadStatus } from "@/lib/messages";
 import {
   EnvironmentVariableProvider,
@@ -2858,12 +2860,12 @@ export function SessionSurface(props: SessionSurfaceProps) {
     void props.client.listMcp(props.workspaceId).then((response) => {
       if (!current || !response.mcpPolicy) return;
       registerMcpServerTitles([...response.mcpPolicy.supported, ...response.mcpPolicy.decisions]);
-      // Once per project and app run: what of the project's own config did not load.
-      const notice = projectCodeNotice(props.workspaceId, response.mcpPolicy.ignoredNotice);
-      if (notice) toast.info(notice.text, { id: notice.id });
+      // Once per project folder (remembered locally): what of the project's own config did not load.
+      const notice = takeProjectCodeNotice(props.workspaceRoot.trim() || props.workspaceId, response.mcpPolicy);
+      if (notice) showProjectCodeNotice(notice);
     }).catch(() => undefined);
     return () => { current = false; };
-  }, [props.client, props.workspaceId]);
+  }, [props.client, props.workspaceId, props.workspaceRoot]);
 
   const listMcp = useCallback(async (): Promise<{ servers: McpServerEntry[]; statuses: McpStatusMap; status: string | null }> => {
     if (props.mcpDisabled === true) {

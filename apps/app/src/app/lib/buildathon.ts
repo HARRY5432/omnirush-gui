@@ -91,6 +91,28 @@ export function buildathonChipText(countdown: BuildathonCountdown): string {
   return `Buildathon · ${formatRemaining(countdown.remainingMs)} left`;
 }
 
+/** The chip's words in two parts, so a narrow title bar can drop "Buildathon · ". */
+export function buildathonChipParts(countdown: BuildathonCountdown): { prefix: string; rest: string } {
+  const text = buildathonChipText(countdown);
+  const prefix = "Buildathon · ";
+  return text.startsWith(prefix) ? { prefix, rest: text.slice(prefix.length) } : { prefix: "", rest: text };
+}
+
+/** The header chip shows while the event is upcoming or open; once submissions close it goes away. */
+export function buildathonChipVisible(countdown: BuildathonCountdown | null): boolean {
+  return countdown !== null && countdown.kind !== "closed";
+}
+
+/**
+ * The "Buildathon" item in the header's "…" menu: for people who joined, from
+ * the moment submissions close (the chip is gone then) until the event is over
+ * (phase "closed"), so judging and results stay one click away.
+ */
+export function buildathonMenuVisible(status: BuildathonStatus | null, countdown: BuildathonCountdown | null): boolean {
+  if (!status || status.enrolled !== true || !countdown) return false;
+  return countdown.kind === "closed" && status.event.phase !== "closed";
+}
+
 /** "20 Oct, 23:59 IST", plus the local time when the machine is not on IST. */
 export function formatEventTime(iso: string | null | undefined, locale?: string): string {
   if (!iso) return "";
