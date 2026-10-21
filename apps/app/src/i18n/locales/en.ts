@@ -2126,7 +2126,7 @@ export default {
   "permissions.mode.careful": "Careful",
   "permissions.mode.careful_summary": "Asks before every file change and every command. Reading and searching run freely.",
   "permissions.mode.normal": "Normal",
-  "permissions.mode.normal_summary": "Asks only before risky actions: recursive deletes, sudo, git push or hard resets, changes outside the project, reading secrets, piping downloads into a shell, publishing packages.",
+  "permissions.mode.normal_summary": "Asks only before risky actions: recursive deletes, sudo, git push or hard resets, changes outside the project, reading secrets, piping downloads into a shell, publishing packages. Computer use asks once per app per chat, then only before paying, buying or ordering and before typing a password.",
   "permissions.mode.auto": "Auto",
   "permissions.mode.auto_summary": "Never asks. The agent runs everything it decides to run.",
   "permissions.status_mode": "{mode} mode.",

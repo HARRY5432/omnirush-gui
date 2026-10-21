@@ -1,13 +1,13 @@
 # Computer use (contract v2, policy, media refs, image codecs, Windows/X11 host): the same files in omnirush-cli (src/computer-use/) and omnirush-gui (apps/server/src/computer-use/shared/).
 # A change to one must be ported to the other and this list updated in both.
-36b49e5c1a90d4eb9b7d8c8fda207e6385c7ec0f8ba633e96f6726fc92ab2f53  contract.mjs
+59abb350a935c9462f3ea2e863396cdc785634dd2907f2f8947d87e9b30ec209  contract.mjs
 aef0973f520f56ab8ad2699c14428bb2dd7ddb4b00dff823e4598e64d0c4a35b  contract.d.mts
-68cbfd310412988babd3fc772ac5bfd2842ec99d726ea7316e6d8b2a02fb5490  policy.mjs
-6d5cd2d2e8e1665806caca5b229ddb0513be130f78476e17d712e0f3647d46bd  policy.d.mts
+7d823cbd1db3b6a5200f173cfd1567e92804c09267eb06e462e72c5f8f82e3c2  policy.mjs
+31c50348ee77d5f61ba10a59e3ca7ff384c051dd70c60ed10e52b3186ad371d0  policy.d.mts
 a96246342720364eb3e5843ba70fbbf640365f94597fc4dbb6a7be7d95254ec4  image.mjs
 5eac31868aedd3e1d1e71b445f9a55d01316da7397f27f6db11472453bee4588  image.d.mts
 e47c9ff67b9fce2ec12307737e973ce22551719c482b87f601569bd4f8a77e17  media.mjs
 eabdf78c56733577d05aad490d9d7d5ece6c22e9b3ea9e6e9803d1a4a546fdd4  media.d.mts
 a0bd964a5d0c7c5e26b4ce4ed8e8300f80a0a3a9da5d7f49c36f6ac2c907e934  native-worker.mjs
-9380ef9ababaae4f2defcef4eaeb3d6918fe24a0a3f710af3a428a371d8b5bbf  portable-host.mjs
-641be80cebb04d353031392d8f53f45ead1e1beaf83f1e67d24945f0eda330bf  portable-host.d.mts
+bd3ad13f41e8ebbfc22a812901dfcfd2d009be8e3c5ae0304d6e06cbab99808b  portable-host.mjs
+ecbac3ec99cc39d8b749699d97201074015b5746aa2baf32e17944c86ac8ef42  portable-host.d.mts

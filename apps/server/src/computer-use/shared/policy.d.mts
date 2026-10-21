@@ -18,6 +18,8 @@ export type ComputerUseBlock = {
   deny_apps: DenyEntry[];
   limits: Limits;
   message: string | null;
+  /** The send/delete asks in Normal (off unless the server says true). */
+  ask_send_delete: boolean;
 };
 export type ComputerUseSetting = ComputerUseBlock & {
   source: "env" | "server" | "default";
@@ -51,24 +53,22 @@ export function readAncestors(options?: { pid?: number; platform?: string; limit
 export function nestedAgent(options?: { env?: Record<string, string | undefined>; ancestors?: ProcessInfo[] }): boolean;
 
 export const RISKY_WORDS: readonly string[];
-export function riskyWords(value: unknown): string[];
+export function riskyWords(value: unknown, from?: "screen" | "intent"): string[];
 export function looksLikeCredential(value: unknown): boolean;
-export function riskyChord(action: unknown): "paste" | "close_quit_delete" | null;
-export function documentOf(title: unknown, appName?: unknown): string;
+export const ASK_SEND_DELETE: boolean;
 
-export type AskReasonCode = "careful" | "risky_intent" | "risky_target" | "secure_field" | "credential_text" | "paste" | "close_quit_delete" | "other_window" | "document_changed" | "after_takeover" | "submit_after_typing" | "target_unknown";
+export type AskReasonCode = "careful" | "risky_intent" | "risky_target" | "secure_field" | "credential_text" | "credential_intent" | "other_window" | "risky_page" | "send_delete_target" | "delete_chord" | "send_after_typing";
 export type ApprovalInput = {
   mode?: PermissionMode | string;
   action?: Action | Record<string, unknown>;
   intent?: string;
-  target?: { text?: string; secure?: boolean; url_host?: string };
-  window?: { id?: string | number; app_id?: string; title?: string; app_name?: string; url_host?: string };
-  approved?: { window_id?: string | number; app_id?: string; title?: string; url_host?: string };
-  after_takeover?: boolean;
+  target?: { text?: string; secure?: boolean };
+  window?: { id?: string | number; app_id?: string; title?: string };
+  approved?: { window_id?: string | number; app_id?: string };
   /** The agent's previous act in this window typed text (and no click or Enter since). */
   typed_before?: boolean;
 };
-export function actApproval(input?: ApprovalInput): { ask: boolean; reasons: Array<{ code: AskReasonCode; detail?: string }> };
+export function actApproval(input?: ApprovalInput, options?: { sendDelete?: boolean }): { ask: boolean; reasons: Array<{ code: AskReasonCode; detail?: string }> };
 export const ASK_REASONS: Readonly<Record<AskReasonCode, string>>;
 export const SCREEN_BASH_RULES: Readonly<Record<string, "ask">>;
 export function computerPermissionRules(): Record<string, "allow">;

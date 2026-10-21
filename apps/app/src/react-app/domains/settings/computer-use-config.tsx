@@ -174,6 +174,9 @@ export function ComputerUseConfig({ connected, connecting, onConnect, onRefresh,
           <Button variant="outline" disabled={copyCli.isPending} onClick={() => copyCli.mutate()}><Copy className="size-4" />{copyCli.isSuccess ? "CLI connection copied" : "Copy CLI connection"}</Button>
           <p className="text-xs leading-relaxed text-muted-foreground">Keep OmniRush.ai open. Add the copied server to ~/.omnirush/mcp.json, then run /mcp reconnect in the CLI. Window approval stays in this app.</p>
         </div> : null}
+        <p className="text-xs leading-relaxed text-muted-foreground" data-computer-use-asks>
+          You approve each app once per chat, in every mode. Normal then works without asking, except before paying, buying or ordering and before typing a password. Careful asks before every action; Auto asks only that first time.
+        </p>
         <p className="text-xs leading-relaxed text-muted-foreground">
           {!mac ? "Keep the target app visible on an unlocked desktop. Computer Use moves the mouse and types in the foreground; choose Continue after taking over. Choose a model that accepts images. For background Blender work, ask for a Blender Python script or use an app connector. " : null}
           Hide the preview if it covers app controls; Stop stays available in the OmniRush.ai window. Sessions end after 15 minutes and pause when idle. Window content is processed by your selected model provider. Enter passwords yourself. For websites, use the built-in browser.

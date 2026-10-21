@@ -15,7 +15,7 @@
     },
     "normal": {
       "title": "Normal",
-      "summary": "Asks only before risky actions: recursive deletes, sudo, git push or hard resets, changes outside the project, reading secrets, piping downloads into a shell, publishing packages."
+      "summary": "Asks only before risky actions: recursive deletes, sudo, git push or hard resets, changes outside the project, reading secrets, piping downloads into a shell, publishing packages. Computer use asks once per app per chat, then only before paying, buying or ordering and before typing a password."
     },
     "auto": {
       "title": "Auto",

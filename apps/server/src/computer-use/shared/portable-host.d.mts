@@ -16,10 +16,10 @@ export type NativeWorker = {
 };
 export function createNativeWorker(options?: { workerPath?: string; nodePath?: string; nodeEnv?: Record<string, string>; koffiPath?: string; timeoutMs?: number }): NativeWorker;
 
-export type HostSettings = { enabled: boolean; real_screen?: boolean; limits?: Partial<Limits> | null; deny_apps?: Array<DenyEntry | string>; mode?: PermissionMode | string | null; message?: string | null };
+export type HostSettings = { enabled: boolean; real_screen?: boolean; limits?: Partial<Limits> | null; deny_apps?: Array<DenyEntry | string>; mode?: PermissionMode | string | null; message?: string | null; ask_send_delete?: boolean };
 export type HostContext = { ancestors?: ProcessInfo[]; self_pids?: number[]; tty_pids?: number[]; chat?: string | null };
 export type AppRef = { app_id: string; app_name: string; bundle_or_exe: string; pid: number };
-export type OpenRequest = { session_id: string; request_id: string; app: AppRef; windows: Array<{ id: string; title: string }>; window_id: string; mode: "observe" | "control"; purpose: string; os: string; seconds: number; chat_seconds: number };
+export type OpenRequest = { session_id: string; request_id: string; app: AppRef; windows: Array<{ id: string; title: string }>; window_id: string; mode: "observe" | "control"; purpose: string; os: string; seconds: number; /** "Allow for this chat": 0 = until the chat ends, else at most this many seconds. */ chat_seconds: number };
 export type OpenAnswer = { decision: "chat" | "once" | "deny"; window_id?: string };
 export type ActRequest = {
   session_id: string;

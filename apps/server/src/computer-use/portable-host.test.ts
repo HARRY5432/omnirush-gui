@@ -65,7 +65,7 @@ function fakeNative() {
   return native;
 }
 
-function rig(mode: "careful" | "normal" | "auto", options: { decision?: "chat" | "once" | "deny"; allowAct?: boolean; limits?: Record<string, number>; enabled?: boolean } = {}) {
+function rig(mode: "careful" | "normal" | "auto", options: { decision?: "chat" | "once" | "deny"; allowAct?: boolean; limits?: Record<string, number>; enabled?: boolean; chats?: Array<string | null> } = {}) {
   const native = fakeNative();
   const dir = mkdtempSync(path.join(os.tmpdir(), "cu-host-"));
   dirs.push(dir);
@@ -77,7 +77,8 @@ function rig(mode: "careful" | "normal" | "auto", options: { decision?: "chat" |
     native,
     spool: createMediaSpool(path.join(dir, "spool")),
     settings: () => settings,
-    context: () => ({ ancestors: [], chat: "ses_1" }),
+    // The chat of each open in turn (options.chats), else always "ses_1".
+    context: () => ({ ancestors: [], chat: options.chats ? (options.chats.length > 1 ? options.chats.shift()! : options.chats[0]!) : "ses_1" }),
     approve: {
       open: async (request: OpenRequest) => { opens.push(request); return { decision: options.decision ?? "once", window_id: request.window_id }; },
       act: async (request: ActRequest) => { acts.push(request); return { allow: options.allowAct ?? true }; },
@@ -146,6 +147,73 @@ describe("portable host: MCP surface and consent", () => {
     await host.close();
   });
 
+  test("Allow for this chat lasts the whole chat (no 30 min expiry), never another chat, and the server's value bounds it", async () => {
+    const realNow = Date.now;
+    let shift = 0;
+    Date.now = () => realNow() + shift;
+    try {
+      const r = rig("normal", { decision: "chat" });
+      const host = await r.hostPromise;
+      const c = host.connect();
+      const first = await call(c, "computer_open_session", { app_id: "/usr/bin/gedit", mode: "control", purpose: "Write" });
+      await call(c, "computer_close_session", { session_id: first.state.session_id });
+      shift = 6 * 3600_000;
+      const later = await call(c, "computer_open_session", { app_id: "/usr/bin/gedit", mode: "control", purpose: "Write later" });
+      expect(later.state).toMatchObject({ ok: true, approval: "chat" });
+      expect(r.opens.length).toBe(1);
+      expect(r.opens[0]?.chat_seconds).toBe(0);
+      await host.close();
+      shift = 0;
+      // The server says 600 s: asked again after it.
+      const b = rig("normal", { decision: "chat", limits: { chat_approval_seconds: 600 } });
+      const hb = await b.hostPromise;
+      const cb = hb.connect();
+      const one = await call(cb, "computer_open_session", { app_id: "/usr/bin/gedit", mode: "control", purpose: "Write" });
+      await call(cb, "computer_close_session", { session_id: one.state.session_id });
+      shift = 601_000;
+      await call(cb, "computer_open_session", { app_id: "/usr/bin/gedit", mode: "control", purpose: "Write" });
+      expect(b.opens.length).toBe(2);
+      expect(b.opens[0]?.chat_seconds).toBe(600);
+      await hb.close();
+      shift = 0;
+      // The server lowers its bound after the grant: the next reuse is checked against the new one.
+      const lowered = rig("normal", { decision: "chat" });
+      const hl = await lowered.hostPromise;
+      const cl = hl.connect();
+      const g = await call(cl, "computer_open_session", { app_id: "/usr/bin/gedit", mode: "control", purpose: "Write" });
+      await call(cl, "computer_close_session", { session_id: g.state.session_id });
+      lowered.settings.limits = { chat_approval_seconds: 1800 };
+      shift = 1801_000;
+      await call(cl, "computer_open_session", { app_id: "/usr/bin/gedit", mode: "control", purpose: "Write" });
+      expect(lowered.opens.length).toBe(2);
+      await hl.close();
+      shift = 0;
+      // The person's Stop and the server's switch clear the grant.
+      for (const by of ["person", "server"] as const) {
+        const st = rig("normal", { decision: "chat" });
+        const hs = await st.hostPromise;
+        const cs = hs.connect();
+        const x = await call(cs, "computer_open_session", { app_id: "/usr/bin/gedit", mode: "control", purpose: "Write" });
+        if (by === "person") await hs.control({ session_id: String(x.state.session_id), action: "stop" });
+        else await hs.stopAll("server");
+        await call(cs, "computer_open_session", { app_id: "/usr/bin/gedit", mode: "control", purpose: "Write" });
+        expect(st.opens.length).toBe(2);
+        await hs.close();
+      }
+      // Another chat asks again; no chat known: no grant.
+      for (const chats of [["ses_1", "ses_2"], [null, null]]) {
+        const d = rig("normal", { decision: "chat", chats });
+        const hd = await d.hostPromise;
+        const cd = hd.connect();
+        const x = await call(cd, "computer_open_session", { app_id: "/usr/bin/gedit", mode: "control", purpose: "Write" });
+        await call(cd, "computer_close_session", { session_id: x.state.session_id });
+        await call(cd, "computer_open_session", { app_id: "/usr/bin/gedit", mode: "control", purpose: "Write" });
+        expect(d.opens.length).toBe(2);
+        await hd.close();
+      }
+    } finally { Date.now = realNow; }
+  });
+
   test("off by the server: no session", async () => {
     const r = rig("normal", { enabled: false });
     const host = await r.hostPromise;
@@ -205,8 +273,13 @@ describe("portable host: observe and act", () => {
     const plain = await call(c, "computer_act", { session_id: session, observation_id: obs.state.observation?.id, request_id: "a", intent: "Put the cursor at the end", action: { type: "click", x: 5, y: 5 } });
     expect(plain.state).toMatchObject({ ok: true, approval: { asked: false } });
     expect(r.acts.length).toBe(0);
-    const risky = await call(c, "computer_act", { session_id: session, observation_id: (plain.state.observation as { id: string }).id, request_id: "b", intent: "Paste the copied text", action: { type: "key", key: "v", modifiers: ["ctrl"] } });
-    expect(risky.state).toMatchObject({ ok: true, approval: { asked: true, reasons: ["paste"] } });
+    const paste = await call(c, "computer_act", { session_id: session, observation_id: (plain.state.observation as { id: string }).id, request_id: "b", intent: "Paste the copied text", action: { type: "key", key: "v", modifiers: ["ctrl"] } });
+    expect(paste.state).toMatchObject({ ok: true, approval: { asked: false } });
+    const send = await call(c, "computer_act", { session_id: session, observation_id: (paste.state.observation as { id: string }).id, request_id: "c", intent: "Send the message", action: { type: "key", key: "Enter" } });
+    expect(send.state).toMatchObject({ ok: true, approval: { asked: false } });
+    expect(r.acts.length).toBe(0);
+    const risky = await call(c, "computer_act", { session_id: session, observation_id: (send.state.observation as { id: string }).id, request_id: "d", intent: "Buy the ticket", action: { type: "click", x: 5, y: 5 } });
+    expect(risky.state).toMatchObject({ ok: true, approval: { asked: true, reasons: ["risky_intent"] } });
     expect(r.acts.length).toBe(1);
     await host.close();
   });
@@ -250,33 +323,39 @@ describe("portable host: observe and act", () => {
     await host.close();
   });
 
-  test("Normal: the text the host read at the point decides (risky target, secure field); without text, a click after typing asks", async () => {
+  test("Normal: the text the host read at the point decides (a pay target asks); without text, clicks run", async () => {
     const r = rig("normal");
-    // A host that reads text (macOS): a "Sign in" button at 300,200 (native pixels; the image is 640 wide, window 2560).
-    r.native.state.texts = [{ x: 300, y: 200, width: 80, height: 30, text: "Sign in" }];
+    // A host that reads text (macOS): a "Buy now" button at 300,200 (native pixels; the image is 640 wide, window 2560).
+    r.native.state.texts = [{ x: 300, y: 200, width: 80, height: 30, text: "Buy now" }];
     const { host, c, session, obs } = await opened(r);
     const sign = await call(c, "computer_act", { session_id: session, observation_id: obs.state.observation?.id, request_id: "a", intent: "Press the button", action: { type: "click", x: 300, y: 200 } });
     expect(sign.state).toMatchObject({ ok: true, approval: { asked: true, reasons: ["risky_target"] } });
     const secure = await call(c, "computer_act", { session_id: session, observation_id: (sign.state.observation as { id: string }).id, request_id: "b", intent: "Fill in the field", action: { type: "type", text: "abc" } });
     expect(secure.state).toMatchObject({ ok: true, approval: { asked: false } });
     await host.close();
-    // A host that reads no text (X11): every click asks (the app doesn't say what it is); typing does not.
+    // A host that reads no text (X11): clicks and plain typing run without asking; a password asks.
     const x = rig("normal");
     const o = await opened(x);
     const typed = await call(o.c, "computer_act", { session_id: o.session, observation_id: o.obs.state.observation?.id, request_id: "t", intent: "Type the name", action: { type: "type", text: "Ada" } });
     expect(typed.state).toMatchObject({ ok: true, approval: { asked: false } });
     const click = await call(o.c, "computer_act", { session_id: o.session, observation_id: (typed.state.observation as { id: string }).id, request_id: "k", intent: "Go to the next field", action: { type: "click", x: 400, y: 300 } });
-    expect(click.state).toMatchObject({ ok: true, approval: { asked: true, reasons: ["target_unknown"] } });
-    // The same click on the same image within 30 s (a retry) is not asked again.
-    const again = await call(o.c, "computer_act", { session_id: o.session, observation_id: (click.state.observation as { id: string }).id, request_id: "k2", intent: "Go to the next field", action: { type: "click", x: 400, y: 300 } });
+    expect(click.state).toMatchObject({ ok: true, approval: { asked: false } });
+    const enter = await call(o.c, "computer_act", { session_id: o.session, observation_id: (click.state.observation as { id: string }).id, request_id: "e", intent: "Submit the form", action: { type: "key", key: "Enter" } });
+    expect(enter.state).toMatchObject({ ok: true, approval: { asked: false } });
+    expect(x.acts.length).toBe(0);
+    const pw = await call(o.c, "computer_act", { session_id: o.session, observation_id: (enter.state.observation as { id: string }).id, request_id: "p", intent: "Type the password", action: { type: "type", text: "hunter22" } });
+    expect(pw.state).toMatchObject({ ok: true, approval: { asked: true, reasons: ["credential_intent"] } });
+    // The same act on the same image within 30 s (a retry) is not asked again.
+    const again = await call(o.c, "computer_act", { session_id: o.session, observation_id: (pw.state.observation as { id: string }).id, request_id: "p2", intent: "Type the password", action: { type: "type", text: "hunter22" } });
     expect(again.state).toMatchObject({ ok: true, approval: { asked: false } });
+    expect(x.acts.length).toBe(1);
     expect(await o.host.physicalInput()).toBe(true);
     x.native.state.synthetic = true;
     expect(await o.host.physicalInput()).toBe(false);
     await o.host.close();
   });
 
-  test("person input pauses; only Continue resumes; first act after takeover asks in Normal", async () => {
+  test("person input pauses; only Continue resumes; the first act after takeover runs in Normal", async () => {
     const r = rig("normal");
     const { host, c, session, obs } = await opened(r);
     r.native.personInput();
@@ -286,7 +365,8 @@ describe("portable host: observe and act", () => {
     await host.control({ session_id: session, action: "continue" });
     const next = await call(c, "computer_observe", { session_id: session });
     const act = await call(c, "computer_act", { session_id: session, observation_id: next.state.observation?.id, request_id: "b", intent: "Click in the text", action: { type: "click", x: 5, y: 5 } });
-    expect(act.state).toMatchObject({ ok: true, approval: { asked: true, reasons: ["target_unknown", "after_takeover"] } });
+    expect(act.state).toMatchObject({ ok: true, approval: { asked: false } });
+    expect(r.acts.length).toBe(0);
     expect(r.events.map((e) => `${e.event}:${e.by}`)).toEqual(["opened:agent", "approved:person", "paused:person", "continued:person"]);
     await host.control({ session_id: session, action: "stop" });
     expect(r.events.at(-1)).toMatchObject({ event: "stopped", by: "person", app_id: "/usr/bin/gedit", app_name: "gedit", bundle_or_exe: "/usr/bin/gedit", mode: "control", approval: "once", os: "linux", screen: { id: "0", width: 3840, height: 2160 } });
@@ -319,7 +399,7 @@ describe("portable host: observe and act", () => {
 });
 
 describe("portable host: titles that follow the agent's own typing, and a worker that died", () => {
-  test("Normal: the agent's own act retitling the window does not ask; a change between acts does", async () => {
+  test("Normal: the window's title changing (the agent's own typing or another document) does not ask", async () => {
     const r = rig("normal");
     const { host, c, session, obs } = await opened(r);
     r.native.state.retitle = () => "first line - Notepad";
@@ -333,7 +413,8 @@ describe("portable host: titles that follow the agent's own typing, and a worker
     r.native.windows[0]!.title = "secrets.txt - Notepad";
     const next = await call(c, "computer_observe", { session_id: session });
     const d = await call(c, "computer_act", { session_id: session, observation_id: next.state.observation?.id, request_id: "d", intent: "Type more", action: { type: "type", text: "x" } });
-    expect(d.state).toMatchObject({ ok: true, approval: { asked: true, reasons: ["document_changed"] } });
+    expect(d.state).toMatchObject({ ok: true, approval: { asked: false } });
+    expect(r.acts.length).toBe(0);
     await host.close();
   });
 
@@ -390,8 +471,43 @@ describe("portable host: the person's own press answers a question", () => {
   });
 });
 
+describe("portable host: the server's send/delete switch", () => {
+  test("off: a Send button runs; on (capabilities ask_send_delete): it asks, and Enter after typing asks", async () => {
+    for (const on of [false, true]) {
+      const r = rig("normal");
+      (r.settings as Record<string, unknown>).ask_send_delete = on;
+      r.native.state.texts = [{ x: 300, y: 200, width: 80, height: 30, text: "Send" }];
+      const { host, c, session, obs } = await opened(r);
+      const send = await call(c, "computer_act", { session_id: session, observation_id: obs.state.observation?.id, request_id: "a", intent: "Press the button", action: { type: "click", x: 300, y: 200 } });
+      expect(send.state).toMatchObject({ ok: true, approval: on ? { asked: true, reasons: ["send_delete_target"] } : { asked: false } });
+      const typed = await call(c, "computer_act", { session_id: session, observation_id: (send.state.observation as { id: string }).id, request_id: "b", intent: "Write the reply", action: { type: "type", text: "see you" } });
+      const enter = await call(c, "computer_act", { session_id: session, observation_id: (typed.state.observation as { id: string }).id, request_id: "c", intent: "Done", action: { type: "key", key: "Enter", modifiers: ["ctrl"] } });
+      expect(enter.state).toMatchObject({ ok: true, approval: { asked: on } });
+      await host.close();
+    }
+  });
+});
+
+describe("portable host: Enter and Space read the focused control; Tab forgets it", () => {
+  test("Enter on a focused pay button asks; after Tab it is unknown and runs", async () => {
+    const r = rig("normal");
+    r.native.state.texts = [{ x: 300, y: 200, width: 80, height: 30, text: "Pay now" }];
+    const { host, c, session, obs } = await opened(r);
+    const click = await call(c, "computer_act", { session_id: session, observation_id: obs.state.observation?.id, request_id: "a", intent: "Focus the button", action: { type: "click", x: 300, y: 200 } });
+    expect(click.state).toMatchObject({ ok: true, approval: { asked: true, reasons: ["risky_target"] } });
+    const enter = await call(c, "computer_act", { session_id: session, observation_id: (click.state.observation as { id: string }).id, request_id: "b", intent: "Press it", action: { type: "key", key: "Enter" } });
+    expect(enter.state).toMatchObject({ ok: true, approval: { asked: true, reasons: ["risky_target"] } });
+    const tab = await call(c, "computer_act", { session_id: session, observation_id: (enter.state.observation as { id: string }).id, request_id: "c", intent: "Next control", action: { type: "key", key: "Tab" } });
+    expect(tab.state).toMatchObject({ ok: true, approval: { asked: false } });
+    const after = await call(c, "computer_act", { session_id: session, observation_id: (tab.state.observation as { id: string }).id, request_id: "d", intent: "Press it", action: { type: "key", key: "Enter" } });
+    expect(after.state).toMatchObject({ ok: true, approval: { asked: false } });
+    expect(r.acts.length).toBe(2);
+    await host.close();
+  });
+});
+
 describe("portable host: the control under the point from the worker (Windows MSAA)", () => {
-  test("a named control decides (risky target, protected field); no name falls back to target_unknown", async () => {
+  test("a named control decides (pay target, protected field); no name runs", async () => {
     const r = rig("normal");
     let next: { name: string; role: number | null; protected: boolean } | null = { name: "Pay now", role: 43, protected: false };
     const call0 = r.native.call.bind(r.native);
@@ -404,7 +520,7 @@ describe("portable host: the control under the point from the worker (Windows MS
     expect(bold.state).toMatchObject({ ok: true, approval: { asked: false } });
     next = { name: "", role: 42, protected: false };
     const blank = await call(c, "computer_act", { session_id: session, observation_id: (bold.state.observation as { id: string }).id, request_id: "n", intent: "Click there", action: { type: "click", x: 30, y: 10 } });
-    expect(blank.state).toMatchObject({ ok: true, approval: { asked: true, reasons: ["target_unknown"] } });
+    expect(blank.state).toMatchObject({ ok: true, approval: { asked: false } });
     await host.close();
   });
 });
