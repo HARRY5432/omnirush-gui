@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import { isProviderLocked, providerLockMessage } from "@/app/lib/provider-lock";
+import { isProviderLocked, providerLockAnswered, providerLockMessage, useProviderLock } from "@/app/lib/provider-lock";
 import { useEditorStore } from "../domains/session/editor/editor-store";
 import { isElectronRuntime } from "../../app/utils";
 import {
@@ -137,7 +137,7 @@ import { draftToParts } from "@/react-app/domains/session/sync/draft-parts";
 import { useSessionInteractions } from "@/react-app/domains/session/sync/use-session-interactions";
 import { useModelBehavior } from "@/react-app/domains/session/surface/use-model-behavior";
 import { getModelBehaviorSummary, nextModelBehaviorValue, previousModelBehaviorValue } from "@/app/lib/model-behavior";
-import { computeModelAvailability, createUnavailableConfirmationGate, type ModelAvailability } from "@/react-app/domains/session/surface/model-availability";
+import { computeModelAvailability, createUnavailableConfirmationGate, sessionModelFallback, type ModelAvailability } from "@/react-app/domains/session/surface/model-availability";
 import { useSessionFindStore } from "@/react-app/domains/session/surface/find-store";
 import { useModelPicker } from "@/react-app/domains/session/modals/use-model-picker";
 import { getSessionModelSelection, resolveSendVariant, useSessionModelStore } from "@/react-app/domains/session/surface/session-model-store";
@@ -1105,8 +1105,45 @@ export function SessionRoute() {
     ? `${activeComposerTargetsSession ? selectedSessionId : "default"}:${activeComposerModel.providerID}:${activeComposerModel.modelID}`
     : null;
   const autoOpenedUnavailableModelRef = useRef<string | null>(null);
+  // A conversation whose remembered model can no longer be used (its provider is
+  // locked or blocked, or the model left the catalog: e.g. a chat from before an
+  // update) moves to the working default with a notice, instead of a disabled
+  // composer and a picker to sort out.
+  // Re-renders when the server's lock answer arrives (providerLockAnswered below).
+  useProviderLock();
+  const sessionFallbackModel = activeComposerTargetsSession
+    ? sessionModelFallback({
+      sessionModel: selectedSessionModelSelection?.model,
+      sessionAvailability: activeComposerAvailability,
+      defaultModel: local.prefs.defaultModel,
+      defaultAvailability: resolveModelAvailability(local.prefs.defaultModel ?? null),
+      lockAnswered: providerLockAnswered(),
+    })
+    : null;
+  const sessionFallbackKey = sessionFallbackModel && selectedSessionId && selectedSessionModelSelection
+    ? `${selectedSessionId}:${selectedSessionModelSelection.model.providerID}:${selectedSessionModelSelection.model.modelID}`
+    : null;
+  useEffect(() => {
+    if (!sessionFallbackKey || !sessionFallbackModel || !selectedSessionId) return;
+    const previous = getSessionModelSelection(selectedSessionId)?.model;
+    if (!previous) return;
+    useSessionModelStore.getState().setModel(selectedSessionId, sessionFallbackModel, local.prefs.modelVariant ?? null);
+    const providerItem = (id: string) => providers.find((item) => item.id === id);
+    const fallbackProvider = providerItem(sessionFallbackModel.providerID);
+    const modelName = resolveModelDisplayName(
+      sessionFallbackModel.modelID,
+      fallbackProvider?.models?.[sessionFallbackModel.modelID]?.name ?? null,
+    );
+    const providerName = providerItem(previous.providerID)?.name?.trim() || previous.providerID;
+    toast(t("models.switched_unavailable", { model: modelName, provider: providerName }), {
+      id: `session-model-switched:${selectedSessionId}`,
+    });
+    // Keyed on the session and the model it remembered: one switch and one notice each.
+  }, [sessionFallbackKey]);
 
   useEffect(() => {
+    // The conversation is about to move to the default model (above): no picker for it.
+    if (sessionFallbackKey) return;
     if (!selectedModelUnavailableKey) {
       // The active composer's model is fine (or pending). If the picker was
       // auto-opened for a previously broken composer — e.g. the New Task
@@ -1123,8 +1160,10 @@ export function SessionRoute() {
       signedIn: denAuth.isSignedIn,
       cloudProviderSyncReady,
       // Silent default repair only applies when the broken selection IS the
-      // default; a conversation's own unavailable model must surface the
-      // picker for that conversation instead.
+      // default. A conversation's own unavailable model moves to the default
+      // with a notice when that is definite (sessionModelFallback: a blocked
+      // provider, a retired OmniRush model); otherwise the picker surfaces
+      // for that conversation.
       entitledOrgDefaultModel: activeComposerTargetsSession ? false : Boolean(entitledOrgDefaultModel),
       organizationModelsEmpty,
       autoOpenedUnavailableModelKey: autoOpenedUnavailableModelRef.current,
@@ -1140,7 +1179,7 @@ export function SessionRoute() {
     modelPicker.setRecentProviderIds(new Set());
     modelPicker.setCompactOpen(false);
     modelPicker.setOpen(true);
-  }, [activeComposerTargetsSession, cloudProviderSyncReady, denAuth.isSignedIn, entitledOrgDefaultModel, modelPicker.setCompactOpen, modelPicker.setOpen, modelPicker.setQuery, modelPicker.setRecentProviderIds, organizationModelsEmpty, selectedModelUnavailableKey, selectedSessionId]);
+  }, [activeComposerTargetsSession, cloudProviderSyncReady, denAuth.isSignedIn, entitledOrgDefaultModel, modelPicker.setCompactOpen, modelPicker.setOpen, modelPicker.setQuery, modelPicker.setRecentProviderIds, organizationModelsEmpty, selectedModelUnavailableKey, selectedSessionId, sessionFallbackKey]);
 
   // Optimistic model selection: a remembered model is treated as valid until
   // the availability gate CONFIRMS it absent (selectedModelUnavailable).

@@ -1182,6 +1182,7 @@ export default {
   "models.done": "Done",
   "models.manage_organization_models": "Manage organization models",
   "models.model_unavailable_short": "Model no longer available",
+  "models.switched_unavailable": "Switched to {model} because {provider} isn't available.",
   "models.no_models_available": "No models available. Connect a provider to get started.",
   "models.no_models_locked": "No OmniRush models yet. Sign in to omnirush.ai from Settings to use them.",
   "models.no_models_match_search": "No models match your search.",

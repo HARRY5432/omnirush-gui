@@ -107,6 +107,36 @@ export function computeModelAvailability(
 }
 
 /**
+ * The model an existing conversation switches to when the model it remembers
+ * can no longer be used: the global default, once that is confirmed available
+ * and differs from it. Only for two definite cases:
+ *   - its provider is blocked (the server's provider lock, or desktop policy),
+ *     once the server has answered the lock (`lockAnswered`; until then the
+ *     app assumes locked, which must not rewrite a chat on an unlocked server);
+ *   - an OmniRush model that left the catalog.
+ * Anything else (an organization's provider not connected, another provider's
+ * model missing) keeps the remembered model and the picker. Null: no switch.
+ */
+export function sessionModelFallback(input: {
+  sessionModel: ModelRef | null | undefined;
+  sessionAvailability: ModelAvailability;
+  defaultModel: ModelRef | null | undefined;
+  defaultAvailability: ModelAvailability;
+  lockAnswered: boolean;
+}): ModelRef | null {
+  const { sessionModel, defaultModel, sessionAvailability } = input;
+  if (!sessionModel || !defaultModel) return null;
+  if (sessionAvailability.status !== "unavailable") return null;
+  const definite = sessionAvailability.reason === "provider_blocked"
+    ? input.lockAnswered
+    : sessionAvailability.reason === "model_missing" && sessionModel.providerID.trim().toLowerCase() === "omnirush";
+  if (!definite) return null;
+  if (input.defaultAvailability.status !== "available") return null;
+  if (sessionModel.providerID === defaultModel.providerID && sessionModel.modelID === defaultModel.modelID) return null;
+  return { providerID: defaultModel.providerID, modelID: defaultModel.modelID };
+}
+
+/**
  * How long a catalog-derived "unavailable" verdict must persist before it is
  * shown. Settings visits and engine reload/restart churn can settle a
  * momentarily incomplete catalog (e.g. `connected` not yet populated), which
