@@ -500,9 +500,13 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     lease = s.id; sessions.set(s.id, s);
     update();
     const grantKey = `${s.chat ?? ""}\0${preferred.appId}\0${s.mode}`;
-    const grant = s.chat && policyRead ? grants.get(grantKey) : null;
+    // A grant is kept and reused only with a fresh read that carries the server's grant epoch and its own
+    // chat bound, under the same epoch it was given in (off -> on, or a new bound, bumps the epoch).
+    const epoch = Number.isSafeInteger(config.grant_epoch) ? config.grant_epoch : null;
+    const grantable = Boolean(s.chat) && policyRead && epoch !== null && config.chat_bound_read === true;
+    const grant = grantable ? grants.get(grantKey) : null;
     // The server's bound now (it may have been lowered since): 0 = until the chat ends.
-    const fresh = grant && (l.chat_approval_seconds === 0 || Date.now() - grant.at < l.chat_approval_seconds * 1000);
+    const fresh = grant && grant.epoch === epoch && (l.chat_approval_seconds === 0 || Date.now() - grant.at < l.chat_approval_seconds * 1000);
     let answer;
     if (fresh) answer = { decision: "chat", window_id: String(preferred.id), reused: true };
     else {
@@ -517,6 +521,8 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     }
     if (!sessions.has(s.id)) return mcpResult(failure("approval_denied", "The request ended without access."));
     if (!answer || !["chat", "once"].includes(answer.decision)) {
+      // A Deny (or no answer) withdraws any earlier "Allow for this chat" for this app in this chat.
+      for (const key of [...grants.keys()]) if (key.startsWith(`${s.chat ?? ""}\0${preferred.appId}\0`)) grants.delete(key);
       sessions.delete(s.id); if (lease === s.id) lease = null;
       s.approval = null;
       emit(s, "denied", answer?.timeout ? "limit" : "person");
@@ -540,7 +546,7 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     // server's chat_approval_seconds (checked again at each reuse). Kept in memory only, keyed to the chat: never
     // another chat, never a restart; the person's Stop and the server's switch clear it. A call no chat can be
     // named for gets no grant (it works as "Allow once").
-    if (answer.decision === "chat" && !answer.reused && s.chat) grants.set(grantKey, { at: Date.now() });
+    if (answer.decision === "chat" && !answer.reused && grantable) grants.set(grantKey, { at: Date.now(), epoch });
     s.phase = "working"; s.lastOperation = Date.now();
     s.expiresAt = Date.now() + l.session_seconds * 1000;
     s.approved = { window_id: String(s.window.id), app_id: s.window.appId };
@@ -610,12 +616,13 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     };
   }
 
-  /** Desktop transport: a loopback socket with a token, found through `<dir>/connection.json` (the bundled relay reads it). */
+  /** Desktop transport: a loopback socket with a token, found through `<dir>/engine-connection.json` (the bundled relay reads it; the copied CLI connection reads `<dir>/cli-connection.json`). */
   async function listen(dir) {
     await mkdir(dir, { recursive: true, mode: 0o700 });
-    // Two tokens: the app's own engine relay reads connection.json; the copied CLI connection reads
-    // cli-connection.json, and its connections are external (no chat, no grants).
-    const discoveryPath = path.join(dir, "connection.json");
+    // Two tokens: the app's own engine relay reads engine-connection.json; the copied CLI connection reads
+    // cli-connection.json, and its connections are external (no chat, no grants). (A CLI connection copied
+    // before these names pointed at connection.json, which is no longer written: it fails to connect.)
+    const discoveryPath = path.join(dir, "engine-connection.json");
     const externalDiscoveryPath = path.join(dir, "cli-connection.json");
     const token = randomBytes(32).toString("hex");
     const externalToken = randomBytes(32).toString("hex");

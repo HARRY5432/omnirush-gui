@@ -72,7 +72,7 @@ export function expectedHostCommand(env: Record<string, string | undefined> = pr
   const resources = (process as { resourcesPath?: string }).resourcesPath;
   const packaged = resources ? join(resources, "computer-use", "relay.mjs") : null;
   const relay = packaged && existsSync(packaged) ? packaged : fileURLToPath(new URL("../../../desktop/electron/computer-use-relay.mjs", import.meta.url));
-  return { command: [process.execPath, relay, join(profile, "computer-use", "connection.json")], environment: { ELECTRON_RUN_AS_NODE: "1" } };
+  return { command: [process.execPath, relay, join(profile, "computer-use", "engine-connection.json")], environment: { ELECTRON_RUN_AS_NODE: "1" } };
 }
 
 export function computerUseEngineEnv(stateDir: string, env: Record<string, string | undefined> = process.env): Record<string, string> {
@@ -175,13 +175,14 @@ export function createChatTracker(limit = 64) {
       if (order.length > limit) order.splice(0, order.length - limit);
     },
     /**
-     * The one chat a call can belong to, for "Allow for this chat": exactly one prompted chat is running.
-     * Running unknown (null), none or several: null, so no grant is kept or reused (the person is asked).
+     * The one chat a call can belong to, for "Allow for this chat": `running` (the engine's running top-level
+     * chats, marked or not) is exactly one chat, and the person prompted it here. Unknown (null), none,
+     * several, or one never prompted here: null, so no grant is kept or reused (the person is asked).
      */
     only(running: string[] | null): string | null {
       if (!running) return null;
-      const live = order.filter((id) => running.includes(id));
-      return live.length === 1 ? live[0]! : null;
+      const chats = [...new Set(running)];
+      return chats.length === 1 && order.includes(chats[0]!) ? chats[0]! : null;
     },
     /** The chat to record a trace event on: the latest prompted chat still running, else the latest. */
     resolve(running: string[] | null): string | null {

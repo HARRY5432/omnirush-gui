@@ -54,7 +54,7 @@ export function registerComputerUseRoutes(deps: ComputerUseRouteDeps): void {
     const chat = deps.chats.only(await deps.runningSessions().catch(() => null));
     return {
       enabled: setting.enabled,
-      setting: { enabled: setting.enabled, real_screen: setting.real_screen, virtual_display: setting.virtual_display, limits: setting.limits, deny_apps: setting.deny_apps, models: setting.models, message: setting.message, ask_send_delete: setting.ask_send_delete === true, reason: setting.reason, source: setting.source },
+      setting: { enabled: setting.enabled, real_screen: setting.real_screen, virtual_display: setting.virtual_display, limits: setting.limits, deny_apps: setting.deny_apps, models: setting.models, message: setting.message, ask_send_delete: setting.ask_send_delete === true, grant_epoch: setting.grant_epoch ?? null, chat_bound_read: setting.chat_bound_read === true, reason: setting.reason, source: setting.source },
       mode,
       dir,
       spool: mediaSpoolDir(deps.stateDir()),

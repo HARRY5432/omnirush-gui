@@ -16,7 +16,7 @@ export type NativeWorker = {
 };
 export function createNativeWorker(options?: { workerPath?: string; nodePath?: string; nodeEnv?: Record<string, string>; koffiPath?: string; timeoutMs?: number }): NativeWorker;
 
-export type HostSettings = { enabled: boolean; real_screen?: boolean; limits?: Partial<Limits> | null; deny_apps?: Array<DenyEntry | string>; mode?: PermissionMode | string | null; message?: string | null; ask_send_delete?: boolean };
+export type HostSettings = { enabled: boolean; real_screen?: boolean; limits?: Partial<Limits> | null; deny_apps?: Array<DenyEntry | string>; mode?: PermissionMode | string | null; message?: string | null; ask_send_delete?: boolean; grant_epoch?: number | null; chat_bound_read?: boolean };
 export type HostContext = { ancestors?: ProcessInfo[]; self_pids?: number[]; tty_pids?: number[]; chat?: string | null };
 export type AppRef = { app_id: string; app_name: string; bundle_or_exe: string; pid: number };
 export type OpenRequest = { session_id: string; request_id: string; app: AppRef; windows: Array<{ id: string; title: string }>; window_id: string; mode: "observe" | "control"; purpose: string; os: string; seconds: number; /** "Allow for this chat": 0 = until the chat ends, else at most this many seconds. */ chat_seconds: number; /** The chat the request belongs to (null: none named, e.g. the copied CLI connection). */ chat: string | null };
@@ -77,7 +77,7 @@ export type PortableHost = {
   os: string;
   /** internal false: a connection from outside the app's own engine (no chat, never keeps or reuses a grant). */
   connect(options?: { internal?: boolean }): McpConnection;
-  /** discoveryPath: the app's own engine relay; externalDiscoveryPath: the copied CLI connection (external). */
+  /** discoveryPath (engine-connection.json): the app's own engine relay; externalDiscoveryPath (cli-connection.json): the copied CLI connection (external). */
   listen(dir: string): Promise<{ discoveryPath: string; externalDiscoveryPath: string; close(): Promise<void> }>;
   control(input: { session_id: string; action: "stop" | "takeover" | "continue" | "hide" | "show" }): Promise<void>;
   stopAll(by?: SessionEvent["by"], event?: SessionEvent["event"]): Promise<void>;

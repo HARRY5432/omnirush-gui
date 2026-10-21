@@ -20,6 +20,10 @@ export type ComputerUseBlock = {
   message: string | null;
   /** The send/delete asks in Normal (off unless the server says true). */
   ask_send_delete: boolean;
+  /** The server's grant epoch (null: not sent): a grant is reused only under the epoch it was given in. */
+  grant_epoch: number | null;
+  /** Whether the server sent limits.chat_approval_seconds itself (false: no grant is reused). */
+  chat_bound_read: boolean;
 };
 export type ComputerUseSetting = ComputerUseBlock & {
   source: "env" | "server" | "default";

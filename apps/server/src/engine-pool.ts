@@ -731,6 +731,52 @@ export class EnginePool {
     return { sessions: [...sessions], unknown };
   }
 
+  /** Each session's parent (null: a top-level chat), as the engine reported it; it never changes. */
+  private readonly sessionParents = new Map<string, string | null>();
+
+  /**
+   * The running top-level chats (sub-agent sessions left out), for computer use's "Allow for this chat".
+   * `unknown` counts engines or sessions that could not be read; callers then name no chat.
+   */
+  async activeChats(directories: string[]): Promise<{ sessions: string[]; unknown: number }> {
+    const chats = new Set<string>();
+    let unknown = 0;
+    const targets = this.generations.filter(isRoutableGeneration);
+    await Promise.all(targets.flatMap((generation) => directories.map(async (directory) => {
+      if (!generation.handle.isAlive()) return;
+      const headers = { Authorization: buildEngineAuthProbeHeader(generation.handle.username, generation.handle.password) };
+      try {
+        const url = new URL("/session/status", generation.handle.url);
+        url.searchParams.set("directory", directory);
+        const response = await loopbackFetch(url.toString(), { headers, signal: AbortSignal.timeout(5_000) });
+        if (!response.ok) throw new Error(`status ${response.status}`);
+        const payload: unknown = await response.json();
+        if (!isRecord(payload)) throw new Error("unreadable status");
+        for (const [sessionId, status] of Object.entries(payload)) {
+          if (!isRecord(status) || status.type === "idle") continue;
+          if (!this.sessionParents.has(sessionId)) {
+            const info = new URL(`/session/${encodeURIComponent(sessionId)}`, generation.handle.url);
+            info.searchParams.set("directory", directory);
+            const answer = await loopbackFetch(info.toString(), { headers, signal: AbortSignal.timeout(5_000) });
+            if (!answer.ok) throw new Error(`session ${answer.status}`);
+            const session: unknown = await answer.json();
+            if (!isRecord(session)) throw new Error("unreadable session");
+            this.sessionParents.set(sessionId, typeof session.parentID === "string" && session.parentID ? session.parentID : null);
+            if (this.sessionParents.size > 4096) this.sessionParents.delete(this.sessionParents.keys().next().value!);
+          }
+          if (this.sessionParents.get(sessionId) === null) chats.add(sessionId);
+        }
+      } catch {
+        unknown += 1;
+      }
+    })));
+    // Prompts on their way (the engine may not report them busy yet): chats the person prompted.
+    for (const owned of this.activeSessionsByGeneration.values()) {
+      for (const sessionId of owned) if (!this.sessionParents.get(sessionId)) chats.add(sessionId);
+    }
+    return { sessions: [...chats], unknown };
+  }
+
   /** Whether `baseUrl` is the engine new work goes to (not a draining one). */
   isPrimaryUrl(baseUrl: string): boolean {
     return this.isPrimaryEndpoint(baseUrl);

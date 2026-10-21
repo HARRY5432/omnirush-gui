@@ -66,7 +66,9 @@ describe("switch and built-in entry", () => {
     expect(chats.only(null)).toBeNull();
     expect(chats.only([])).toBeNull();
     expect(chats.only(["ses_b"])).toBe("ses_b");
-    expect(chats.only(["ses_b", "ses_child_of_b"])).toBe("ses_b");
+    // Running chats come without sub-agent sessions; an unmarked running chat (steered, not captured) counts.
+    expect(chats.only(["ses_b", "ses_b"])).toBe("ses_b");
+    expect(chats.only(["ses_b", "ses_unmarked"])).toBeNull();
     expect(chats.only(["ses_a", "ses_b"])).toBeNull();
     expect(chats.only(["ses_unmarked"])).toBeNull();
     expect(sessionEventOf({ event: "opened", by: "agent", app_id: "/usr/bin/gedit", screen: { id: "0", width: 10, height: 5, scale: 1 }, junk: 1 })).toEqual({ event: "opened", by: "agent", app_id: "/usr/bin/gedit", screen: { id: "0", width: 10, height: 5, scale: 1 } });

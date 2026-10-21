@@ -72,7 +72,8 @@ function rig(mode: "careful" | "normal" | "auto", options: { decision?: "chat" |
   const events: Array<Record<string, unknown>> = [];
   const opens: OpenRequest[] = [];
   const acts: ActRequest[] = [];
-  const settings = { enabled: options.enabled ?? true, real_screen: true, limits: options.limits ?? {}, deny_apps: [], mode };
+  // As a fresh server read gives them: the grant epoch and the chat bound the server sent.
+  const settings: Record<string, unknown> & { enabled: boolean; limits: Record<string, number> } = { enabled: options.enabled ?? true, real_screen: true, limits: options.limits ?? {}, deny_apps: [], mode, grant_epoch: 1, chat_bound_read: true };
   const hostPromise = createPortableHost({
     native,
     spool: createMediaSpool(path.join(dir, "spool")),
@@ -286,6 +287,45 @@ describe("portable host: MCP surface and consent", () => {
     engine.close(); cli.close();
     await listener.close();
     await host.close();
+  });
+
+  test("grant epoch: off -> on with no open asks again; no epoch or no chat bound: never reused; a Deny withdraws the grant", async () => {
+    const open = { app_id: "/usr/bin/gedit", mode: "control", purpose: "Write" };
+    const cycle = async (c: { handle: (m: unknown) => Promise<unknown> }) => { const x = await call(c, "computer_open_session", open); if (x.state.session_id) await call(c, "computer_close_session", { session_id: x.state.session_id }); return x; };
+    // Same epoch: reused. The server switched off and on (epoch 1 -> 3): asked again.
+    {
+      const r = rig("normal", { decision: "chat" });
+      const host = await r.hostPromise; const c = host.connect();
+      await cycle(c); await cycle(c);
+      expect(r.opens.length).toBe(1);
+      r.settings.grant_epoch = 3;
+      await cycle(c);
+      expect(r.opens.length).toBe(2);
+      await host.close();
+    }
+    // No epoch (an older server), or the bound not sent: asked every time.
+    for (const change of [{ grant_epoch: null }, { grant_epoch: undefined }, { chat_bound_read: false }]) {
+      const r = rig("normal", { decision: "chat" });
+      Object.assign(r.settings, change);
+      const host = await r.hostPromise; const c = host.connect();
+      await cycle(c); await cycle(c);
+      expect(r.opens.length).toBe(2);
+      await host.close();
+    }
+    // Allow for this chat, then (the epoch moved, so asked) Deny, then the old epoch again: still asked.
+    {
+      const r = rig("normal");
+      const answers = ["chat", "deny", "chat"];
+      const host = await createPortableHost({ native: r.native, settings: () => r.settings, context: () => ({ ancestors: [], chat: "ses_1" }), approve: { open: async (request: OpenRequest) => { r.opens.push(request); return { decision: answers.shift() as "chat" | "deny", window_id: request.window_id }; }, act: async () => ({ allow: true }) } });
+      const c = host.connect();
+      await cycle(c);
+      r.settings.grant_epoch = 2;
+      expect((await cycle(c)).state).toMatchObject({ ok: false, code: "approval_denied" });
+      r.settings.grant_epoch = 1;
+      await cycle(c);
+      expect(r.opens.length).toBe(3);
+      await host.close();
+    }
   });
 
   test("off by the server: no session", async () => {

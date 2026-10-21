@@ -168,7 +168,7 @@ const approve = {
 
 function hostSettings() {
   const setting = server?.setting ?? {};
-  return { enabled: server?.enabled === true, real_screen: setting.real_screen !== false, limits: setting.limits ?? null, deny_apps: setting.deny_apps ?? [], mode: server?.mode ?? "normal", message: setting.message ?? null, ask_send_delete: setting.ask_send_delete === true };
+  return { enabled: server?.enabled === true, real_screen: setting.real_screen !== false, limits: setting.limits ?? null, deny_apps: setting.deny_apps ?? [], mode: server?.mode ?? "normal", message: setting.message ?? null, ask_send_delete: setting.ask_send_delete === true, grant_epoch: Number.isSafeInteger(setting.grant_epoch) ? setting.grant_epoch : null, chat_bound_read: setting.chat_bound_read === true };
 }
 
 async function hostContext() {
@@ -302,7 +302,7 @@ async function getComputerUseMcpCommand() {
   await startHost();
   const relay = app.isPackaged ? path.join(process.resourcesPath, "computer-use", "relay.mjs") : path.join(__dirname, "computer-use-relay.mjs");
   // The copied CLI connection: its own token (cli-connection.json), so its calls belong to no chat of this app
-  // and never keep or reuse "Allow for this chat". The engine's relay alone reads connection.json.
+  // and never keep or reuse "Allow for this chat". The engine's relay alone reads engine-connection.json.
   return [process.execPath, relay, listener.externalDiscoveryPath];
 }
 
