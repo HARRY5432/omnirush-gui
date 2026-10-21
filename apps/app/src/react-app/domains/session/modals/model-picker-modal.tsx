@@ -88,6 +88,7 @@ export function resolveModelPickerEmptyState(input: {
   organizationModelsEmpty: boolean;
   restrictToCloud: boolean;
   organizationModelsSettingsUrl?: string;
+  providerLocked?: boolean;
 }): ModelPickerEmptyState | null {
   if (input.providerGroupCount > 0) return null;
   if (input.query.trim()) {
@@ -106,10 +107,11 @@ export function resolveModelPickerEmptyState(input: {
       showOrganizationModelsSettings: Boolean(input.organizationModelsSettingsUrl),
     };
   }
+  // No provider is added while the server locks them (app/lib/provider-lock.ts).
+  const locked = input.providerLocked ?? isProviderLocked();
   return {
-    messageKey: "models.no_models_available",
-    // No provider is added while the server locks them (app/lib/provider-lock.ts).
-    showConnectProvider: !input.restrictToCloud && !isProviderLocked(),
+    messageKey: locked ? "models.no_models_locked" : "models.no_models_available",
+    showConnectProvider: !input.restrictToCloud && !locked,
     showRefreshOrganizationModels: false,
     showOrganizationModelsSettings: false,
   };

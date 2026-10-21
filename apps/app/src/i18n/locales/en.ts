@@ -1183,6 +1183,7 @@ export default {
   "models.manage_organization_models": "Manage organization models",
   "models.model_unavailable_short": "Model no longer available",
   "models.no_models_available": "No models available. Connect a provider to get started.",
+  "models.no_models_locked": "No OmniRush models yet. Sign in to omnirush.ai from Settings to use them.",
   "models.no_models_match_search": "No models match your search.",
   "models.organization_models_empty": "Your organization hasn't published any models for you yet.",
   "models.refresh_organization_models": "Refresh organization models",
