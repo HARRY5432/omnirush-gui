@@ -384,7 +384,7 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
       if (compare.stale) return finish({ ...common, ok: false, code: "stale_observation", message: "The window changed since the observation. Observe again.", next: "computer_observe" });
     }
     // Per-action approval by permission mode (host channel, never the engine's).
-    const decision = actApproval({ mode: settings()?.mode, action, intent: args.intent, target: await targetAt(observed, action, current, s), window: { id: String(current.id), app_id: current.appId, title: current.title }, approved: s.approved });
+    const decision = actApproval({ mode: settings()?.mode, action, intent: args.intent, target: await targetAt(observed, action, current, s), window: { id: String(current.id), app_id: current.appId, title: current.title }, approved: s.approved, typed_before: s.typedIn === String(current.id) });
     let approval = { asked: false };
     if (decision.ask) {
       // The same action with the same intent, allowed a moment ago (a retry after a fresh observation), is not asked again.
@@ -427,6 +427,9 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     // Typing goes to the control the last click focused: its secure-field check reads this point.
     if (["click", "double_click"].includes(action.type) && mapped.length === 1) s.focusPoint = { window: String(current.id), screen: mapped[0].screen };
     else if (action.type === "key" && String(action.key).toLowerCase() === "tab") s.focusPoint = null;
+    // Typing arms "Enter right after typing" (the send/delete switch); a click or Enter disarms it.
+    if (action.type === "type") s.typedIn = String(current.id);
+    else if (["click", "double_click"].includes(action.type) || (action.type === "key" && String(action.key).toLowerCase() === "enter")) s.typedIn = null;
     const cursorAfter = await native.call("cursor").catch(() => null);
     const done = { ...common, approval, point, path, cursor_before: cursorBefore, cursor_after: cursorAfter, ok: true, may_have_acted: action.type !== "wait" };
     if (!args.observe_after) return finish({ ...done, next: "computer_observe" });

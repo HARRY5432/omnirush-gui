@@ -227,6 +227,7 @@ describe("policy: approvals per permission mode", () => {
     ["subscribe target", { target: { text: "Subscribe for $9.99/month" } }, ["risky_target"]],
     ["donate intent", { intent: "Donate 5 dollars" }, ["risky_intent"]],
     ["transfer intent", { intent: "Transfer $500 to savings" }, ["risky_intent"]],
+    ["transfer target", { target: { text: "Transfer" } }, ["risky_target"]],
     ["send money target", { target: { text: "Send $20" } }, ["risky_target"]],
     ["reorder target", { target: { text: "Reorder" } }, ["risky_target"]],
     ["book now target", { target: { text: "Book now" } }, ["risky_target"]],
@@ -262,6 +263,11 @@ describe("policy: approvals per permission mode", () => {
     ["send target (switch off)", { target: { text: "Send" } }, []],
     ["empty trash target (switch off)", { target: { text: "Empty Trash" } }, []],
     ["shift+delete (switch off)", { action: { type: "key", key: "Delete", modifiers: ["shift"] } }, []],
+    ["address book intent", { intent: "Open the address book" }, []],
+    ["transfer a file intent", { intent: "Transfer the file to the server" }, []],
+    ["upgrade intent", { intent: "Upgrade the dependency" }, []],
+    ["read the tip intent", { intent: "Read the tip" }, []],
+    ["Enter after typing (switch off)", { action: { type: "key", key: "Enter" }, target: {}, typed_before: true }, []],
     ["plain typing", { action: { type: "type", text: "Meeting notes for Tuesday" }, intent: "Type the notes" }, []],
     ["move over a pay button", { action: { type: "move", x: 1, y: 1 }, target: { text: "Pay" } }, []],
     // Kept: an act outside the approved window (a session never sends one).
@@ -283,9 +289,12 @@ describe("policy: approvals per permission mode", () => {
     expect(riskyWords("track my order")).toEqual([]);
     expect(riskyWords("Send $20 to Bob")).toEqual(["amount"]);
     expect(riskyWords("Transfer 500 EUR")).toEqual(["transfer", "amount"]);
+    expect(riskyWords("Transfer 500 EUR", "intent")).toEqual(["amount"]);
+    expect(riskyWords("Book now", "intent")).toEqual([]);
+    expect(riskyWords("Buy the plan", "intent")).toEqual(["buy"]);
     expect(actApproval({ ...plain, intent: "Buy it" }).reasons[0]).toEqual({ code: "risky_intent", detail: "buy" });
     for (const code of ["careful", "risky_intent", "risky_target", "secure_field", "credential_text", "credential_intent", "other_window"]) expect(typeof ASK_REASONS[code as keyof typeof ASK_REASONS]).toBe("string");
-    expect(Object.keys(ASK_REASONS).sort()).toEqual(["careful", "credential_intent", "credential_text", "delete_chord", "other_window", "risky_intent", "risky_page", "risky_target", "secure_field", "send_delete_target"]);
+    expect(Object.keys(ASK_REASONS).sort()).toEqual(["careful", "credential_intent", "credential_text", "delete_chord", "other_window", "risky_intent", "risky_page", "risky_target", "secure_field", "send_after_typing", "send_delete_target"]);
     expect(looksLikeCredential("AKIAABCDEFGHIJKLMNOP")).toBe(true);
     expect(looksLikeCredential("password=Sup3rS3cret!")).toBe(true);
     expect(looksLikeCredential("Xk9#mP2$vL7qR4@nT8wZ")).toBe(true);
@@ -300,6 +309,9 @@ describe("policy: approvals per permission mode", () => {
     expect(actApproval({ ...plain, action: { type: "key", key: "Enter" }, target: { text: "Send" } }, on).ask).toBe(true);
     for (const chord of [{ key: "Delete", modifiers: ["shift"] }, { key: "Backspace", modifiers: ["meta"] }]) expect(actApproval({ ...plain, action: { type: "key", ...chord } }, on).reasons).toEqual([{ code: "delete_chord" }]);
     expect(actApproval({ ...plain, intent: "Send the email and delete the draft" }, on).ask).toBe(false);
+    for (const modifiers of [[], ["ctrl"], ["meta"]]) expect(actApproval({ ...plain, action: { type: "key", key: "Enter", modifiers }, target: { text: "Message #general" }, typed_before: true }, on).reasons).toEqual([{ code: "send_after_typing" }]);
+    expect(actApproval({ ...plain, action: { type: "key", key: "Enter" }, target: {}, typed_before: false }, on).ask).toBe(false);
+    expect(actApproval({ ...plain, action: { type: "key", key: "Enter", modifiers: ["shift"] }, target: {}, typed_before: true }, on).ask).toBe(false);
     expect(actApproval({ ...plain, target: {} }, on).ask).toBe(false);
     expect(actApproval({ ...plain, target: { text: "Move to Trash" } }, on).ask).toBe(false);
     expect(actApproval({ ...plain, target: { text: "Sender" } }, on).ask).toBe(false);

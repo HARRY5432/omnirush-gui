@@ -51,11 +51,11 @@ export function readAncestors(options?: { pid?: number; platform?: string; limit
 export function nestedAgent(options?: { env?: Record<string, string | undefined>; ancestors?: ProcessInfo[] }): boolean;
 
 export const RISKY_WORDS: readonly string[];
-export function riskyWords(value: unknown): string[];
+export function riskyWords(value: unknown, from?: "screen" | "intent"): string[];
 export function looksLikeCredential(value: unknown): boolean;
 export const ASK_SEND_DELETE: boolean;
 
-export type AskReasonCode = "careful" | "risky_intent" | "risky_target" | "secure_field" | "credential_text" | "credential_intent" | "other_window" | "risky_page" | "send_delete_target" | "delete_chord";
+export type AskReasonCode = "careful" | "risky_intent" | "risky_target" | "secure_field" | "credential_text" | "credential_intent" | "other_window" | "risky_page" | "send_delete_target" | "delete_chord" | "send_after_typing";
 export type ApprovalInput = {
   mode?: PermissionMode | string;
   action?: Action | Record<string, unknown>;
@@ -63,6 +63,8 @@ export type ApprovalInput = {
   target?: { text?: string; secure?: boolean };
   window?: { id?: string | number; app_id?: string; title?: string };
   approved?: { window_id?: string | number; app_id?: string };
+  /** The agent's previous act in this window typed text (and no click or Enter since). */
+  typed_before?: boolean;
 };
 export function actApproval(input?: ApprovalInput, options?: { sendDelete?: boolean }): { ask: boolean; reasons: Array<{ code: AskReasonCode; detail?: string }> };
 export const ASK_REASONS: Readonly<Record<AskReasonCode, string>>;

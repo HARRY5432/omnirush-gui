@@ -268,14 +268,20 @@ const BENIGN = /\b(in\s+order\s+(to|for)|sort\s+order|order\s+by|ordered\s+list|
 const AMOUNT = /[$€£₹¥]\s?\d|\b\d[\d,.]*\s?(usd|eur|gbp|inr|jpy|dollars?|euros?|rupees?|pounds?)\b/i;
 const MOVES_MONEY = /\b(send|transfer|give|confirm|complete|submit|request|withdraw|deposit|pay|tip|donate)\b/i;
 
-/** The paying/buying/ordering words found in `value` (intent or on-screen text), lower case ("amount": money with a verb that moves it). */
-export function riskyWords(value) {
+/** Words that also name everyday work ("the address book", "transfer the file"): they count in on-screen text and page titles, not in the agent's intent. */
+const SCREEN_ONLY_WORDS = new Set(["book", "book now", "reserve", "rent", "tip", "bid", "place bid", "upgrade", "renew", "transfer"]);
+
+/**
+ * The paying/buying/ordering words found in `value`, lower case ("amount": money with a verb that moves it).
+ * `from`: "screen" (on-screen text, page titles; the default) or "intent" (the agent's own words: SCREEN_ONLY_WORDS left out).
+ */
+export function riskyWords(value, from = "screen") {
   if (typeof value !== "string" || !value) return [];
   const textValue = value.replace(BENIGN, " ");
   const found = new Set();
   const re = new RegExp(RISKY_RE.source, "giu");
   let m;
-  while ((m = re.exec(textValue)) !== null) found.add(m[2].toLowerCase().replace(/\s+/g, " "));
+  while ((m = re.exec(textValue)) !== null) { const word = m[2].toLowerCase().replace(/\s+/g, " "); if (from !== "intent" || !SCREEN_ONLY_WORDS.has(word)) found.add(word); }
   if (AMOUNT.test(textValue) && MOVES_MONEY.test(textValue)) found.add("amount");
   return [...found];
 }
@@ -340,14 +346,16 @@ export function looksLikeCredential(value) {
  *   looks like a credential, or an intent that says so); plus an act outside
  *   the approved window, which a session never does (acts go to the approved
  *   window, other apps need their own open consent). With ASK_SEND_DELETE
- *   (or options.sendDelete) also OS-read send/permanent-delete targets and
- *   the Shift+Delete / Cmd+Backspace chords;
+ *   (or options.sendDelete) also OS-read send/permanent-delete targets, the
+ *   Shift+Delete / Cmd+Backspace chords and Enter (or Ctrl/Cmd+Enter) right
+ *   after typing in the window;
  * - auto: never.
  * In every mode the open-session consent, the deny list, hit-testing, the
  * indicator and Stop still apply.
  * `input`: { mode, action, intent, target: { text, secure }, window: { id,
- * app_id, title }, approved: { window_id, app_id } } (target.text undefined:
- * the host reads no text there). `options`: { sendDelete }.
+ * app_id, title }, approved: { window_id, app_id }, typed_before } (target.text
+ * undefined: the host reads no text there; typed_before: the agent's last act
+ * in this window typed text). `options`: { sendDelete }.
  * Returns { ask, reasons: [{ code, detail? }] }.
  */
 export function actApproval(input = {}, options = {}) {
@@ -361,7 +369,7 @@ export function actApproval(input = {}, options = {}) {
   const window = isRecord(input.window) ? input.window : null;
   const key = action.type === "key" ? String(action.key ?? "").toLowerCase() : "";
   const mods = new Set(Array.isArray(action.modifiers) ? action.modifiers : []);
-  const intentWords = riskyWords(input.intent);
+  const intentWords = riskyWords(input.intent, "intent");
   if (intentWords.length) reasons.push({ code: "risky_intent", detail: intentWords.join(", ") });
   // Clicks, and Enter or Space on the focused control (no modifiers).
   const presses = ["click", "double_click", "right_click", "drag"].includes(action.type) || ((key === "enter" || key === "space") && mods.size === 0);
@@ -373,6 +381,8 @@ export function actApproval(input = {}, options = {}) {
     if (sendDelete && typeof target.text === "string" && (SEND_TARGET.test(target.text) || DELETE_TARGET.test(target.text))) reasons.push({ code: "send_delete_target", detail: target.text.slice(0, 80) });
   }
   if (sendDelete && action.type === "key" && ((mods.has("shift") && key === "delete") || (mods.has("meta") && (key === "backspace" || key === "delete")))) reasons.push({ code: "delete_chord" });
+  // Enter (or Ctrl/Cmd+Enter) right after the agent typed in this window sends a chat message or an e-mail.
+  if (sendDelete && key === "enter" && input.typed_before === true && [...mods].every((m) => m === "ctrl" || m === "meta")) reasons.push({ code: "send_after_typing" });
   if (action.type === "type") {
     if (target.secure === true) reasons.push({ code: "secure_field" });
     if (looksLikeCredential(action.text)) reasons.push({ code: "credential_text" });
@@ -391,6 +401,7 @@ export const ASK_REASONS = Object.freeze({
   risky_page: "The page looks like a checkout or payment page",
   send_delete_target: "The target looks like a button that sends, posts or deletes for good",
   delete_chord: "The shortcut deletes for good.",
+  send_after_typing: "It would press Enter right after typing, which may send what was typed.",
   secure_field: "It would type into a password field.",
   credential_text: "The text looks like a password or key.",
   credential_intent: "The agent says it is typing a password, code or key.",
