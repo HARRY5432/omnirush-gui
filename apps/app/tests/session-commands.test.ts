@@ -195,8 +195,27 @@ describe("chatUndoKey", () => {
     expect(chatUndoKey(key({ metaKey: true, target: { tagName: "TEXTAREA", isContentEditable: false, textContent: "" } }), true)).toBeNull();
     expect(chatUndoKey(key({ metaKey: true, target: { tagName: "DIV", isContentEditable: true, textContent: "draft" } }), true)).toBeNull();
     expect(chatUndoKey(key({ metaKey: true, target: { tagName: "DIV", isContentEditable: true, textContent: "  " } }), true)).toBeNull();
-    expect(chatUndoKey(key({ metaKey: true, target: { tagName: "BUTTON", isContentEditable: false, textContent: "Send", closest: () => null } }), true)).toBe("undo");
-    const inEditor = { tagName: "DIV", isContentEditable: false, textContent: "", closest: (selector: string) => (selector.includes(".monaco-editor") ? {} : null) };
+    const inChat = (selector: string) => (selector === "[data-session-pane]" ? {} : null);
+    expect(chatUndoKey(key({ metaKey: true, target: { tagName: "BUTTON", isContentEditable: false, textContent: "Send", closest: inChat } }), true)).toBe("undo");
+    const inEditor = { tagName: "DIV", isContentEditable: false, textContent: "", closest: (selector: string) => (selector.includes(".monaco-editor") || selector === "[data-session-pane]" ? {} : null) };
     expect(chatUndoKey(key({ ctrlKey: true, target: inEditor }), false)).toBeNull();
+  });
+
+  test("only with focus in the chat: the IDE's file tree, tabs and lists keep the key", () => {
+    const outsideChat = { tagName: "BUTTON", isContentEditable: false, closest: () => null };
+    expect(chatUndoKey(key({ metaKey: true, target: outsideChat }), true)).toBeNull();
+    const noClosest = { tagName: "DIV", isContentEditable: false };
+    expect(chatUndoKey(key({ metaKey: true, target: noClosest }), true)).toBeNull();
+    // Nothing focused: the chat's in the Chat layout, nobody's while the code editor is on screen.
+    const body = (editor: boolean) => ({ tagName: "BODY", isContentEditable: false, ownerDocument: { querySelector: () => (editor ? {} : null) } });
+    expect(chatUndoKey(key({ metaKey: true, target: body(false) }), true)).toBe("undo");
+    expect(chatUndoKey(key({ metaKey: true, target: body(true) }), true)).toBeNull();
+  });
+
+  test("a held key undoes one turn, not one per auto-repeat", () => {
+    const inChat = { tagName: "BUTTON", isContentEditable: false, closest: (selector: string) => (selector === "[data-session-pane]" ? {} : null) };
+    expect(chatUndoKey(key({ metaKey: true, target: inChat }), true)).toBe("undo");
+    expect(chatUndoKey({ ...key({ metaKey: true, target: inChat }), repeat: true }, true)).toBeNull();
+    expect(chatUndoKey({ ...key({ metaKey: true, shiftKey: true, target: inChat }), repeat: true }, true)).toBeNull();
   });
 });
