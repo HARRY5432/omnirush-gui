@@ -752,20 +752,21 @@ export class EnginePool {
         if (!response.ok) throw new Error(`status ${response.status}`);
         const payload: unknown = await response.json();
         if (!isRecord(payload)) throw new Error("unreadable status");
-        for (const [sessionId, status] of Object.entries(payload)) {
-          if (!isRecord(status) || status.type === "idle") continue;
-          if (!this.sessionParents.has(sessionId)) {
-            const info = new URL(`/session/${encodeURIComponent(sessionId)}`, generation.handle.url);
-            info.searchParams.set("directory", directory);
-            const answer = await loopbackFetch(info.toString(), { headers, signal: AbortSignal.timeout(5_000) });
-            if (!answer.ok) throw new Error(`session ${answer.status}`);
-            const session: unknown = await answer.json();
-            if (!isRecord(session)) throw new Error("unreadable session");
-            this.sessionParents.set(sessionId, typeof session.parentID === "string" && session.parentID ? session.parentID : null);
-            if (this.sessionParents.size > 4096) this.sessionParents.delete(this.sessionParents.keys().next().value!);
-          }
-          if (this.sessionParents.get(sessionId) === null) chats.add(sessionId);
-        }
+        const busy = Object.entries(payload).filter(([, status]) => isRecord(status) && status.type !== "idle").map(([sessionId]) => sessionId);
+        // Parents not known yet, read together (at most 32; more: unknown, so no chat is named).
+        const unread = busy.filter((sessionId) => !this.sessionParents.has(sessionId));
+        if (unread.length > 32) throw new Error("too many sessions to read");
+        await Promise.all(unread.map(async (sessionId) => {
+          const info = new URL(`/session/${encodeURIComponent(sessionId)}`, generation.handle.url);
+          info.searchParams.set("directory", directory);
+          const answer = await loopbackFetch(info.toString(), { headers, signal: AbortSignal.timeout(5_000) });
+          if (!answer.ok) throw new Error(`session ${answer.status}`);
+          const session: unknown = await answer.json();
+          if (!isRecord(session)) throw new Error("unreadable session");
+          this.sessionParents.set(sessionId, typeof session.parentID === "string" && session.parentID ? session.parentID : null);
+          if (this.sessionParents.size > 4096) this.sessionParents.delete(this.sessionParents.keys().next().value!);
+        }));
+        for (const sessionId of busy) if (this.sessionParents.get(sessionId) === null) chats.add(sessionId);
       } catch {
         unknown += 1;
       }
