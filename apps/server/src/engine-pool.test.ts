@@ -13,6 +13,7 @@ import {
   setEnginePoolForConfig,
   type EnginePoolHooks,
   type EngineSpawnTemplate,
+  rootChats,
 } from "./engine-pool.js";
 import { createManagedOpencodeServer, type ManagedOpencodeServer } from "./managed-opencode.js";
 import { proxyOpencodeRequest, startServer } from "./server.js";
@@ -100,6 +101,13 @@ async function writeFakeEngineBin(root: string): Promise<string> {
     "    if (url.pathname === '/session/status') {",
     "      const entries = busySessions(server.port, url.searchParams.get('directory')).map((id) => [id, { type: 'busy' }]);",
     "      return Response.json(Object.fromEntries(entries));",
+    "    }",
+    "    if (/^\\/session\\/[^/]+$/.test(url.pathname) && request.method === 'GET') {",
+    "      let parents = {};",
+    "      try { parents = JSON.parse(readFileSync(statePath, 'utf8')).__parents ?? {}; } catch {}",
+    "      const id = decodeURIComponent(url.pathname.slice('/session/'.length));",
+    "      if (!(id in parents)) return new Response('not found', { status: 404 });",
+    "      return Response.json({ id, ...(parents[id] ? { parentID: parents[id] } : {}) });",
     "    }",
     "    if (url.pathname === '/permission') {",
     "      const owner = Number(url.searchParams.get('owner') ?? 0);",
@@ -564,6 +572,36 @@ describe("engine pool", () => {
     expect(await waitUntil(async () => pool.snapshot().generations.length === 1, 5_000)).toBe(true);
     expect(pool.snapshot().generations[0]?.role).toBe("primary");
     expect(await fixture.logLines()).toContain(`${oldPort} SIGTERM`);
+  });
+
+  test("activeChats: busy sessions count as their root chat; an unreadable session leaves the answer unknown", async () => {
+    const fixture = await createFixture();
+    const { pool, primary } = await createPool(fixture);
+    const port = portOf(primary.url);
+    const setParents = async (parents: Record<string, string | null>) => {
+      const state = JSON.parse(await readFile(fixture.statePath, "utf8").catch(() => "{}")) as Record<string, unknown>;
+      state.__parents = parents;
+      await writeFile(fixture.statePath, JSON.stringify(state));
+    };
+    await setParents({ ses_root: null, ses_sub: "ses_root", ses_subsub: "ses_sub", ses_other: null });
+    // A background sub-agent (two levels down) whose chat is not busy itself: that chat runs.
+    await fixture.setBusyForDirectory(port, "/dir-a", ["ses_subsub"]);
+    expect(await pool.activeChats(["/dir-a"])).toEqual({ sessions: ["ses_root"], unknown: 0 });
+    // The chat and its sub-agent: one chat. Another chat too: two.
+    await fixture.setBusyForDirectory(port, "/dir-a", ["ses_root", "ses_sub"]);
+    expect(await pool.activeChats(["/dir-a"])).toEqual({ sessions: ["ses_root"], unknown: 0 });
+    await fixture.setBusyForDirectory(port, "/dir-a", ["ses_sub", "ses_other"]);
+    expect((await pool.activeChats(["/dir-a"])).sessions.sort()).toEqual(["ses_other", "ses_root"]);
+    // A session the engine cannot describe: unknown (callers then name no chat).
+    await fixture.setBusyForDirectory(port, "/dir-a", ["ses_missing"]);
+    expect((await pool.activeChats(["/dir-a"])).unknown).toBe(1);
+  });
+
+  test("rootChats follows parents to the root and refuses a chain that is too long", async () => {
+    const parents: Record<string, string | null> = { a: null, b: "a", c: "b", x: null };
+    expect((await rootChats(["c", "b", "x"], async (id) => parents[id] ?? null)).sort()).toEqual(["a", "x"]);
+    const loop: Record<string, string> = { p: "q", q: "p" };
+    await expect(rootChats(["p"], async (id) => loop[id] ?? null, 4)).rejects.toThrow("too deep");
   });
 
   test("reports an active draining generation until it retires", async () => {

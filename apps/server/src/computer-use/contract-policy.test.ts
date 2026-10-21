@@ -322,6 +322,12 @@ describe("policy: approvals per permission mode", () => {
     expect(actApproval({ ...plain, mode: "auto", target: { text: "Send" } }, on).ask).toBe(false);
   });
 
+  test("approval_timeout_seconds is capped at 120 s (inside the engine's call timeout)", () => {
+    expect(normalizeLimits({ approval_timeout_seconds: 600 }).approval_timeout_seconds).toBe(120);
+    expect(normalizeLimits({ approval_timeout_seconds: 90 }).approval_timeout_seconds).toBe(90);
+    expect(normalizeLimits({}).approval_timeout_seconds).toBe(120);
+  });
+
   test("Allow for this chat: until the chat ends by default; the server's value is an upper bound", () => {
     expect(DEFAULT_LIMITS.chat_approval_seconds).toBe(0);
     expect(normalizeLimits({ chat_approval_seconds: 1800 }).chat_approval_seconds).toBe(1800);
