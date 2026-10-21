@@ -390,11 +390,14 @@ async function openComputerUseSetupApp() {
   child.unref();
 }
 
-/** The chat permission mode the built-in browser follows, as computer use reads it. */
-function browserPermissionMode() {
+/** The chat permission mode the built-in browser follows, read now as computer use does (else the last poll's). */
+async function browserPermissionMode() {
+  const fresh = await serverFetch("/computer-use/state").catch(() => null);
+  if (fresh) server = fresh;
   return server?.mode ?? "normal";
 }
 
+let browserPolicy = null;
 /**
  * Whether one built-in browser act asks first: the computer use rules
  * (policy.mjs actApproval), reasons with their people-facing text. If the
@@ -402,10 +405,12 @@ function browserPermissionMode() {
  */
 async function browserActApproval(input) {
   try {
-    const { policyModule } = await sharedModules();
-    const decision = policyModule.actApproval(input, { sendDelete: server?.setting?.ask_send_delete === true });
-    return { ask: decision.ask, reasons: decision.reasons.map((reason) => ({ ...reason, text: policyModule.ASK_REASONS[reason.code] ?? null })) };
+    browserPolicy ??= import(shippedModule("policy.mjs"));
+    const policy = await browserPolicy;
+    const decision = policy.actApproval(input, { sendDelete: server?.setting?.ask_send_delete === true });
+    return { ask: decision.ask, reasons: decision.reasons.map((reason) => ({ ...reason, text: policy.ASK_REASONS[reason.code] ?? null })) };
   } catch {
+    browserPolicy = null;
     return { ask: true, reasons: [] };
   }
 }

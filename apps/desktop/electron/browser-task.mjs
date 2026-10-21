@@ -29,7 +29,14 @@ function safeUrl(value) {
 
 // Runs in Electron's isolated world. It has DOM access but no page globals,
 // Node, IPC, browser profile or network tools. References never enter page DOM.
-function observePage(id) {
+export function observePage(id) {
+  // A control's visible name. Button-like inputs show their value, image
+  // buttons and icon buttons their alt text, others only a tooltip; text
+  // fields never contribute what was typed into them.
+  const controlName = (element) => {
+    const buttonValue = element instanceof HTMLInputElement && ["submit", "button", "reset", "image"].includes(element.type) ? element.value || element.alt : "";
+    return (element.getAttribute("aria-label") || (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement ? element.labels?.[0]?.innerText : "") || element.innerText || buttonValue || element.getAttribute("alt") || element.querySelector("img[alt]")?.getAttribute("alt") || element.getAttribute("title") || element.getAttribute("placeholder") || element.getAttribute("name") || "").trim().slice(0, 200);
+  };
   const key = "__omnirushBrowserObservation";
   globalThis[key]?.observer?.disconnect();
   const nodes = new Map();
@@ -43,15 +50,16 @@ function observePage(id) {
     if (!rect.width || !rect.height || style.visibility === "hidden" || style.display === "none") continue;
     const ref = `e${elements.length + 1}`;
     const password = element.matches('input[type="password"],input[autocomplete="one-time-code"]');
-    const label = element.getAttribute("aria-label") || (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement ? element.labels?.[0]?.innerText : "") || element.innerText || element.getAttribute("placeholder") || element.getAttribute("name") || "";
+    const label = controlName(element);
     nodes.set(ref, element);
-    elements.push({ ref, tag: element.tagName.toLowerCase(), role: element.getAttribute("role"), name: label.trim().slice(0, 200), disabled: element.hasAttribute("disabled"), sensitive: password, bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } });
+    elements.push({ ref, tag: element.tagName.toLowerCase(), role: element.getAttribute("role"), name: label, disabled: element.hasAttribute("disabled"), sensitive: password, bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } });
   }
   const observation = { id, nodes, changed: false, observer: null, width: innerWidth, height: innerHeight, x: scrollX, y: scrollY };
   observation.observer = new MutationObserver(() => { observation.changed = true; });
   observation.observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
   globalThis[key] = observation;
-  return { title: document.title.slice(0, 300), text: (document.body?.innerText || "").slice(0, 16000), elements,
+  const focused = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? controlName(document.activeElement) : "";
+  return { title: document.title.slice(0, 300), focusedName: focused, text: (document.body?.innerText || "").slice(0, 16000), elements,
     viewport: { width: innerWidth, height: innerHeight }, hasPasswordField: [...document.querySelectorAll('input[type="password"],input[autocomplete="one-time-code"]')].some((element) => { const rect = element.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; }),
     webmcp: "modelContext" in document ? "available" : "check_site_tools",
     limitations: ["DOM references cover the top document and open controls; use a fresh image for frames or canvas."] };
@@ -112,14 +120,17 @@ const BROWSER_KEYS = { Enter: "enter", Space: "space", Tab: "tab", Escape: "esca
  * title, as on hosts that read no text at the target.
  */
 export function browserActInput(mode, action, observed) {
-  const element = action.ref ? observed.elements.find((item) => item.ref === action.ref) : null;
+  // Keys go to the focused control and scrolls press nothing: a ref on them is ignored.
+  const element = action.ref && (action.type === "click" || action.type === "fill") ? observed.elements.find((item) => item.ref === action.ref) : null;
+  const focused = action.type === "key" && (action.key === "Enter" || action.key === "Space") && observed.focusedName ? { text: observed.focusedName } : {};
   const act = action.type === "fill" ? { type: "type", text: action.text }
     : action.type === "key" ? { type: "key", key: BROWSER_KEYS[action.key] ?? String(action.key ?? "").toLowerCase() }
       : { type: action.type };
   return {
     mode,
     action: act,
-    target: element ? { text: element.name, secure: element.sensitive === true } : {},
+    // No readable name (icon-only control): no text, so the page title decides, as on hosts that read none.
+    target: element ? { text: element.name || undefined, secure: element.sensitive === true } : focused,
     window: { title: observed.title ?? "" },
   };
 }
@@ -299,7 +310,7 @@ export function createBrowserTaskHost({ getTab, tabsFor, ownerOf, activeFor, isV
     if (!await allowed(url)) fail("website_blocked", "Your organization does not allow this website.");
     if (revision !== tab.webMcpRevision || url !== tab.view.webContents.getURL()) fail("page_changed", "The page changed during observation. Observe again.");
     signal.throwIfAborted();
-    state.observation = { id, at: Date.now(), revision, url, title: page.title, viewport: page.viewport, elements: page.elements, digest };
+    state.observation = { id, at: Date.now(), revision, url, title: page.title, focusedName: page.focusedName, viewport: page.viewport, elements: page.elements, digest };
     return { ok: true, tabId: tab.tabId, observationId: id, url: safeUrl(url), trust: TRUST, ...page, ...(image ? { image } : {}) };
   }
   /**
@@ -432,15 +443,23 @@ export function createBrowserTaskHost({ getTab, tabsFor, ownerOf, activeFor, isV
         if (action.type === "fill") await contents.insertText(action.text);
         if (action.type === "click") {
           // sendInputEvent targets the main widget, not an OOPIF's widget.
-          // Chromium's input router hit-tests these already-approved CSS pixels.
+          // Chromium's input router hit-tests these checked CSS pixels.
           const cdp = contents.debugger;
-          const attached = !cdp.isAttached();
-          if (attached) cdp.attach("1.3");
+          // The panel's background-tab emulation shares this debugger: attach only
+          // when nobody has, and leave it attached if the tab went to the
+          // background meanwhile (the emulation now owns it).
+          let attached = false;
+          if (!cdp.isAttached()) {
+            try { cdp.attach("1.3"); attached = true; }
+            catch (error) { if (!cdp.isAttached()) throw error; }
+          }
           try {
             await cdp.sendCommand("Input.dispatchMouseEvent", { type: "mousePressed", x: point.x, y: point.y, button: "left", clickCount: 1 });
             await cdp.sendCommand("Input.dispatchMouseEvent", { type: "mouseReleased", x: point.x, y: point.y, button: "left", clickCount: 1 });
           } finally {
-            if (attached && cdp.isAttached()) cdp.detach();
+            if (attached && !tab.background && !contents.isDestroyed() && cdp.isAttached()) {
+              try { cdp.detach(); } catch { /* already detached */ }
+            }
           }
         }
         if (action.type === "key") { contents.sendInputEvent({ type: "keyDown", keyCode: keys[action.key] }); contents.sendInputEvent({ type: "keyUp", keyCode: keys[action.key] }); }

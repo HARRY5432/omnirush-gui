@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { browserActInput, createBrowserTaskHost } from "./browser-task.mjs";
+import { browserActInput, createBrowserTaskHost, observePage } from "./browser-task.mjs";
 import { actApproval, ASK_REASONS } from "../../server/src/computer-use/shared/policy.mjs";
 
 const PAGE_URL = "https://shop.example.com/cart";
@@ -176,4 +176,85 @@ test("browser acts map onto the computer use act shape", () => {
   });
   assert.deepEqual(browserActInput("normal", { type: "key", key: "Space" }, observed).action, { type: "key", key: "space" });
   assert.deepEqual(browserActInput("normal", { type: "click", x: 1, y: 2 }, observed).target, {});
+});
+
+test("Normal: an icon-only control on a checkout page asks (no name: the page title decides)", async () => {
+  const icon = [{ ref: "e1", tag: "button", role: null, name: "", disabled: false, sensitive: false, bounds: { x: 0, y: 0, width: 20, height: 20 } }];
+  const checkout = hostFor({ mode: "normal", visible: true, elements: icon, title: "Checkout - Example shop" });
+  const result = await checkout.act({ type: "click", ref: "e1" });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(checkout.asked.length, 1);
+  assert.match(checkout.asked[0].detail, /checkout or payment page/);
+
+  const plain = hostFor({ mode: "normal", visible: false, elements: icon, title: "Docs" });
+  assert.equal((await plain.act({ type: "click", ref: "e1" })).ok, true);
+  assert.equal(plain.asked.length, 0);
+});
+
+test("Normal: Enter on a focused order button asks; a ref on a key press is ignored", async () => {
+  const observed = { title: "Shop", focusedName: "Place order", elements: BUTTONS };
+  assert.deepEqual(browserActInput("normal", { type: "key", key: "Enter", ref: "e1" }, observed).target, { text: "Place order" });
+  assert.deepEqual(browserActInput("normal", { type: "scroll", ref: "e2", x: 1, y: 1, deltaY: 10 }, observed).target, {});
+  assert.equal(actApproval(browserActInput("normal", { type: "key", key: "Enter" }, observed)).ask, true);
+  assert.equal(actApproval(browserActInput("normal", { type: "key", key: "Enter" }, { ...observed, focusedName: "Next page" })).ask, false);
+});
+
+// A small DOM for observePage: just what it reads.
+function fakeDom(build) {
+  class HTMLElement {
+    constructor(tag, { attrs = {}, text = "", children = [] } = {}) {
+      this.tagName = tag.toUpperCase(); this.attrs = attrs; this.innerText = text; this.children = children; this.labels = [];
+    }
+    getAttribute(name) { return this.attrs[name] ?? null; }
+    hasAttribute(name) { return name in this.attrs; }
+    matches(selector) { return selector.includes('type="password"') && this.attrs.type === "password"; }
+    querySelector(selector) { return selector === "img[alt]" ? this.children.find((child) => child.tagName === "IMG" && child.hasAttribute("alt")) ?? null : null; }
+    getBoundingClientRect() { return { x: 1, y: 1, width: 10, height: 10 }; }
+  }
+  class HTMLInputElement extends HTMLElement {
+    constructor(attrs) { super("input", { attrs }); this.type = attrs.type ?? "text"; this.value = attrs.value ?? ""; this.alt = attrs.alt ?? ""; }
+  }
+  class HTMLTextAreaElement extends HTMLElement {}
+  class HTMLSelectElement extends HTMLElement {}
+  const saved = {};
+  const globals = { HTMLElement, HTMLInputElement, HTMLTextAreaElement, HTMLSelectElement,
+    getComputedStyle: () => ({ visibility: "visible", display: "block" }),
+    MutationObserver: class { observe() {} disconnect() {} }, innerWidth: 800, innerHeight: 600, scrollX: 0, scrollY: 0 };
+  for (const [name, value] of Object.entries(globals)) { saved[name] = Object.getOwnPropertyDescriptor(globalThis, name); Object.defineProperty(globalThis, name, { value, configurable: true, writable: true }); }
+  const { controls, focused } = build({ HTMLElement, HTMLInputElement });
+  const body = new HTMLElement("body");
+  saved.document = Object.getOwnPropertyDescriptor(globalThis, "document");
+  Object.defineProperty(globalThis, "document", { configurable: true, writable: true, value: {
+    title: "Shop", body, activeElement: focused ?? body,
+    querySelectorAll: () => controls,
+  } });
+  return () => {
+    for (const [name, descriptor] of Object.entries(saved)) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+      else delete globalThis[name];
+    }
+    delete globalThis.__omnirushBrowserObservation;
+  };
+}
+
+test("observed names include button values, alt text and tooltips, never typed field values", () => {
+  let restore;
+  try {
+    restore = fakeDom(({ HTMLElement, HTMLInputElement }) => {
+      const submit = new HTMLInputElement({ type: "submit", value: "Place order" });
+      const image = new HTMLInputElement({ type: "image", alt: "Pay now" });
+      const iconButton = new HTMLElement("button", { children: [new HTMLElement("img", { attrs: { alt: "Buy now" } })] });
+      const tooltip = new HTMLElement("button", { attrs: { title: "Checkout" } });
+      const field = new HTMLInputElement({ type: "text", value: "my secret draft", placeholder: "Search" });
+      return { controls: [submit, image, iconButton, tooltip, field], focused: submit };
+    });
+    const page = observePage("obs-1");
+    assert.deepEqual(page.elements.map((item) => item.name), ["Place order", "Pay now", "Buy now", "Checkout", "Search"]);
+    assert.equal(page.focusedName, "Place order");
+    for (const ref of ["e1", "e2", "e3"]) {
+      assert.equal(actApproval(browserActInput("normal", { type: "click", ref }, { title: "Shop", elements: page.elements })).ask, true, ref);
+    }
+  } finally {
+    restore?.();
+  }
 });
