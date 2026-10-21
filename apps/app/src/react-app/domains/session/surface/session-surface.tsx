@@ -800,14 +800,14 @@ type SessionRunStatusProps = {
 };
 
 /**
- * A readable, sticky explanation of the state behind the composer. The
- * transcript can be scrolled away and the circular action button is too easy
- * to mistake for a loading spinner, so the user should always have a plain
- * language answer to "what is happening and what can I do?" beside the input.
+ * A sticky note behind the composer, shown only when the user has something
+ * to do: a send that may not have been accepted, a question or approval the
+ * agent is waiting on, or a retry after an error. Routine work (thinking,
+ * tools, responding, compacting) shows nothing here; the composer keeps Stop.
  */
 function SessionRunStatus(props: SessionRunStatusProps) {
   const [stopPending, setStopPending] = useState(false);
-  if (!props.busy && !props.preparing && !props.acceptanceUnknown && props.activityStatus !== "waiting" && props.activityStatus !== "compacting") {
+  if (!props.acceptanceUnknown && props.activityStatus !== "waiting" && !(props.busy && props.retryMessage)) {
     return null;
   }
 
