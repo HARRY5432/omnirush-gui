@@ -23,9 +23,9 @@ import {
 import {
   actApproval,
   ASK_REASONS,
+  ASK_SEND_DELETE,
   computerUseSetting,
   deniedApp,
-  documentOf,
   looksLikeCredential,
   modelAllowed,
   nestedAgent,
@@ -226,6 +226,14 @@ describe("policy: approvals per permission mode", () => {
     ["checkout target, Enter", { action: { type: "key", key: "Enter" }, target: { text: "Checkout" } }, ["risky_target"]],
     ["subscribe target", { target: { text: "Subscribe for $9.99/month" } }, ["risky_target"]],
     ["donate intent", { intent: "Donate 5 dollars" }, ["risky_intent"]],
+    ["transfer intent", { intent: "Transfer $500 to savings" }, ["risky_intent"]],
+    ["send money target", { target: { text: "Send $20" } }, ["risky_target"]],
+    ["reorder target", { target: { text: "Reorder" } }, ["risky_target"]],
+    ["book now target", { target: { text: "Book now" } }, ["risky_target"]],
+    ["add funds target", { target: { text: "Add funds" } }, ["risky_target"]],
+    ["Space on a focused pay button", { action: { type: "key", key: "Space" }, target: { text: "Pay" } }, ["risky_target"]],
+    ["no text at the point, checkout page (X11)", { target: {}, window: { ...window, title: "Checkout - Example Shop" } }, ["risky_page"]],
+    ["no text at the point, cart page, Enter (X11)", { action: { type: "key", key: "Enter" }, target: {}, window: { ...window, title: "Your cart" } }, ["risky_page"]],
     // (b) typing a password: secure field, credential text, or an intent that says so.
     ["secure field", { action: { type: "type", text: "hunter22" }, target: { secure: true } }, ["secure_field"]],
     ["credential text", { action: { type: "type", text: "ghp_" + "a1B2".repeat(9) } }, ["credential_text"]],
@@ -249,6 +257,11 @@ describe("policy: approvals per permission mode", () => {
     ["after takeover", { after_takeover: true }, []],
     ["sort order", { intent: "Sort in order to find the row" }, []],
     ["order history", { target: { text: "Order history" } }, []],
+    ["price next to a plain button", { target: { text: "Add to cart $19.99" } }, []],
+    ["no text at the point, mail page (X11)", { target: {}, window: { ...window, title: "Inbox - Mail" } }, []],
+    ["send target (switch off)", { target: { text: "Send" } }, []],
+    ["empty trash target (switch off)", { target: { text: "Empty Trash" } }, []],
+    ["shift+delete (switch off)", { action: { type: "key", key: "Delete", modifiers: ["shift"] } }, []],
     ["plain typing", { action: { type: "type", text: "Meeting notes for Tuesday" }, intent: "Type the notes" }, []],
     ["move over a pay button", { action: { type: "move", x: 1, y: 1 }, target: { text: "Pay" } }, []],
     // Kept: an act outside the approved window (a session never sends one).
@@ -268,15 +281,29 @@ describe("policy: approvals per permission mode", () => {
     expect(riskyWords("uninstall the plugin then post a reply")).toEqual([]);
     expect(riskyWords("buy the plan, then place order")).toEqual(["buy", "place order"]);
     expect(riskyWords("track my order")).toEqual([]);
+    expect(riskyWords("Send $20 to Bob")).toEqual(["amount"]);
+    expect(riskyWords("Transfer 500 EUR")).toEqual(["transfer", "amount"]);
     expect(actApproval({ ...plain, intent: "Buy it" }).reasons[0]).toEqual({ code: "risky_intent", detail: "buy" });
     for (const code of ["careful", "risky_intent", "risky_target", "secure_field", "credential_text", "credential_intent", "other_window"]) expect(typeof ASK_REASONS[code as keyof typeof ASK_REASONS]).toBe("string");
-    expect(Object.keys(ASK_REASONS).sort()).toEqual(["careful", "credential_intent", "credential_text", "other_window", "risky_intent", "risky_target", "secure_field"]);
+    expect(Object.keys(ASK_REASONS).sort()).toEqual(["careful", "credential_intent", "credential_text", "delete_chord", "other_window", "risky_intent", "risky_page", "risky_target", "secure_field", "send_delete_target"]);
     expect(looksLikeCredential("AKIAABCDEFGHIJKLMNOP")).toBe(true);
     expect(looksLikeCredential("password=Sup3rS3cret!")).toBe(true);
     expect(looksLikeCredential("Xk9#mP2$vL7qR4@nT8wZ")).toBe(true);
     expect(looksLikeCredential("https://example.com/some/long/path?q=1")).toBe(false);
     expect(looksLikeCredential("the quick brown fox jumps")).toBe(false);
-    expect(documentOf("● main.ts - Code", "Code")).toBe("main.ts");
+  });
+
+  test("the send/delete switch (off by default): OS-read send and permanent-delete targets and delete chords ask; intents never", () => {
+    expect(ASK_SEND_DELETE).toBe(false);
+    const on = { sendDelete: true };
+    for (const text of ["Send", "Post", "Publish", "Forward", "Reply all", "Delete permanently", "Empty Trash", "Delete account"]) expect(actApproval({ ...plain, target: { text } }, on).reasons.map((r) => r.code)).toEqual(["send_delete_target"]);
+    expect(actApproval({ ...plain, action: { type: "key", key: "Enter" }, target: { text: "Send" } }, on).ask).toBe(true);
+    for (const chord of [{ key: "Delete", modifiers: ["shift"] }, { key: "Backspace", modifiers: ["meta"] }]) expect(actApproval({ ...plain, action: { type: "key", ...chord } }, on).reasons).toEqual([{ code: "delete_chord" }]);
+    expect(actApproval({ ...plain, intent: "Send the email and delete the draft" }, on).ask).toBe(false);
+    expect(actApproval({ ...plain, target: {} }, on).ask).toBe(false);
+    expect(actApproval({ ...plain, target: { text: "Move to Trash" } }, on).ask).toBe(false);
+    expect(actApproval({ ...plain, target: { text: "Sender" } }, on).ask).toBe(false);
+    expect(actApproval({ ...plain, mode: "auto", target: { text: "Send" } }, on).ask).toBe(false);
   });
 
   test("Allow for this chat: until the chat ends by default; the server's value is an upper bound", () => {

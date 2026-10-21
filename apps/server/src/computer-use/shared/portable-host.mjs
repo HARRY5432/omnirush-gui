@@ -311,21 +311,8 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     return mcpResult(observeResult({ session_id: s.id, observation: obs.ref, window: windowRef(w), screen: s.screen, scale: w.bounds.width / obs.model.width, dpi: w.dpi, monitor_id: w.monitor, cursor: await native.call("cursor").catch(() => null), os, expires_in_ms: l.observation_ttl_seconds * 1000, actions_left: Math.max(0, l.actions_per_session - s.actions), seconds_left: Math.max(0, Math.ceil((s.expiresAt - Date.now()) / 1000)) }), includeImage ? { data: obs.bytes, mime: obs.mime } : null);
   }
 
-  /** The on-screen text at (or within 24 px of) the action's point, and whether it is in a secure field. Unknown text: undefined. */
-  /** Whether the control the last click focused (this window) is a secure field: { secure: true } or {}. */
-  async function focusedTarget(observed, current, s) {
-    const f = s?.focusPoint;
-    if (!f || f.window !== String(current.id)) return {};
-    const mx = ((f.screen.x - current.bounds.x) * observed.model.width) / current.bounds.width, my = ((f.screen.y - current.bounds.y) * observed.model.height) / current.bounds.height;
-    if ((observed.secureFields ?? []).some((r) => mx >= r.x && mx <= r.x + r.width && my >= r.y && my <= r.y + r.height)) return { secure: true };
-    const answer = await native.call("target", { points: [f.screen] }).catch(() => null);
-    return Array.isArray(answer?.targets) && answer.targets[0]?.protected ? { secure: true } : {};
-  }
-
-  async function targetAt(observed, action, current, s) {
-    const p = action.type === "drag" ? action.path.at(-1) : action.x !== undefined ? { x: action.x, y: action.y } : null;
-    // Typing has no point: it goes to the control the last click in this window focused.
-    if (!p) return action.type === "type" ? focusedTarget(observed, current, s) : {};
+  /** The on-screen text at (or within 24 px of) a point of the image, and whether it is in a secure field. Unknown text: undefined. */
+  async function targetAtPoint(observed, current, p) {
     const inside = (r, pad) => p.x >= r.x - pad && p.x <= r.x + r.width + pad && p.y >= r.y - pad && p.y <= r.y + r.height + pad;
     let secure = (observed.secureFields ?? []).some((r) => inside(r, 0));
     if (!observed.texts) {
@@ -338,6 +325,21 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     }
     const near = observed.texts.filter((t) => inside(t, 24)).sort((a, b) => (inside(a, 0) ? 0 : 1) - (inside(b, 0) ? 0 : 1)).slice(0, 4);
     return { text: near.map((t) => t.text).join(" "), ...(secure ? { secure } : {}) };
+  }
+
+  async function targetAt(observed, action, current, s) {
+    const p = action.type === "drag" ? action.path.at(-1) : action.x !== undefined ? { x: action.x, y: action.y } : null;
+    if (p) return targetAtPoint(observed, current, p);
+    // Typing, Enter and Space have no point: they go to the control the last click in this window focused
+    // (none after a Tab moved the focus: unknown).
+    const key = action.type === "key" ? String(action.key ?? "").toLowerCase() : "";
+    if (action.type !== "type" && key !== "enter" && key !== "space") return {};
+    const f = s?.focusPoint;
+    if (!f || f.window !== String(current.id)) return {};
+    const model = { x: ((f.screen.x - current.bounds.x) * observed.model.width) / current.bounds.width, y: ((f.screen.y - current.bounds.y) * observed.model.height) / current.bounds.height };
+    const found = await targetAtPoint(observed, current, model);
+    // Typing: only whether the field is secure (its label is not what is typed).
+    return action.type === "type" ? (found.secure ? { secure: true } : {}) : found;
   }
 
   async function actTool(s, args) {
@@ -382,7 +384,7 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
       if (compare.stale) return finish({ ...common, ok: false, code: "stale_observation", message: "The window changed since the observation. Observe again.", next: "computer_observe" });
     }
     // Per-action approval by permission mode (host channel, never the engine's).
-    const decision = actApproval({ mode: settings()?.mode, action, intent: args.intent, target: await targetAt(observed, action, current, s), window: { id: String(current.id), app_id: current.appId }, approved: s.approved });
+    const decision = actApproval({ mode: settings()?.mode, action, intent: args.intent, target: await targetAt(observed, action, current, s), window: { id: String(current.id), app_id: current.appId, title: current.title }, approved: s.approved });
     let approval = { asked: false };
     if (decision.ask) {
       // The same action with the same intent, allowed a moment ago (a retry after a fresh observation), is not asked again.
@@ -424,6 +426,7 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     s.lastOperation = Date.now();
     // Typing goes to the control the last click focused: its secure-field check reads this point.
     if (["click", "double_click"].includes(action.type) && mapped.length === 1) s.focusPoint = { window: String(current.id), screen: mapped[0].screen };
+    else if (action.type === "key" && String(action.key).toLowerCase() === "tab") s.focusPoint = null;
     const cursorAfter = await native.call("cursor").catch(() => null);
     const done = { ...common, approval, point, path, cursor_before: cursorBefore, cursor_after: cursorAfter, ok: true, may_have_acted: action.type !== "wait" };
     if (!args.observe_after) return finish({ ...done, next: "computer_observe" });
@@ -491,8 +494,10 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     update();
     const grantKey = `${s.chat ?? ""}\0${preferred.appId}\0${s.mode}`;
     const grant = s.chat ? grants.get(grantKey) : null;
+    // The server's bound now (it may have been lowered since): 0 = until the chat ends.
+    const fresh = grant && (l.chat_approval_seconds === 0 || Date.now() - grant.at < l.chat_approval_seconds * 1000);
     let answer;
-    if (grant && grant.until > Date.now()) answer = { decision: "chat", window_id: String(preferred.id), reused: true };
+    if (fresh) answer = { decision: "chat", window_id: String(preferred.id), reused: true };
     else {
       const pendingAnswer = new Promise((resolve) => { s.pendingApproval = { resolve }; });
       const request = { session_id: s.id, request_id: randomUUID(), app: { app_id: preferred.appId, app_name: preferred.appName, bundle_or_exe: preferred.executable, pid: preferred.pid }, windows: windows.map((w) => ({ id: String(w.id), title: w.title })), window_id: String(preferred.id), mode: s.mode, purpose: s.purpose, os, seconds: l.session_seconds, chat_seconds: l.chat_approval_seconds };
@@ -525,9 +530,10 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
     }
     s.approval = answer.decision;
     // "Allow for this chat": this app, this chat, until the chat ends (chat_approval_seconds 0), or for at most the
-    // server's chat_approval_seconds. Kept in memory only, keyed to the chat: never another chat, never a restart.
-    // A call no chat can be named for gets no grant (it works as "Allow once").
-    if (answer.decision === "chat" && !answer.reused && s.chat) grants.set(grantKey, { until: l.chat_approval_seconds > 0 ? Date.now() + l.chat_approval_seconds * 1000 : Infinity });
+    // server's chat_approval_seconds (checked again at each reuse). Kept in memory only, keyed to the chat: never
+    // another chat, never a restart; the person's Stop and the server's switch clear it. A call no chat can be
+    // named for gets no grant (it works as "Allow once").
+    if (answer.decision === "chat" && !answer.reused && s.chat) grants.set(grantKey, { at: Date.now() });
     s.phase = "working"; s.lastOperation = Date.now();
     s.expiresAt = Date.now() + l.session_seconds * 1000;
     s.approved = { window_id: String(s.window.id), app_id: s.window.appId };
@@ -637,7 +643,7 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
   async function control({ session_id, action }) {
     const s = sessions.get(session_id);
     if (!s) throw new Error("This computer use session has ended.");
-    if (action === "stop") return stop(s, "stopped", "person");
+    if (action === "stop") { grants.clear(); return stop(s, "stopped", "person"); }
     if (action === "takeover") return pause(s, "person", "You took over. Choose Continue when you are ready.");
     if (action === "hide" || action === "show") { s.hidden = action === "hide"; update(); return undefined; }
     if (action !== "continue" || s.phase !== "paused") throw new Error("This action is unavailable.");
@@ -656,6 +662,8 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
 
   /** Ends every session (server switch off, app quitting). */
   async function stopAll(by = "server", event = "stopped") {
+    // Stop by the person or the server: "Allow for this chat" is asked again.
+    if (by === "person" || by === "server") grants.clear();
     for (const s of [...sessions.values()]) await stop(s, event, by);
   }
 

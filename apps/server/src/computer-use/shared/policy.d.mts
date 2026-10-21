@@ -53,18 +53,18 @@ export function nestedAgent(options?: { env?: Record<string, string | undefined>
 export const RISKY_WORDS: readonly string[];
 export function riskyWords(value: unknown): string[];
 export function looksLikeCredential(value: unknown): boolean;
-export function documentOf(title: unknown, appName?: unknown): string;
+export const ASK_SEND_DELETE: boolean;
 
-export type AskReasonCode = "careful" | "risky_intent" | "risky_target" | "secure_field" | "credential_text" | "credential_intent" | "other_window";
+export type AskReasonCode = "careful" | "risky_intent" | "risky_target" | "secure_field" | "credential_text" | "credential_intent" | "other_window" | "risky_page" | "send_delete_target" | "delete_chord";
 export type ApprovalInput = {
   mode?: PermissionMode | string;
   action?: Action | Record<string, unknown>;
   intent?: string;
   target?: { text?: string; secure?: boolean };
-  window?: { id?: string | number; app_id?: string };
+  window?: { id?: string | number; app_id?: string; title?: string };
   approved?: { window_id?: string | number; app_id?: string };
 };
-export function actApproval(input?: ApprovalInput): { ask: boolean; reasons: Array<{ code: AskReasonCode; detail?: string }> };
+export function actApproval(input?: ApprovalInput, options?: { sendDelete?: boolean }): { ask: boolean; reasons: Array<{ code: AskReasonCode; detail?: string }> };
 export const ASK_REASONS: Readonly<Record<AskReasonCode, string>>;
 export const SCREEN_BASH_RULES: Readonly<Record<string, "ask">>;
 export function computerPermissionRules(): Record<string, "allow">;

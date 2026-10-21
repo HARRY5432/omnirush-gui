@@ -258,13 +258,17 @@ export function nestedAgent({ env = process.env, ancestors = [] } = {}) {
  * paying, buying and ordering (money leaving the person's account).
  */
 export const RISKY_WORDS = Object.freeze([
-  "pay", "payment", "pay now", "buy", "buy now", "purchase", "checkout", "check out", "order", "place order", "order now",
-  "subscribe", "donate", "send money", "transfer money", "wire",
+  "pay", "payment", "pay now", "buy", "buy now", "buy again", "purchase", "checkout", "check out", "order", "place order", "order now", "reorder", "1-click",
+  "subscribe", "upgrade", "renew", "donate", "tip", "bid", "place bid", "book", "book now", "reserve", "rent", "top up", "top-up", "add funds",
+  "send money", "transfer", "wire",
 ]);
 const RISKY_RE = new RegExp(`(^|[^\\p{L}\\p{N}])(${[...RISKY_WORDS].sort((a, b) => b.length - a.length).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+")).join("|")})(?=$|[^\\p{L}\\p{N}])`, "iu");
-const BENIGN = /\b(in\s+order\s+(to|for)|sort\s+order|order\s+by|reorder|ordered\s+list|order\s+(history|status|details|number)|track\s+(my\s+|your\s+|the\s+)?order)\b/gi;
+const BENIGN = /\b(in\s+order\s+(to|for)|sort\s+order|order\s+by|ordered\s+list|order\s+(history|status|details|number)|track\s+(my\s+|your\s+|the\s+)?order)\b/gi;
+// An amount of money with a verb that moves it ("Send $20", "Confirm 500 EUR"): paying too.
+const AMOUNT = /[$€£₹¥]\s?\d|\b\d[\d,.]*\s?(usd|eur|gbp|inr|jpy|dollars?|euros?|rupees?|pounds?)\b/i;
+const MOVES_MONEY = /\b(send|transfer|give|confirm|complete|submit|request|withdraw|deposit|pay|tip|donate)\b/i;
 
-/** The paying/buying/ordering words found in `value` (intent or on-screen text), lower case. */
+/** The paying/buying/ordering words found in `value` (intent or on-screen text), lower case ("amount": money with a verb that moves it). */
 export function riskyWords(value) {
   if (typeof value !== "string" || !value) return [];
   const textValue = value.replace(BENIGN, " ");
@@ -272,8 +276,21 @@ export function riskyWords(value) {
   const re = new RegExp(RISKY_RE.source, "giu");
   let m;
   while ((m = re.exec(textValue)) !== null) found.add(m[2].toLowerCase().replace(/\s+/g, " "));
+  if (AMOUNT.test(textValue) && MOVES_MONEY.test(textValue)) found.add("amount");
   return [...found];
 }
+
+/** Window titles (a browser's page title) that say the page takes money: hosts that read no text at the point (X11) ask there. */
+const PAYMENT_PAGE = /\b(cart|basket|billing|payment|checkout|check\s*out)\b/i;
+
+/**
+ * The judge's narrower variant (send and delete), OFF by default: when true, Normal also asks when the text
+ * the OS read at a click/Enter target says Send/Post/Publish/Forward/Reply all or a permanent delete, and on
+ * the Shift+Delete and Cmd+Backspace chords. Only OS-read text counts, never the agent's intent.
+ */
+export const ASK_SEND_DELETE = false;
+const SEND_TARGET = /(^|[^\p{L}\p{N}])(send|post|publish|forward|reply\s+all)(?=$|[^\p{L}\p{N}])/iu;
+const DELETE_TARGET = /\b(delete\s+(permanently|forever|account)|permanently\s+delete|empty\s+(the\s+)?(trash|bin|recycle\s+bin))\b/i;
 
 /** An intent that says the typed text is a password, code or key (hosts that cannot see secure fields, X11). */
 const SECRET_INTENT = /\b(pass(word|code|phrase)s?|pins?|one[-\s]?time\s+(code|password)|otp|2fa|mfa|verification\s+code|security\s+code|secret|api[-\s]?key|access\s+key|token|credentials?|cvv|cvc|card\s+number)\b/i;
@@ -314,49 +331,53 @@ export function looksLikeCredential(value) {
   return classes >= 3 && entropy(word) >= 3.8 && !/^https?:\/\//i.test(word) && !/^[\w.+-]+@[\w-]+\.[\w.]+$/.test(word);
 }
 
-/** A window title without unsaved-change markers and the app name suffix, for "same document" checks. */
-export function documentOf(title, appName) {
-  let t = String(title ?? "").trim().replace(/^[*•●◦]\s*/, "").replace(/\s*[*•●◦]$/, "").replace(/\s+\(modified\)$/i, "");
-  const app = String(appName ?? "").trim();
-  if (app) for (const sep of [" - ", " — ", " – ", " | "]) if (t.toLowerCase().endsWith((sep + app).toLowerCase())) t = t.slice(0, -(sep + app).length);
-  return t.replace(/\s+/g, " ").trim().toLowerCase();
-}
-
 /**
  * Whether one computer_act asks the person first, by permission mode:
  * - careful: every act asks;
- * - normal: only paying, buying or ordering (the intent, or the text at a
- *   click or Enter target) and typing a password (a secure field, text that
+ * - normal: only paying, buying or ordering (the intent, the text at a click
+ *   or Enter/Space target, or, where the host reads no text there, a page
+ *   title that says so) and typing a password (a secure field, text that
  *   looks like a credential, or an intent that says so); plus an act outside
  *   the approved window, which a session never does (acts go to the approved
- *   window, other apps need their own open consent);
+ *   window, other apps need their own open consent). With ASK_SEND_DELETE
+ *   (or options.sendDelete) also OS-read send/permanent-delete targets and
+ *   the Shift+Delete / Cmd+Backspace chords;
  * - auto: never.
  * In every mode the open-session consent, the deny list, hit-testing, the
  * indicator and Stop still apply.
  * `input`: { mode, action, intent, target: { text, secure }, window: { id,
- * app_id }, approved: { window_id, app_id } } (target.text undefined: the
- * host reads no text there).
+ * app_id, title }, approved: { window_id, app_id } } (target.text undefined:
+ * the host reads no text there). `options`: { sendDelete }.
  * Returns { ask, reasons: [{ code, detail? }] }.
  */
-export function actApproval(input = {}) {
+export function actApproval(input = {}, options = {}) {
   const mode = PERMISSION_MODES.includes(input.mode) ? input.mode : "normal";
   if (mode === "auto") return { ask: false, reasons: [] };
   if (mode === "careful") return { ask: true, reasons: [{ code: "careful" }] };
+  const sendDelete = options.sendDelete ?? ASK_SEND_DELETE;
   const reasons = [];
   const action = isRecord(input.action) ? input.action : {};
   const target = isRecord(input.target) ? input.target : {};
+  const window = isRecord(input.window) ? input.window : null;
+  const key = action.type === "key" ? String(action.key ?? "").toLowerCase() : "";
+  const mods = new Set(Array.isArray(action.modifiers) ? action.modifiers : []);
   const intentWords = riskyWords(input.intent);
   if (intentWords.length) reasons.push({ code: "risky_intent", detail: intentWords.join(", ") });
-  if (["click", "double_click", "right_click", "drag"].includes(action.type) || (action.type === "key" && String(action.key).toLowerCase() === "enter")) {
+  // Clicks, and Enter or Space on the focused control (no modifiers).
+  const presses = ["click", "double_click", "right_click", "drag"].includes(action.type) || ((key === "enter" || key === "space") && mods.size === 0);
+  if (presses) {
     const targetWords = riskyWords(target.text);
     if (targetWords.length) reasons.push({ code: "risky_target", detail: targetWords.join(", ") });
+    // No text the host could read there (X11): the page title decides whether this may be a payment page.
+    else if (typeof target.text !== "string" && action.type !== "drag" && window && (riskyWords(window.title).length || PAYMENT_PAGE.test(String(window.title ?? "")))) reasons.push({ code: "risky_page", detail: String(window.title ?? "").slice(0, 120) });
+    if (sendDelete && typeof target.text === "string" && (SEND_TARGET.test(target.text) || DELETE_TARGET.test(target.text))) reasons.push({ code: "send_delete_target", detail: target.text.slice(0, 80) });
   }
+  if (sendDelete && action.type === "key" && ((mods.has("shift") && key === "delete") || (mods.has("meta") && (key === "backspace" || key === "delete")))) reasons.push({ code: "delete_chord" });
   if (action.type === "type") {
     if (target.secure === true) reasons.push({ code: "secure_field" });
     if (looksLikeCredential(action.text)) reasons.push({ code: "credential_text" });
     else if (target.secure !== true && SECRET_INTENT.test(String(input.intent ?? ""))) reasons.push({ code: "credential_intent" });
   }
-  const window = isRecord(input.window) ? input.window : null;
   const approved = isRecord(input.approved) ? input.approved : null;
   if (window && approved && ((approved.app_id && window.app_id && approved.app_id !== window.app_id) || (approved.window_id !== undefined && window.id !== undefined && String(approved.window_id) !== String(window.id)))) reasons.push({ code: "other_window" });
   return { ask: reasons.length > 0, reasons };
@@ -367,6 +388,9 @@ export const ASK_REASONS = Object.freeze({
   careful: "Careful mode asks before every action.",
   risky_intent: "The agent says it will pay, buy or order something",
   risky_target: "The target looks like a button that pays, buys or orders",
+  risky_page: "The page looks like a checkout or payment page",
+  send_delete_target: "The target looks like a button that sends, posts or deletes for good",
+  delete_chord: "The shortcut deletes for good.",
   secure_field: "It would type into a password field.",
   credential_text: "The text looks like a password or key.",
   credential_intent: "The agent says it is typing a password, code or key.",

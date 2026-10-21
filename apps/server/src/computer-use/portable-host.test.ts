@@ -176,6 +176,30 @@ describe("portable host: MCP surface and consent", () => {
       expect(b.opens[0]?.chat_seconds).toBe(600);
       await hb.close();
       shift = 0;
+      // The server lowers its bound after the grant: the next reuse is checked against the new one.
+      const lowered = rig("normal", { decision: "chat" });
+      const hl = await lowered.hostPromise;
+      const cl = hl.connect();
+      const g = await call(cl, "computer_open_session", { app_id: "/usr/bin/gedit", mode: "control", purpose: "Write" });
+      await call(cl, "computer_close_session", { session_id: g.state.session_id });
+      lowered.settings.limits = { chat_approval_seconds: 1800 };
+      shift = 1801_000;
+      await call(cl, "computer_open_session", { app_id: "/usr/bin/gedit", mode: "control", purpose: "Write" });
+      expect(lowered.opens.length).toBe(2);
+      await hl.close();
+      shift = 0;
+      // The person's Stop and the server's switch clear the grant.
+      for (const by of ["person", "server"] as const) {
+        const st = rig("normal", { decision: "chat" });
+        const hs = await st.hostPromise;
+        const cs = hs.connect();
+        const x = await call(cs, "computer_open_session", { app_id: "/usr/bin/gedit", mode: "control", purpose: "Write" });
+        if (by === "person") await hs.control({ session_id: String(x.state.session_id), action: "stop" });
+        else await hs.stopAll("server");
+        await call(cs, "computer_open_session", { app_id: "/usr/bin/gedit", mode: "control", purpose: "Write" });
+        expect(st.opens.length).toBe(2);
+        await hs.close();
+      }
       // Another chat asks again; no chat known: no grant.
       for (const chats of [["ses_1", "ses_2"], [null, null]]) {
         const d = rig("normal", { decision: "chat", chats });
@@ -443,6 +467,24 @@ describe("portable host: the person's own press answers a question", () => {
     expect(await host.physicalInput(1500, { foregroundPid: 4242, rect })).toBe(true);
     r.native.state.pressKey = "y";
     expect(await host.physicalInput(1500, { foregroundPid: 4242, rect })).toBe(false);
+    await host.close();
+  });
+});
+
+describe("portable host: Enter and Space read the focused control; Tab forgets it", () => {
+  test("Enter on a focused pay button asks; after Tab it is unknown and runs", async () => {
+    const r = rig("normal");
+    r.native.state.texts = [{ x: 300, y: 200, width: 80, height: 30, text: "Pay now" }];
+    const { host, c, session, obs } = await opened(r);
+    const click = await call(c, "computer_act", { session_id: session, observation_id: obs.state.observation?.id, request_id: "a", intent: "Focus the button", action: { type: "click", x: 300, y: 200 } });
+    expect(click.state).toMatchObject({ ok: true, approval: { asked: true, reasons: ["risky_target"] } });
+    const enter = await call(c, "computer_act", { session_id: session, observation_id: (click.state.observation as { id: string }).id, request_id: "b", intent: "Press it", action: { type: "key", key: "Enter" } });
+    expect(enter.state).toMatchObject({ ok: true, approval: { asked: true, reasons: ["risky_target"] } });
+    const tab = await call(c, "computer_act", { session_id: session, observation_id: (enter.state.observation as { id: string }).id, request_id: "c", intent: "Next control", action: { type: "key", key: "Tab" } });
+    expect(tab.state).toMatchObject({ ok: true, approval: { asked: false } });
+    const after = await call(c, "computer_act", { session_id: session, observation_id: (tab.state.observation as { id: string }).id, request_id: "d", intent: "Press it", action: { type: "key", key: "Enter" } });
+    expect(after.state).toMatchObject({ ok: true, approval: { asked: false } });
+    expect(r.acts.length).toBe(2);
     await host.close();
   });
 });
