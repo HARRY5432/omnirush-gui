@@ -258,6 +258,7 @@ test("showing the panel sizes the active tab and resets viewport emulation left 
   invoke("omnirush:browser:createTab", "https://example.com");
   assert.equal(onScreen(), null, "a tab created while the panel is hidden stays off screen");
   await flush();
+  assert.equal(invoke("omnirush:browser:state").backgroundWindowCount, 1, "it keeps painting in the hidden host");
 
   invoke("omnirush:browser:show", PANEL_BOUNDS);
   await flush();
@@ -265,7 +266,9 @@ test("showing the panel sizes the active tab and resets viewport emulation left 
   const view = onScreen();
   assert.ok(view, "the active tab is attached to the window");
   assert.deepEqual(view.getBounds(), PANEL_BOUNDS);
-  assert.deepEqual(commands(view), RESET_SEQUENCE);
+  // Leaving the hidden host clears the parked viewport, which is the reset.
+  assert.deepEqual(commands(view), [...BACKGROUND_SEQUENCE, ...FOREGROUND_SEQUENCE]);
+  assert.equal(invoke("omnirush:browser:state").backgroundWindowCount, 0, "the hidden host is released");
   assert.equal(view.webContents.debugger.isAttached(), false, "the temporary debugger session is released");
 });
 
@@ -489,6 +492,9 @@ test("failed navigation rolls back its allocation while another owner's page sur
   await assert.rejects(opening, { code: "browser_operation_failed" });
   invoke("omnirush:browser:setVisibleSession", "A");
   assert.deepEqual(invoke("omnirush:browser:state").tabs, before.tabs);
+  // B's empty panel closed; A's active tab stays live in the hidden host until A's panel shows again.
+  assert.equal(invoke("omnirush:browser:state").backgroundWindowCount, 1);
+  invoke("omnirush:browser:show", PANEL_BOUNDS, "A");
   assert.equal(invoke("omnirush:browser:state").backgroundWindowCount, 0);
   assert.equal(views()[1].webContents.isDestroyed(), true);
   assert.equal(views()[0].webContents.isDestroyed(), false);
@@ -1442,4 +1448,53 @@ test("the main window only shows the app document and pages the main process loa
   panel.setMainWindowEntryUrl("http://localhost:5173/");
   assert.equal(panel.isMainWindowAllowedNavigation("http://localhost:5173/#/settings"), true);
   assert.equal(panel.isMainWindowAllowedNavigation("http://localhost:5174/"), false);
+});
+
+test("closing the panel keeps the active tab painting in the hidden host and showing it again restores it", async () => {
+  const { invoke, onScreen, children, commands } = createPanel();
+  invoke("omnirush:browser:show", PANEL_BOUNDS, "A");
+  invoke("omnirush:browser:createTab", "https://one.example", "A");
+  const view = onScreen();
+  assert.ok(view);
+  await flush();
+  commands(view).length = 0;
+
+  invoke("omnirush:browser:hide");
+  await flush();
+  assert.equal(children.includes(view), false, "nothing paints over the app");
+  assert.equal(invoke("omnirush:browser:state").backgroundWindowCount, 1);
+  assert.deepEqual(view.getBounds(), { x: 0, y: 0, width: 1280, height: 800 });
+  assert.deepEqual(commands(view), BACKGROUND_SEQUENCE, "the page keeps a real viewport and focus while unseen");
+
+  invoke("omnirush:browser:show", PANEL_BOUNDS, "A");
+  await flush();
+  assert.equal(onScreen(), view);
+  assert.deepEqual(view.getBounds(), PANEL_BOUNDS);
+  assert.equal(invoke("omnirush:browser:state").backgroundWindowCount, 0);
+});
+
+test("minimizing the window parks the displayed tab and restoring brings it back", async () => {
+  const { invoke, onScreen, children, panel } = createPanel();
+  invoke("omnirush:browser:show", PANEL_BOUNDS, "A");
+  invoke("omnirush:browser:createTab", "https://one.example", "A");
+  const other = invoke("omnirush:browser:createTab", "https://two.example", "A");
+  const view = onScreen();
+  await flush();
+
+  panel.setMainWindowConcealed(true);
+  await flush();
+  assert.equal(onScreen(), null, "a minimized window holds no browser view");
+  assert.equal(children.includes(view), false);
+  const state = invoke("omnirush:browser:state");
+  assert.equal(state.backgroundWindowCount, 1, "only the displayed tab is kept live");
+  assert.equal(state.activeTabId, other.tabId, "the selection is unchanged");
+
+  panel.setMainWindowConcealed(true);
+  assert.equal(invoke("omnirush:browser:state").backgroundWindowCount, 1, "repeated events are idempotent");
+
+  panel.setMainWindowConcealed(false);
+  await flush();
+  assert.equal(onScreen(), view);
+  assert.deepEqual(view.getBounds(), PANEL_BOUNDS);
+  assert.equal(invoke("omnirush:browser:state").backgroundWindowCount, 0);
 });
