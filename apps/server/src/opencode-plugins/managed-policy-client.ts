@@ -50,9 +50,22 @@ export interface PolicyVerdict {
   approvalMode: ApprovalMode;
 }
 
+let heldPolicyToken: string | undefined;
+
+/**
+ * Keeps the policy token in this module and takes it out of the engine's
+ * environment, for an engine that starts shells straight from process.env
+ * with no shell.env hook (the preview engine): its commands then never get it.
+ */
+export function holdPolicyToken(): void {
+  const token = process.env.OMNIRUSH_POLICY_TOKEN;
+  if (token) heldPolicyToken = token;
+  delete process.env.OMNIRUSH_POLICY_TOKEN;
+}
+
 export async function check(action: ManagedPolicyAction, input: Record<string, unknown>): Promise<PolicyVerdict> {
   const base = process.env.OMNIRUSH_SERVER_URL;
-  const token = process.env.OMNIRUSH_POLICY_TOKEN;
+  const token = heldPolicyToken ?? process.env.OMNIRUSH_POLICY_TOKEN;
   if (!base || !token) throw new Error("The app policy service is unavailable.");
   const response = await fetch(`${base}/managed-policy/evaluate`, {
     method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },

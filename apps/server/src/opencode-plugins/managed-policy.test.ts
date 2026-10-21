@@ -321,6 +321,8 @@ describe("managed-policy engine plugin: git workflows", () => {
       shell: { hook: async (name, callback) => { hooks[`shell.${name}`] = callback as never; } },
       session: { hook: async (name, callback) => { hooks[`session.${name}`] = callback as never; } },
     });
+    // Its shells copy process.env with no hook to empty a variable: the policy token is held by the plugin instead.
+    expect(process.env.OMNIRUSH_POLICY_TOKEN).toBeUndefined();
     const input: Record<string, unknown> = { command: "git commit -m x && rm -rf build" };
     await hooks["tool.execute.before"]({ tool: "bash", input, callID: "call_8" } as never);
     expect(input.command).toBe(`git commit -m x && ${DESTRUCTIVE_MARKER} rm -rf build`);
