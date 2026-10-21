@@ -179,43 +179,44 @@ describe("changes", () => {
 });
 
 describe("chatUndoKey", () => {
-  const key = (init: Partial<KeyboardEvent> & { target?: unknown }) => ({
+  const key = (init: Partial<KeyboardEvent> & { target?: unknown; repeat?: boolean }) => ({
     key: "z", metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, defaultPrevented: false, target: null, ...init,
   }) as Parameters<typeof chatUndoKey>[0];
+  // An element whose ancestors match these selectors.
+  const el = (tagName: string, ...inside: string[]) => ({
+    tagName,
+    isContentEditable: false,
+    closest: (selector: string) => (selector.split(", ").some((part) => inside.includes(part)) ? {} : null),
+  });
+  const transcript = el("DIV", "[data-chat-transcript]");
 
-  test("Cmd/Ctrl+Z undoes and Shift redoes outside text fields", () => {
-    expect(chatUndoKey(key({ metaKey: true }), true)).toBe("undo");
-    expect(chatUndoKey(key({ ctrlKey: true }), false)).toBe("undo");
-    expect(chatUndoKey(key({ ctrlKey: true, shiftKey: true }), false)).toBe("redo");
-    expect(chatUndoKey(key({ ctrlKey: true }), true)).toBeNull();
-    expect(chatUndoKey(key({ metaKey: true, key: "y" }), true)).toBeNull();
+  test("Cmd/Ctrl+Z undoes and Shift redoes with focus in the transcript", () => {
+    expect(chatUndoKey(key({ metaKey: true, target: transcript }), true)).toBe("undo");
+    expect(chatUndoKey(key({ ctrlKey: true, target: transcript }), false)).toBe("undo");
+    expect(chatUndoKey(key({ ctrlKey: true, shiftKey: true, target: transcript }), false)).toBe("redo");
+    expect(chatUndoKey(key({ ctrlKey: true, target: transcript }), true)).toBeNull();
+    expect(chatUndoKey(key({ metaKey: true, key: "y", target: transcript }), true)).toBeNull();
   });
 
-  test("any editable element keeps its own undo, the empty composer too", () => {
-    expect(chatUndoKey(key({ metaKey: true, target: { tagName: "TEXTAREA", isContentEditable: false, textContent: "" } }), true)).toBeNull();
-    expect(chatUndoKey(key({ metaKey: true, target: { tagName: "DIV", isContentEditable: true, textContent: "draft" } }), true)).toBeNull();
-    expect(chatUndoKey(key({ metaKey: true, target: { tagName: "DIV", isContentEditable: true, textContent: "  " } }), true)).toBeNull();
-    const inChat = (selector: string) => (selector === "[data-session-pane]" ? {} : null);
-    expect(chatUndoKey(key({ metaKey: true, target: { tagName: "BUTTON", isContentEditable: false, textContent: "Send", closest: inChat } }), true)).toBe("undo");
-    const inEditor = { tagName: "DIV", isContentEditable: false, textContent: "", closest: (selector: string) => (selector.includes(".monaco-editor") || selector === "[data-session-pane]" ? {} : null) };
-    expect(chatUndoKey(key({ ctrlKey: true, target: inEditor }), false)).toBeNull();
+  test("anything with keys of its own keeps them, inside the transcript too", () => {
+    expect(chatUndoKey(key({ metaKey: true, target: el("TEXTAREA", "textarea", "[data-chat-transcript]") }), true)).toBeNull();
+    expect(chatUndoKey(key({ metaKey: true, target: { ...transcript, isContentEditable: true } }), true)).toBeNull();
+    expect(chatUndoKey(key({ metaKey: true, target: el("BUTTON", "button", "[data-chat-transcript]") }), true)).toBeNull();
+    expect(chatUndoKey(key({ ctrlKey: true, target: el("DIV", ".monaco-editor", "[data-chat-transcript]") }), false)).toBeNull();
+    expect(chatUndoKey(key({ metaKey: true, target: el("DIV", "[data-composer-shell]") }), true)).toBeNull();
   });
 
-  test("only with focus in the chat: the IDE's file tree, tabs and lists keep the key", () => {
-    const outsideChat = { tagName: "BUTTON", isContentEditable: false, closest: () => null };
-    expect(chatUndoKey(key({ metaKey: true, target: outsideChat }), true)).toBeNull();
-    const noClosest = { tagName: "DIV", isContentEditable: false };
-    expect(chatUndoKey(key({ metaKey: true, target: noClosest }), true)).toBeNull();
-    // Nothing focused: the chat's in the Chat layout, nobody's while the code editor is on screen.
-    const body = (editor: boolean) => ({ tagName: "BODY", isContentEditable: false, ownerDocument: { querySelector: () => (editor ? {} : null) } });
-    expect(chatUndoKey(key({ metaKey: true, target: body(false) }), true)).toBe("undo");
-    expect(chatUndoKey(key({ metaKey: true, target: body(true) }), true)).toBeNull();
+  test("never from the IDE, the page itself or anywhere outside the transcript", () => {
+    expect(chatUndoKey(key({ metaKey: true, target: el("DIV", "[role=treeitem]", "[data-editor-panel]") }), true)).toBeNull();
+    expect(chatUndoKey(key({ metaKey: true, target: el("DIV", "[data-editor-panel]") }), true)).toBeNull();
+    expect(chatUndoKey(key({ metaKey: true, target: el("DIV", "[role=tab]") }), true)).toBeNull();
+    expect(chatUndoKey(key({ metaKey: true, target: el("BODY") }), true)).toBeNull();
+    expect(chatUndoKey(key({ metaKey: true, target: el("DIV", "[data-session-pane]") }), true)).toBeNull();
+    expect(chatUndoKey(key({ metaKey: true, target: null }), true)).toBeNull();
   });
 
-  test("a held key undoes one turn, not one per auto-repeat", () => {
-    const inChat = { tagName: "BUTTON", isContentEditable: false, closest: (selector: string) => (selector === "[data-session-pane]" ? {} : null) };
-    expect(chatUndoKey(key({ metaKey: true, target: inChat }), true)).toBe("undo");
-    expect(chatUndoKey({ ...key({ metaKey: true, target: inChat }), repeat: true }, true)).toBeNull();
-    expect(chatUndoKey({ ...key({ metaKey: true, shiftKey: true, target: inChat }), repeat: true }, true)).toBeNull();
+  test("a held key undoes one turn at most, not one per auto-repeat", () => {
+    expect(chatUndoKey(key({ metaKey: true, target: transcript, repeat: true }), true)).toBeNull();
+    expect(chatUndoKey(key({ metaKey: true, shiftKey: true, target: transcript, repeat: true }), true)).toBeNull();
   });
 });

@@ -76,6 +76,8 @@ export function SessionCommandControls(props: SessionCommandControlsProps) {
         toast.info("Stop the turn first (Esc), then undo", { duration: 4000 });
         return;
       }
+      // A key press is easy to make by accident: the undo (the turn and its file changes) asks first.
+      if (action === "undo" && !window.confirm("Undo the last turn? Its messages are hidden and its file changes taken back. Redo or Restore brings them back.")) return;
       void (action === "undo" ? undo() : redo());
     };
     window.addEventListener("keydown", onKey, true);
