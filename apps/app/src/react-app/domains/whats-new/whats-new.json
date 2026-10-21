@@ -233,7 +233,7 @@
         "Long chats have a Load earlier messages button at the top."
       ],
       "improved": [
-        "Computer use works on a display of its own with its own cursor, so your mouse, keyboard and clipboard stay yours. Using your own screen is a setting you turn on in Settings > Computer use; it is off by default."
+        "Computer use works on a display of its own with its own cursor, so your mouse, keyboard and clipboard stay yours."
       ],
       "fixed": [
         "Undo and revert no longer remove chat turns or file changes without asking. Undo works only from the chat itself and ignores a held key, Revert and Edit say what they will take back, and hidden messages go only after you confirm a send."
