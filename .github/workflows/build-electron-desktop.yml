@@ -84,6 +84,11 @@ jobs:
           OMNIRUSH_DESKTOP_SENTRY_TRACES_SAMPLE_RATE: ${{ vars.OMNIRUSH_DESKTOP_SENTRY_TRACES_SAMPLE_RATE || '0.01' }}
         run: pnpm --filter @omnirush/desktop package:electron:dir
 
+      # Every relative import inside the packaged app resolves (a module missing from dist crashes the app at start).
+      - name: Verify packaged server imports
+        shell: bash
+        run: node apps/desktop/scripts/verify-packaged-imports.mjs
+
       # The packaged app must accept its own bundled engine (the app's own checks, its own runtime).
       - name: Verify the packaged app accepts its bundled engine
         shell: bash
