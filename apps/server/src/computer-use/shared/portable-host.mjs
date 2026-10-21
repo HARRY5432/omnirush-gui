@@ -412,9 +412,9 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
       if (after.identity !== current.identity || JSON.stringify(after.bounds) !== JSON.stringify(current.bounds)) return finish({ ...common, approval, ok: false, code: "window_changed", message: "The window moved or changed. Observe again.", next: "computer_observe" });
       if (!(await hitAll(after))) return finish({ ...common, approval, ok: false, code: "window_occluded", message: "Another window covers this point, or it is outside the approved window. Observe again." });
     }
+    const cursorBefore = await native.call("cursor").catch(() => null);
     // The engine gave up on this call (before or while it was asked): no input with nobody waiting for it.
     if (s.connection.cancelled) return finish({ ...common, approval: { ...approval, ...(approval.asked ? {} : { by: "agent" }), reason: "cancelled" }, ok: false, code: "approval_denied", message: "The request was cancelled.", may_have_acted: false });
-    const cursorBefore = await native.call("cursor").catch(() => null);
     const point = mapped.length === 1 ? { model: mapped[0].model, screen: mapped[0].screen } : undefined;
     const path = action.type === "drag" ? mapped.map((m) => ({ model: m.model, screen: m.screen })) : undefined;
     const screenAction = action.type === "drag" ? { ...action, path: mapped.map((m) => m.screen) } : mapped.length ? { ...action, x: mapped[0].screen.x, y: mapped[0].screen.y } : action;
