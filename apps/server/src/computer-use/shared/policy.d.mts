@@ -18,6 +18,8 @@ export type ComputerUseBlock = {
   deny_apps: DenyEntry[];
   limits: Limits;
   message: string | null;
+  /** The send/delete asks in Normal (off unless the server says true). */
+  ask_send_delete: boolean;
 };
 export type ComputerUseSetting = ComputerUseBlock & {
   source: "env" | "server" | "default";

@@ -471,6 +471,23 @@ describe("portable host: the person's own press answers a question", () => {
   });
 });
 
+describe("portable host: the server's send/delete switch", () => {
+  test("off: a Send button runs; on (capabilities ask_send_delete): it asks, and Enter after typing asks", async () => {
+    for (const on of [false, true]) {
+      const r = rig("normal");
+      (r.settings as Record<string, unknown>).ask_send_delete = on;
+      r.native.state.texts = [{ x: 300, y: 200, width: 80, height: 30, text: "Send" }];
+      const { host, c, session, obs } = await opened(r);
+      const send = await call(c, "computer_act", { session_id: session, observation_id: obs.state.observation?.id, request_id: "a", intent: "Press the button", action: { type: "click", x: 300, y: 200 } });
+      expect(send.state).toMatchObject({ ok: true, approval: on ? { asked: true, reasons: ["send_delete_target"] } : { asked: false } });
+      const typed = await call(c, "computer_act", { session_id: session, observation_id: (send.state.observation as { id: string }).id, request_id: "b", intent: "Write the reply", action: { type: "type", text: "see you" } });
+      const enter = await call(c, "computer_act", { session_id: session, observation_id: (typed.state.observation as { id: string }).id, request_id: "c", intent: "Done", action: { type: "key", key: "Enter", modifiers: ["ctrl"] } });
+      expect(enter.state).toMatchObject({ ok: true, approval: { asked: on } });
+      await host.close();
+    }
+  });
+});
+
 describe("portable host: Enter and Space read the focused control; Tab forgets it", () => {
   test("Enter on a focused pay button asks; after Tab it is unknown and runs", async () => {
     const r = rig("normal");

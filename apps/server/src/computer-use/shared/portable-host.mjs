@@ -36,7 +36,7 @@ import {
 } from "./contract.mjs";
 import { compareGrids, encodeJpeg, encodePng, fitLongSide, luminanceGrid, paintBoxes } from "./image.mjs";
 import { sha256 } from "./media.mjs";
-import { actApproval, deniedApp } from "./policy.mjs";
+import { actApproval, ASK_SEND_DELETE, deniedApp } from "./policy.mjs";
 
 const RPC = new Set(["initialize", "ping", "tools/list", "tools/call", "notifications/initialized", "notifications/cancelled"]);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -127,8 +127,8 @@ function describeAction(a) {
  * The host. Options:
  * - native: a createNativeWorker() (or the same interface)
  * - spool: a media spool (media.mjs createMediaSpool) frames go to, or null
- * - settings(): { enabled, real_screen, limits, deny_apps, mode } now
- *   (mode: the chat's permission mode careful|normal|auto)
+ * - settings(): { enabled, real_screen, limits, deny_apps, mode, ask_send_delete } now
+ *   (mode: the chat's permission mode careful|normal|auto; ask_send_delete: the server's send/delete asks)
  * - context(): { ancestors, self_pids, tty_pids, chat } now, or a promise of it
  *   (chat: the chat using computer use, for "Allow for this chat" and per-chat counts)
  * - approve: { open(request) → { decision: "chat"|"once"|"deny", window_id? },
@@ -384,7 +384,7 @@ export async function createPortableHost({ native: firstNative, nativeFactory = 
       if (compare.stale) return finish({ ...common, ok: false, code: "stale_observation", message: "The window changed since the observation. Observe again.", next: "computer_observe" });
     }
     // Per-action approval by permission mode (host channel, never the engine's).
-    const decision = actApproval({ mode: settings()?.mode, action, intent: args.intent, target: await targetAt(observed, action, current, s), window: { id: String(current.id), app_id: current.appId, title: current.title }, approved: s.approved, typed_before: s.typedIn === String(current.id) });
+    const decision = actApproval({ mode: settings()?.mode, action, intent: args.intent, target: await targetAt(observed, action, current, s), window: { id: String(current.id), app_id: current.appId, title: current.title }, approved: s.approved, typed_before: s.typedIn === String(current.id) }, { sendDelete: settings()?.ask_send_delete === true || ASK_SEND_DELETE });
     let approval = { asked: false };
     if (decision.ask) {
       // The same action with the same intent, allowed a moment ago (a retry after a fresh observation), is not asked again.

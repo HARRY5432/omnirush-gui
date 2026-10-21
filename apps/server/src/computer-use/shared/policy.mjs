@@ -35,10 +35,10 @@ function text(value, limit = 400) {
  * missing or malformed block is off. The server already applied
  * `rollout_percent` (and the account) to `enabled`.
  * Shape: { enabled, clients, os, models, real_screen, virtual_display,
- * deny_apps, limits, message } (null lists: no restriction).
+ * deny_apps, limits, message, ask_send_delete } (null lists: no restriction).
  */
 export function normalizeComputerUse(block) {
-  if (!isRecord(block)) return { enabled: false, clients: null, os: null, models: null, real_screen: false, virtual_display: false, deny_apps: [], limits: normalizeLimits(null), message: null };
+  if (!isRecord(block)) return { enabled: false, clients: null, os: null, models: null, real_screen: false, virtual_display: false, deny_apps: [], limits: normalizeLimits(null), message: null, ask_send_delete: false };
   const denyApps = Array.isArray(block.deny_apps)
     ? block.deny_apps.flatMap((item) => {
       if (typeof item === "string" && item.trim()) return [{ match: item.trim().slice(0, 200), reason: null }];
@@ -56,6 +56,8 @@ export function normalizeComputerUse(block) {
     deny_apps: denyApps,
     limits: normalizeLimits(block.limits),
     message: text(block.message),
+    // The send/delete asks in Normal (actApproval options.sendDelete): only an explicit true turns them on.
+    ask_send_delete: block.ask_send_delete === true,
   };
 }
 
@@ -290,7 +292,9 @@ export function riskyWords(value, from = "screen") {
 const PAYMENT_PAGE = /\b(cart|basket|billing|payment|checkout|check\s*out)\b/i;
 
 /**
- * The judge's narrower variant (send and delete), OFF by default: when true, Normal also asks when the text
+ * The narrower send/delete variant, OFF (the owner's decision, 2026-10-21). The server can turn it on without a
+ * release (capabilities `computer_use.ask_send_delete: true`, hosts pass it as options.sendDelete): Normal then
+ * also asks when the text
  * the OS read at a click/Enter target says Send/Post/Publish/Forward/Reply all or a permanent delete, and on
  * the Shift+Delete and Cmd+Backspace chords. Only OS-read text counts, never the agent's intent.
  */

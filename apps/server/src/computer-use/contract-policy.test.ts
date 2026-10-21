@@ -304,6 +304,10 @@ describe("policy: approvals per permission mode", () => {
 
   test("the send/delete switch (off by default): OS-read send and permanent-delete targets and delete chords ask; intents never", () => {
     expect(ASK_SEND_DELETE).toBe(false);
+    expect(normalizeComputerUse({ enabled: true }).ask_send_delete).toBe(false);
+    expect(normalizeComputerUse({ enabled: true, ask_send_delete: "yes" }).ask_send_delete).toBe(false);
+    expect(normalizeComputerUse({ enabled: true, ask_send_delete: true }).ask_send_delete).toBe(true);
+    expect(normalizeComputerUse(null).ask_send_delete).toBe(false);
     const on = { sendDelete: true };
     for (const text of ["Send", "Post", "Publish", "Forward", "Reply all", "Delete permanently", "Empty Trash", "Delete account"]) expect(actApproval({ ...plain, target: { text } }, on).reasons.map((r) => r.code)).toEqual(["send_delete_target"]);
     expect(actApproval({ ...plain, action: { type: "key", key: "Enter" }, target: { text: "Send" } }, on).ask).toBe(true);

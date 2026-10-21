@@ -168,7 +168,7 @@ const approve = {
 
 function hostSettings() {
   const setting = server?.setting ?? {};
-  return { enabled: server?.enabled === true, real_screen: setting.real_screen !== false, limits: setting.limits ?? null, deny_apps: setting.deny_apps ?? [], mode: server?.mode ?? "normal", message: setting.message ?? null };
+  return { enabled: server?.enabled === true, real_screen: setting.real_screen !== false, limits: setting.limits ?? null, deny_apps: setting.deny_apps ?? [], mode: server?.mode ?? "normal", message: setting.message ?? null, ask_send_delete: setting.ask_send_delete === true };
 }
 
 async function hostContext() {
