@@ -1,5 +1,6 @@
 import { annotateShellOutput, check, checkManagedTool } from "./managed-policy-client.js";
 import { applyEnginePath } from "../engine-shell-path.js";
+import { blankShellSecrets } from "./shell-secret-env.js";
 
 type ToolBeforeInput = { tool: string; sessionID?: string; callID?: string };
 type ToolAfterInput = { tool: string; sessionID?: string; callID?: string; args?: unknown };
@@ -17,6 +18,8 @@ export default async function managedPolicy(input?: { directory?: string }) {
       output.output = annotateShellOutput(event.callID, output.output);
     },
     "shell.env": async (event: { cwd: string; callID?: string; sessionID?: string }, output: { env: Record<string, string> }) => {
+      // The app's own secrets never reach a command the agent runs (shell-secret-env.ts).
+      blankShellSecrets(output.env);
       if (enginePath) output.env.PATH = enginePath;
       // The call and session the shell runs for: the install log's wrappers note them, so an
       // install is tied to the very call that ran it (parallel calls, a sub-agent's, one in the background).
