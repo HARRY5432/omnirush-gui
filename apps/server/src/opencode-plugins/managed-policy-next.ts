@@ -1,4 +1,4 @@
-import { check, checkManagedTool } from "./managed-policy-client.js";
+import { check, checkManagedTool, holdPolicyToken } from "./managed-policy-client.js";
 import { applyEnginePath } from "../engine-shell-path.js";
 // Plugin.define is the identity function in the pinned SDK. The structural
 // contract avoids loading either engine's SDK into the other engine.
@@ -13,6 +13,8 @@ export default {
     // The next engine spawns shells from process.env; enrich it once so git
     // and gh resolve the way the packaged app resolves them.
     applyEnginePath();
+    // Its shells copy process.env and there is no hook to empty a variable: the policy token leaves it.
+    holdPolicyToken();
     await ctx.tool.hook("execute.before", (event) =>
       checkManagedTool(event.tool, event.input, { directory: ctx.directory, callID: event.callID, sessionID: event.sessionID }));
     await ctx.shell.hook("create.before", async (event) => { await check("shell", { command: event.command }); });
