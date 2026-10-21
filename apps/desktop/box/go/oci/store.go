@@ -82,6 +82,9 @@ func (s Store) tagFile(ref Ref, arch string) string {
 	return filepath.Join(s.Dir, "tags", hex.EncodeToString(sum[:12]))
 }
 
+// Lock is lock for callers outside the package (rmimage and up: one image-use change at a time).
+func (s Store) Lock(id string) (func(), error) { return s.lock(id) }
+
 // lock takes an exclusive lock for an image id (one unpack at a time).
 func (s Store) lock(id string) (func(), error) {
 	dir := filepath.Join(s.Dir, "locks")

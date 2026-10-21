@@ -259,7 +259,8 @@ export const bwrapDriver: BoxDriver = {
       if (!img || !removableImage({ ref: img.ref, digest: img.digest, id }, { keep, used: usedIds })) continue;
       try { if (now - statSync(path.join(dir, id, "image.json")).mtimeMs < YOUNG_IMAGE_MS) continue; } catch { continue; }
       if (dryRun) { removed.push({ kind: "image", name: String(img.ref), reason: "not current", path: path.join(dir, id), dryRun: true }); continue; }
-      const res = await run(runtime.bin, ["rmimage", ...storeArgs(home), "--id", id], { timeoutMs: 120_000 });
+      // boxrun itself also refuses while any box (running or stopped) records this image.
+      const res = await run(runtime.bin, ["rmimage", ...storeArgs(home), "--id", id, "--boxes", path.join(bwrapHome(home), "boxes")], { timeoutMs: 120_000 });
       if (parseOut(res.stdout)?.ok) removed.push({ kind: "image", name: String(img.ref), reason: "not current" });
     }
     return removed;

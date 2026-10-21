@@ -463,7 +463,7 @@ export const wslDriver: BoxDriver = {
       if (!Number.isFinite(unpackedAt) || unpackedAt <= 0 || now - unpackedAt < YOUNG_IMAGE_MS) continue;
       if (!/^[0-9a-zA-Z._-]+$/.test(id) || !removableImage({ ref: img?.ref, digest: img?.digest, id }, { keep, used: usedIds })) continue;
       if (dryRun) { removed.push({ kind: "image", name: String(img?.ref), reason: "not current", dryRun: true }); continue; }
-      const { out } = await boxrun(wsl, ["rmimage", "--store", STORE, "--id", id], { run, env, timeoutMs: 120_000 });
+      const { out } = await boxrun(wsl, ["rmimage", "--store", STORE, "--id", id, "--boxes", BOXES], { run, env, timeoutMs: 120_000 });
       if (out?.ok) removed.push({ kind: "image", name: String(img?.ref), reason: "not current" });
     }
     return removed;
