@@ -107,6 +107,27 @@ export function computeModelAvailability(
 }
 
 /**
+ * The model an existing conversation switches to when the model it remembers
+ * can no longer be used (its provider is locked or blocked, it is not
+ * connected, or the model left the catalog): the global default, once that is
+ * confirmed available and differs from it. Null keeps the remembered model
+ * (still pending, fine, or no usable default to switch to).
+ */
+export function sessionModelFallback(input: {
+  sessionModel: ModelRef | null | undefined;
+  sessionAvailability: ModelAvailability;
+  defaultModel: ModelRef | null | undefined;
+  defaultAvailability: ModelAvailability;
+}): ModelRef | null {
+  const { sessionModel, defaultModel } = input;
+  if (!sessionModel || !defaultModel) return null;
+  if (input.sessionAvailability.status !== "unavailable") return null;
+  if (input.defaultAvailability.status !== "available") return null;
+  if (sessionModel.providerID === defaultModel.providerID && sessionModel.modelID === defaultModel.modelID) return null;
+  return { providerID: defaultModel.providerID, modelID: defaultModel.modelID };
+}
+
+/**
  * How long a catalog-derived "unavailable" verdict must persist before it is
  * shown. Settings visits and engine reload/restart churn can settle a
  * momentarily incomplete catalog (e.g. `connected` not yet populated), which
