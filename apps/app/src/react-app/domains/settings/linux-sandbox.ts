@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { captureAnalyticsEvent, type AnalyticsProperties } from "@/app/lib/analytics";
-import type { OmniRushServerClient, OmniRushWorkspaceBox, OmniRushWorkspaceBoxProgress } from "@/app/lib/omnirush-server";
+import type { OmniRushServerClient, OmniRushWorkspaceBox, OmniRushWorkspaceBoxProgress, OmniRushWorkspaceBoxSetupAction } from "@/app/lib/omnirush-server";
 
-export type LinuxSandboxClient = Pick<OmniRushServerClient, "getWorkspaceBox" | "setWorkspaceBox" | "setWorkspaceBoxBackend" | "resetWorkspaceBox" | "retryWorkspaceBox">;
+export type LinuxSandboxClient = Pick<OmniRushServerClient, "getWorkspaceBox" | "setWorkspaceBox" | "setWorkspaceBoxBackend" | "resetWorkspaceBox" | "retryWorkspaceBox"> & Partial<Pick<OmniRushServerClient, "setupWorkspaceBox">>;
 
 export const LINUX_SANDBOX_HELP = "Commands run in a Linux container for this project. Your files stay in this folder; installs are kept per project.";
 
@@ -25,7 +25,7 @@ export type LinuxSandboxView = {
 };
 
 /** A change the user made that the server has not answered yet (the switch already shows it). */
-export type LinuxSandboxPending = "on" | "off" | "backend" | "reset" | "retry" | null;
+export type LinuxSandboxPending = "on" | "off" | "backend" | "reset" | "retry" | "setup" | null;
 
 const RUNS_HERE = "Commands run on this computer for now.";
 const LOAD_FAILED = "The sandbox status could not be loaded.";
@@ -103,8 +103,11 @@ export function linuxSandboxView(box: OmniRushWorkspaceBox, pending: LinuxSandbo
   if (pending === "off") return { ...base, tone: "busy", title: "Turning off…", detail: null };
   if (pending === "reset") return { ...base, tone: "busy", title: "Resetting the sandbox…", detail: "Removing its container and installs." };
   if (pending === "retry") return { ...base, tone: "busy", title: "Trying again…", detail: null };
+  if (pending === "setup") return { ...base, tone: "busy", title: "Setting up the sandbox…", detail: null };
   if (!box.on) {
     if (box.source === "env") return { ...base, tone: "off", title: "Off for this app", detail: "Set by OMNIRUSH_BOX where the app is launched." };
+    // Required, but the project only builds on this OS: its chats run here.
+    if (box.source === "host-only" && box.hostOnly) return { ...base, tone: "attention", title: "Runs on this computer", detail: box.hostOnly.notice };
     if (box.hostBuilds?.native) return { ...base, tone: "attention", title: "Off for this project", detail: box.hostBuilds.notice };
     // A buildathon project: turned off here (less reproducible), or the event offers the sandbox.
     if (box.notice) return { ...base, tone: "attention", title: box.source === "project" ? "Off for this project" : "Off", detail: box.notice };
@@ -203,7 +206,7 @@ export type LinuxSandboxProblem = { message: string; retry: (() => void) | null 
  * while it moves, and when the window comes back), the switch (shown at
  * once, before the server answers), the backend, Retry and Reset.
  */
-export function useLinuxSandbox(client: LinuxSandboxClient | null, workspaceId: string | null, { fresh: freshOnOpen = true }: { fresh?: boolean } = {}) {
+export function useLinuxSandbox(client: LinuxSandboxClient | null, workspaceId: string | null, { fresh: freshOnOpen = true, sessionId = null }: { fresh?: boolean; sessionId?: string | null } = {}) {
   const [box, setBox] = useState<OmniRushWorkspaceBox | null>(null);
   const [pending, setPending] = useState<LinuxSandboxPending>(null);
   const [problem, setProblem] = useState<LinuxSandboxProblem | null>(null);
@@ -216,7 +219,7 @@ export function useLinuxSandbox(client: LinuxSandboxClient | null, workspaceId: 
   const load = useCallback(async (fresh = false) => {
     if (!client || !workspaceId) return;
     const startedAt = sequence.current;
-    const value = await client.getWorkspaceBox(workspaceId, { fresh }).catch(() => null);
+    const value = await client.getWorkspaceBox(workspaceId, sessionId ? { fresh, sessionId } : { fresh }).catch(() => null);
     if (sequence.current !== startedAt) return;
     if (value) {
       boxFor.current = workspaceId;
@@ -225,7 +228,7 @@ export function useLinuxSandbox(client: LinuxSandboxClient | null, workspaceId: 
     } else {
       setProblem({ message: LOAD_FAILED, retry: () => void load(true) });
     }
-  }, [client, workspaceId]);
+  }, [client, workspaceId, sessionId]);
 
   // Another project: start from nothing. The same project with a new client (the engine
   // reloaded after the switch): keep what is shown and ask again, so nothing flickers.
@@ -322,7 +325,14 @@ export function useLinuxSandbox(client: LinuxSandboxClient | null, workspaceId: 
 
   const refresh = useCallback(() => load(true), [load]);
 
-  return { box, pending, problem, notice, setEnabled, setBackend, retry, reset, refresh };
+  /** One setup step of the setup screen (Allow, Set up, Restart now, Not now, Check again). */
+  const setup = useCallback((action: OmniRushWorkspaceBoxSetupAction) => {
+    if (!client?.setupWorkspaceBox || !workspaceId) return Promise.resolve();
+    const run = client.setupWorkspaceBox;
+    return change("setup", () => run(workspaceId, action), action === "win_restart" ? "Windows could not be restarted from here. Restart it from the Start menu." : "The setup step did not finish.", () => void setup(action));
+  }, [change, client, workspaceId]);
+
+  return { box, pending, problem, notice, setEnabled, setBackend, retry, reset, refresh, setup };
 }
 
 export type LinuxSandboxState = ReturnType<typeof useLinuxSandbox>;

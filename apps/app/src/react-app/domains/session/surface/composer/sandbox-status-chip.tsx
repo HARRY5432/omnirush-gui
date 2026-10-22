@@ -39,8 +39,10 @@ function SandboxChip(props: { client: LinuxSandboxClient; workspaceId: string; o
   const chip = "flex h-9 max-h-9 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-sm text-gray-10 transition-colors hover:bg-gray-3 hover:text-gray-12";
 
   if (!box.on && sandbox.pending !== "on") {
-    // The server's default left this project on this computer (its folder has this computer's builds): say why.
-    if (box.hostBuilds?.native) {
+    // The server's default left this project on this computer (its folder has this computer's builds), or the
+    // sandbox is required but the project only builds on this OS: say why.
+    const offWhy = box.hostBuilds?.native ? box.hostBuilds.notice : box.source === "host-only" ? box.hostOnly?.notice ?? null : null;
+    if (offWhy) {
       return (
         <Tooltip>
           <TooltipTrigger
@@ -55,7 +57,7 @@ function SandboxChip(props: { client: LinuxSandboxClient; workspaceId: string; o
           <TooltipContent>
             <div className="flex max-w-64 flex-col">
               <span className="font-medium">Linux sandbox: off for this project</span>
-              <span>{box.hostBuilds.notice}</span>
+              <span>{offWhy}</span>
             </div>
           </TooltipContent>
         </Tooltip>
@@ -108,6 +110,7 @@ function SandboxChip(props: { client: LinuxSandboxClient; workspaceId: string; o
         <div className="flex max-w-64 flex-col">
           <span className="font-medium">Linux sandbox: {view.title}</span>
           {view.progress ? <span>{view.progress.label}</span> : view.detail ? <span>{view.detail}</span> : null}
+          {box.required && box.requiredText ? <span className="mt-1 text-gray-9">{box.requiredText.line}</span> : null}
         </div>
       </TooltipContent>
     </Tooltip>

@@ -479,6 +479,15 @@ export type OmniRushBestPracticesChange = OmniRushBestPractices & {
   engine: { status: "applied" | "deferred" | "failed" | "unconfigured" };
 };
 
+/** The box status query: a fresh backend check, and the chat it is asked for. */
+function boxQuery(options?: { fresh?: boolean; sessionId?: string | null }): string {
+  const query = new URLSearchParams();
+  if (options?.fresh) query.set("fresh", "1");
+  if (options?.sessionId) query.set("session", options.sessionId);
+  const text = query.toString();
+  return text ? `?${text}` : "";
+}
+
 /**
  * GET /workspace/:id/box: the workspace's Linux sandbox (commands run in a
  * per-project container on this computer). `mode` null: the server's default.
@@ -487,8 +496,11 @@ export type OmniRushWorkspaceBox = {
   mode: "on" | "off" | null;
   serverDefault: "off" | "offer" | "on";
   on: boolean;
-  /** "host-builds": the server's default would put it in the sandbox, but the folder has this computer's builds. */
-  source: "env" | "project" | "server" | "default" | "host-builds" | "buildathon";
+  /**
+   * "host-builds": the server's default would put it in the sandbox, but the folder has this computer's builds.
+   * "required": the account requires the sandbox for new chats; "host-only": required, but the project only builds on this OS.
+   */
+  source: "env" | "project" | "server" | "default" | "host-builds" | "buildathon" | "required" | "host-only";
   offer: boolean;
   state: "off" | "unavailable" | "downloading" | "starting" | "ready" | "failed";
   runtime: { ok: boolean; name: string | null; flavor: string | null; version: string | null; reason: string | null } | null;
@@ -519,7 +531,27 @@ export type OmniRushWorkspaceBox = {
   hostBuilds?: { native: boolean; things: string; notice: string } | null;
   /** macOS / Windows, while chats run in the sandbox: one line that says so. Older servers: absent. */
   boxNotice?: string | null;
+  /** The account requires the sandbox for new chats: the switch and "Off (this computer)" are disabled. Older servers: absent. */
+  required?: boolean;
+  requiredText?: { line: string; optOut: string; keptOldChat: string } | null;
+  /** Required, but the project only builds on this OS (an Xcode project, a WPF app): its chats run on this computer. */
+  hostOnly?: { things: string[]; notice: string } | null;
+  /** Required and not ready: what the sandbox needs on this computer (the setup screen). */
+  setup?: OmniRushWorkspaceBoxSetup | null;
+  /** Asked for one chat: it started on this computer before the sandbox was required and stays here. */
+  chatKept?: boolean;
 };
+export type OmniRushWorkspaceBoxSetup = {
+  need: "none" | "linux_allow" | "win_install" | "win_restart" | "win_update" | "mac_vm" | "runtime" | "cannot_run";
+  why: "firmware_off" | "nested_vm" | "s_mode" | "old_windows" | "old_macos" | "policy" | "declined" | null;
+  whyText: string | null;
+  declined: boolean;
+  result: { ok: boolean; message: string; at: number } | null;
+  fallback: "native" | "native_uncounted";
+  /** cannot_run: the one line ("The sandbox can't run on this computer: …."). */
+  line?: string | null;
+};
+export type OmniRushWorkspaceBoxSetupAction = "linux_allow" | "win_install" | "win_restart" | "win_update" | "decline" | "check";
 export type OmniRushWorkspaceBoxProgress = {
   bytesDone: number | null;
   bytesTotal: number | null;
@@ -2144,8 +2176,8 @@ export function createOmniRushServerClient(options: { baseUrl: string; token?: s
       requestJson<OmniRushPendingUploads>(baseUrl, "/omnirush/capture/pending", { token, hostToken, timeoutMs: timeouts.config }),
     flushPendingUploads: () =>
       requestJson<{ before: number; after: number }>(baseUrl, "/omnirush/capture/flush", { token, hostToken, method: "POST", body: {}, timeoutMs: SIGN_OUT_FLUSH_TIMEOUT_MS }),
-    getWorkspaceBox: (workspaceId: string, options?: { fresh?: boolean }) =>
-      requestJson<OmniRushWorkspaceBox>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/box${options?.fresh ? "?fresh=1" : ""}`, {
+    getWorkspaceBox: (workspaceId: string, options?: { fresh?: boolean; sessionId?: string | null }) =>
+      requestJson<OmniRushWorkspaceBox>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/box${boxQuery(options)}`, {
         token, hostToken, timeoutMs: timeouts.config,
       }),
     setWorkspaceBox: (workspaceId: string, mode: "on" | "off" | null) =>
@@ -2160,6 +2192,11 @@ export function createOmniRushServerClient(options: { baseUrl: string; token?: s
       // A fresh backend check, then the status (each bounded at 10 s on the server).
       requestJson<OmniRushWorkspaceBox>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/box/retry`, {
         token, hostToken, method: "POST", body: {}, timeoutMs: 30_000,
+      }),
+    /** One sandbox setup step (the setup screen): the elevated ones wait for the admin prompt, so the limit is long. */
+    setupWorkspaceBox: (workspaceId: string, action: OmniRushWorkspaceBoxSetupAction) =>
+      requestJson<OmniRushWorkspaceBox>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/box/setup`, {
+        token, hostToken, method: "POST", body: { action }, timeoutMs: 35 * 60_000,
       }),
     resetWorkspaceBox: (workspaceId: string) =>
       requestJson<{ removed: boolean }>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/box/reset`, {

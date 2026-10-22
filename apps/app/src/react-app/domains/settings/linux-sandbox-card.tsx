@@ -152,6 +152,8 @@ function Advanced(props: { box: OmniRushWorkspaceBox; busy: boolean; defaultOpen
   const choices = linuxSandboxBackendChoices(box);
   const others = (box.backend?.alternatives ?? []).filter((alt) => alt.id !== box.backend?.id);
   const lockedByEnv = box.backendSetting.source === "env";
+  // Required on this account: "Off (this computer)" is not a choice.
+  const required = box.required === true;
   const canReset = Boolean(box.container?.exists);
   return (
     <Collapsible open={open} onOpenChange={setOpen} className="border-t border-dls-border">
@@ -183,7 +185,7 @@ function Advanced(props: { box: OmniRushWorkspaceBox; busy: boolean; defaultOpen
                   <SelectContent>
                     <SelectGroup>
                       {choices.map((item) => (
-                        <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>
+                        <SelectItem key={item.value} value={item.value} disabled={required && item.value === "native"}>{item.label}</SelectItem>
                       ))}
                     </SelectGroup>
                   </SelectContent>
@@ -191,6 +193,7 @@ function Advanced(props: { box: OmniRushWorkspaceBox; busy: boolean; defaultOpen
               </div>
             ) : null}
           </div>
+          {required ? <div className="-mt-2 text-[11px] text-dls-secondary" data-testid="linux-sandbox-backend-required">“Off (this computer)”: {box.requiredText?.optOut}</div> : null}
           {others.length ? (
             <div>
               <div className="text-[11px] font-medium text-dls-secondary">Other backends on this computer</div>
@@ -272,6 +275,9 @@ export function LinuxSandboxCard(props: LinuxSandboxCardProps) {
               <span className="rounded-full border border-dls-border px-1.5 py-px text-[10px] font-medium uppercase tracking-wide text-dls-secondary">Beta</span>
             </div>
             <div id="linux-sandbox-help" className="text-[11px] text-dls-secondary">{LINUX_SANDBOX_HELP}</div>
+            {box?.required ? (
+              <div className="mt-1 text-[11px] font-medium text-dls-text" data-testid="linux-sandbox-required">{box.requiredText?.optOut}</div>
+            ) : null}
             {/* TODO(Sam): data-collection wording for sandboxed chats goes here (what uploads record about the
                 sandbox: Linux as the OS, the container image, per-turn changes outside the project). No copy yet. */}
           </div>
@@ -281,7 +287,7 @@ export function LinuxSandboxCard(props: LinuxSandboxCardProps) {
             aria-describedby="linux-sandbox-help"
             aria-busy={busy || undefined}
             checked={checked}
-            disabled={busy || !box || box.source === "env"}
+            disabled={busy || !box || box.source === "env" || box.required === true}
             onCheckedChange={props.onToggle}
           />
         </div>

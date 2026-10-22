@@ -54,6 +54,7 @@ import { ReactSessionComposer } from "./composer/composer";
 import { WorkspaceRunModeMenu } from "./composer/workspace-run-mode-menu";
 import { FullPermissionsToggle } from "./composer/full-permissions-toggle";
 import { SandboxStatusChip } from "./composer/sandbox-status-chip";
+import { SandboxSetupPanel } from "./sandbox-setup-panel";
 import { useSessionCommandsStore } from "@/react-app/domains/session/commands/session-commands-store";
 import { SubagentModelMenu } from "./composer/subagent-model-menu";
 import { useSessionModelSelection } from "./session-model-store";
@@ -3614,6 +3615,13 @@ export function SessionSurface(props: SessionSurfaceProps) {
             {attachment.name}{sending ? " · Uploading…" : ""}
           </div>
         )))}
+        <SandboxSetupPanel
+          client={props.client}
+          workspaceId={props.workspaceId}
+          sessionId={props.sessionId}
+          chatRunning={chatStreaming || (effectiveActivityStatus !== "idle" && effectiveActivityStatus !== "error")}
+          onOpenSettings={() => props.onOpenSettingsSection?.("sandbox")}
+        />
         <SessionRunStatus
           activityStatus={effectiveActivityStatus}
           busy={chatStreaming}
