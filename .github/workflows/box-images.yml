@@ -1,7 +1,9 @@
 # Publishes one box version (apps/desktop/box/VERSION): the sandbox images
 # ghcr.io/omnirush-ai/box-{base,go,rust,java,ruby}:<version> for linux/amd64 and
 # linux/arm64, and the OmniRush WSL image (omnirush-wsl-<version>-<arch>.tar.gz) on the
-# `box-<version>` release of this repository, with box-pins.json beside it.
+# `box-<version>` release of this repository, with box-pins.json beside it. The same release
+# carries the OmniRush VM's disk for macOS (omnirush-vm-<version>-<arch>.qcow2, built from
+# apps/desktop/box/vm on native runners, with .sha256 and .source beside it).
 #
 # Published from this public repository with GITHUB_TOKEN, the packages are public and
 # linked here. Each image and WSL asset carries a hash of its sources: a version that
@@ -11,6 +13,9 @@
 # Afterwards both repositories take the pins with `node scripts/box/pins.mjs <version>`
 # (images.json and wsl.json, byte-identical) and commit them. The release guard
 # (scripts/box/check-pins.mjs) refuses an app release without them. See RELEASING.md.
+# The VM disk is pinned by hand in required.json (setup.darwin.vm.image.custom, both
+# repositories, PARITY lists): see apps/desktop/box/vm/README.md. A dispatch with vm_only
+# builds (or reuses) the VM disks and touches nothing else: no images, no WSL, no box-pins.json.
 name: box-images
 on:
   push:
@@ -19,8 +24,13 @@ on:
       - apps/desktop/box/VERSION
       - apps/desktop/box/images/**
       - apps/desktop/box/wsl/**
+      - apps/desktop/box/vm/**
   workflow_dispatch:
     inputs:
+      vm_only:
+        description: "Only the macOS VM disks (no container images, WSL image or box-pins.json)"
+        type: boolean
+        default: false
       adopt_existing:
         description: "Reuse images of this version published before source hashes were recorded"
         type: boolean
@@ -60,6 +70,7 @@ jobs:
 
   images:
     needs: prepare
+    if: ${{ !inputs.vm_only }}
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
@@ -128,6 +139,7 @@ jobs:
 
   wsl:
     needs: prepare
+    if: ${{ !inputs.vm_only }}
     strategy:
       matrix:
         include:
@@ -175,8 +187,58 @@ jobs:
           name: box-wsl-${{ matrix.arch }}
           path: wsl-${{ matrix.arch }}.json
 
+  vm:
+    needs: prepare
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      ARCH: ${{ matrix.arch }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build or reuse the VM disk
+        run: |
+          set -euo pipefail
+          tag="box-$VERSION"; name="omnirush-vm-$VERSION-$ARCH"; file="$name.qcow2"
+          src=$( (cd "$BOX_DIR/vm" && find . -type f -print0 | sort -z | xargs -0 sha256sum) | sha256sum | cut -c1-64)
+          mkdir -p dist
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' | grep -qx "$file"; then
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" -p "$file" -p "$name.source" -D dist
+            [ "$(cat "dist/$name.source")" = "$src" ] || { echo "::error::$file exists with other sources: bump $BOX_DIR/VERSION"; exit 1; }
+            echo "$file exists with these sources: reused"
+          else
+            # A Debian 13 root builds it (mmdebstrap, grub-efi of this arch); the runner is the target arch.
+            docker run --rm --privileged -e BOX_DIR -e VERSION -e ARCH -v "$PWD:/w" -w /w debian:trixie bash -euo pipefail -c '
+              apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+                mmdebstrap e2fsprogs dosfstools mtools fdisk qemu-utils "grub-efi-$ARCH-bin" ca-certificates >/dev/null
+              bash "$BOX_DIR/vm/build-image.sh" "$VERSION" "$ARCH" dist
+              chown -R "$(stat -c %u:%g /w)" dist'
+            printf '%s\n' "$src" > "dist/$name.source"
+            (cd dist && sha256sum "$file" > "$file.sha256")
+            gh release upload "$tag" --repo "$GITHUB_REPOSITORY" "dist/$file" "dist/$file.sha256" "dist/$name.source"
+          fi
+          sha=$(sha256sum "dist/$file" | cut -d' ' -f1); bytes=$(stat -c %s "dist/$file")
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/$file"
+          jq -n --arg url "$url" --arg sha "$sha" --argjson bytes "$bytes" '{url: $url, sha256: $sha, bytes: $bytes}' > "vm-$ARCH.json"
+          cat "vm-$ARCH.json"
+          { echo "### VM disk $VERSION $ARCH"; echo '```json'; cat "vm-$ARCH.json"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: box-vm-${{ matrix.arch }}
+          path: vm-${{ matrix.arch }}.json
+
   pins:
-    needs: [prepare, images, wsl]
+    needs: [prepare, images, wsl, vm]
+    if: ${{ !inputs.vm_only }}
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
@@ -192,8 +254,9 @@ jobs:
           set -euo pipefail
           base=$(sed -n 's/^FROM \(debian:[^ ]*\).*/\1/p' "$BOX_DIR/wsl/Dockerfile" | head -1)
           jq -n --slurpfile images parts/images.json --slurpfile a parts/wsl-amd64.json --slurpfile b parts/wsl-arm64.json \
+            --slurpfile va parts/vm-amd64.json --slurpfile vb parts/vm-arm64.json \
             --arg version "$VERSION" --arg base "$base" \
-            '{images: $images[0], wsl: {version: $version, distro: "OmniRushBox", base: $base, assets: {amd64: $a[0], arm64: $b[0]}}}' > box-pins.json
+            '{images: $images[0], wsl: {version: $version, distro: "OmniRushBox", base: $base, assets: {amd64: $a[0], arm64: $b[0]}}, vm: {version: $version, assets: {amd64: $va[0], arm64: $vb[0]}}}' > box-pins.json
           gh release upload "box-$VERSION" --repo "$GITHUB_REPOSITORY" --clobber box-pins.json
       - name: Check the pins and show them
         run: |
