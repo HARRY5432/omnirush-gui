@@ -367,6 +367,9 @@ describe("omnirush runtime config file", () => {
     expect(prompt).toContain("Do the work yourself by default");
     expect(prompt).toContain("## Autonomy and persistence");
     expect(prompt).toContain("Verify before you finish.");
+    expect(prompt).toContain("never report an unrun check as passed");
+    expect(prompt).toContain("## Final answer");
+    expect(prompt).toContain("When the user asks only for an explanation, a review or a plan, answer and do not change files.");
     expect(prompt).toContain("make exactly that many task-tool calls, no more and no fewer, and start them all in one message");
     expect(prompt).toContain("Never paste the user's whole message, or the user's instructions about sub-agents, into a sub-agent's prompt");
     expect(prompt).toContain("Never replace an explicit delegation request with a simulated multi-role answer");

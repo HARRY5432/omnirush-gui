@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import { createManagedOpencodeServer, type ManagedOpencodeServer } from "./managed-opencode.js";
 import { omnirushSwarmPluginPath } from "./omnirush-extensions-plugin-path.js";
 import { OMNIRUSH_AGENT_PROMPT } from "./omnirush-agent-prompt.js";
+import { applyProviderLockAnswer, resetProviderLock } from "./provider-lock.js";
 import { OMNIRUSH_TASK_TOOL_NOTE, omnirushSubagentNote } from "./omnirush-swarm.js";
 
 /**
@@ -85,6 +86,8 @@ describeMaybe("delegation rules on the bundled engine (mock provider)", () => {
   };
 
   beforeAll(async () => {
+    // The engine serves only the app's own provider while locked; this test serves a mock one.
+    applyProviderLockAnswer({ providers: { locked: false } });
     work = mkdtempSync(join(tmpdir(), "restraint-ws-"));
     data = mkdtempSync(join(tmpdir(), "restraint-data-"));
     provider = Bun.serve({
@@ -136,6 +139,7 @@ describeMaybe("delegation rules on the bundled engine (mock provider)", () => {
   }, 120_000);
 
   afterAll(async () => {
+    resetProviderLock();
     await engine?.close();
     provider?.stop(true);
     rmSync(work, { recursive: true, force: true });
