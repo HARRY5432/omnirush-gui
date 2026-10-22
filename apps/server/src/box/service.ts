@@ -860,9 +860,11 @@ export class BoxService {
     const mode = await this.mode(workspace).catch(() => null);
     if (!mode) return { native: true, source: null, reason: "plan_failed" };
     const { fallback } = this.required();
-    // Required: every outcome says so; a chat that runs here names the fallback the server set.
+    // Required: every outcome says so; a chat that runs here by the fallback rule (the box cannot run, setup
+    // needed or declined, a box that failed to start) names the fallback the server set (as the CLI's launch event).
     const required = mode.required ? { required: true as const } : {};
-    const native = (reason: string, extra: Partial<BoxPlanOutcome> = {}): BoxPlanOutcome => ({ native: true, source: mode.source, reason, ...required, ...(mode.required ? { fallback } : {}), ...extra });
+    const byFallback = new Set(["cannot_run", "setup_needed", "setup_declined", "box_failed"]);
+    const native = (reason: string, extra: Partial<BoxPlanOutcome> = {}): BoxPlanOutcome => ({ native: true, source: mode.source, reason, ...required, ...(mode.required && byFallback.has(reason) ? { fallback } : {}), ...extra });
     if (this.nativeChats.has(sessionId)) return native("kept_old_chat", { source: "chat" });
     if (this.boxedChats.has(sessionId)) return { native: false, source: mode.source, reason: "box", ...required };
     if (!mode.on) {
