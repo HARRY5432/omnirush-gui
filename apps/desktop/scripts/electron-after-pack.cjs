@@ -3,6 +3,7 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const asar = require("@electron/asar");
 const { verifyBundledUiMcp } = require("./ui-mcp-bundle.cjs");
+const { signLimactl } = require("./sign-lima.cjs");
 
 const computerUseHelperAppName = "OmniRush.ai Computer Use.app";
 
@@ -143,6 +144,11 @@ function signComputerUseHelper(context) {
 async function afterPack(context) {
   verifyRuntimeDependencies(context);
   verifyUiControlMcpBundle(context);
+  // The OmniRush VM's limactl: its own signature (virtualization entitlement), before the app is signed around it.
+  if (context.electronPlatformName === "darwin") {
+    const appPath = resolveMacAppPath(context);
+    if (appPath) signLimactl(appPath);
+  }
   const triple = targetTriple(context.electronPlatformName, context.arch);
   if (!triple) return;
 
