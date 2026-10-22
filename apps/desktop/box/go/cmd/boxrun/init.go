@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -89,6 +90,16 @@ func stageInit(args []string) error {
 	overlay, err := mountOverlayMode(sp.Lower, sp.Upper, sp.Work, m, sp.Fuse, sp.NoKernel)
 	if err != nil {
 		return err
+	}
+	if overlay == "fuse" {
+		// fuse-overlayfs serves the root from this mount namespace: the root switch would move
+		// its root into the box too, and a path it looks up (/proc/self/fd/N for xattrs) would
+		// then wait on itself, forever. The rest goes on in a copy of the namespace, on this
+		// thread only (it ends in exec), so the daemon keeps the root it started with.
+		runtime.LockOSThread()
+		if err := syscall.Unshare(syscall.CLONE_NEWNS); err != nil {
+			return fmt.Errorf("fuse-overlayfs: own mount namespace: %w", err)
+		}
 	}
 	shadowsOn, shadowsMade, err := prepareRoot(sp, m)
 	if err != nil {
