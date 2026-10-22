@@ -10,9 +10,10 @@
 // `__sandbox__` format, so the converter and the rebuild do not change.
 //
 //   Linux:   bwrap (no daemon, no root) > rootless Podman > Docker
-//   macOS:   OmniRush's own Lima VM (macOS 13+, set up by itself) > OrbStack > colima
-//            > Docker Desktop > Rancher > Podman machine, the runtimes only when already
-//            running (Apple container is opt-in only: never picked on its own, never started unasked)
+//   macOS:   OrbStack > colima > Docker Desktop > Rancher > Podman machine
+//            (Apple container is opt-in only: never picked on its own, never started unasked);
+//            under the required sandbox OmniRush's own Lima VM (macOS 13+, set up by itself) comes
+//            first, else the VM runs only when chosen by name (REQUIRED_FIRST)
 //   Windows: WSL containers (wslc, WSL 3.0.1+) > OmniRush's WSL distro > Docker Desktop > Podman machine
 //            > Docker in the default WSL distro
 //
@@ -37,7 +38,7 @@ type Env = NodeJS.ProcessEnv;
 
 export const ORDER: Record<"linux" | "darwin" | "win32", string[]> = {
   linux: ["bwrap", "podman", "docker"],
-  darwin: ["lima", "orbstack", "colima", "docker-desktop", "rancher", "podman", "docker"],
+  darwin: ["orbstack", "colima", "docker-desktop", "rancher", "podman", "docker"],
   win32: ["wslc", "wsl", "docker-desktop", "podman", "docker", "wsl-engine"],
 };
 
@@ -49,6 +50,13 @@ export const ORDER: Record<"linux" | "darwin" | "win32", string[]> = {
  * packet filter on for all host traffic (#2335).
  */
 export const OPT_IN: Partial<Record<NodeJS.Platform, string[]>> = { darwin: ["apple"] };
+
+/**
+ * Backends that lead the automatic order only while the sandbox is required
+ * on this account (the server's `local_box.required`): macOS' own VM. Without
+ * it the order is the one above, and the VM runs only when chosen by name.
+ */
+export const REQUIRED_FIRST: Partial<Record<NodeJS.Platform, string[]>> = { darwin: ["lima"] };
 
 /** What the backend setting takes (and what uploads record as sandbox.backend). */
 export const BACKENDS = ["bwrap", "lima", "apple", "wslc", "wsl", "orbstack", "colima", "docker-desktop", "rancher", "docker", "podman", "wsl-engine"] as const;
@@ -195,9 +203,9 @@ function writeCache(boxHome: string, key: string, result: RuntimeResult, now: nu
 }
 
 /** One line when nothing works, with the free option to install. */
-export function noneReason(platform: NodeJS.Platform): string {
+export function noneReason(platform: NodeJS.Platform, required = false): string {
   if (platform === "linux") return "no sandbox backend works here (install bubblewrap, Podman or Docker)";
-  if (platform === "darwin") return "the OmniRush VM cannot run here and no container runtime found (free: `brew install colima docker && colima start`; also OrbStack, Docker Desktop, Podman; Apple container only when chosen in Settings)";
+  if (platform === "darwin") return (required ? "the OmniRush VM cannot run here and " : "") + "no container runtime found (free: `brew install colima docker && colima start`; also OrbStack, Docker Desktop, Podman; Apple container only when chosen in Settings)";
   return "no sandbox backend found (turn on WSL 2: `wsl --install --no-distribution` as administrator, then `wsl --update` for WSL containers; or Docker Desktop, Podman)";
 }
 
@@ -216,14 +224,14 @@ function alternative(r: Probed | { backend: string; name: string; ok: false; rea
  * flavor, ..., why }) or { ok: false, reason, tried }. `asked`: a backend id
  * or "auto" (the setting); `allow`: the server's allowlist (null: any).
  */
-export async function detectBackend({ boxHome, env = process.env, platform = process.platform, home = os.homedir(), exists = existsSync, run = runCommand, wsl = platform === "linux" && isWsl(env), now = Date.now(), fresh = false, all = false, timeoutMs, asked = env.OMNIRUSH_BOX_BACKEND, allow = null, arch = process.arch, release = os.release(), preferShadows = false }: DetectOptions = {}): Promise<RuntimeResult> {
+export async function detectBackend({ boxHome, env = process.env, platform = process.platform, home = os.homedir(), exists = existsSync, run = runCommand, wsl = platform === "linux" && isWsl(env), now = Date.now(), fresh = false, all = false, timeoutMs, asked = env.OMNIRUSH_BOX_BACKEND, allow = null, arch = process.arch, release = os.release(), preferShadows = false, required = false }: DetectOptions = {}): Promise<RuntimeResult> {
   let wanted = normalizeBackend(asked);
   let legacyRuntime = String(env.OMNIRUSH_BOX_RUNTIME || "").trim();
   // OMNIRUSH_BOX_RUNTIME naming a backend's own program picks that backend (the host kits do).
   const named = runtimeBackend(legacyRuntime, platform);
   if (named && wanted === "auto") { wanted = normalizeBackend(named); legacyRuntime = ""; }
   const allowList = Array.isArray(allow) ? allow.map(normalizeBackend).filter((id): id is BackendId | "auto" | "native" => Boolean(id)) : null;
-  const key = JSON.stringify([2, platform, wanted, allowList, ...(preferShadows ? ["shadows"] : []), legacyRuntime, env.DOCKER_HOST || "", env.PATH || env.Path || "", env.OMNIRUSH_BOX_BWRAP || ""]);
+  const key = JSON.stringify([2, platform, wanted, allowList, ...(preferShadows ? ["shadows"] : []), ...(required ? ["required"] : []), legacyRuntime, env.DOCKER_HOST || "", env.PATH || env.Path || "", env.OMNIRUSH_BOX_BWRAP || ""]);
   if (boxHome && !fresh && !all) {
     const cached = readCache(boxHome, now, key);
     if (cached) return { ...cached, cached: true };
@@ -231,6 +239,9 @@ export async function detectBackend({ boxHome, env = process.env, platform = pro
   if (wanted === null) return { ok: false, reason: `unknown sandbox backend "${asked}" (one of: auto, ${BACKENDS.join(", ")}, native)`, tried: [] };
   if (wanted === "native") return { ok: false, reason: "the sandbox backend is set to native (this machine)", tried: [], native: true };
   let order: string[] = backendsFor(platform);
+  // Under required (only): the backends that lead then (macOS: OmniRush's VM).
+  const first = REQUIRED_FIRST[platform] ?? [];
+  if (required && wanted === "auto") order = [...first, ...order.filter((id) => !first.includes(id))];
   // OMNIRUSH_BOX_RUNTIME (docker, podman or a path) keeps meaning "this container CLI".
   if (legacyRuntime) order = order.filter((id) => !["bwrap", "lima", "apple", "wslc", "wsl", "wsl-engine"].includes(id));
   // Under the required sandbox on macOS/Windows: the backends whose boxes get their own build
@@ -283,6 +294,7 @@ export async function detectBackend({ boxHome, env = process.env, platform = pro
   if (all && containers === null) await containerList();
   // Opt-in backends are listed for the status, never probed or started unless chosen.
   if (all && wanted === "auto") for (const id of OPT_IN[platform] ?? []) if (!results.some((r) => r.backend === id)) results.push({ backend: id, name: id, ok: false, reason: "opt-in only: choose it in Settings (sandbox backend)" });
+  if (all && wanted === "auto" && !required) for (const id of REQUIRED_FIRST[platform] ?? []) if (!results.some((r) => r.backend === id)) results.push({ backend: id, name: id, ok: false, reason: "used when the sandbox is required on this account, or when chosen in Settings (sandbox backend)" });
   const probedContainers: Probed[] = containers ?? [];
   if (all) for (const r of probedContainers) if (!results.some((x) => "bin" in x && x.bin === r.bin && ("context" in x ? x.context : undefined) === r.context && x.name === r.name)) results.push(r);
   const failed = [...skipped, ...results.filter((r) => !r.ok)];
@@ -292,7 +304,7 @@ export async function detectBackend({ boxHome, env = process.env, platform = pro
     result = { ...chosen, why };
   } else {
     const reasons = tried.filter((t) => t.reason).map((t) => `${t.backend}: ${t.reason}`);
-    const failure: RuntimeFailure = { ok: false, reason: reasons.length ? reasons.join("; ") : noneReason(platform), tried };
+    const failure: RuntimeFailure = { ok: false, reason: reasons.length ? reasons.join("; ") : noneReason(platform, required), tried };
     if (platform === "darwin" && !results.some((r) => r.ok)) failure.hint = "colima";
     result = failure;
   }

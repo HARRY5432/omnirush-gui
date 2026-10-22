@@ -13,7 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 
-import { OPT_IN, BACKENDS, backendsFor, detectBackend, driverFor, normalizeBackend, ORDER } from "./backends/index.js";
+import { OPT_IN, BACKENDS, REQUIRED_FIRST, backendsFor, detectBackend, driverFor, normalizeBackend, ORDER } from "./backends/index.js";
 import { apparmorProfile, boxdEnv, boxrunPath, bwrapCandidates, ENABLED_BWRAP, explainProbe, parseOut, probeBwrap, upArgs } from "./backends/bwrap.js";
 import { createAppleArgs, findDigest, macosMajor, parseVersions, probeApple, snapshotInfo, SUPPORTED as APPLE, systemProductVersion } from "./backends/apple.js";
 import { versionAtLeast } from "./backends/shared.js";
@@ -55,13 +55,14 @@ function helperBin(): string {
 describe("box backends: ranking and overrides", () => {
   test("the ranked order per OS", () => {
     expect(ORDER.linux).toEqual(["bwrap", "podman", "docker"]);
-    expect(ORDER.darwin).toEqual(["lima", "orbstack", "colima", "docker-desktop", "rancher", "podman", "docker"]);
+    expect(ORDER.darwin).toEqual(["orbstack", "colima", "docker-desktop", "rancher", "podman", "docker"]);
+    expect(REQUIRED_FIRST.darwin).toEqual(["lima"]);
     expect(OPT_IN.darwin).toEqual(["apple"]);
     expect(ORDER.win32).toEqual(["wslc", "wsl", "docker-desktop", "podman", "docker", "wsl-engine"]);
     for (const list of Object.values(ORDER)) for (const id of list) expect(BACKENDS.some((b) => b === id)).toBe(true);
     expect(backendsFor("linux")).toEqual(ORDER.linux);
     expect(backendChoices("win32").map((c) => c.id)).toEqual(["auto", ...ORDER.win32, "native"]);
-    expect(backendChoices("darwin").map((c) => c.id)).toEqual(["auto", ...ORDER.darwin, "apple", "native"]);
+    expect(backendChoices("darwin").map((c) => c.id)).toEqual(["auto", "lima", ...ORDER.darwin, "apple", "native"]);
     expect(backendChoices("darwin").find((c) => c.id === "apple")?.label).toBe("Apple container (opt-in)");
   });
 

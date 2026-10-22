@@ -365,4 +365,6 @@ export type DetectOptions = {
   release?: string;
   /** Under the required sandbox on macOS/Windows: the backends whose boxes get their own build folders (driver.shadows) first. */
   preferShadows?: boolean;
+  /** The sandbox is required on this account: the backends of REQUIRED_FIRST (macOS: OmniRush's VM) lead the order. */
+  required?: boolean;
 };
