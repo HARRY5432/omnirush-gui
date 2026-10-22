@@ -137,7 +137,7 @@ function Panel(props: { client: LinuxSandboxClient; workspaceId: string; session
     return (
       <div className={`${WIDTH} flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-xl border border-dls-border bg-dls-surface px-3 py-2`} data-testid="sandbox-setup-panel" data-kind={view.kind}>
         <ToneIcon tone={view.tone} />
-        <div className="min-w-0 flex-1 text-xs">
+        <div className="min-w-0 flex-1 basis-48 text-xs">
           <span className="font-medium text-dls-text" role="status">{view.title}</span>
           {view.detail ? <span className="ml-1.5 text-dls-secondary">{view.detail}</span> : null}
         </div>
