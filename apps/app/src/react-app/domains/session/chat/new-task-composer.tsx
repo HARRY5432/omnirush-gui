@@ -14,6 +14,7 @@ import { ReactSessionComposer } from "@/react-app/domains/session/surface/compos
 import { WorkspaceRunModeMenu } from "@/react-app/domains/session/surface/composer/workspace-run-mode-menu";
 import { FullPermissionsToggle } from "@/react-app/domains/session/surface/composer/full-permissions-toggle";
 import { SandboxStatusChip } from "@/react-app/domains/session/surface/composer/sandbox-status-chip";
+import { SandboxSetupPanel } from "@/react-app/domains/session/surface/sandbox-setup-panel";
 import { SubagentModelMenu } from "@/react-app/domains/session/surface/composer/subagent-model-menu";
 import {
   snapshotComposerSessionState,
@@ -431,6 +432,7 @@ export function NewTaskComposer(props: NewTaskComposerProps) {
       setFailedSubmission(null);
     }}>Clear the current draft to restore the unsent message</button> : null}
     {context?.projectPicker ? <ProjectPicker {...context.projectPicker} /> : null}
+    <SandboxSetupPanel client={workspaceClient} workspaceId={workspaceId} chatRunning={Boolean(props.busy)} onOpenSettings={() => context?.onOpenSettingsSection?.("sandbox")} />
     <ReactSessionComposer
       runModeControl={<WorkspaceRunModeMenu client={workspaceClient} workspaceId={workspaceId} busy={props.busy} />}
       fullPermissionsControl={<FullPermissionsToggle client={workspaceClient} workspaceId={workspaceId} />}

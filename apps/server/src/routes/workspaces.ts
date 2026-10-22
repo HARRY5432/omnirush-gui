@@ -39,6 +39,8 @@ interface RegisterWorkspaceRoutesOptions {
    * processes, open handles) is released. Best effort; never throws.
    */
   stopWorkspaceWork?: (config: ServerConfig, workspace: WorkspaceInfo) => Promise<void>;
+  /** A local workspace was added or made active: its sandbox starts now, in the background (box/service.ts opened). */
+  onWorkspaceOpened?: (config: ServerConfig, workspace: WorkspaceInfo) => void;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -313,6 +315,7 @@ export function registerWorkspaceRoutes(options: RegisterWorkspaceRoutesOptions)
     resolveWorkspace,
     serializeWorkspace,
     syncWorkspaceRuntimeMcp,
+    onWorkspaceOpened,
   } = options;
 
   const resolveWorkspaceForRegistry = async (id: string): Promise<WorkspaceInfo> => {
@@ -343,6 +346,7 @@ export function registerWorkspaceRoutes(options: RegisterWorkspaceRoutesOptions)
 
     const { workspace, persisted } = await addLocalWorkspace(config, { folderPath, name, preset, actor: ctx.actor });
     onWorkspacesChanged();
+    onWorkspaceOpened?.(config, workspace);
 
     return jsonResponse({
       activeId: workspace.id,
@@ -509,6 +513,7 @@ export function registerWorkspaceRoutes(options: RegisterWorkspaceRoutesOptions)
     if (!wasActive && workspace.workspaceType === "local" && resolveWorkspaceOpencodeConnection(config, workspace).baseUrl?.trim()) {
       void syncWorkspaceRuntimeMcp(config, workspace).catch(() => undefined);
     }
+    if (workspace.workspaceType === "local") onWorkspaceOpened?.(config, workspace);
     return jsonResponse({ activeId: workspace.id, workspace: serializeWorkspace(workspace), persisted });
   });
 

@@ -2,20 +2,28 @@
 // The Linux sandbox's helpers (apps/server/src/box), next to the engine in
 // the sidecars folder: box/<goos>-<goarch>/boxsh[.exe] (the shell the engine
 // runs its shell tool with), box/linux-<arch>/boxd (run inside each
-// project's box) and, for Linux and Windows builds, box/linux-<arch>/boxrun
-// (the bubblewrap backend on Linux; copied into the OmniRush WSL distro on
-// Windows). Built from box/go, a copy of the CLI's box/go (omnirush-cli
+// project's box) and box/linux-<arch>/boxrun (the bubblewrap backend on
+// Linux; copied into the OmniRush WSL distro on Windows and into the OmniRush
+// VM on macOS). macOS builds also ship the VM's Lima (prepare-lima.mjs:
+// sidecars/lima, the pinned release, sha256-checked). Built from box/go, a copy of the CLI's box/go (omnirush-cli
 // feat/local-box-backends), with Go >= 1.22 (GO=/path/to/go), or copied from
 // OMNIRUSH_BOX_PREBUILT_DIR (a folder with the same layout). Linux builds also
-// ship box/linux-<arch>/bwrap when the prebuilt folder has one (an optional
-// static bubblewrap for systems without it; never built here). Without the
+// ship box/linux-<arch>/bwrap: the static bubblewrap the CLI ships (box/bwrap,
+// a copy of the CLI's box/bwrap, built by its build.sh), checked against
+// box/bwrap/SHA256SUMS, with its licence texts next to it (box/LICENSE-*);
+// the prebuilt folder's bwrap is used instead when it has one. It runs boxes
+// where the system has no usable bubblewrap, and is what "Allow the sandbox"
+// installs where AppArmor blocks user namespaces. Without the
 // helpers the app ships without them and the sandbox reports itself
 // unavailable (boxrun alone missing: the bubblewrap and WSL distro backends
 // are); nothing else changes.
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { prepareLima } from "./prepare-lima.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const source = resolve(here, "..", "box", "go");
@@ -27,6 +35,18 @@ const sidecarDir = sidecarOverride ? resolve(sidecarOverride) : resolve(here, ".
 const out = join(sidecarDir, "box");
 
 const GOOS = { darwin: "darwin", linux: "linux", win32: "windows" };
+/** The licence texts shipped next to the bubblewrap (the CLI's names: scripts/check-bwrap.mjs). */
+const BWRAP_LICENSES = [["COPYING.bubblewrap", "LICENSE-bwrap-LGPL-2.0"], ["COPYING.libcap", "LICENSE-libcap"], ["COPYING.musl", "LICENSE-musl"]];
+
+/** box/bwrap/SHA256SUMS as { name: sha256 }. */
+function bwrapSums(dir) {
+  const sums = {};
+  for (const line of readFileSync(join(dir, "SHA256SUMS"), "utf8").split("\n")) {
+    const [digest, name] = line.trim().split(/\s+/);
+    if (digest && name) sums[name] = digest;
+  }
+  return sums;
+}
 const GOARCH = { x64: "amd64", arm64: "arm64" };
 
 /** The target from the same triple prepare-sidecar.mjs reads, else this machine. */
@@ -41,8 +61,9 @@ const { goos, goarch } = target();
 const files = [
   { cmd: "boxsh", goos, goarch, name: goos === "windows" ? "boxsh.exe" : "boxsh" },
   { cmd: "boxd", goos: "linux", goarch, name: "boxd" },
-  // The bubblewrap backend (Linux) and the OmniRush WSL distro's runner (Windows copies it in).
-  ...(goos === "linux" || goos === "windows" ? [{ cmd: "boxrun", goos: "linux", goarch, name: "boxrun", optional: true }] : []),
+  // The bubblewrap backend (Linux), the OmniRush WSL distro's runner (Windows copies it in) and the
+  // OmniRush VM's (macOS copies it in).
+  { cmd: "boxrun", goos: "linux", goarch, name: "boxrun", optional: true },
 ];
 
 const go = process.env.GO?.trim() || "go";
@@ -64,7 +85,7 @@ for (const file of files) {
   } else if (prebuilt && existsSync(join(prebuilt, `${file.goos}-${file.goarch}`, file.name))) {
     copyFileSync(join(prebuilt, `${file.goos}-${file.goarch}`, file.name), dest);
   } else {
-    if (file.optional) console.warn(`Sandbox helper linux-${file.goarch}/${file.name} missing: the bubblewrap / WSL distro backends are unavailable in this build.`);
+    if (file.optional) console.warn(`Sandbox helper linux-${file.goarch}/${file.name} missing: the bubblewrap / WSL distro / VM backends are unavailable in this build.`);
     else missing += 1;
     continue;
   }
@@ -73,12 +94,29 @@ for (const file of files) {
   if (process.platform === "darwin" && file.goos === "darwin") spawnSync("codesign", ["--force", "--sign", "-", dest], { stdio: "ignore" });
   console.log(`Sandbox helper ${file.goos}-${file.goarch}/${file.name} ready.`);
 }
-// An optional static bubblewrap for Linux systems without one (prebuilt only).
-if (goos === "linux" && prebuilt && existsSync(join(prebuilt, `linux-${goarch}`, "bwrap"))) {
+// The static bubblewrap (Linux builds): the prebuilt folder's, else the vendored one, checked against its sha256.
+if (goos === "linux") {
   const dest = join(out, `linux-${goarch}`, "bwrap");
   mkdirSync(dirname(dest), { recursive: true });
-  copyFileSync(join(prebuilt, `linux-${goarch}`, "bwrap"), dest);
+  const fromPrebuilt = prebuilt && existsSync(join(prebuilt, `linux-${goarch}`, "bwrap")) ? join(prebuilt, `linux-${goarch}`, "bwrap") : null;
+  if (fromPrebuilt) {
+    copyFileSync(fromPrebuilt, dest);
+  } else {
+    const vendored = resolve(here, "..", "box", "bwrap");
+    const sums = bwrapSums(vendored);
+    for (const [name, file] of [[`linux-${goarch}/bwrap`, dest], ...BWRAP_LICENSES.map(([src, to]) => [src, join(out, to)])]) {
+      const src = join(vendored, name);
+      const digest = createHash("sha256").update(readFileSync(src)).digest("hex");
+      if (!sums[name] || digest !== sums[name]) throw new Error(`box/bwrap/${name} is not the one box/bwrap/SHA256SUMS pins (${digest})`);
+      copyFileSync(src, file);
+    }
+  }
   chmodSync(dest, 0o755);
-  console.log(`Sandbox helper linux-${goarch}/bwrap ready.`);
+  console.log(`Sandbox helper linux-${goarch}/bwrap ready${fromPrebuilt ? " (prebuilt)" : ""}.`);
 }
 if (missing) console.warn("Sandbox helpers missing (no Go and no OMNIRUSH_BOX_PREBUILT_DIR): the Linux sandbox will report itself unavailable.");
+// macOS: the OmniRush VM's Lima (bin/limactl, the Linux guest agent, its licence) in sidecars/lima.
+if (goos === "darwin") {
+  const lima = await prepareLima({ goos, goarch, out: sidecarDir });
+  console.log(lima.ok ? `Sandbox VM Lima ${lima.version} ready (${lima.source}).` : `Sandbox VM Lima not bundled (${lima.reason}): the app downloads the pinned release on first use.`);
+}

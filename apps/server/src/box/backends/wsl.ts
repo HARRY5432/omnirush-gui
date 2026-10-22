@@ -50,6 +50,8 @@ type WslRuntime = Pick<BoxRuntime, "bin" | "distro" | "arch" | "installed">;
 export const DEFAULT_DISTRO = "OmniRushBox";
 export const STORE = "/var/lib/omnirush/store";
 export const BOXES = "/var/lib/omnirush/boxes";
+/** Where a box's own build folders (shadows) live in the distro: one folder per box, mounted at the same path inside it. */
+export const SHADOW_STORES = "/var/lib/omnirush/shadows";
 export const ENABLE_HINT = "WSL 2 is not enabled on this Windows. One time, in an administrator terminal: `wsl --install --no-distribution`, then restart Windows";
 
 export type WslAsset = { url: string | null; sha256: string | null; bytes?: number | null };
@@ -102,6 +104,16 @@ export function parseWslList(text: unknown): WslRow[] {
   return rows;
 }
 
+/**
+ * `wsl --status` without its WSL 1 notes: Windows 11 with only Virtual
+ * Machine Platform on (what `wsl --install --no-distribution` turns on) says
+ * "WSL1 is not supported ... enable the "Windows Subsystem for Linux"
+ * optional component to use WSL1", while WSL 2 works.
+ */
+export function withoutWsl1Notes(text: unknown): string {
+  return String(text ?? "").split(/\r?\n/).filter((line) => !/\bWSL ?1\b/i.test(line)).join("\n");
+}
+
 const NOT_ENABLED = /not installed|is not enabled|optional component|virtual machine platform|HCS_E_HYPERV_NOT_INSTALLED|WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED|0x8007019e|0x80370102|wsl\.exe --install|enable the .*feature/i;
 const NO_DISTROS = /no installed distributions|WSL_E_DEFAULT_DISTRO_NOT_FOUND|has no installed distributions/i;
 
@@ -128,7 +140,7 @@ export async function probeWslDistro({ env = process.env, platform = process.pla
   const bin = wslExe({ env, exists });
   if (!bin) return { ...base, ok: false, reason: ENABLE_HINT };
   const status = await wslCall(bin, ["--status"], { run, env, timeoutMs });
-  const said = `${status.stdout}\n${status.stderr}`;
+  const said = withoutWsl1Notes(`${status.stdout}\n${status.stderr}`);
   if (NOT_ENABLED.test(said) || (status.code !== 0 && !NO_DISTROS.test(said))) {
     return { ...base, ok: false, bin, reason: NOT_ENABLED.test(said) || status.error === "ENOENT" ? ENABLE_HINT : `\`wsl --status\` failed: ${firstLine(said) || status.code}` };
   }
@@ -164,22 +176,49 @@ export function sha256File(file: string): Promise<string> {
   });
 }
 
+export type DownloadOptions = {
+  fetcher?: (input: string, init?: RequestInit) => Promise<Response>;
+  /** A download that sends nothing for this long fails (0: never; the CLI's download has the same option). */
+  stallMs?: number;
+  /** Bytes so far and the total (null when the server does not say), as they come. */
+  onProgress?: (done: number, total: number | null) => void;
+};
+
 /** Download over https (redirects followed, through externalFetch: the app's proxy and CA settings) to `dest`, checked against `sha256`. */
-export async function download(url: string, dest: string, sha256: string | null, { fetcher = externalFetch }: { fetcher?: (input: string, init?: RequestInit) => Promise<Response> } = {}): Promise<string> {
+export async function download(url: string, dest: string, sha256: string | null, { fetcher = externalFetch, stallMs = 0, onProgress }: DownloadOptions = {}): Promise<string> {
   if (!/^https:\/\//.test(url)) throw new Error("download: https only");
   mkdirSync(path.dirname(dest), { recursive: true });
   const tmp = `${dest}.${process.pid}.part`;
-  const res = await fetcher(url, { headers: { "user-agent": "omnirush" }, redirect: "follow" });
-  if (res.status !== 200 || !res.body) {
-    await res.body?.cancel().catch(() => undefined);
-    throw new Error(`download: HTTP ${res.status}`);
-  }
-  if (res.url && !res.url.startsWith("https://")) throw new Error("download: https only");
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const arm = () => {
+    if (!stallMs) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => controller.abort(new Error(`download: no data for ${Math.round(stallMs / 1000)} s`)), stallMs);
+  };
+  arm();
   try {
-    await pipeline(Readable.fromWeb(res.body as unknown as NodeReadableStream<Uint8Array>), createWriteStream(tmp));
+    const res = await fetcher(url, { headers: { "user-agent": "omnirush" }, redirect: "follow", signal: controller.signal });
+    if (res.status !== 200 || !res.body) {
+      await res.body?.cancel().catch(() => undefined);
+      throw new Error(`download: HTTP ${res.status}`);
+    }
+    if (res.url && !res.url.startsWith("https://")) throw new Error("download: https only");
+    const total = Number(res.headers.get("content-length")) > 0 ? Number(res.headers.get("content-length")) : null;
+    let done = 0;
+    const source = Readable.fromWeb(res.body as unknown as NodeReadableStream<Uint8Array>);
+    source.on("data", (chunk: Buffer) => {
+      arm();
+      done += chunk.length;
+      try { onProgress?.(done, total); } catch { /* a listener's problem */ }
+    });
+    await pipeline(source, createWriteStream(tmp));
   } catch (error) {
     rmSync(tmp, { force: true });
-    throw error;
+    const reason = controller.signal.aborted ? controller.signal.reason : null;
+    throw reason instanceof Error ? reason : error;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
   const got = await sha256File(tmp);
   if (sha256 && got !== sha256) { rmSync(tmp, { force: true }); throw new Error(`download: sha256 mismatch (${got.slice(0, 12)}…)`); }
@@ -317,10 +356,10 @@ export function startKeeper(runtime: WslRuntime, args: string[], { env = process
   });
 }
 
-type WslMeta = BoxMeta & { mounts?: string[] };
+type WslMeta = BoxMeta & { mounts?: string[]; shadows?: string[] };
 
 async function open(ctx: OpenContext): Promise<Opened> {
-  const { key, root, croot, runtime, run, home, runFolder, image, pull: mayPull, shims, pkglog, env, log, onPulling, spawnImpl } = ctx;
+  const { key, root, croot, runtime, run, home, runFolder, image, pull: mayPull, shims, pkglog, shadows = null, env, log, onPulling, spawnImpl } = ctx;
   const file = metaFile(home, key);
   let meta = readJson<WslMeta>(file);
   if (meta && meta.root !== root) return { ok: false, error: `box ${key} belongs to another folder` };
@@ -331,7 +370,7 @@ async function open(ctx: OpenContext): Promise<Opened> {
     const asks = ctx.ping ?? ping;
     const answers = (await asks(live.endpoint, { timeoutMs: 1_500 })) || (live.alternates.length > 0 && (await asks(live.alternates[0]!, { timeoutMs: 1_500 })));
     if (answers) {
-      return { ok: true, created: null, endpoint: live.endpoint, alternates: live.alternates, uid: 0, gid: 0, containerId: `wsl_${key}_${meta.instance}`, imageId: meta.config || meta.image, mounts: meta.mounts ?? [] };
+      return { ok: true, created: null, endpoint: live.endpoint, alternates: live.alternates, uid: 0, gid: 0, containerId: `wsl_${key}_${meta.instance}`, imageId: meta.config || meta.image, mounts: meta.mounts ?? [], shadows: meta.shadows ?? [] };
     }
     log("info", "box keeper running but boxd not answering; starting it again", { key });
     try { live.child.kill(); } catch { /* gone */ }
@@ -363,7 +402,7 @@ async function open(ctx: OpenContext): Promise<Opened> {
   const args = upArgs({
     box: boxPath(key), store: STORE, image: meta.image, boxd: "/opt/omnirush/boxd", portFile: `${wslPath(runFolder)}/boxd.port`,
     root, croot, runFolder, shims, pkglog, token: meta.token, idleMinutes: idle, listen: listenAny ? "0.0.0.0:0" : "127.0.0.1:0",
-    platform: "win32", mapPath: wslPath,
+    platform: "win32", mapPath: wslPath, shadows, shadowStore: shadows ? `${SHADOW_STORES}/${key}` : null,
   });
   const kept = await startKeeper(runtime, args, { env, ...(spawnImpl ? { spawnImpl } : {}) });
   if (!kept.ok) return { ok: false, error: `could not start the sandbox: ${kept.error}` };
@@ -376,9 +415,12 @@ async function open(ctx: OpenContext): Promise<Opened> {
     if (addr) alternates.push({ host: addr, port, token: meta.token });
   }
   const mounts = [croot, "/run/omnirush", ...(shims ? ["/opt/omnirush/pkglog-src"] : []), ...(pkglog ? [containerRoot(pkglog.root, "win32")] : [])];
-  if (!kept.out.reused) writeJson(file, { ...meta, mounts, started_at: new Date().toISOString() });
+  // The folders boxrun shadowed (a box it found running keeps the set it started with).
+  const reported = Array.isArray(kept.out.shadows) ? kept.out.shadows.filter((item): item is string => typeof item === "string") : null;
+  const shadowed = reported ?? (kept.out.reused ? (meta.shadows ?? []) : []);
+  if (!kept.out.reused) writeJson(file, { ...meta, mounts, shadows: shadowed, started_at: new Date().toISOString() });
   keepers.set(key, { child: kept.child, endpoint, alternates });
-  return { ok: true, created, endpoint, alternates, uid: 0, gid: 0, containerId: `wsl_${key}_${meta.instance}`, imageId: meta.config || meta.image, mounts: kept.out.reused ? (meta.mounts ?? mounts) : mounts };
+  return { ok: true, created, endpoint, alternates, uid: 0, gid: 0, containerId: `wsl_${key}_${meta.instance}`, imageId: meta.config || meta.image, mounts: kept.out.reused ? (meta.mounts ?? mounts) : mounts, shadows: shadowed };
 }
 
 function keeperAlive(key: string): boolean {
@@ -389,6 +431,8 @@ function keeperAlive(key: string): boolean {
 export const wslDriver: BoxDriver = {
   kind: "wsl",
   execFallback: false,
+  /** boxrun runs as root in the distro: a box here gets its own build folders on a Windows host (required.ts). */
+  shadows: true,
   imagePresent,
   pull,
   /** Desktop: the distro import, the helpers and the image download run in this process (launch.ts pullInBackground). */

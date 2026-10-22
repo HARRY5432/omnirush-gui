@@ -21,21 +21,26 @@
  *
  * Not to be confused with the OpenWork worker sandbox (`sandboxBackend`).
  */
+import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { boxHome, boxKey, boxSnapshotsDir, containerName, installShell, listBoxes, mountReplaced, readRecord, resetBox, savedTurns, type BoxLabel, type BoxLog } from "./box.js";
-import { LABELS, OPT_IN, backendsFor, driverFor } from "./backends/index.js";
+import { LABELS, OPT_IN, REQUIRED_FIRST, backendsFor, driverFor } from "./backends/index.js";
+import { limaHome } from "./backends/lima.js";
 import type { BoxExec } from "./backends/types.js";
 import type { BoxEndpoint } from "./client.js";
 import { hostBuilds, hostBuildsNotice, hostBuildThings, hostRules } from "./host-builds.js";
-import { detectStack, imageFor } from "./images.js";
-import { askedBackend, boxRun, planBox, pullLog, pullMarker, pulling, pullInBackground, resolveMode, saveBackend, serverBackends, serverDefault, shimsDir, type BoxRun, type ProjectBoxMode, type ServerBoxDefault } from "./launch.js";
+import { detectStack, imageFor, type BoxImage } from "./images.js";
+import { portLine } from "./ports.js";
+import { askedBackend, boxRun, planBox, pullActivityAt, pullLog, pullMarker, pulling, pullInBackground, setupWait, resolveMode, saveBackend, serverBackends, serverDefault, serverRequired, shimsDir, type BoxRun, type ProjectBoxMode, type ServerBoxDefault } from "./launch.js";
+import { desktopText, hostOnlyProject, requiredLaunch, shadowsApply, shadowsNotice, type RequiredFallback } from "./required.js";
+import { cachedWindowsChecks, classifySetup, linuxAllow, resumeWinSetup, saveSetupState, setupState, windowsInstall, windowsRestart, windowsUpdate, type BoxSetup } from "./setup.js";
 import type { BoxInstallLogPaths } from "./install-log.js";
 import { DESKTOP_PROJECTS_FILE } from "./plugin-lib.js";
 import { BUILDATHON_OFFER_NOTICE, buildathonBoxFor, buildathonProjectsFile, LESS_REPRO_NOTICE } from "../buildathon-repro.js";
 import { layerSizes, pullProgress, type PullProgress } from "./pull-progress.js";
-import { detectRuntime, type BackendAlternative, type DetectOptions, type RuntimeResult } from "./runtime.js";
+import { detectRuntime, type BackendAlternative, type DetectOptions, type RuntimeInfo, type RuntimeResult } from "./runtime.js";
 
 /** What the capture side needs of a chat's box (plain data: it crosses to the capture worker). */
 export type BoxCaptureInfo = {
@@ -62,8 +67,11 @@ export type BoxStatus = {
   serverDefault: ServerBoxDefault;
   /** Whether the project's chats should run in its box. */
   on: boolean;
-  /** "host-builds": the server's default would put it in the box, but its folder has this computer's builds (macOS, Windows). */
-  source: "env" | "project" | "server" | "default" | "host-builds" | "buildathon";
+  /**
+   * "host-builds": the server's default would put it in the box, but its folder has this computer's builds (macOS, Windows).
+   * "required": the server requires the sandbox for new chats. "host-only": required, but the project only builds on this OS.
+   */
+  source: "env" | "project" | "server" | "default" | "host-builds" | "buildathon" | "required" | "host-only";
   /** The server offers the box and this project was not offered it yet. */
   offer: boolean;
   state: "off" | "unavailable" | "downloading" | "starting" | "ready" | "failed";
@@ -89,7 +97,36 @@ export type BoxStatus = {
   hostBuilds: { native: boolean; things: string; notice: string } | null;
   /** macOS / Windows, while the project's chats run in the box: the one line that says so (null elsewhere). */
   boxNotice: string | null;
+  /**
+   * The server requires the sandbox for new chats (local_box.required): the switch and "Off (this
+   * computer)" are disabled with `requiredText.optOut`. False with an older server.
+   */
+  required: boolean;
+  requiredText: { line: string; optOut: string; keptOldChat: string } | null;
+  /** Required, but the project only builds on this OS (an Xcode project, a WPF app): its chats run here. */
+  hostOnly: { things: string[]; notice: string } | null;
+  /** Required and not ready: what the sandbox needs on this computer (the setup screen). Null otherwise. */
+  setup: (BoxSetup & { line: string | null }) | null;
+  /** Asked for one chat (`?session=`): it ran on this computer before the sandbox was required and stays here. */
+  chatKept: boolean;
+  /** Servers in the box open at the same port on this computer's 127.0.0.1 (Docker/Podman boxes; ports.ts). */
+  ports: Array<{ port: number; url: string; line: string }>;
 };
+
+/** The setup screen's steps (POST /workspace/:id/box/setup). */
+export const BOX_SETUP_ACTIONS = ["linux_allow", "win_install", "win_restart", "win_update", "decline", "check"] as const;
+export type BoxSetupAction = (typeof BOX_SETUP_ACTIONS)[number];
+export function isBoxSetupAction(value: unknown): value is BoxSetupAction {
+  return BOX_SETUP_ACTIONS.some((action) => action === value);
+}
+
+/** PUT mode "off" (or the backend "native") while the sandbox is required: refused (409 box_required). */
+export class BoxRequiredError extends Error {
+  readonly code = "box_required";
+  constructor() {
+    super(desktopText("opt_out_refused"));
+  }
+}
 
 export type BoxBackendView = {
   /** The chosen backend's id (null when none works here). */
@@ -108,7 +145,9 @@ export type BoxBackendView = {
 /** The backend choices of a platform: auto, the ranked ids there, the opt-in ones, native. */
 export function backendChoices(platform: NodeJS.Platform = process.platform): Array<{ id: string; label: string }> {
   const optIn = (OPT_IN[platform] ?? []).map((id) => ({ id, label: `${LABELS[id] ?? id} (opt-in)` }));
-  return [{ id: "auto", label: "Automatic" }, ...backendsFor(platform).map((id) => ({ id, label: LABELS[id] ?? id })), ...optIn, { id: "native", label: "Off (this computer)" }];
+  // macOS' own VM: first under the required sandbox, else chosen by name only.
+  const first = (REQUIRED_FIRST[platform] ?? []).map((id) => ({ id, label: LABELS[id] ?? id }));
+  return [{ id: "auto", label: "Automatic" }, ...first, ...backendsFor(platform).map((id) => ({ id, label: LABELS[id] ?? id })), ...optIn, { id: "native", label: "Off (this computer)" }];
 }
 
 export type BoxServiceOptions = {
@@ -128,7 +167,7 @@ export type BoxServiceOptions = {
 };
 
 /** `waitingImage`: planned while its image was downloading (planned again as soon as the image is here). */
-type Project = { run: BoxRun | null; notice: string | null; planning: Promise<BoxRun | null> | null; nextPlanAt: number; waitingImage: boolean; why?: PlanWhy | null };
+type Project = { run: BoxRun | null; notice: string | null; planning: Promise<BoxRun | null> | null; nextPlanAt: number; waitingImage: boolean; why?: PlanWhy | null; pull?: { runtime: RuntimeInfo; image: BoxImage } | null; lastRuntime?: RuntimeResult | null };
 
 /** Why the project's last plan has no box (the `box.plan` reason), with the runtime's failure in safe words. */
 type PlanWhy = { reason: "no_runtime" | "helpers_missing" | "downloading"; runtime?: { name: string | null; code: string | null } };
@@ -140,7 +179,7 @@ type PlanWhy = { reason: "no_runtime" | "helpers_missing" | "downloading"; runti
  * helpers_missing, downloading, planning; `source`: what turned the box on or
  * off (project, server, default, flag, host-builds, chat).
  */
-export type BoxPlanOutcome = { native: boolean; source: string | null; reason: string; runtime?: { name: string | null; code: string | null } };
+export type BoxPlanOutcome = { native: boolean; source: string | null; reason: string; runtime?: { name: string | null; code: string | null }; required?: true; capable?: boolean; fallback?: RequiredFallback };
 
 /** The backend tried and its failure code (bubblewrap's apparmor, no_bwrap, ...; `timeout`), never its text or a path. */
 export function runtimeWhy(runtime: { name?: unknown; code?: unknown; reason?: unknown } | null | undefined): { name: string | null; code: string | null } {
@@ -156,6 +195,16 @@ const REPLAN_MS = 15_000;
 const FREEZE_WAIT_MS = 90_000;
 /** The full backend check (every backend, for the status card's "others") is reused this long. */
 const ALTERNATIVES_MS = 60_000;
+/**
+ * Required: a prompt waits for its project's box while the first setup makes progress (the
+ * download's log moves: the VM's setup lines, the image's bytes) and stops waiting after this
+ * long with none (the CLI: a run's no-progress stop counts the setup too).
+ */
+const REQUIRED_WAIT_MS = 15 * 60_000;
+/** ...and at most this long in all, however slow the network (a first macOS VM setup is ~0.7 GB). */
+const REQUIRED_SETUP_MAX_MS = 60 * 60_000;
+/** How often a waiting prompt looks again. */
+const REQUIRED_POLL_MS = 1_000;
 
 export function boxRoot(workspace: BoxWorkspace): string {
   return workspace.directory?.trim() || workspace.path;
@@ -212,9 +261,21 @@ export class BoxService {
     return serverDefault(this.options.stateDir);
   }
 
-  /** The backend detection's inputs: the setting (or OMNIRUSH_BOX_BACKEND) and the server's allowlist. */
-  private detectOptions(): Pick<DetectOptions, "asked" | "allow"> {
-    return { asked: askedBackend({ env: this.env, stateDir: this.options.stateDir }).backend, allow: serverBackends(this.options.stateDir) };
+  /** The server's `required` for this device (box-server.json), its fallback and prefetch. */
+  required(): ReturnType<typeof serverRequired> {
+    return serverRequired(this.options.stateDir);
+  }
+
+  /**
+   * The backend detection's inputs: the setting (or OMNIRUSH_BOX_BACKEND) and the server's allowlist.
+   * While the sandbox is required, a saved "native" reads as automatic (OMNIRUSH_BOX_BACKEND=native still counts).
+   */
+  private detectOptions(): Pick<DetectOptions, "asked" | "allow" | "preferShadows" | "required"> {
+    const asked = askedBackend({ env: this.env, stateDir: this.options.stateDir });
+    const required = this.required().required;
+    const backend = asked.source === "setting" && asked.backend === "native" && required ? "auto" : asked.backend;
+    // Under required on macOS / Windows the backends that give the box its own build folders (shadows) come first.
+    return { asked: backend, allow: serverBackends(this.options.stateDir), ...(required && shadowsApply(this.platform, this.env) ? { preferShadows: true } : {}), ...(required ? { required: true } : {}) };
   }
 
   private detect(extra: DetectOptions = {}): Promise<RuntimeResult> {
@@ -227,6 +288,7 @@ export class BoxService {
    * is planned again). Throws for an unknown value.
    */
   async setBackend(value: unknown): Promise<string> {
+    if (value === "native" && this.required().required) throw new BoxRequiredError();
     const saved = saveBackend(this.options.stateDir, value);
     this.alternatives = null;
     const now = await this.detect({ fresh: true });
@@ -263,14 +325,30 @@ export class BoxService {
   private async mode(workspace: BoxWorkspace) {
     const settings = await this.options.readSettings(workspace.id).catch(() => ({ mode: null, offered: false }));
     const server = this.serverDefault();
+    const { required } = this.required();
     // A buildathon project (the app lists them): the event's `repro.box` comes before the server's default.
     const buildathon = workspace.workspaceType === "local" ? this.buildathonBox(boxRoot(workspace)) : null;
-    const resolved = resolveMode({ env: this.env, project: settings.mode, server, offered: settings.offered, buildathon });
+    const resolved = resolveMode({ env: this.env, project: settings.mode, server, offered: settings.offered, buildathon, required });
+    // Required: the folder's builds no longer keep it here (the box keeps its own copies); a project that
+    // only builds on this OS (an Xcode project, a WPF app) does.
+    if (resolved.source === "required") {
+      const hostOnly = workspace.workspaceType === "local" ? this.hostOnly(boxRoot(workspace)) : null;
+      if (hostOnly) return { settings, server, ...resolved, on: false, source: "host-only" as const, hostBuilds: null, hostOnly };
+      return { settings, server, ...resolved, hostBuilds: null, hostOnly: null };
+    }
     const gate = workspace.workspaceType === "local" ? this.hostGate(boxRoot(workspace), resolved) : null;
     // A box already running for the project keeps its chats (builds made since do not move them out).
     const running = this.projects.get(boxKey(boxRoot(workspace)))?.run;
-    if (gate?.native && !(running && !running.native)) return { settings, server, ...resolved, on: false, source: "host-builds" as const, offer: false, hostBuilds: gate };
-    return { settings, server, ...resolved, hostBuilds: gate };
+    if (gate?.native && !(running && !running.native)) return { settings, server, ...resolved, on: false, source: "host-builds" as const, offer: false, hostBuilds: gate, hostOnly: null };
+    return { settings, server, ...resolved, hostBuilds: gate, hostOnly: null };
+  }
+
+  private hostOnly(root: string): { things: string[]; notice: string } | null {
+    try {
+      return hostOnlyProject(root, { platform: this.platform });
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -311,7 +389,7 @@ export class BoxService {
    * offer, and the helpers for this machine are installed.
    */
   async engineBits(): Promise<{ shell: string; plugin: string } | null> {
-    let wanted = this.serverDefault() !== "off" || ["1", "on", "true"].includes(String(this.env.OMNIRUSH_BOX ?? "").trim().toLowerCase());
+    let wanted = this.serverDefault() !== "off" || this.required().required || ["1", "on", "true"].includes(String(this.env.OMNIRUSH_BOX ?? "").trim().toLowerCase());
     for (const workspace of this.options.workspaces()) {
       if (wanted) break;
       if (workspace.workspaceType !== "local") continue;
@@ -356,8 +434,10 @@ export class BoxService {
         project.nextPlanAt = 0;
       }
       if (Date.now() < project.nextPlanAt) return null;
-      const plan = await planBox({ env: this.env, home: this.home, root, log: this.log, shims: shimsDir(this.env), ...this.detectOptions() });
+      const plan = await planBox({ env: this.env, home: this.home, root, log: this.log, shims: shimsDir(this.env), platform: this.platform, stateDir: this.options.stateDir, ...this.detectOptions(), required: this.required().required });
       project.waitingImage = !plan.box && plan.downloading === true;
+      project.lastRuntime = plan.box ? null : plan.runtime;
+      project.pull = !plan.box && plan.downloading === true && plan.image && plan.runtime?.ok ? { runtime: plan.runtime, image: plan.image } : null;
       project.why = plan.box ? null
         : plan.downloading === true ? { reason: "downloading" }
         : plan.runtime && !plan.runtime.ok ? { reason: "no_runtime", runtime: runtimeWhy(plan.runtime) }
@@ -373,6 +453,8 @@ export class BoxService {
       project.run?.close();
       project.run = boxRun(plan, {
         log: this.log,
+        // Box ports on this computer's 127.0.0.1: only under the required sandbox.
+        required: this.required().required,
         pkglog: this.installLog ? { root: this.installLog.root, bin: this.installLog.bin, py: this.installLog.py } : null,
         tmpRoot: join(this.home, "pending"),
         // boxd stopped while the app ran: started again (installs kept), or once why not and what to do.
@@ -384,6 +466,8 @@ export class BoxService {
             project.notice = `Sandbox stopped: ${event.error}.`;
           }
         },
+        // A server in the box (its own network) at the same port on this computer's 127.0.0.1: one log line (ports.ts).
+        onPort: (event) => { if (event.open) this.log("info", event.line ?? `box port ${event.port} open`, { key, port: event.port }); },
         onNative: (reason) => {
           project.notice = `Sandbox off for now: ${reason}.`;
           project.nextPlanAt = Date.now() + REPLAN_MS;
@@ -401,6 +485,39 @@ export class BoxService {
   /** Plans every local workspace whose box is on (server start, a changed default); never throws. */
   async ensureAll(): Promise<void> {
     await Promise.allSettled(this.options.workspaces().map((workspace) => this.ensure(workspace)));
+  }
+
+  /**
+   * A workspace was opened, made active or added: its box is planned now, in
+   * the background (a missing image starts downloading, the box starts), so
+   * it is ready before the first prompt. Never throws.
+   */
+  opened(workspace: BoxWorkspace): void {
+    if (workspace.workspaceType !== "local") return;
+    const project = this.projects.get(boxKey(boxRoot(workspace)));
+    if (project && !project.run) project.nextPlanAt = 0;
+    // The box starts as soon as its run exists (boxRun); a missing image starts downloading.
+    void this.ensure(workspace).then((run) => {
+      this.log("info", "box planned for an opened project", { key: boxKey(boxRoot(workspace)), box: Boolean(run && !run.native) });
+    }).catch(() => null);
+  }
+
+  /**
+   * The server asks for images to be fetched ahead (local_box.setup.prefetch):
+   * the base image, in the background, next to the stacks the open projects'
+   * plans download (ensureAll). Skipped on a metered connection (OMNIRUSH_BOX_METERED=1)
+   * and when no backend works. Whether a download started.
+   */
+  async prefetch(): Promise<boolean> {
+    if (!this.required().prefetch || this.env.OMNIRUSH_BOX_METERED === "1") return false;
+    const runtime = await this.detect().catch(() => null);
+    if (!runtime?.ok) return false;
+    const image = imageFor("base", { env: this.env });
+    if (pulling(this.home, runtime, image.pull)) return false;
+    if (await driverFor(runtime).imagePresent(runtime, image, { home: this.home, env: this.env }).catch(() => null)) return false;
+    this.log("info", "box prefetch", { image: image.pull, backend: runtime.backend ?? runtime.name });
+    pullInBackground(runtime, image, this.home, { env: this.env, log: this.log });
+    return true;
   }
 
   /** The projects the plugin routes to their box: on, planned, not gone native. */
@@ -432,6 +549,7 @@ export class BoxService {
   }
 
   async setMode(workspace: BoxWorkspace, mode: ProjectBoxMode): Promise<BoxStatus> {
+    if (mode === "off" && this.required().required) throw new BoxRequiredError();
     await this.options.writeSettings(workspace.id, { mode, offered: true });
     const key = boxKey(boxRoot(workspace));
     // Turned on by the user: the project's chats that stayed on this machine move to the box too.
@@ -452,14 +570,17 @@ export class BoxService {
     return (await this.mode(workspace)).on;
   }
 
-  async status(workspace: BoxWorkspace, { fresh = false }: { fresh?: boolean } = {}): Promise<BoxStatus> {
-    const { settings, server, on, source, offer, hostBuilds: gate, lessRepro } = await this.mode(workspace);
+  async status(workspace: BoxWorkspace, { fresh = false, sessionId = null }: { fresh?: boolean; sessionId?: string | null } = {}): Promise<BoxStatus> {
+    const { settings, server, on, source, offer, hostBuilds: gate, lessRepro, hostOnly, required } = await this.mode(workspace);
     // The server's "offer": shown once per folder (CLI: the tip, once per folder).
     if (offer && workspace.workspaceType === "local") await this.options.writeSettings(workspace.id, { offered: true }).catch(() => undefined);
     const root = boxRoot(workspace);
     const key = boxKey(root);
     const project = this.projects.get(key);
-    const base = { mode: settings.mode, serverDefault: server, on, source, offer, error: null, hostBuilds: gate, boxNotice: null };
+    const needed = required === true;
+    const requiredText = needed ? { line: desktopText("required_line"), optOut: desktopText("opt_out_refused"), keptOldChat: desktopText("kept_old_chat") } : null;
+    const chatKept = Boolean(sessionId && this.nativeChats.has(sessionId));
+    const base = { mode: settings.mode, serverDefault: server, on, source, offer, error: null, hostBuilds: gate, boxNotice: null, required: needed, requiredText, hostOnly, setup: null, chatKept, ports: [] as BoxStatus["ports"] };
     const backendSetting = { ...askedBackend({ env: this.env, stateDir: this.options.stateDir }), choices: backendChoices() };
     const setting = { value: backendSetting.backend, source: backendSetting.source, choices: backendSetting.choices };
     if (workspace.workspaceType !== "local") return { ...base, on: false, offer: false, state: "off", runtime: null, backend: null, backendSetting: setting, image: null, progress: null, container: null, platform: this.platform, notice: "The sandbox is for folders on this computer." };
@@ -513,6 +634,7 @@ export class BoxService {
       : run && !run.native ? (run.box?.ready ? "ready" : run.box?.state === "failed" ? "failed" : "starting")
       : downloading || (!present && !container?.exists) ? "downloading"
       : project?.notice ? "unavailable" : "starting";
+    const setup = needed && on && state !== "ready" ? await this.setupFor(runtime, { fresh }) : null;
     return {
       ...base,
       state,
@@ -525,13 +647,57 @@ export class BoxService {
       platform: this.platform,
       notice: on ? project?.notice ?? (runtime.ok ? null : `Sandbox off for now: ${runtime.reason}.`)
         : gate?.native ? gate.notice
+        : hostOnly ? hostOnly.notice
         : lessRepro ? LESS_REPRO_NOTICE
         : offer && source === "buildathon" ? BUILDATHON_OFFER_NOTICE
         : null,
       error: run?.box?.error ?? (record?.state === "off" || record?.state === "failed" ? record.error || null : null),
-      boxNotice: on && hostRules(this.platform) ? hostBuildsNotice("box", { platform: this.platform }) : null,
+      // The box's own build folders in use (required.json texts.desktop.shadows), else the plain macOS/Windows line.
+      boxNotice: on && run && !run.native && run.box?.shadows ? shadowsNotice(run.box.currentShadows(), this.platform) ?? hostBuildsNotice("box", { platform: this.platform })
+        : on && hostRules(this.platform) ? hostBuildsNotice("box", { platform: this.platform }) : null,
+      setup,
+      ports: run && !run.native ? (run.forwardedPorts?.() ?? []).map((port) => ({ port, url: `http://127.0.0.1:${port}`, line: portLine(port) })) : [],
     };
   }
+
+  /** What the sandbox needs here before it can run (the setup screen); this PC's checks are read (and cached) for it on Windows. */
+  async setupFor(runtime: RuntimeResult | null, { fresh = false }: { fresh?: boolean } = {}): Promise<BoxSetup & { line: string | null }> {
+    const checks = this.platform === "win32" && runtime && !runtime.ok ? await cachedWindowsChecks({ fresh }).catch(() => null) : null;
+    // macOS: the OmniRush VM picked and not made yet (it sets itself up; the panel shows its progress).
+    const macVm = this.platform === "darwin" && Boolean(runtime?.ok && runtime.backend === "lima" && !runtime.installed && !this.limaMade(runtime));
+    const setup = classifySetup({ runtime, platform: this.platform, checks, state: setupState(this.home), fallback: this.required().fallback, macVm });
+    // The one line (required.json texts.desktop.cannot_run) when the box cannot run here.
+    const why = setup.whyText ?? (runtime && !runtime.ok ? runtime.reason.split("\n")[0]!.replace(/\.$/, "") : null);
+    return { ...setup, line: setup.need === "cannot_run" && why ? desktopText("cannot_run", { why }) : null };
+  }
+
+  /** Whether the OmniRush VM was made since the (cached) probe said it was not: its LIMA_HOME has the instance. */
+  private limaMade(runtime: RuntimeResult): boolean {
+    if (!runtime.ok || runtime.backend !== "lima") return false;
+    try { return existsSync(join(limaHome(this.home, this.env, undefined, runtime.instance), runtime.instance ?? "omnirush-box", "lima.yaml")); } catch { return false; }
+  }
+
+  /**
+   * App start on Windows after "Set up (one restart)" (the resume marker):
+   * `wsl --update` when WSL asks for it, then every project is planned (the
+   * distro import and the image download follow). Never throws.
+   */
+  async resumeSetup(): Promise<boolean> {
+    if (this.platform !== "win32" || setupState(this.home).win?.state !== "restart") return false;
+    // A slow `wsl --update` goes on in the background (setup.ts RESUME_UPDATE_WAIT_MS) and finishes the same way.
+    const ready = async (): Promise<void> => {
+      this.alternatives = null;
+      await this.detect({ fresh: true }).catch(() => null);
+      void this.ensureAll();
+      void this.prefetch().catch(() => false);
+    };
+    const resumed = await resumeWinSetup({ home: this.home, env: this.env, log: (level, message) => this.log(level, message), onReady: () => { this.log("info", "sandbox setup resume", { state: "ready" }); void ready(); } }).catch(() => null);
+    this.log("info", "sandbox setup resume", { state: resumed?.state ?? "failed" });
+    if (!resumed?.ok) return false;
+    await ready();
+    return true;
+  }
+
 
   /**
    * Try again now (the card's retry): a box that failed to start, or a
@@ -551,6 +717,26 @@ export class BoxService {
     await this.writeProjects();
     void this.ensure(workspace).catch(() => null);
     return this.status(workspace, { fresh: true });
+  }
+
+  /**
+   * One setup step (box/setup.ts), then a fresh look: a step that worked has
+   * the project planned again (and the images fetched ahead), so the box
+   * starts. Only the steps of this OS run; the others are a fresh look.
+   */
+  async setup(workspace: BoxWorkspace, action: BoxSetupAction): Promise<BoxStatus> {
+    const home = this.home;
+    const which = this.platform === "win32" ? "win" : this.platform === "linux" ? "linux" : null;
+    if (action === "linux_allow" && this.platform === "linux") await linuxAllow({ home, env: this.env });
+    else if (action === "win_install" && this.platform === "win32") await windowsInstall({ home, env: this.env });
+    else if (action === "win_update" && this.platform === "win32") await windowsUpdate({ env: this.env });
+    else if (action === "win_restart" && this.platform === "win32") await windowsRestart();
+    else if (action === "decline" && which) saveSetupState(home, which, { state: "declined", message: "Set up later; chats run on this computer meanwhile." });
+    if (action === "check" && this.platform === "win32") await cachedWindowsChecks({ fresh: true }).catch(() => null);
+    if (action === "win_restart") return this.status(workspace);
+    const status = await this.retry(workspace);
+    if (status.setup?.need === "none") void this.prefetch().catch(() => false);
+    return status;
   }
 
   /** Remove the project's container (installs gone); the next chat starts a fresh one. */
@@ -599,12 +785,21 @@ export class BoxService {
     const turnsSoFar = this.chatTurns.get(sessionId) ?? turnsBefore;
     const chatTurn = capture ? turnsSoFar + 1 : 0;
     if (capture) this.chatTurns.set(sessionId, chatTurn);
-    const run = await this.ensure(workspace).catch(() => null);
+    // Required: a new chat waits for its project's box (the download, the start) instead of starting here;
+    // a chat that already ran on this machine stays here, without waiting.
+    const required = workspace.workspaceType === "local" && (await this.mode(workspace).catch(() => null))?.source === "required";
+    const oldChat = capture && turnsSoFar > 0 && !this.boxedChats.has(sessionId) && !this.turns.has(sessionId) && savedTurns(this.snapshotDir(sessionId)) === 0;
+    if (required && oldChat && !this.nativeChats.has(sessionId)) {
+      this.nativeChats.set(sessionId, boxKey(boxRoot(workspace)));
+      await this.writeProjects();
+      this.log("info", "box: a chat that ran on this machine stays there", { sessionId, turnsBefore, required: true });
+    }
+    const run = required && !this.nativeChats.has(sessionId) ? await this.waitForBox(workspace) : await this.ensure(workspace).catch(() => null);
     if (!run || run.native) return null;
     // A chat with turns but no checkpoint ran on this machine (reopened, or started in this run before the
     // server's default reached the app, or while the image downloaded): when only the server's default
     // turned the box on, it goes on here (new chats get the box); a project turned on by its user moves it.
-    if (capture && turnsSoFar > 0 && !this.nativeChats.has(sessionId) && !this.boxedChats.has(sessionId) && !this.turns.has(sessionId) && savedTurns(this.snapshotDir(sessionId)) === 0 && ["server", "buildathon"].includes((await this.mode(workspace)).source)) {
+    if (capture && turnsSoFar > 0 && !this.nativeChats.has(sessionId) && !this.boxedChats.has(sessionId) && !this.turns.has(sessionId) && savedTurns(this.snapshotDir(sessionId)) === 0 && ["server", "buildathon", "required"].includes((await this.mode(workspace)).source)) {
       this.nativeChats.set(sessionId, run.key);
       await this.writeProjects();
       this.log("info", "box: a chat that ran on this machine stays there", { sessionId, turnsBefore });
@@ -633,20 +828,72 @@ export class BoxService {
     return { key: run.key, root: run.root, croot: box.croot, container: box.container, runtimeBin: run.runtimeBin, runtimeArgs: run.runtimeArgs, backend: run.backend, exec: run.exec, label };
   }
 
+  /**
+   * Required: the project's box, waited for while its image downloads (at
+   * most REQUIRED_WAIT_MS; planned again as soon as the download ends). Null
+   * when it cannot run here (no backend: the setup screen says why; the
+   * chat goes on per the server's required_fallback).
+   */
+  private async waitForBox(workspace: BoxWorkspace): Promise<BoxRun | null> {
+    const key = boxKey(boxRoot(workspace));
+    const startedAt = Date.now();
+    let lastProgressAt = startedAt;
+    let said = false;
+    for (;;) {
+      const run = await this.ensure(workspace).catch(() => null);
+      if (run) return run;
+      const project = this.projects.get(key);
+      if (project?.why?.reason !== "downloading") return null;
+      const pull = project.pull;
+      const moved = pull ? pullActivityAt(this.home, pull.runtime, pull.image.pull) : null;
+      if (moved !== null && moved > lastProgressAt) lastProgressAt = moved;
+      const wait = setupWait({ startedAt, lastProgressAt, now: Date.now(), idleMs: REQUIRED_WAIT_MS, maxMs: REQUIRED_SETUP_MAX_MS });
+      if (wait.over) {
+        this.log("warn", "required sandbox wait over", { reason: wait.over, waitedMs: Date.now() - startedAt });
+        return null;
+      }
+      if (!said && Date.now() - startedAt >= 60_000) {
+        said = true;
+        this.log("info", "required sandbox: the prompt waits for the first setup", { maxMin: Math.round(REQUIRED_SETUP_MAX_MS / 60_000) });
+      }
+      await new Promise((resolve) => setTimeout(resolve, REQUIRED_POLL_MS));
+      if (pull && !pulling(this.home, pull.runtime, pull.image.pull)) project.nextPlanAt = 0;
+    }
+  }
+
   /** The chat's box.plan outcome, once per chat and app run (null after that, or for a folder not on this computer). */
   async planOutcome(sessionId: string, workspace: BoxWorkspace): Promise<BoxPlanOutcome | null> {
     if (workspace.workspaceType !== "local" || this.outcomeSent.has(sessionId)) return null;
     this.outcomeSent.add(sessionId);
     const mode = await this.mode(workspace).catch(() => null);
     if (!mode) return { native: true, source: null, reason: "plan_failed" };
-    if (this.nativeChats.has(sessionId)) return { native: true, source: "chat", reason: "kept_old_chat" };
-    if (this.boxedChats.has(sessionId)) return { native: false, source: mode.source, reason: "box" };
-    if (!mode.on) return { native: true, source: mode.source, reason: mode.source === "host-builds" ? "host_builds" : mode.offer ? "offer" : "off" };
+    const { fallback } = this.required();
+    // Required (required.ts requiredLaunch, as the CLI's launch event): whether this machine can run the box and,
+    // on this machine, the fallback in force: `native` where it can't (counted in full), the server's
+    // required_fallback where the box was turned off (OMNIRUSH_BOX=0) or the setup declined.
+    const native = (reason: string, extra: Partial<BoxPlanOutcome> = {}): BoxPlanOutcome => ({ native: true, source: mode.source, reason, ...(mode.required ? requiredLaunch(reason, { native: true, serverFallback: fallback }) : {}), ...extra });
+    if (this.nativeChats.has(sessionId)) return native("kept_old_chat", { source: "chat" });
+    if (this.boxedChats.has(sessionId)) return { native: false, source: mode.source, reason: "box", ...(mode.required ? requiredLaunch("box", { native: false }) : {}) };
+    if (!mode.on) {
+      if (mode.required && mode.source === "env") return native("env_off");
+      if (mode.source === "host-only") return native("host_only");
+      return native(mode.source === "host-builds" ? "host_builds" : mode.offer ? "offer" : "off");
+    }
     const project = this.projects.get(boxKey(boxRoot(workspace)));
-    if (project?.run?.native) return { native: true, source: mode.source, reason: "box_failed" };
-    if (project?.why) return { native: true, source: mode.source, reason: project.why.reason, ...(project.why.runtime ? { runtime: project.why.runtime } : {}) };
+    if (project?.run?.native) return native("box_failed");
+    if (project?.why) {
+      const runtime = project.why.runtime ? { runtime: project.why.runtime } : {};
+      if (mode.required && project.why.reason !== "downloading") {
+        const setup = await this.setupFor(project.lastRuntime ?? null).catch(() => null);
+        // As the CLI: only a step this app can run here (Allow, the WSL setup, the VM) is setup; else it cannot run.
+        const fixable = setup && ["linux_allow", "win_install", "win_restart", "win_update", "mac_vm"].includes(setup.need);
+        const reason = !fixable || project.why.reason === "helpers_missing" ? "cannot_run" : setup.declined ? "setup_declined" : "setup_needed";
+        return native(reason, runtime);
+      }
+      return native(project.why.reason, runtime);
+    }
     // Not planned yet (a plan still running, or waiting for its next try).
-    return { native: true, source: mode.source, reason: "planning" };
+    return native("planning");
   }
 
   /** Whether chats ran in a box during this run (they get a `final` checkpoint at quit). */

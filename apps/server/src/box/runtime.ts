@@ -61,6 +61,11 @@ export type RuntimeInfo = {
   idmap?: string;
   launcher?: string;
   kernel?: string;
+  /** The OmniRush VM (macOS, backends/lima.ts): the box home, the VM's name, where limactl came from, the helpers' folder in it. */
+  home?: string;
+  instance?: string;
+  limactlSource?: "env" | "bundled" | "download";
+  helpers?: string | null;
   cached?: boolean;
   alternatives?: BackendAlternative[];
 };
@@ -358,4 +363,8 @@ export type DetectOptions = {
   allow?: string[] | null;
   arch?: string;
   release?: string;
+  /** Under the required sandbox on macOS/Windows: the backends whose boxes get their own build folders (driver.shadows) first. */
+  preferShadows?: boolean;
+  /** The sandbox is required on this account: the backends of REQUIRED_FIRST (macOS: OmniRush's VM) lead the order. */
+  required?: boolean;
 };

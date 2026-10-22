@@ -112,6 +112,72 @@ export async function exec(box: BoxEndpoint, argv: string[], { cwd, env, root = 
   return { code: result.exit.code, stdout: result.stdout, stderr: result.stderr, ms: result.exit.ms };
 }
 
+/** A listening TCP socket inside the box (op "ports"). */
+export type BoxListener = { port: number; addr: string };
+
+/**
+ * The box's listening TCP ports (boxd's own left out), or null when this
+ * box's boxd predates the request (a box made by an older version: Reset
+ * sandbox gives it the new helper). Rejects when the box cannot be reached.
+ */
+export async function listPorts(box: BoxEndpoint, { timeoutMs = 5_000 }: { timeoutMs?: number } = {}): Promise<BoxListener[] | null> {
+  const result = await request(box, { op: "ports" }, { timeoutMs });
+  if (result.exit.code !== 0) {
+    if (/unknown op/.test(result.stderr)) return null;
+    throw new Error(`box ports failed: ${result.stderr.trim() || result.exit.code}`);
+  }
+  const parsed: unknown = JSON.parse(result.data.toString("utf8") || "[]");
+  return Array.isArray(parsed) ? parsed.filter((item): item is BoxListener => Number.isInteger(item?.port)) : [];
+}
+
+/**
+ * A TCP stream to `port` inside the box, through boxd: resolves { socket,
+ * head } once boxd connected (socket paused; `head` is what already arrived
+ * after boxd's answer and goes first), rejects with boxd's reason otherwise.
+ */
+export function connectPort(box: BoxEndpoint, port: number, { timeoutMs = 5_000 }: { timeoutMs?: number } = {}): Promise<{ socket: net.Socket; head: Buffer }> {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect({ host: box.host || "127.0.0.1", port: box.port, allowHalfOpen: true });
+    socket.setNoDelay(true);
+    let buffered: Buffer = Buffer.alloc(0);
+    let settled = false;
+    const failText: string[] = [];
+    const done = (error: Error | null, value?: { socket: net.Socket; head: Buffer }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.removeListener("data", onData);
+      socket.removeListener("error", onError);
+      socket.removeListener("close", onClose);
+      if (error || !value) { socket.destroy(); reject(error ?? new Error("box connect failed")); } else resolve(value);
+    };
+    const timer = setTimeout(() => done(new Error(`box connect to port ${port} timed out after ${timeoutMs} ms`)), timeoutMs);
+    const onError = (error: Error) => done(error);
+    const onClose = () => done(new Error(`box closed the connect to port ${port} early`));
+    const onData = (chunk: Buffer) => {
+      buffered = buffered.length ? Buffer.concat([buffered, chunk]) : chunk;
+      while (buffered.length >= 5) {
+        const size = buffered.readUInt32BE(1);
+        if (buffered.length < 5 + size) return;
+        const kind = buffered[0];
+        const payload = buffered.subarray(5, 5 + size);
+        buffered = buffered.subarray(5 + size);
+        if (kind === T.data) {
+          socket.pause();
+          done(null, { socket, head: Buffer.from(buffered) });
+          return;
+        }
+        if (kind === T.fail || kind === T.stderr) failText.push(payload.toString("utf8"));
+        else if (kind === T.exit) { done(new Error(failText.join("").trim() || `box could not connect to port ${port}`)); return; }
+      }
+    };
+    socket.once("connect", () => socket.write(`${JSON.stringify({ v: PROTO_VERSION, token: box.token, op: "connect", port })}\n`));
+    socket.on("data", onData);
+    socket.on("error", onError);
+    socket.on("close", onClose);
+  });
+}
+
 /** lstat of each path, in order (type "missing" for a path that is gone). */
 export async function stat(box: BoxEndpoint, paths: string[], { timeoutMs = 60_000, budget = REQUEST_LINE_BUDGET }: { timeoutMs?: number; budget?: number } = {}): Promise<BoxStat[]> {
   const out: BoxStat[] = [];

@@ -1,8 +1,8 @@
 // Ported from the CLI (omnirush-cli src/box/backends/bwrap.js,
 // feat/local-box-backends); keep the two in step. Desktop differences: types;
-// the one-time admin step (`sudo omnirush sandbox enable`) is the CLI's, so
-// the AppArmor reason names the CLI; boxrun missing from the sidecars is a
-// reason, not a path.
+// the one-time admin step is the app's "Allow the sandbox" (setup.ts, pkexec)
+// or the CLI's `sudo omnirush sandbox enable`, and the AppArmor reason names
+// both; boxrun missing from the sidecars is a reason, not a path.
 //
 // The bubblewrap backend (Linux; also what runs inside the OmniRush WSL
 // distro): no daemon, no root, nothing to install where unprivileged user
@@ -22,6 +22,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { GOARCH, RUN_DIR, SHIMS_DIR, containerName, containerRoot, helperPath, newToken, readJson, writeJson, type BoxInstallLog, type BoxRuntime } from "../common.js";
+import { REQUIRED_RULES, shadowId, type ShadowPlan } from "../required.js";
 import { runCommand, type RunCommand, type RunOptions } from "../run.js";
 import type { RuntimeResult } from "../runtime.js";
 import { YOUNG_IMAGE_MS, removableImage, removeTree, staleEntries } from "../retention.mjs";
@@ -57,16 +58,29 @@ export function boxrunPath({ env = process.env, arch = process.arch }: { env?: E
 }
 
 /**
- * The bwrap to use, best first: OMNIRUSH_BOX_BWRAP, the profiled copy
- * `sandbox enable` installed, the one shipped with OmniRush (static, for
- * systems without bubblewrap). Null: boxrun looks for the system's.
+ * The bwraps to try, best first ({ path, source }): OMNIRUSH_BOX_BWRAP alone
+ * when set; else the root-owned copy `sandbox enable` (or the app's "Allow
+ * the sandbox") installed, which AppArmor allows; the system's (a
+ * distribution keeps it patched); then the static one shipped with OmniRush
+ * (Linux builds: a system without bubblewrap, or whose own cannot start a
+ * box). CLI: bwrapCandidates, the same order.
  */
-export function bwrapPath({ env = process.env, arch = process.arch, exists = existsSync }: { env?: Env; arch?: string; exists?: (file: string) => boolean } = {}): string | null {
+export function bwrapCandidates({ env = process.env, arch = process.arch, exists = existsSync }: { env?: Env; arch?: string; exists?: (file: string) => boolean } = {}): Array<{ path: string; source: "env" | "enabled" | "system" | "bundled" }> {
   const asked = String(env.OMNIRUSH_BOX_BWRAP || "").trim();
-  if (asked) return asked;
-  if (exists(ENABLED_BWRAP)) return ENABLED_BWRAP;
+  if (asked) return [{ path: asked, source: "env" }];
+  const out: Array<{ path: string; source: "env" | "enabled" | "system" | "bundled" }> = [];
+  if (exists(ENABLED_BWRAP)) out.push({ path: ENABLED_BWRAP, source: "enabled" });
+  const dirs = [...String(env.PATH || "").split(":").filter(Boolean), "/usr/bin", "/usr/local/bin", "/bin"];
+  const system = dirs.map((dir) => path.posix.join(dir, "bwrap")).find((file) => file !== ENABLED_BWRAP && exists(file));
+  if (system) out.push({ path: system, source: "system" });
   const shipped = helperPath("bwrap", { goos: "linux", goarch: GOARCH[arch] || "amd64", env });
-  return shipped && exists(shipped) ? shipped : null;
+  if (shipped && exists(shipped)) out.push({ path: shipped, source: "bundled" });
+  return out;
+}
+
+/** The first bwrap to try (null: none here; boxrun looks on PATH). */
+export function bwrapPath(options: { env?: Env; arch?: string; exists?: (file: string) => boolean } = {}): string | null {
+  return bwrapCandidates(options)[0]?.path ?? null;
 }
 
 /** One line for each reason boxrun's probe gives. */
@@ -74,7 +88,7 @@ export function explainProbe(out: Record<string, unknown> | null): string {
   const reason = str(out?.reason) || "bubblewrap could not start";
   switch (out?.code) {
     case "apparmor":
-      return `${reason}; one-time admin fix: \`sudo omnirush sandbox enable\` (OmniRush CLI)`;
+      return `${reason}; one-time admin fix: Allow the sandbox (one password prompt), or \`sudo omnirush sandbox enable\` (OmniRush CLI)`;
     case "no_bwrap":
       return `${reason} (\`sudo apt install bubblewrap\` or your system's package)`;
     case "userns_off":
@@ -93,21 +107,33 @@ export async function probeBwrap({ env = process.env, boxHome, run = runCommand,
   const bin = boxrunPath({ env, arch });
   if (!bin || !exists(bin)) return { ...base, ok: false, ...(bin ? { bin } : {}), reason: "the sandbox helper boxrun is missing from this install" };
   try { mkdirSync(boxHome, { recursive: true }); } catch { /* the probe says */ }
-  const args = ["probe", "--dir", boxHome];
-  const bw = bwrapPath({ env, arch, exists });
-  if (bw) args.push("--bwrap", bw);
-  const res = await run(bin, args, { env: { PATH: env.PATH || "/usr/bin:/bin", USER: env.USER || "" }, timeoutMs });
-  const out = parseOut(res.stdout);
-  if (!out) return { ...base, ok: false, bin, reason: res.error === "timeout" ? "the bubblewrap probe did not answer in time" : `boxrun probe failed: ${String(res.stderr || "").trim().slice(0, 200)}` };
-  if (!out.ok) return { ...base, ok: false, bin, code: str(out.code), reason: explainProbe(out) };
-  return {
-    ...base, ok: true, bin, bwrap: str(out.bwrap) || bw || null,
-    version: str(out.bwrap_version),
-    os: "linux", arch: GOARCH[arch] || arch,
-    flavor: out.overlay === "fuse" ? "fuse-overlayfs" : "overlayfs",
-    idmap: str(out.idmap) || "single", launcher: str(out.launcher) || "bwrap",
-    rootless: !out.root, vm: false, kernel: str(out.kernel) || os.release(),
-  };
+  const candidates = bwrapCandidates({ env, arch, exists });
+  const failures: Array<RuntimeResult & { ok: false }> = [];
+  // Each bwrap in order until one starts a box; none anywhere: boxrun still looks on PATH and says "not installed".
+  for (const candidate of candidates.length ? candidates : [null]) {
+    const args = ["probe", "--dir", boxHome];
+    if (candidate) args.push("--bwrap", candidate.path);
+    const res = await run(bin, args, { env: { PATH: env.PATH || "/usr/bin:/bin", USER: env.USER || "" }, timeoutMs });
+    const out = parseOut(res.stdout);
+    if (!out) {
+      failures.push({ ...base, ok: false, bin, reason: res.error === "timeout" ? "the bubblewrap probe did not answer in time" : `boxrun probe failed: ${String(res.stderr || "").trim().slice(0, 200)}` });
+      continue;
+    }
+    if (!out.ok) {
+      failures.push({ ...base, ok: false, bin, code: str(out.code), reason: explainProbe(out) });
+      continue;
+    }
+    return {
+      ...base, ok: true, bin, bwrap: str(out.bwrap) || candidate?.path || null,
+      version: str(out.bwrap_version),
+      os: "linux", arch: GOARCH[arch] || arch,
+      flavor: out.overlay === "fuse" ? "fuse-overlayfs" : "overlayfs",
+      idmap: str(out.idmap) || "single", launcher: str(out.launcher) || "bwrap",
+      rootless: !out.root, vm: false, kernel: str(out.kernel) || os.release(),
+    };
+  }
+  // AppArmor's answer when that is what blocks them (one admin step fixes it), else the first one's.
+  return failures.find((failure) => failure.code === "apparmor") ?? failures[0] ?? { ...base, ok: false, bin, reason: "bubblewrap could not start" };
 }
 
 function storeArgs(home: string): string[] {
@@ -140,14 +166,30 @@ export function boxdEnv({ token, croot, idleMinutes = IDLE_MINUTES, listen = "12
   ];
 }
 
+/** The folders boxd may shadow mid-chat (required.json shadows.binds, even_if_absent), with their plain file markers. CLI: the same. */
+export function lazyShadowRules(): Array<{ dir: string; markers: string[] }> {
+  return REQUIRED_RULES.shadows.binds
+    .filter((rule) => rule.even_if_absent)
+    .map((rule) => ({ dir: rule.dir, markers: rule.when_any.filter((m) => !/[/@*?[,]/.test(m)) }))
+    .filter((rule) => rule.markers.length > 0);
+}
+
 /** `boxrun up` arguments for a project's box. */
-export function upArgs({ box, store, image, boxd, portFile, root, croot, runFolder, shims = null, pkglog = null, token, bwrap = null, idleMinutes = IDLE_MINUTES, listen, platform = "linux", mapPath = (p: string) => p }: { box: string; store: string; image: string; boxd: string; portFile: string; root: string; croot: string; runFolder: string; shims?: string | null; pkglog?: Pick<BoxInstallLog, "root"> | null; token: string; bwrap?: string | null; idleMinutes?: number; listen?: string; platform?: NodeJS.Platform; mapPath?: (p: string) => string }): string[] {
+export function upArgs({ box, store, image, boxd, portFile, root, croot, runFolder, shims = null, pkglog = null, token, bwrap = null, idleMinutes = IDLE_MINUTES, listen, platform = "linux", mapPath = (p: string) => p, shadows = null, shadowStore = null }: { box: string; store: string; image: string; boxd: string; portFile: string; root: string; croot: string; runFolder: string; shims?: string | null; pkglog?: Pick<BoxInstallLog, "root"> | null; token: string; bwrap?: string | null; idleMinutes?: number; listen?: string; platform?: NodeJS.Platform; mapPath?: (p: string) => string; shadows?: Pick<ShadowPlan, "binds"> | null; shadowStore?: string | null }): string[] {
   const args = ["up", "--box", box, "--store", store, "--image", image, "--boxd", boxd, "--port-file", portFile,
     "--bind", `${mapPath(root)}=${croot}`, "--bind", `${mapPath(runFolder)}=${RUN_DIR}`];
   if (shims) args.push("--ro-bind", `${mapPath(shims)}=${SHIMS_DIR}-src`);
   if (pkglog) args.push("--bind", `${mapPath(pkglog.root)}=${containerRoot(pkglog.root, platform)}`);
   for (const kv of boxdEnv({ token, croot, idleMinutes, ...(listen ? { listen } : {}) })) args.push("--env", kv);
   if (bwrap) args.push("--bwrap", bwrap);
+  // The box's own build folders (required.ts shadowPlan; backends whose boxrun runs as root):
+  // the per-box store on the backend's own disk, and each folder bound from it (boxrun init Binds).
+  if (shadows && shadowStore) {
+    args.push("--shadow-store", shadowStore);
+    for (const bind of shadows.binds ?? []) args.push("--shadow", `${bind.id ?? shadowId(bind.path)}=${bind.target}`);
+    // What boxd may shadow mid-chat (required.json): boxrun removes such a folder after a kill only when it fits these.
+    if (shadows.binds?.length) for (const rule of lazyShadowRules()) args.push("--shadow-lazy", `${rule.dir}=${rule.markers.join(",")}`);
+  }
   return args;
 }
 

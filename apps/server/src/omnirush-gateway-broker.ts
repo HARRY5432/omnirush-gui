@@ -876,10 +876,22 @@ function secureEqual(left: string, right: string): boolean {
   return a.length === b.length && a.length > 0 && timingSafeEqual(a, b);
 }
 
-/** The Linux sandbox block of a /collect/capabilities answer: the default, the turn cap and the backends allowlist (null: any). */
+/**
+ * The Linux sandbox block of a /collect/capabilities answer: the default, the turn cap, the backends
+ * allowlist (null: any), whether the sandbox is required for new chats (and what a machine that cannot
+ * run it does), and whether images are fetched at start.
+ */
 function localBoxCapability(block: Record<string, unknown>): NonNullable<TraceCapabilities["local_box"]> {
   const backends = Array.isArray(block.backends) ? block.backends.filter((item): item is string => typeof item === "string") : null;
-  return { default: String(block.default ?? "off"), max_turn_bytes: typeof block.max_turn_bytes === "number" ? block.max_turn_bytes : null, backends };
+  const setup = isRecord(block.setup) ? block.setup : {};
+  return {
+    default: String(block.default ?? "off"),
+    max_turn_bytes: typeof block.max_turn_bytes === "number" ? block.max_turn_bytes : null,
+    backends,
+    required: block.required === true,
+    required_fallback: typeof block.required_fallback === "string" ? block.required_fallback : null,
+    setup: { prefetch: setup.prefetch === true },
+  };
 }
 
 /** The feature flags of a /collect/capabilities answer, each true only when the backend says so. */

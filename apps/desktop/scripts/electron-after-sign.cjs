@@ -1,6 +1,7 @@
 const { spawnSync } = require("node:child_process");
 const { existsSync, mkdtempSync, rmSync } = require("node:fs");
 const { notaryCredentials, notarizeFile, runWithRetry, staple } = require("./macos-notarize.cjs");
+const { resignLimaAdHoc, verifyLimactl } = require("./sign-lima.cjs");
 const { tmpdir } = require("node:os");
 const path = require("node:path");
 
@@ -63,7 +64,10 @@ async function afterSign(context) {
 
   const appName = `${context.packager.appInfo.productFilename}.app`;
   const appPath = path.join(context.appOutDir, appName);
-  adHocSignIfUnsigned(appPath);
+  // The deep ad-hoc signature replaces limactl's own: it gets its entitlement back and the app is sealed again.
+  if (adHocSignIfUnsigned(appPath)) resignLimaAdHoc(appPath);
+  // The bundled limactl as it ships: the virtualization entitlement, the hardened runtime (Developer ID when notarized).
+  verifyLimactl(appPath, { requireDeveloperId: process.env.MACOS_NOTARIZE === "true" });
 
   if (process.env.MACOS_NOTARIZE !== "true") {
     console.warn("[electron-after-sign] MACOS_NOTARIZE is not true; skipping notarization.");

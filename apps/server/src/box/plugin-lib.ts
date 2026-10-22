@@ -21,7 +21,7 @@ export function keyOf(dir: string): string {
   return createHash("sha256").update(resolved).digest("hex").slice(0, 12);
 }
 
-export function record(key: string): { state?: string; uid?: number; croot?: string } | null {
+export function record(key: string): { state?: string; uid?: number; croot?: string; shadows_note?: string } | null {
   try { return JSON.parse(readFileSync(path.join(boxHome(), "boxes", `${key}.json`), "utf8")); } catch { return null; }
 }
 
@@ -77,11 +77,13 @@ export function toolPaths(tool: string, args: Record<string, unknown> = {}): str
   return [args.filePath, args.path, args.file_path].filter((value): value is string => typeof value === "string" && Boolean(value));
 }
 
-export const BOX_NOTE = (root: string, uid = 0, croot = root): string => [
+// `shadows`: the record's shadows_note (macOS/Windows hosts: the box's own node_modules, .venv, ...), one more line.
+export const BOX_NOTE = (root: string, uid = 0, croot = root, shadows: unknown = null): string => [
   `Sandbox: shell commands run in a Linux (Debian) container, ${uid === 0 ? "as root" : "as a user with passwordless sudo"}, with HOME=/root.`,
   croot && croot !== root
     ? `The project folder ${root} is ${croot} inside the container (the same files); use ${croot} in shell commands. Changes are visible on both sides.`
     : `The project folder ${root} is the same folder inside the container (same path); changes to it are visible on both sides.`,
   "Files outside the project folder (/tmp, HOME, system folders) exist only inside the container: read and change them with shell commands, not with the file tools.",
   "Install what the task needs with the usual package managers (apt-get, pip, npm, cargo, go, ...); installs persist in this project's container across sessions.",
+  ...(typeof shadows === "string" && shadows ? [shadows] : []),
 ].join("\n");

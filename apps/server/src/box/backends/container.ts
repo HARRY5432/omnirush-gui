@@ -249,6 +249,8 @@ export async function listContainers(runtime: BoxRuntime, { run = runCommand }: 
 
 export const containerDriver: BoxDriver = {
   kind: "container",
+  /** The box has its own network: its servers reach this computer's 127.0.0.1 through boxd (ports.ts). */
+  forwardsPorts: false,
   /** `docker exec` works when boxd is down (boxsh's fallback). */
   execFallback: true,
   async imagePresent(runtime, image, { run = runCommand } = {}) {

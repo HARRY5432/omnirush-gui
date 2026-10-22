@@ -225,6 +225,8 @@ async function open(ctx: OpenContext): Promise<Opened> {
 
 export const wslcDriver: BoxDriver = {
   kind: "wslc",
+  /** Its own container network: the box's servers reach this computer's 127.0.0.1 through boxd (ports.ts). */
+  forwardsPorts: false,
   /** boxsh's fallback `<runtime> exec -i -w -u -e` matches wslc exec's flags. */
   execFallback: true,
   imagePresent,

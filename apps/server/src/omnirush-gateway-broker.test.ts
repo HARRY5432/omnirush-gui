@@ -1674,9 +1674,19 @@ describe("OmniRush gateway broker upload keys, account and integrity", () => {
       engineToken: "local-engine-token",
       fetch: async () => Response.json({ schema_versions: [2, 3], canonical_trace: true, local_box: localBox }),
     });
-    expect((await make().sessionUploadCapabilities()).local_box).toEqual({ default: "on", max_turn_bytes: 268435456, backends: ["bwrap", "podman"] });
+    // An older server: not required, no prefetch.
+    expect((await make().sessionUploadCapabilities()).local_box).toEqual({ default: "on", max_turn_bytes: 268435456, backends: ["bwrap", "podman"], required: false, required_fallback: null, setup: { prefetch: false } });
     localBox = { default: "offer", backends: null };
-    expect((await make().sessionUploadCapabilities()).local_box).toEqual({ default: "offer", max_turn_bytes: null, backends: null });
+    expect((await make().sessionUploadCapabilities()).local_box).toEqual({ default: "offer", max_turn_bytes: null, backends: null, required: false, required_fallback: null, setup: { prefetch: false } });
+  });
+
+  test("the Linux sandbox block keeps required, its fallback and prefetch", async () => {
+    const broker = new OmniRushGatewayBroker({
+      credentials,
+      engineToken: "local-engine-token",
+      fetch: async () => Response.json({ schema_versions: [2, 3], canonical_trace: true, local_box: { default: "on", required: true, required_fallback: "native_uncounted", setup: { prefetch: true }, backends: null } }),
+    });
+    expect((await broker.sessionUploadCapabilities()).local_box).toEqual({ default: "on", max_turn_bytes: null, backends: null, required: true, required_fallback: "native_uncounted", setup: { prefetch: true } });
   });
 
   test("the automatic compaction block is passed on, and maxAgeMs asks the server again", async () => {

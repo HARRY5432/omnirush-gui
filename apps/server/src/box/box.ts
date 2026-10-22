@@ -39,6 +39,7 @@ import type { ListedBox, SpawnLike } from "./backends/types.js";
 import { detectStack, imageFor, type BoxImage, type ImagePins } from "./images.js";
 import { runCommand, type RunCommand, type RunOptions } from "./run.js";
 import { keptImages } from "./retention.mjs";
+import { REQUIRED_RULES, shadowRecord, shadowsNotice, type ShadowBind, type ShadowPlan } from "./required.js";
 
 type Env = NodeJS.ProcessEnv;
 
@@ -177,8 +178,12 @@ function topmost(paths: string[]): string[] {
   return out;
 }
 
-/** Dependency folders of the project (top level, and one or two levels down). */
-export function dependencyFolders(root: string, { maxDepth = 2 }: { maxDepth?: number } = {}): string[] {
+/**
+ * Dependency folders of the project (top level, and one or two levels down).
+ * `skip`: project-relative POSIX paths left out (the box's own shadow copies,
+ * required.ts: never in a snapshot; a rebuild makes them from the manifests).
+ */
+export function dependencyFolders(root: string, { maxDepth = 2, skip = null }: { maxDepth?: number; skip?: Set<string> | null } = {}): string[] {
   const out: string[] = [];
   const visit = (dir: string, depth: number) => {
     let entries;
@@ -186,6 +191,7 @@ export function dependencyFolders(root: string, { maxDepth = 2 }: { maxDepth?: n
     for (const entry of entries) {
       if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
       const full = path.join(dir, entry.name);
+      if (skip?.has(path.relative(root, full).split(path.sep).join("/"))) continue;
       if (DEPENDENCY_DIRS.has(entry.name)) { out.push(full); continue; }
       if (depth < maxDepth && !entry.name.startsWith(".") && entry.name !== "dist" && entry.name !== "build" && entry.name !== "target") visit(full, depth + 1);
     }
@@ -205,7 +211,7 @@ type OnState = (state: BoxState, error: string | null) => void;
  * (the record boxsh reads says the same). Throws only for programming
  * errors; a box that cannot start is a Box with state "failed" and `error`.
  */
-export async function openBox({ root, runtime, env = process.env, platform = process.platform, home = boxHome(env), run = runCommand, log = () => {}, shims = null, pkglog = null, pull = true, image: asked = null, onState = () => {}, onLine, spawnImpl, readyMs = 15_000, revive = false }: { root: string; runtime: BoxRuntime; env?: Env; platform?: NodeJS.Platform; home?: string; run?: RunCommand; log?: BoxLog; shims?: string | null; pkglog?: BoxInstallLog | null; pull?: boolean; image?: BoxImage | null; onState?: OnState; onLine?: RunOptions["onLine"]; spawnImpl?: SpawnLike; readyMs?: number; revive?: boolean }): Promise<Box> {
+export async function openBox({ root, runtime, env = process.env, platform = process.platform, home = boxHome(env), run = runCommand, log = () => {}, shims = null, pkglog = null, pull = true, image: asked = null, onState = () => {}, onLine, spawnImpl, readyMs = 15_000, revive = false, shadows = null }: { root: string; runtime: BoxRuntime; env?: Env; platform?: NodeJS.Platform; home?: string; run?: RunCommand; log?: BoxLog; shims?: string | null; pkglog?: BoxInstallLog | null; pull?: boolean; image?: BoxImage | null; onState?: OnState; onLine?: RunOptions["onLine"]; spawnImpl?: SpawnLike; readyMs?: number; revive?: boolean; shadows?: ShadowPlan | null }): Promise<Box> {
   const projectRoot = path.resolve(root);
   const key = boxKey(projectRoot, { platform });
   const name = containerName(key, env);
@@ -216,13 +222,15 @@ export async function openBox({ root, runtime, env = process.env, platform = pro
   // The app restarts boxd when a shell call finds it stopped (boxsh asks through boxes/<key>.revive).
   box.revive = revive;
   const driver = driverFor(runtime);
+  // Shadows only where the backend applies them (driver.shadows: boxrun as root, macOS/Windows hosts).
+  const wanted = driver.shadows && shadows && (shadows.binds?.length || Object.keys(shadows.env ?? {}).length) ? shadows : null;
   const lock = await acquireLock(home, key);
   try {
     box.setState("starting", null, onState);
     const chosen = asked ?? imageFor(detectStack(projectRoot), { env });
     let opened: Awaited<ReturnType<typeof driver.open>>;
     for (let attempt = 0; ; attempt += 1) {
-      opened = await driver.open({ key, name, root: projectRoot, croot, runtime, run, home, runFolder, image: chosen, pull, shims, pkglog, env, platform, log, ...(spawnImpl ? { spawnImpl } : {}), ...(onLine ? { onLine } : {}), onPulling: () => box.setState("pulling", null, onState) });
+      opened = await driver.open({ key, name, root: projectRoot, croot, runtime, run, home, runFolder, image: chosen, pull, shims, pkglog, shadows: wanted, env, platform, log, ...(spawnImpl ? { spawnImpl } : {}), ...(onLine ? { onLine } : {}), onPulling: () => box.setState("pulling", null, onState) });
       if (!opened.ok) return box.fail(opened.error, onState);
       if (opened.created || attempt > 0 || !(await mountReplaced(opened, { croot, readyMs }))) break;
       // The folder was deleted and made again at its path (a new clone) while its box ran:
@@ -251,6 +259,11 @@ export async function openBox({ root, runtime, env = process.env, platform = pro
       else log("info", "box made before the install log: its wrappers are not in this box (Reset sandbox adds them)", { key });
     }
     try { box.useGitIdentity(); } catch (error) { log("warn", "box git identity not set", { error: error instanceof Error ? error.message : String(error) }); }
+    // The shadows boxrun really bound (a box another start made before keeps its own set until it stops):
+    // what a checkpoint leaves out follows those, whatever this plan said.
+    const bound = Array.isArray(opened.shadows) ? opened.shadows.filter((t): t is string => typeof t === "string") : null;
+    if (wanted || bound?.length) box.useShadows(wanted ?? { binds: [], env: {}, dirs: [], scanned: 0, truncated: false, ms: 0 }, bound, { lazy: Boolean(wanted) });
+    else rmSync(path.join(runFolder, "shadows.json"), { force: true });
     box.setState("ready", null, onState);
     return box;
   } catch (error) {
@@ -374,6 +387,8 @@ export class Box {
   gid: number | undefined;
   containerId: string | undefined;
   imageId: string | undefined;
+  /** The box's own build folders in use (macOS/Windows hosts; required.ts), null with none. */
+  shadows: ShadowPlan | null = null;
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor({ key, name, root, croot, runtime, home, runFolder, run, log, platform, env }: BoxInit) {
@@ -409,6 +424,8 @@ export class Box {
       host: this.endpoint?.host ?? "127.0.0.1", port: this.endpoint?.port ?? 0, token: this.endpoint?.token ?? "",
       state: this.state, error: this.error ?? "", uid: this.uid ?? 0, gid: this.gid ?? 0, home: HOME_IN_BOX, shell: "/bin/bash",
       path_prefix: this.pathPrefix, env_file: `${RUN_DIR}/env`, updated: Date.now(), pid: process.pid, revive: this.revive,
+      // The agent's box notice adds this line (plugin-lib.ts BOX_NOTE): the CLI's words, so both apps tell the model the same.
+      ...(this.shadows ? { shadows_note: shadowsNotice(this.shadows, this.platform, "cli") ?? undefined } : {}),
     };
     writeJson(recordFile(this.home, this.key), record);
   }
@@ -488,6 +505,50 @@ export class Box {
     writeFileSync(file, `${lines.join("\n")}\n`, { mode: 0o644 });
   }
 
+  /**
+   * The box's own build folders (required.ts shadowPlan): `applied` lists the
+   * folders inside that boxrun bound (null: all of the plan). Their
+   * redirections (UV_PROJECT_ENVIRONMENT, ...) go in the env file for every
+   * command; shadows.json in the run folder tells boxd which folders are
+   * shadowed and what to bind when a new package appears mid-chat. CLI: the same.
+   */
+  useShadows(plan: ShadowPlan, applied: string[] | null = null, { lazy: mid = true }: { lazy?: boolean } = {}): void {
+    // `applied` (boxrun's answer) wins over the plan: a box started before keeps the set it was made with.
+    const binds = Array.isArray(applied)
+      ? applied.map((target) => plan.binds.find((b) => b.target === target) ?? this.shadowOf(target)).filter((b): b is ShadowBind => b !== null)
+      : plan.binds;
+    this.shadows = { ...plan, binds, dirs: [...new Set(binds.map((b) => b.path.split("/").pop()!))] };
+    const rules = REQUIRED_RULES.shadows;
+    // Folders shadowed mid-chat only under the plan's rules (the required sandbox); none otherwise.
+    const lazy = mid ? rules.binds.filter((rule) => rule.even_if_absent).map((rule) => ({ dir: rule.dir, when_any: rule.when_any })) : [];
+    writeJson(path.join(this.runFolder, "shadows.json"), { v: 1, root: this.croot, store: rules.store, active: binds.map((b) => b.target), lazy, limits: rules.limits, skip_dirs: rules.skip_dirs }, 0o644);
+    // The env file keeps what the wrappers and the git identity wrote; the redirections are set once.
+    const names = Object.keys(plan.env ?? {});
+    const file = path.join(this.runFolder, "env");
+    let lines: string[] = [];
+    try { lines = readFileSync(file, "utf8").split("\n").filter((line) => line && !names.some((name) => line.startsWith(`${name}=`))); } catch { /* none yet */ }
+    lines.push(...Object.entries(plan.env ?? {}).map(([k, v]) => `${k}=${v}`));
+    writeFileSync(file, `${lines.join("\n")}\n`, { mode: 0o644 });
+    this.writeRecord();
+  }
+
+  /** A bound folder (inside path) the plan does not list: its project-relative path, or null outside the project. */
+  shadowOf(target: string): ShadowBind | null {
+    const rel = path.posix.relative(this.croot, path.posix.normalize(String(target)));
+    if (!rel || rel.startsWith("..") || path.posix.isAbsolute(rel)) return null;
+    return { path: rel, existed: false, target: `${this.croot}/${rel}` };
+  }
+
+  /** The shadows in use now: the start's, plus the folders boxd bound mid-chat (shadows-lazy.json in the run folder). */
+  currentShadows(): ShadowPlan | null {
+    if (!this.shadows) return null;
+    const lazy = readJson<{ binds?: Array<{ path?: unknown }> }>(path.join(this.runFolder, "shadows-lazy.json"));
+    const extra = (Array.isArray(lazy?.binds) ? lazy.binds : []).filter((b): b is { path: string } => typeof b?.path === "string" && !this.shadows!.binds.some((x) => x.path === b.path));
+    if (!extra.length) return this.shadows;
+    const more: ShadowBind[] = extra.map((b) => ({ path: b.path, existed: false, target: `${this.croot}/${b.path}` }));
+    return { ...this.shadows, binds: [...this.shadows.binds, ...more] };
+  }
+
   /** The prompt number the package-manager wrappers write into their lines. */
   setTurn(turn: number): void {
     try { writeFileSync(path.join(this.runFolder, "state", "turn"), `${turn}\n`); } catch { /* best effort */ }
@@ -513,6 +574,8 @@ export class Box {
       user: { uid: this.uid ?? 0, gid: this.gid ?? 0, home: HOME_IN_BOX },
       environment: { HOME: HOME_IN_BOX, shims: this.pathPrefix ? SHIMS_DIR : null },
       excluded: { prefixes: NOISE_PREFIXES, keep: KEEP_PREFIXES, patterns: NOISE_PATTERNS.map(String), dependency_dirs: [...DEPENDENCY_DIRS] },
+      // The box's own copies of build folders (macOS/Windows hosts), never in a checkpoint.
+      ...(this.shadows ? { [REQUIRED_RULES.shadows.record_key]: shadowRecord(this.currentShadows()) } : {}),
     };
   }
 
@@ -554,7 +617,9 @@ export class Box {
     // What the box changed against its image: boxd's walk (fast, any runtime), else `diff`
     // (overlay2's naive diff walks the whole image on most Linux kernels: ~1 s for 1 GB).
     const mounts = [this.croot, RUN_DIR, `${SHIMS_DIR}-src`];
-    const walked = await client.changes(endpoint, NOISE_PREFIXES, KEEP_PREFIXES);
+    // The shadow store's mount point (made at the box's start) is no change of the box.
+    const shadowed = this.currentShadows();
+    const walked = await client.changes(endpoint, shadowed ? [...NOISE_PREFIXES, path.posix.dirname(REQUIRED_RULES.shadows.store)] : NOISE_PREFIXES, KEEP_PREFIXES);
     let entries: DiffEntry[];
     let stats: BoxStat[];
     let source = "boxd";
@@ -577,7 +642,8 @@ export class Box {
     let depStats: BoxStat[] = [];
     let depsInfo: { folders: number; entries: number; truncated: boolean } | null = null;
     if (deps) {
-      const folders = dependencyFolders(this.root).map((folder) => path.posix.join(this.croot, path.relative(this.root, folder).split(path.sep).join("/")));
+      const skip = shadowed ? new Set(shadowed.binds.map((b) => b.path)) : null;
+      const folders = dependencyFolders(this.root, { skip }).map((folder) => path.posix.join(this.croot, path.relative(this.root, folder).split(path.sep).join("/")));
       if (folders.length) {
         const walkedDeps = await client.walk(endpoint, folders);
         depStats = (walkedDeps.entries ?? []).filter((entry) => !NOISE_PATTERNS.some((pattern) => pattern.test(entry.path)) && !/\/node_modules\/\.cache(\/|$)/.test(entry.path));
@@ -708,7 +774,9 @@ export class Box {
         settled = true;
         mkdirSync(to, { recursive: true });
         const recordPath = path.join(to, "record.json");
-        if (!existsSync(recordPath)) writeJson(recordPath, record, 0o600);
+        // A folder boxd shadowed mid-chat is in the next checkpoint's record (shadows are never in the tar).
+        const shadowsNow = (record as { shadows?: unknown }).shadows;
+        if (!existsSync(recordPath) || (shadowsNow && JSON.stringify(readJson<{ shadows?: unknown }>(recordPath)?.shadows ?? null) !== JSON.stringify(shadowsNow))) writeJson(recordPath, record, 0o600);
         rmSync(path.join(to, `${label}.tar`), { force: true });
         for (const name of readdirSync(stage)) renameSync(path.join(stage, name), path.join(to, name));
         rmSync(stage, { recursive: true, force: true });

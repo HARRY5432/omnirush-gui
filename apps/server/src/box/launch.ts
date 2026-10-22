@@ -18,15 +18,17 @@
 // background, and a shell call waits for it (boxsh).
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import path from "node:path";
 
 import * as client from "./client.js";
-import { boxKey, containerName, gcBoxes, installShell, openBox, recordFile, reviveFile, savedTurns, type Box, type BoxInstallLog, type BoxLabel, type BoxLog, type BoxRuntime, type CheckpointSummary } from "./box.js";
+import { boxKey, containerName, containerRoot, gcBoxes, installShell, openBox, recordFile, reviveFile, savedTurns, type Box, type BoxInstallLog, type BoxLabel, type BoxLog, type BoxRuntime, type CheckpointSummary } from "./box.js";
 import { driverFor, normalizeBackend } from "./backends/index.js";
 import type { BoxExec } from "./backends/types.js";
 import { detectStack, imageFor, loadPins, type BoxImage } from "./images.js";
+import { portForwards, type PortForwardOptions, type PortForwards } from "./ports.js";
 import { rememberPins } from "./retention.mjs";
+import { requiredFallback, shadowPlan, shadowsApply, shadowsNotice, type RequiredFallback, type ShadowPlan } from "./required.js";
 import { detectRuntime, runCommand, type RunCommand, type RuntimeResult } from "./runtime.js";
 
 export const MODES = ["off", "offer", "on"] as const;
@@ -60,19 +62,52 @@ export function serverBackends(stateDir: string): string[] | null {
   }
 }
 
-/** Remembers local_box.default (and its backends allowlist) of a capabilities answer; whether either changed. */
+/**
+ * Whether the server requires the sandbox for this device's new chats
+ * (local_box.required, said only to a client at or above its minimum
+ * version), what a machine that cannot run it does (`required_fallback`), and
+ * whether images are fetched at app start (`setup.prefetch`). An older
+ * server: not required, no prefetch.
+ */
+export function serverRequired(stateDir: string): { required: boolean; fallback: RequiredFallback; prefetch: boolean } {
+  try {
+    const value = JSON.parse(readFileSync(path.join(stateDir, "box-server.json"), "utf8"));
+    const required = value?.required === true;
+    // Prefetch is part of the requirement: a server that says `on` also says prefetch, and a
+    // device it does not require keeps today's behaviour (the image is fetched by a chat's plan).
+    return { required, fallback: requiredFallback(value?.required_fallback), prefetch: required && value?.prefetch === true };
+  } catch {
+    return { required: false, fallback: "native", prefetch: false };
+  }
+}
+
+/**
+ * Remembers local_box.default (with its backends allowlist, `required`,
+ * `required_fallback` and `setup.prefetch`) of a capabilities answer; whether
+ * what decides where chats run changed: the default, the allowlist, or
+ * `required` (with its fallback). Keys that first appear with their old
+ * meaning (required false; prefetch) are no change, so boxes are not planned
+ * again for them.
+ */
 export function rememberServerDefault(stateDir: string, capabilities: { local_box?: unknown } | null | undefined): boolean {
   const block = capabilities?.local_box;
   if (!block || typeof block !== "object") return false;
-  const fields: { default?: unknown; max_turn_bytes?: unknown; backends?: unknown } = block;
+  const fields: { default?: unknown; max_turn_bytes?: unknown; backends?: unknown; required?: unknown; required_fallback?: unknown; setup?: unknown } = block;
   const value = isMode(fields.default) ? fields.default : "off";
   const backends = Array.isArray(fields.backends) ? fields.backends.filter((b): b is string => typeof b === "string").slice(0, 32) : null;
-  const before = JSON.stringify([serverDefault(stateDir), serverBackends(stateDir)]);
+  const required = fields.required === true;
+  const fallback = requiredFallback(fields.required_fallback);
+  const setup: { prefetch?: unknown } = fields.setup && typeof fields.setup === "object" ? fields.setup : {};
+  const was = serverRequired(stateDir);
+  const before = JSON.stringify([serverDefault(stateDir), serverBackends(stateDir), was.required, was.required ? was.fallback : null]);
   try {
     mkdirSync(stateDir, { recursive: true });
-    writeFileSync(path.join(stateDir, "box-server.json"), JSON.stringify({ default: value, max_turn_bytes: fields.max_turn_bytes ?? null, backends, at: Date.now() }), { mode: 0o600 });
+    // The required keys are written only when the server requires the sandbox, so the file is
+    // exactly what it was before them otherwise (the CLI's requiredBlock does the same).
+    const extra = required ? { required, required_fallback: fallback, prefetch: setup.prefetch === true } : {};
+    writeFileSync(path.join(stateDir, "box-server.json"), JSON.stringify({ default: value, max_turn_bytes: fields.max_turn_bytes ?? null, backends, ...extra, at: Date.now() }), { mode: 0o600 });
   } catch { /* best effort */ }
-  return before !== JSON.stringify([value, backends]);
+  return before !== JSON.stringify([value, backends, required, required ? fallback : null]);
 }
 
 /**
@@ -142,17 +177,22 @@ export function askedBackend({ env = process.env, stateDir }: { env?: NodeJS.Pro
 
 /**
  * On or off for a project, and why: OMNIRUSH_BOX=1|0 (every project), then
- * the project's setting, then (a buildathon project, buildathon-repro.ts) the
+ * the server's `required` (every new chat in the box: the project's own
+ * switch and the buildathon's choice no longer turn it off), then the
+ * project's setting, then (a buildathon project, buildathon-repro.ts) the
  * event's `repro.box`, then the server's default ("on"; "offer" shows a
  * one-line offer until the project was offered it once; "off"). A buildathon
  * project kept off by OMNIRUSH_BOX=0 or its own switch says so (`lessRepro`).
+ * OMNIRUSH_BOX=0 while the sandbox is required is the support-only escape:
+ * `required` stays set so the chat reports it (launch reason env_off).
  * CLI: src/box/launch.js resolveMode, the same order.
  */
-export function resolveMode({ env = process.env, project, server, offered = false, buildathon = null }: { env?: NodeJS.ProcessEnv; project: ProjectBoxMode; server: ServerBoxDefault; offered?: boolean; buildathon?: "on" | "offer" | "off" | null }): { on: boolean; source: "env" | "project" | "server" | "default" | "buildathon"; offer: boolean; lessRepro?: true } {
+export function resolveMode({ env = process.env, project, server, offered = false, buildathon = null, required = false }: { env?: NodeJS.ProcessEnv; project: ProjectBoxMode; server: ServerBoxDefault; offered?: boolean; buildathon?: "on" | "offer" | "off" | null; required?: boolean }): { on: boolean; source: "env" | "project" | "server" | "default" | "buildathon" | "required"; offer: boolean; lessRepro?: true; required?: true } {
   const lessRepro = buildathon === "on" || buildathon === "offer" ? { lessRepro: true as const } : {};
   const asked = String(env.OMNIRUSH_BOX ?? "").trim().toLowerCase();
-  if (["1", "on", "true"].includes(asked)) return { on: true, source: "env", offer: false };
-  if (["0", "off", "false"].includes(asked)) return { on: false, source: "env", offer: false, ...lessRepro };
+  if (["1", "on", "true"].includes(asked)) return { on: true, source: "env", offer: false, ...(required ? { required: true as const } : {}) };
+  if (["0", "off", "false"].includes(asked)) return { on: false, source: "env", offer: false, ...lessRepro, ...(required ? { required: true as const } : {}) };
+  if (required) return { on: true, source: "required", offer: false, required: true };
   if (project === "on" || project === "off") return { on: project === "on", source: "project", offer: false, ...(project === "off" ? lessRepro : {}) };
   if (buildathon === "on") return { on: true, source: "buildathon", offer: false };
   if (buildathon === "offer" && server !== "on") return { on: false, source: "buildathon", offer: !offered };
@@ -169,6 +209,23 @@ export function pullMarker(home: string, runtime: Pick<BoxRuntime, "backend" | "
 /** The detached download's output (Desktop: its progress, pull-progress.ts). */
 export function pullLog(marker: string): string {
   return marker.replace(/\.pid$/, ".log");
+}
+
+/** When a download's log last moved (ms since the epoch), or null: no log. */
+export function pullActivityAt(home: string, runtime: Pick<BoxRuntime, "backend" | "name">, image: string): number | null {
+  try { return Math.round(statSync(pullLog(pullMarker(home, runtime, image))).mtimeMs); } catch { return null; }
+}
+
+/**
+ * Whether a wait for the first sandbox setup is over: `idle` (no progress
+ * for `idleMs`: nothing moved in the download's log) or `max` (`maxMs` in all);
+ * null while it goes on. The CLI's run limit counts the setup the same way
+ * (src/box/setup-wait.js).
+ */
+export function setupWait({ startedAt, lastProgressAt, now, idleMs, maxMs }: { startedAt: number; lastProgressAt: number; now: number; idleMs: number; maxMs: number }): { over: "idle" | "max" | null } {
+  if (now - startedAt >= maxMs) return { over: "max" };
+  if (now - Math.max(startedAt, lastProgressAt) >= idleMs) return { over: "idle" };
+  return { over: null };
 }
 
 /** Downloads running in this process (a backend with no detached command: the WSL distro). */
@@ -189,6 +246,31 @@ export function pulling(home: string, runtime: Pick<BoxRuntime, "backend" | "nam
 }
 
 /**
+ * The log of a download in this process (the WSL distro, the Lima VM): its
+ * lines appended as they come, for the setup panel's progress; the marker
+ * (this process's pid) is touched so the start time reads right.
+ */
+export function inProcessLog(marker: string): { onLine: (stream: "stdout" | "stderr", line: string) => void; close: () => void } {
+  let fd: number | null = null;
+  try {
+    mkdirSync(path.dirname(marker), { recursive: true });
+    writeFileSync(marker, String(process.pid));
+    fd = openSync(pullLog(marker), "w", 0o600);
+  } catch { /* no progress then */ }
+  return {
+    onLine: (_stream, line) => {
+      if (fd === null) return;
+      try { writeSync(fd, `${line}\n`); } catch { /* best effort */ }
+    },
+    close: () => {
+      if (fd !== null) { try { closeSync(fd); } catch { /* closed */ } fd = null; }
+      // The marker names this (still running) process: gone once the download ends, so it never reads as running.
+      try { rmSync(marker, { force: true }); } catch { /* none */ }
+    },
+  };
+}
+
+/**
  * Start the backend's download detached (survives this run); one at a time
  * per image. A backend without a detached command (the WSL distro, whose
  * download imports the distro first) downloads in this process instead.
@@ -205,10 +287,13 @@ export function pullInBackground(runtime: BoxRuntime, image: BoxImage, home: str
   const cmd = driver.pullCommand(runtime, image, home);
   if (!cmd) {
     inProcess.add(marker);
-    void driver.pull(runtime, image, { home, env, log })
+    // Its progress lines (the Lima VM's setup steps, boxrun's bytes) go to the same log a detached
+    // download writes (pull-progress.ts reads it); the marker's time is when it started.
+    const progress = inProcessLog(marker);
+    void driver.pull(runtime, image, { home, env, log, onLine: progress.onLine })
       .then((res) => { if (!res.ok) log("warn", "box download failed", { backend: runtime.backend, error: res.error }); })
       .catch((error) => log("warn", "box download failed", { backend: runtime.backend, error: String(error?.message || error) }))
-      .finally(() => inProcess.delete(marker));
+      .finally(() => { progress.close(); inProcess.delete(marker); });
     return { started: true, pid: process.pid };
   }
   // Its output goes to a log next to the marker (the Settings card reads its progress there).
@@ -244,19 +329,42 @@ export type ReadyPlan = {
   restart?: () => Promise<Box>;
   /** What the box start is doing ("starting", "pulling", "ready", "failed"; null before it starts). */
   readonly phase: string | null;
+  /** macOS / Windows with a backend that runs boxrun as root: the box's own build folders (required.ts), else null. */
+  shadows?: ShadowPlan | null;
+  /** The one line that says so (required.json texts.desktop.shadows), else null. */
+  shadowsLine?: string | null;
 };
 export type NativePlan = { box: null; notice: string | null; runtime: RuntimeResult | null; image?: BoxImage; downloading?: boolean };
 export type BoxPlan = ReadyPlan | NativePlan;
+
+/** How long a plan under required waits for the backend to answer before it is "cannot run" (cold WSL / VM start). */
+export const REQUIRED_REDETECT_MS = 45_000;
+
+/**
+ * The box's own build folders (required.ts shadowPlan), found now (bounded)
+ * so the project's one line can say so: under the required sandbox only, on
+ * macOS / Windows, with a backend that runs boxrun as root (the WSL distro,
+ * the Lima VM). Else null (as before the required sandbox).
+ */
+export function boxShadows({ required, runtime, root, platform = process.platform, env = process.env, stateDir = null, log = () => {} }: { required: boolean; runtime: BoxRuntime; root: string; platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv; stateDir?: string | null; log?: BoxLog }): ShadowPlan | null {
+  if (!required || !driverFor(runtime).shadows || !shadowsApply(platform, env)) return null;
+  let shadows: ShadowPlan | null = null;
+  try { shadows = shadowPlan(root, { platform, croot: containerRoot(root, platform), stateDir, env }); } catch (error) { log("warn", "box shadows scan failed", { error: error instanceof Error ? error.message : String(error) }); }
+  if (shadows) log("info", "box shadows", { binds: shadows.binds.length, env: Object.keys(shadows.env), ms: shadows.ms, truncated: shadows.truncated });
+  return shadows;
+}
 
 /**
  * Plan the box of the project at `root` (the project's box is on). Returns
  * { box: null, notice } when its chats run on this machine for now (no
  * runtime, no helpers, the image still downloading), else a ready plan.
  */
-export async function planBox({ env = process.env, home, root, log = () => {}, run = runCommand, probeMs = 4_000, shims = null, asked = null, allow = null }: { env?: NodeJS.ProcessEnv; home: string; root: string; log?: BoxLog; run?: RunCommand; probeMs?: number; shims?: string | null; asked?: string | null; allow?: string[] | null }): Promise<BoxPlan> {
+export async function planBox({ env = process.env, home, root, log = () => {}, run = runCommand, probeMs = 4_000, shims = null, asked = null, allow = null, platform = process.platform, stateDir = null, preferShadows = false, required = false }: { env?: NodeJS.ProcessEnv; home: string; root: string; log?: BoxLog; run?: RunCommand; probeMs?: number; shims?: string | null; asked?: string | null; allow?: string[] | null; platform?: NodeJS.Platform; stateDir?: string | null; preferShadows?: boolean; required?: boolean }): Promise<BoxPlan> {
   const key = boxKey(root);
   const bounded = <T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> => Promise.race([promise, new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms))]);
-  const runtime = await bounded<RuntimeResult>(detectRuntime({ boxHome: home, env, run, ...(asked ? { asked } : {}), allow }), probeMs, { ok: false, reason: "the sandbox backend did not answer in time" });
+  // Under required the chat waits for the box anyway: a backend slow to answer (a WSL VM booting) is not "cannot run".
+  const detectMs = required ? Math.max(probeMs, REQUIRED_REDETECT_MS) : probeMs;
+  const runtime = await bounded<RuntimeResult>(detectRuntime({ boxHome: home, env, run, ...(asked ? { asked } : {}), allow, ...(preferShadows ? { preferShadows } : {}), ...(required ? { required } : {}) }), detectMs, { ok: false, reason: "the sandbox backend did not answer in time" });
   if (!runtime.ok) {
     log("info", "box unavailable", { reason: runtime.reason });
     return { box: null, notice: `Sandbox off for now: ${runtime.reason}.`, runtime };
@@ -275,7 +383,7 @@ export async function planBox({ env = process.env, home, root, log = () => {}, r
     const present = await bounded(driver.imagePresent(runtime, image, { run, home, env }), probeMs, null);
     if (!present) {
       pullInBackground(runtime, image, home, { env, log });
-      return { box: null, notice: `Sandbox is downloading (${image.approxMb ? `about ${image.approxMb} MB, ` : ""}once${runtime.backend === "wsl" && !runtime.installed ? ", with the OmniRush WSL distro" : ""}); chats here run on this machine until it is ready.`, runtime, image, downloading: true };
+      return { box: null, notice: `Sandbox is downloading (${image.approxMb ? `about ${image.approxMb} MB, ` : ""}once${runtime.backend === "wsl" && !runtime.installed ? ", with the OmniRush WSL distro" : runtime.backend === "lima" && !runtime.installed ? ", with the OmniRush VM" : ""}); chats here run on this machine until it is ready.`, runtime, image, downloading: true };
     }
   }
   // The pins this box starts on are remembered: the next box version keeps their images as the previous ones.
@@ -284,9 +392,10 @@ export async function planBox({ env = process.env, home, root, log = () => {}, r
   let opening: Promise<Box> | null = null;
   let phase: string | null = null;
   let startedWith: BoxInstallLog | null = null;
+  const shadows = boxShadows({ required, runtime, root, platform, env, stateDir, log });
   const start = ({ pkglog = null }: { pkglog?: BoxInstallLog | null } = {}): Promise<Box> => {
     if (!opening) startedWith = pkglog;
-    opening ??= openBox({ root, runtime, env, home, log, pull: false, shims, pkglog, revive: true, onState: (state) => { phase = state; } });
+    opening ??= openBox({ root, runtime, env, home, log, pull: false, shims, pkglog, revive: true, shadows, platform, onState: (state) => { phase = state; } });
     return opening;
   };
   return {
@@ -296,10 +405,12 @@ export async function planBox({ env = process.env, home, root, log = () => {}, r
     start,
     restart: () => {
       if (!opening) return start();
-      opening = openBox({ root, runtime, env, home, log, pull: false, shims, pkglog: startedWith, revive: true });
+      opening = openBox({ root, runtime, env, home, log, pull: false, shims, pkglog: startedWith, revive: true, shadows, platform });
       return opening;
     },
     get phase() { return phase; },
+    shadows,
+    shadowsLine: shadowsNotice(shadows, platform),
   };
 }
 
@@ -385,7 +496,9 @@ export type BoxRun = {
   setTurn: (turn: number) => void;
   /** Start boxd again when it does not answer (resolves the Box now in use). */
   heal: (why: string) => Promise<Box | null>;
-  /** Stop watching for restart requests (the project's box is let go). */
+  /** The box's ports open on this computer now (ports.ts). */
+  forwardedPorts?: () => number[];
+  /** Stop watching for restart requests and close the port forwards (the project's box is let go). */
   close: () => void;
   /** `sessionTurn`: the chat's own number of the prompt the checkpoint comes before (written as session_turn). */
   freeze: (label: string, options: { sessionId: string; turn?: number | null; sessionTurn?: number | null; chain?: string | null }) => Promise<Frozen | null>;
@@ -399,18 +512,30 @@ export type BoxRun = {
  * "off"; the shell runs on this machine, its chats are not labelled); later
  * failures are logged and that turn has no checkpoint.
  */
-export function boxRun(plan: ReadyPlan, { log = () => {}, readyWaitMs = 30_000, onNative = () => {}, onRevive = () => {}, tmpRoot, pkglog = null, pollMs = REVIVE_POLL_MS, ping = client.ping }: { log?: BoxLog; readyWaitMs?: number; onNative?: (reason: string) => void; onRevive?: (event: { ok: boolean; why: string; error?: string }) => void; tmpRoot?: string; pkglog?: BoxInstallLog | null; pollMs?: number; ping?: typeof client.ping } = {}): BoxRun {
+export function boxRun(plan: ReadyPlan, { log = () => {}, readyWaitMs = 30_000, onNative = () => {}, onRevive = () => {}, onPort = () => {}, tmpRoot, pkglog = null, pollMs = REVIVE_POLL_MS, ping = client.ping, env = process.env, forwards: makeForwards = portForwards, required = false }: { required?: boolean; log?: BoxLog; readyWaitMs?: number; onNative?: (reason: string) => void; onRevive?: (event: { ok: boolean; why: string; error?: string }) => void; onPort?: (event: { port: number; open: boolean; line?: string; why?: string }) => void; tmpRoot?: string; pkglog?: BoxInstallLog | null; pollMs?: number; ping?: typeof client.ping; env?: NodeJS.ProcessEnv; forwards?: (options: PortForwardOptions) => PortForwards } = {}): BoxRun {
   const { key, home, runtime, root } = plan.box;
   let box: Box | null = null;
   let native = false;
+  let closed = false;
   const checkpoints = new Map<string, number>();
   const requestFile = reviveFile(home, key);
   // A restart request nobody answered before (the app quit): this start answers it.
   try { rmSync(requestFile, { force: true }); } catch { /* not there */ }
   const opening = plan.start({ pkglog }).then((opened) => { box = opened; return opened; });
+  // A box with its own network (Docker, Podman): its servers at the same port on this computer's 127.0.0.1
+  // (ports.ts), polled while the box is usable (none before it is ready, after a failure, once let go).
+  // Under the required sandbox only (a chat that would have run here keeps its servers reachable); OMNIRUSH_BOX_PORTS=off: never.
+  const wantsForwards = required && driverFor(runtime).forwardsPorts === false && String(env.OMNIRUSH_BOX_PORTS ?? "").trim().toLowerCase() !== "off";
+  const forwards = wantsForwards ? makeForwards({
+    endpoint: () => { const current: Box | null = box; return current?.ready && !native && !closed ? current.endpoint : null; },
+    log,
+    onOpen: (port, line) => { try { onPort({ port, line, open: true }); } catch { /* the caller's problem */ } },
+    onClose: (port, why) => { try { onPort({ port, open: false, why }); } catch { /* the caller's problem */ } },
+  }) : null;
   const goNative = (reason: string) => {
     if (native) return;
     native = true;
+    forwards?.close();
     recordOff(home, key, reason);
     log("warn", "box off for this project", { reason });
     onNative(reason);
@@ -506,7 +631,8 @@ export function boxRun(plan: ReadyPlan, { log = () => {}, readyWaitMs = 30_000, 
     label: (sessionId) => (box?.ready && !native && (checkpoints.get(sessionId) ?? 0) > 0 ? box.label() : null),
     setTurn: (turn) => { lastTurn = turn; box?.setTurn(turn); },
     heal,
-    close: () => clearInterval(watcher),
+    forwardedPorts: () => forwards?.ports() ?? [],
+    close: () => { closed = true; clearInterval(watcher); forwards?.close(); },
     /**
      * The old sandbox's freeze(label, { turn, chain }) -> { save(dir), discard() } | null:
      * the checkpoint is taken now and placed by save(); `final` (the state a

@@ -63,6 +63,11 @@ mac:
   notarize: false
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
+  # The OmniRush VM's limactl is signed on its own (scripts/sign-lima.cjs, from afterPack):
+  # Developer ID, hardened runtime and build/entitlements.lima.plist (com.apple.security.virtualization,
+  # which Apple's Virtualization.framework requires). The inherited entitlements would replace it.
+  signIgnore:
+    - /Contents/Resources/sidecars/lima/bin/limactl$
   extendInfo:
     NSMicrophoneUsageDescription: omnirush uses the microphone when you allow a page to access audio input.
   extraResources:
@@ -76,6 +81,11 @@ mac:
         - versions.json-x86_64-apple-darwin
         - box/darwin-*/boxsh
         - box/linux-*/boxd
+        # The OmniRush VM (backends/lima.ts): boxrun runs boxes inside it; Lima runs the VM.
+        - box/linux-*/boxrun
+        - lima/bin/limactl
+        - lima/share/lima/lima-guestagent.Linux-*.gz
+        - lima/LICENSE
     - from: resources/helpers
       to: helpers
       filter:
@@ -103,6 +113,7 @@ linux:
         - box/linux-*/boxd
         - box/linux-*/boxrun
         - box/linux-*/bwrap
+        - box/LICENSE-*
   target:
     - AppImage
     - deb

@@ -96,6 +96,8 @@ export type BoxRecord = {
   home: string; shell: string; path_prefix: string; env_file: string; updated: number; pid: number;
   /** The app restarts boxd when boxsh asks (boxes/<key>.revive). */
   revive?: boolean;
+  /** The agent's box notice adds this line (plugin-lib.ts BOX_NOTE): the box's own build folders (macOS/Windows hosts). */
+  shadows_note?: string;
 };
 
 export function readRecord(home: string, key: string): BoxRecord | null {
@@ -121,6 +123,11 @@ export function helperDirs({ env = process.env, toolsRoot = null }: { env?: Env;
 let platformTools: string | null = null;
 export function setToolsRoot(dir: string | null | undefined): void {
   platformTools = dir || null;
+}
+
+/** The sidecars folder set at start (null: none; tests, a dev server). */
+export function toolsRoot(): string | null {
+  return platformTools;
 }
 
 /** The helper's file, or null when no folder has it (the box is then unavailable). */

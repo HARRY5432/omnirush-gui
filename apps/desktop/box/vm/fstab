@@ -1,0 +1,2 @@
+# The OmniRush VM (box/vm): one ext4 root, grown to the VM's disk at first boot (cloud-init growpart).
+LABEL=omnirush-root  /  ext4  rw,discard,errors=remount-ro  0  1

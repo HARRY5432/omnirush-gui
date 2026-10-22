@@ -600,6 +600,10 @@ type spec struct {
 	Root     bool       `json:"root"`                        // unshare as real root (WSL distro): mount /dev and /sys from the host
 	NoKernel bool       `json:"no_kernel_overlay,omitempty"` // fuse-overlayfs only (a kernel without overlayfs in user namespaces, or a test of one)
 	AptRoot  bool       `json:"apt_root"`
+	// The box's own build folders (shadows.go): the store mounted at shadowStore, each shadow bound from it.
+	ShadowStore   string     `json:"shadow_store,omitempty"`
+	Shadows       []bindSpec `json:"shadows,omitempty"`
+	ShadowProject string     `json:"shadow_project,omitempty"` // the project's inside path: shadows are made in it only
 }
 
 type bindSpec struct {
@@ -609,14 +613,15 @@ type bindSpec struct {
 }
 
 type state struct {
-	Pid      int    `json:"pid"`
-	Port     int    `json:"port"`
-	Launcher string `json:"launcher"`
-	IDMap    string `json:"idmap"`
-	Overlay  string `json:"overlay"`
-	Image    string `json:"image"`
-	Started  int64  `json:"started"`
-	Version  string `json:"version"`
+	Pid      int      `json:"pid"`
+	Port     int      `json:"port"`
+	Launcher string   `json:"launcher"`
+	IDMap    string   `json:"idmap"`
+	Overlay  string   `json:"overlay"`
+	Image    string   `json:"image"`
+	Started  int64    `json:"started"`
+	Version  string   `json:"version"`
+	Shadows  []string `json:"shadows,omitempty"`
 }
 
 func readState(box string) *state {
@@ -705,7 +710,10 @@ func cmdUp(args []string) error {
 	foreground := fs.Bool("foreground", false, "stay attached (the WSL keeper): exit when stdin closes")
 	timeout := fs.Duration("timeout", 30*time.Second, "wait this long for boxd")
 	overlayMode := fs.String("overlay", "auto", "auto|fuse (fuse-overlayfs only)")
-	var binds, roBinds, envs multi
+	var binds, roBinds, envs, shadowArgs, lazyArgs multi
+	shadowStoreDir := fs.String("shadow-store", "", "the box's own store of build folders (shadows; as root only)")
+	fs.Var(&shadowArgs, "shadow", "ID=DST: a build folder of the project bound from <shadow-store>/ID (repeat)")
+	fs.Var(&lazyArgs, "shadow-lazy", "DIR=MARKER[,MARKER]: a folder boxd may shadow mid-chat (repeat; default: required.json's)")
 	fs.Var(&binds, "bind", "SRC=DST (repeat)")
 	fs.Var(&roBinds, "ro-bind", "SRC=DST read-only (repeat)")
 	fs.Var(&envs, "env", "K=V for boxd (repeat)")
@@ -728,7 +736,7 @@ func cmdUp(args []string) error {
 					unlock()
 				}
 			}
-			emit(map[string]any{"ok": true, "reused": true, "pid": s.Pid, "port": port, "launcher": s.Launcher, "idmap": s.IDMap, "overlay": s.Overlay, "ms": time.Since(start).Milliseconds()})
+			emit(map[string]any{"ok": true, "reused": true, "pid": s.Pid, "port": port, "launcher": s.Launcher, "idmap": s.IDMap, "overlay": s.Overlay, "shadows": nonNil(s.Shadows), "ms": time.Since(start).Milliseconds()})
 			if *foreground {
 				keep(nil)
 			}
@@ -736,6 +744,8 @@ func cmdUp(args []string) error {
 		}
 		killTree(s.Pid)
 	}
+	// Mount points an earlier run of this box made on the host and did not remove (it was killed).
+	removeShadowMade(*box)
 	st := oci.Store{Dir: *store}
 	unlockImage, err := st.Lock(*image)
 	if err != nil {
@@ -808,6 +818,21 @@ func cmdUp(args []string) error {
 		_ = os.MkdirAll(sp.Merged, 0o755)
 		sp.Fuse, sp.Boxd, sp.Resolv, sp.Hosts = fuseBin, *boxd, resolvFile(), filepath.Join(*box, "hosts")
 		sp.Binds, sp.InitOut, sp.Root = bs, filepath.Join(*box, "init.json"), true
+		if *shadowStoreDir != "" && len(shadowArgs) > 0 {
+			var lazy []lazyRule
+			for _, v := range lazyArgs {
+				rule, err := parseLazyRule(v)
+				if err != nil {
+					return err
+				}
+				lazy = append(lazy, rule)
+			}
+			shadowSpec, err := planShadows(*box, *shadowStoreDir, shadowArgs, bs, envValue(envs, "BOXD_ROOT"), lazy)
+			if err != nil {
+				return err
+			}
+			sp.ShadowStore, sp.Shadows, sp.ShadowProject = shadowSpec.store, shadowSpec.binds, shadowSpec.project
+		}
 		if err := writeJSONFile(filepath.Join(*box, "spec.json"), sp); err != nil {
 			return err
 		}
@@ -917,14 +942,18 @@ func cmdUp(args []string) error {
 		return fmt.Errorf("boxd did not answer in %v: %s", *timeout, tail(filepath.Join(*box, "boxd.log"), 600))
 	}
 	var initInfo struct {
-		Overlay string `json:"overlay"`
+		Overlay string   `json:"overlay"`
+		Shadows []string `json:"shadows"`
+		Made    []string `json:"made"`
 	}
 	if data, err := os.ReadFile(filepath.Join(*box, "init.json")); err == nil {
 		_ = json.Unmarshal(data, &initInfo)
 	}
-	s := state{Pid: cmd.Process.Pid, Port: port, Launcher: mode, IDMap: ids.Mode, Overlay: initInfo.Overlay, Image: *image, Started: time.Now().Unix(), Version: version}
+	// The mount points init made on the host, kept in the box folder (the box never sees it).
+	recordShadowMade(*box, initInfo.Made)
+	s := state{Pid: cmd.Process.Pid, Port: port, Launcher: mode, IDMap: ids.Mode, Overlay: initInfo.Overlay, Image: *image, Started: time.Now().Unix(), Version: version, Shadows: initInfo.Shadows}
 	_ = writeJSONFile(filepath.Join(*box, "state.json"), s)
-	emit(map[string]any{"ok": true, "reused": false, "pid": s.Pid, "port": port, "launcher": mode, "idmap": ids.Mode, "overlay": s.Overlay, "ms": time.Since(start).Milliseconds()})
+	emit(map[string]any{"ok": true, "reused": false, "pid": s.Pid, "port": port, "launcher": mode, "idmap": ids.Mode, "overlay": s.Overlay, "shadows": nonNil(s.Shadows), "ms": time.Since(start).Milliseconds()})
 	if *foreground {
 		keep(func() { killTree(cmd.Process.Pid) })
 		return nil
@@ -956,6 +985,17 @@ func keep(onEnd func()) {
 	// session may still use it. Only a keeper's own box with no other
 	// keeper would be stopped here, which `onEnd` leaves to boxd's idle exit.
 	_ = onEnd
+}
+
+// envValue: the value of the last KEY=V in env, or "".
+func envValue(env []string, key string) string {
+	v := ""
+	for _, kv := range env {
+		if strings.HasPrefix(kv, key+"=") {
+			v = kv[len(key)+1:]
+		}
+	}
+	return v
 }
 
 func hasKey(env []string, key string) bool {
@@ -1074,6 +1114,8 @@ func cmdStop(args []string, remove bool) error {
 		killTree(s.Pid)
 	}
 	_ = os.Remove(filepath.Join(*box, "state.json"))
+	// Killed: boxd did not remove the shadows' mount points it made on the host; done here.
+	removeShadowMade(*box)
 	if remove {
 		if err := removeTree(*box); err != nil {
 			// Files owned by subordinate ids: delete them from inside a namespace that maps them.

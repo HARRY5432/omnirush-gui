@@ -283,6 +283,8 @@ async function open(ctx: OpenContext): Promise<Opened> {
 
 export const appleDriver: BoxDriver = {
   kind: "apple",
+  /** Its own VM network: the box's servers reach this computer's 127.0.0.1 through boxd (ports.ts). */
+  forwardsPorts: false,
   execFallback: false,
   imagePresent,
   pull,

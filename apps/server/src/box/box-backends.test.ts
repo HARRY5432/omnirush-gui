@@ -13,8 +13,8 @@ import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 
-import { OPT_IN, BACKENDS, backendsFor, detectBackend, driverFor, normalizeBackend, ORDER } from "./backends/index.js";
-import { apparmorProfile, boxdEnv, boxrunPath, explainProbe, parseOut, probeBwrap, upArgs } from "./backends/bwrap.js";
+import { OPT_IN, BACKENDS, REQUIRED_FIRST, backendsFor, detectBackend, driverFor, normalizeBackend, ORDER } from "./backends/index.js";
+import { apparmorProfile, boxdEnv, boxrunPath, bwrapCandidates, ENABLED_BWRAP, explainProbe, parseOut, probeBwrap, upArgs } from "./backends/bwrap.js";
 import { createAppleArgs, findDigest, macosMajor, parseVersions, probeApple, snapshotInfo, SUPPORTED as APPLE, systemProductVersion } from "./backends/apple.js";
 import { versionAtLeast } from "./backends/shared.js";
 import { decodeWsl, download, ENABLE_HINT, inDistro, parseWslList, probeWslDistro, startKeeper } from "./backends/wsl.js";
@@ -56,12 +56,13 @@ describe("box backends: ranking and overrides", () => {
   test("the ranked order per OS", () => {
     expect(ORDER.linux).toEqual(["bwrap", "podman", "docker"]);
     expect(ORDER.darwin).toEqual(["orbstack", "colima", "docker-desktop", "rancher", "podman", "docker"]);
+    expect(REQUIRED_FIRST.darwin).toEqual(["lima"]);
     expect(OPT_IN.darwin).toEqual(["apple"]);
     expect(ORDER.win32).toEqual(["wslc", "wsl", "docker-desktop", "podman", "docker", "wsl-engine"]);
     for (const list of Object.values(ORDER)) for (const id of list) expect(BACKENDS.some((b) => b === id)).toBe(true);
     expect(backendsFor("linux")).toEqual(ORDER.linux);
     expect(backendChoices("win32").map((c) => c.id)).toEqual(["auto", ...ORDER.win32, "native"]);
-    expect(backendChoices("darwin").map((c) => c.id)).toEqual(["auto", ...ORDER.darwin, "apple", "native"]);
+    expect(backendChoices("darwin").map((c) => c.id)).toEqual(["auto", "lima", ...ORDER.darwin, "apple", "native"]);
     expect(backendChoices("darwin").find((c) => c.id === "apple")?.label).toBe("Apple container (opt-in)");
   });
 
@@ -128,6 +129,34 @@ describe("box backends: Linux", () => {
     const garbage = await probeBwrap({ env: { OMNIRUSH_BOX_BIN_DIR: helperBin() }, boxHome: home, exists: () => true, platform: "linux", run: async () => ({ code: 1, stdout: "", stderr: "segfault" }) });
     expect(garbage.ok).toBe(false);
     expect(parseOut('noise\n{"a":1}\n{"ok":true,"port":5}\n')).toEqual({ ok: true, port: 5 });
+  });
+
+  test("bwrap candidates: the enabled copy, the system's, then the bundled one; each probed until one starts a box", async () => {
+    const bin = helperBin();
+    const bundled = path.join(bin, "linux-amd64", "bwrap");
+    writeFileSync(bundled, "");
+    const present = new Set([ENABLED_BWRAP, "/usr/bin/bwrap", bundled, path.join(bin, "linux-amd64", "boxrun")]);
+    const exists = (file: string) => present.has(file);
+    expect(bwrapCandidates({ env: { PATH: "/usr/bin", OMNIRUSH_BOX_BIN_DIR: bin }, arch: "x64", exists })).toEqual([
+      { path: ENABLED_BWRAP, source: "enabled" }, { path: "/usr/bin/bwrap", source: "system" }, { path: bundled, source: "bundled" },
+    ]);
+    expect(bwrapCandidates({ env: { OMNIRUSH_BOX_BWRAP: "/x/bwrap" }, exists })).toEqual([{ path: "/x/bwrap", source: "env" }]);
+    // The enabled copy fails, the system's is blocked by AppArmor, the bundled one works: it is used.
+    const tried: string[] = [];
+    const run: RunCommand = async (_bin, args) => {
+      const bw = args[args.indexOf("--bwrap") + 1] ?? "";
+      tried.push(bw);
+      if (bw === bundled) return { code: 0, stdout: JSON.stringify({ ok: true, bwrap: bw, bwrap_version: "0.11.0" }), stderr: "" };
+      return { code: 1, stdout: JSON.stringify({ ok: false, code: bw === "/usr/bin/bwrap" ? "apparmor" : "userns_off", reason: "blocked" }), stderr: "" };
+    };
+    const found = await probeBwrap({ env: { PATH: "/usr/bin", OMNIRUSH_BOX_BIN_DIR: bin }, boxHome: tmp(), arch: "x64", exists, platform: "linux", run });
+    expect(found).toMatchObject({ ok: true, bwrap: bundled, version: "0.11.0" });
+    expect(tried).toEqual([ENABLED_BWRAP, "/usr/bin/bwrap", bundled]);
+    // None works: AppArmor's reason (one admin step fixes it), naming the app's Allow.
+    present.delete(bundled);
+    const none = await probeBwrap({ env: { PATH: "/usr/bin", OMNIRUSH_BOX_BIN_DIR: bin }, boxHome: tmp(), arch: "x64", exists, platform: "linux", run });
+    expect(none).toMatchObject({ ok: false, code: "apparmor" });
+    expect(none.ok ? "" : none.reason).toContain("Allow the sandbox");
   });
 
   test("the setting picks one backend; native turns the box off; the server's allowlist skips the rest", async () => {
@@ -242,11 +271,12 @@ describe("box backends: macOS", () => {
       return fail("no");
     };
     const home = tmp();
-    const found = await detectBackend({ boxHome: home, platform: "darwin", arch: "arm64", release: "24.0.0", home: "/Users/sam", env: { PATH: "/usr/local/bin" }, exists: set(docker), run, fresh: true, all: true });
+    // (the OmniRush VM off: these are the runtimes it falls back to)
+    const found = await detectBackend({ boxHome: home, platform: "darwin", arch: "arm64", release: "24.0.0", home: "/Users/sam", env: { PATH: "/usr/local/bin", OMNIRUSH_BOX_LIMA: "0" }, exists: set(docker), run, fresh: true, all: true });
     expect(found).toMatchObject({ ok: true, backend: "colima", prefix: ["--context", "colima"] });
     expect(found.alternatives?.find((a) => a.backend === "apple")?.reason).toMatch(/opt-in only/);
     expect(found.alternatives?.some((a) => a.backend === "docker-desktop" && a.ok)).toBe(true);
-    const none = await detectBackend({ boxHome: home, platform: "darwin", home: "/Users/sam", env: { PATH: "/usr/bin" }, exists: () => false, run, fresh: true });
+    const none = await detectBackend({ boxHome: home, platform: "darwin", home: "/Users/sam", env: { PATH: "/usr/bin", OMNIRUSH_BOX_LIMA: "0" }, exists: () => false, run, fresh: true });
     expect(none).toMatchObject({ ok: false, hint: "colima" });
   });
 
@@ -257,7 +287,7 @@ describe("box backends: macOS", () => {
       if (bin === APPLE_BIN) return args[1] === "version" ? ok(appleVersions) : ok("apiserver is running");
       return fail("Cannot connect to the Docker daemon");
     };
-    const base = { boxHome: tmp(), platform: "darwin" as const, arch: "arm64", release: "26.0.0", home: "/Users/sam", env: { PATH: "/usr/local/bin" }, exists: set(APPLE_BIN), run, fresh: true };
+    const base = { boxHome: tmp(), platform: "darwin" as const, arch: "arm64", release: "26.0.0", home: "/Users/sam", env: { PATH: "/usr/local/bin", OMNIRUSH_BOX_LIMA: "0" }, exists: set(APPLE_BIN), run, fresh: true };
     const auto = await detectBackend(base);
     expect(auto.ok).toBe(false);
     expect(calls.some(([bin]) => bin === APPLE_BIN)).toBe(false);

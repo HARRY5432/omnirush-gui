@@ -15,6 +15,22 @@ gatekeeper() {
   grep -q 'source=Notarized Developer ID' <<<"$out" || { echo "Gatekeeper source is not Notarized Developer ID" >&2; return 1; }
 }
 
+# The OmniRush VM's limactl (sidecars/lima/bin/limactl): its own signature with Apple's
+# virtualization entitlement (apps/desktop/scripts/sign-lima.cjs), Developer ID, hardened runtime.
+check_lima() {
+  local app="$1" lima details
+  lima="$app/Contents/Resources/sidecars/lima/bin/limactl"
+  [ -e "$lima" ] || { echo "no bundled limactl in $app" >&2; return 1; }
+  codesign --verify --strict --verbose=2 "$lima"
+  details=$(codesign -dv --verbose=4 "$lima" 2>&1)
+  grep -E '^(Identifier|Authority|TeamIdentifier|Timestamp|CodeDirectory)' <<<"$details"
+  grep -q '^Authority=Developer ID Application' <<<"$details" || { echo "limactl is not Developer ID signed" >&2; return 1; }
+  grep -q '^Timestamp=' <<<"$details" || { echo "limactl's signature has no secure timestamp" >&2; return 1; }
+  grep -Eq '^CodeDirectory .*flags=0x[0-9a-f]*\(.*runtime' <<<"$details" || { echo "limactl: hardened runtime is off" >&2; return 1; }
+  codesign -d --entitlements - --xml "$lima" 2>/dev/null | grep -q 'com.apple.security.virtualization' || { echo "limactl lacks com.apple.security.virtualization" >&2; return 1; }
+  "$lima" --version
+}
+
 check_app() {
   local app="$1" details
   echo "== $app"
@@ -26,6 +42,7 @@ check_app() {
   codesign -d --entitlements - --xml "$app" 2>/dev/null | plutil -p - || true
   gatekeeper -a -vv -t exec "$app"
   xcrun stapler validate "$app"
+  check_lima "$app"
 }
 
 apps=("$dist"/mac*/*.app)
