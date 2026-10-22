@@ -116,13 +116,21 @@ describe("lima: the probe and the order", () => {
 });
 
 describe("lima: pins, paths, config (the same as the CLI's)", () => {
-  test("Lima per arch by sha256; the VM image falls back to the official Debian one by sha512 until ours is published", () => {
+  test("Lima per arch by sha256; our VM image per arch by sha256, the official Debian one by sha512 when ours is not published", () => {
     const setup = loadDarwinSetup();
     expect(setup.backend).toBe("lima");
     expect(limaAsset(setup, "arm64")?.url).toMatch(/lima-2\.2\.1-Darwin-arm64\.tar\.gz$/);
     expect(limaAsset(setup, "x64")?.url).toMatch(/Darwin-x86_64/);
     const home = "/Users/sam/.omnirush/box";
-    const image = vmImage({ setup, arch: "arm64", home, env: {} });
+    for (const [arch, name] of [["arm64", "arm64"], ["x64", "amd64"]] as const) {
+      const ours = vmImage({ setup, arch, home, env: {} });
+      expect(ours).toMatchObject({ kind: "custom", algo: "sha256", version: setup.vm?.image?.custom?.version });
+      expect(ours?.digest).toMatch(/^[0-9a-f]{64}$/);
+      expect(ours?.url).toMatch(new RegExp(`^https://github\\.com/omnirush-ai/omnirush-gui/releases/download/box-[0-9.]+/omnirush-vm-[0-9.]+-${name}\\.qcow2$`));
+      expect(path.dirname(String(ours?.file))).toBe(path.join(home, "lima", "images"));
+    }
+    const unpublished = { ...setup, vm: { ...setup.vm, image: { ...setup.vm?.image, custom: { version: null, arm64: { url: null, sha256: null }, x64: { url: null, sha256: null } } } } } as typeof setup;
+    const image = vmImage({ setup: unpublished, arch: "arm64", home, env: {} });
     expect(image).toMatchObject({ kind: "debian", algo: "sha512" });
     expect(image?.url).toMatch(/genericcloud-arm64-.*\.qcow2$/);
     expect(path.dirname(String(image?.file))).toBe(path.join(home, "lima", "images"));
