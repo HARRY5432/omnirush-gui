@@ -7,6 +7,7 @@ import { boxKey, setToolsRoot } from "./box.js";
 import { planBox, rememberServerDefault, REQUIRED_REDETECT_MS, resolveMode, serverRequired, type BoxRun } from "./launch.js";
 import type { RunCommand } from "./run.js";
 import { DESKTOP_PROJECTS_FILE } from "./plugin-lib.js";
+import { setupState } from "./setup.js";
 import { BoxRequiredError, BoxService, type BoxWorkspace } from "./service.js";
 
 const dirs: string[] = [];
@@ -213,6 +214,18 @@ describe("required sandbox: the desktop's projects", () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(asked).toEqual(["ws_open"]);
     expect(await boxes.prefetch()).toBe(false);
+  });
+
+  test("the admin setup steps run only when the sandbox is required", async () => {
+    const stateDir = await temp("state");
+    const root = await temp("project");
+    const home = await temp("boxhome");
+    const workspace: BoxWorkspace = { id: "ws_setup", path: root, workspaceType: "local" };
+    rememberServerDefault(stateDir, { local_box: { default: "on" } });
+    const boxes = service({ stateDir, workspaces: [workspace], env: { OMNIRUSH_BOX_HOME: home, ...NO_RUNTIME }, platform: "win32" });
+    await boxes.setup(workspace, "decline");
+    await boxes.setup(workspace, "win_install");
+    expect(setupState(home).win).toBeUndefined();
   });
 
   test("a server that says `on` with prefetch: no prefetch for a device it does not require", async () => {
