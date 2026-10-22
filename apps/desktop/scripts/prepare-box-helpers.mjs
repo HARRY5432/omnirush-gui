@@ -7,13 +7,18 @@
 // Windows). Built from box/go, a copy of the CLI's box/go (omnirush-cli
 // feat/local-box-backends), with Go >= 1.22 (GO=/path/to/go), or copied from
 // OMNIRUSH_BOX_PREBUILT_DIR (a folder with the same layout). Linux builds also
-// ship box/linux-<arch>/bwrap when the prebuilt folder has one (an optional
-// static bubblewrap for systems without it; never built here). Without the
+// ship box/linux-<arch>/bwrap: the static bubblewrap the CLI ships (box/bwrap,
+// a copy of the CLI's box/bwrap, built by its build.sh), checked against
+// box/bwrap/SHA256SUMS, with its licence texts next to it (box/LICENSE-*);
+// the prebuilt folder's bwrap is used instead when it has one. It runs boxes
+// where the system has no usable bubblewrap, and is what "Allow the sandbox"
+// installs where AppArmor blocks user namespaces. Without the
 // helpers the app ships without them and the sandbox reports itself
 // unavailable (boxrun alone missing: the bubblewrap and WSL distro backends
 // are); nothing else changes.
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -27,6 +32,18 @@ const sidecarDir = sidecarOverride ? resolve(sidecarOverride) : resolve(here, ".
 const out = join(sidecarDir, "box");
 
 const GOOS = { darwin: "darwin", linux: "linux", win32: "windows" };
+/** The licence texts shipped next to the bubblewrap (the CLI's names: scripts/check-bwrap.mjs). */
+const BWRAP_LICENSES = [["COPYING.bubblewrap", "LICENSE-bwrap-LGPL-2.0"], ["COPYING.libcap", "LICENSE-libcap"], ["COPYING.musl", "LICENSE-musl"]];
+
+/** box/bwrap/SHA256SUMS as { name: sha256 }. */
+function bwrapSums(dir) {
+  const sums = {};
+  for (const line of readFileSync(join(dir, "SHA256SUMS"), "utf8").split("\n")) {
+    const [digest, name] = line.trim().split(/\s+/);
+    if (digest && name) sums[name] = digest;
+  }
+  return sums;
+}
 const GOARCH = { x64: "amd64", arm64: "arm64" };
 
 /** The target from the same triple prepare-sidecar.mjs reads, else this machine. */
@@ -73,12 +90,24 @@ for (const file of files) {
   if (process.platform === "darwin" && file.goos === "darwin") spawnSync("codesign", ["--force", "--sign", "-", dest], { stdio: "ignore" });
   console.log(`Sandbox helper ${file.goos}-${file.goarch}/${file.name} ready.`);
 }
-// An optional static bubblewrap for Linux systems without one (prebuilt only).
-if (goos === "linux" && prebuilt && existsSync(join(prebuilt, `linux-${goarch}`, "bwrap"))) {
+// The static bubblewrap (Linux builds): the prebuilt folder's, else the vendored one, checked against its sha256.
+if (goos === "linux") {
   const dest = join(out, `linux-${goarch}`, "bwrap");
   mkdirSync(dirname(dest), { recursive: true });
-  copyFileSync(join(prebuilt, `linux-${goarch}`, "bwrap"), dest);
+  const fromPrebuilt = prebuilt && existsSync(join(prebuilt, `linux-${goarch}`, "bwrap")) ? join(prebuilt, `linux-${goarch}`, "bwrap") : null;
+  if (fromPrebuilt) {
+    copyFileSync(fromPrebuilt, dest);
+  } else {
+    const vendored = resolve(here, "..", "box", "bwrap");
+    const sums = bwrapSums(vendored);
+    for (const [name, file] of [[`linux-${goarch}/bwrap`, dest], ...BWRAP_LICENSES.map(([src, to]) => [src, join(out, to)])]) {
+      const src = join(vendored, name);
+      const digest = createHash("sha256").update(readFileSync(src)).digest("hex");
+      if (!sums[name] || digest !== sums[name]) throw new Error(`box/bwrap/${name} is not the one box/bwrap/SHA256SUMS pins (${digest})`);
+      copyFileSync(src, file);
+    }
+  }
   chmodSync(dest, 0o755);
-  console.log(`Sandbox helper linux-${goarch}/bwrap ready.`);
+  console.log(`Sandbox helper linux-${goarch}/bwrap ready${fromPrebuilt ? " (prebuilt)" : ""}.`);
 }
 if (missing) console.warn("Sandbox helpers missing (no Go and no OMNIRUSH_BOX_PREBUILT_DIR): the Linux sandbox will report itself unavailable.");

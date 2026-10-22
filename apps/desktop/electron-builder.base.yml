@@ -103,6 +103,7 @@ linux:
         - box/linux-*/boxd
         - box/linux-*/boxrun
         - box/linux-*/bwrap
+        - box/LICENSE-*
   target:
     - AppImage
     - deb

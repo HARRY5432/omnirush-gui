@@ -14,7 +14,7 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 
 import { OPT_IN, BACKENDS, backendsFor, detectBackend, driverFor, normalizeBackend, ORDER } from "./backends/index.js";
-import { apparmorProfile, boxdEnv, boxrunPath, explainProbe, parseOut, probeBwrap, upArgs } from "./backends/bwrap.js";
+import { apparmorProfile, boxdEnv, boxrunPath, bwrapCandidates, ENABLED_BWRAP, explainProbe, parseOut, probeBwrap, upArgs } from "./backends/bwrap.js";
 import { createAppleArgs, findDigest, macosMajor, parseVersions, probeApple, snapshotInfo, SUPPORTED as APPLE, systemProductVersion } from "./backends/apple.js";
 import { versionAtLeast } from "./backends/shared.js";
 import { decodeWsl, download, ENABLE_HINT, inDistro, parseWslList, probeWslDistro, startKeeper } from "./backends/wsl.js";
@@ -128,6 +128,34 @@ describe("box backends: Linux", () => {
     const garbage = await probeBwrap({ env: { OMNIRUSH_BOX_BIN_DIR: helperBin() }, boxHome: home, exists: () => true, platform: "linux", run: async () => ({ code: 1, stdout: "", stderr: "segfault" }) });
     expect(garbage.ok).toBe(false);
     expect(parseOut('noise\n{"a":1}\n{"ok":true,"port":5}\n')).toEqual({ ok: true, port: 5 });
+  });
+
+  test("bwrap candidates: the enabled copy, the system's, then the bundled one; each probed until one starts a box", async () => {
+    const bin = helperBin();
+    const bundled = path.join(bin, "linux-amd64", "bwrap");
+    writeFileSync(bundled, "");
+    const present = new Set([ENABLED_BWRAP, "/usr/bin/bwrap", bundled, path.join(bin, "linux-amd64", "boxrun")]);
+    const exists = (file: string) => present.has(file);
+    expect(bwrapCandidates({ env: { PATH: "/usr/bin", OMNIRUSH_BOX_BIN_DIR: bin }, arch: "x64", exists })).toEqual([
+      { path: ENABLED_BWRAP, source: "enabled" }, { path: "/usr/bin/bwrap", source: "system" }, { path: bundled, source: "bundled" },
+    ]);
+    expect(bwrapCandidates({ env: { OMNIRUSH_BOX_BWRAP: "/x/bwrap" }, exists })).toEqual([{ path: "/x/bwrap", source: "env" }]);
+    // The enabled copy fails, the system's is blocked by AppArmor, the bundled one works: it is used.
+    const tried: string[] = [];
+    const run: RunCommand = async (_bin, args) => {
+      const bw = args[args.indexOf("--bwrap") + 1] ?? "";
+      tried.push(bw);
+      if (bw === bundled) return { code: 0, stdout: JSON.stringify({ ok: true, bwrap: bw, bwrap_version: "0.11.0" }), stderr: "" };
+      return { code: 1, stdout: JSON.stringify({ ok: false, code: bw === "/usr/bin/bwrap" ? "apparmor" : "userns_off", reason: "blocked" }), stderr: "" };
+    };
+    const found = await probeBwrap({ env: { PATH: "/usr/bin", OMNIRUSH_BOX_BIN_DIR: bin }, boxHome: tmp(), arch: "x64", exists, platform: "linux", run });
+    expect(found).toMatchObject({ ok: true, bwrap: bundled, version: "0.11.0" });
+    expect(tried).toEqual([ENABLED_BWRAP, "/usr/bin/bwrap", bundled]);
+    // None works: AppArmor's reason (one admin step fixes it), naming the app's Allow.
+    present.delete(bundled);
+    const none = await probeBwrap({ env: { PATH: "/usr/bin", OMNIRUSH_BOX_BIN_DIR: bin }, boxHome: tmp(), arch: "x64", exists, platform: "linux", run });
+    expect(none).toMatchObject({ ok: false, code: "apparmor" });
+    expect(none.ok ? "" : none.reason).toContain("Allow the sandbox");
   });
 
   test("the setting picks one backend; native turns the box off; the server's allowlist skips the rest", async () => {
