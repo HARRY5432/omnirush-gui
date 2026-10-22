@@ -335,6 +335,20 @@ export type BoxPlan = ReadyPlan | NativePlan;
 export const REQUIRED_REDETECT_MS = 45_000;
 
 /**
+ * The box's own build folders (required.ts shadowPlan), found now (bounded)
+ * so the project's one line can say so: under the required sandbox only, on
+ * macOS / Windows, with a backend that runs boxrun as root (the WSL distro,
+ * the Lima VM). Else null (as before the required sandbox).
+ */
+export function boxShadows({ required, runtime, root, platform = process.platform, env = process.env, stateDir = null, log = () => {} }: { required: boolean; runtime: BoxRuntime; root: string; platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv; stateDir?: string | null; log?: BoxLog }): ShadowPlan | null {
+  if (!required || !driverFor(runtime).shadows || !shadowsApply(platform, env)) return null;
+  let shadows: ShadowPlan | null = null;
+  try { shadows = shadowPlan(root, { platform, croot: containerRoot(root, platform), stateDir, env }); } catch (error) { log("warn", "box shadows scan failed", { error: error instanceof Error ? error.message : String(error) }); }
+  if (shadows) log("info", "box shadows", { binds: shadows.binds.length, env: Object.keys(shadows.env), ms: shadows.ms, truncated: shadows.truncated });
+  return shadows;
+}
+
+/**
  * Plan the box of the project at `root` (the project's box is on). Returns
  * { box: null, notice } when its chats run on this machine for now (no
  * runtime, no helpers, the image still downloading), else a ready plan.
@@ -344,7 +358,7 @@ export async function planBox({ env = process.env, home, root, log = () => {}, r
   const bounded = <T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> => Promise.race([promise, new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms))]);
   // Under required the chat waits for the box anyway: a backend slow to answer (a WSL VM booting) is not "cannot run".
   const detectMs = required ? Math.max(probeMs, REQUIRED_REDETECT_MS) : probeMs;
-  const runtime = await bounded<RuntimeResult>(detectRuntime({ boxHome: home, env, run, ...(asked ? { asked } : {}), allow, ...(preferShadows ? { preferShadows } : {}) }), detectMs, { ok: false, reason: "the sandbox backend did not answer in time" });
+  const runtime = await bounded<RuntimeResult>(detectRuntime({ boxHome: home, env, run, ...(asked ? { asked } : {}), allow, ...(preferShadows ? { preferShadows } : {}), ...(required ? { required } : {}) }), detectMs, { ok: false, reason: "the sandbox backend did not answer in time" });
   if (!runtime.ok) {
     log("info", "box unavailable", { reason: runtime.reason });
     return { box: null, notice: `Sandbox off for now: ${runtime.reason}.`, runtime };
@@ -372,13 +386,7 @@ export async function planBox({ env = process.env, home, root, log = () => {}, r
   let opening: Promise<Box> | null = null;
   let phase: string | null = null;
   let startedWith: BoxInstallLog | null = null;
-  // macOS / Windows with a backend that runs boxrun as root (the WSL distro): the box's own build folders
-  // (required.ts shadowPlan), found now (bounded) so the project's one line can say so.
-  let shadows: ShadowPlan | null = null;
-  if (driver.shadows && shadowsApply(platform, env)) {
-    try { shadows = shadowPlan(root, { platform, croot: containerRoot(root, platform), stateDir, env }); } catch (error) { log("warn", "box shadows scan failed", { error: error instanceof Error ? error.message : String(error) }); }
-    if (shadows) log("info", "box shadows", { binds: shadows.binds.length, env: Object.keys(shadows.env), ms: shadows.ms, truncated: shadows.truncated });
-  }
+  const shadows = boxShadows({ required, runtime, root, platform, env, stateDir, log });
   const start = ({ pkglog = null }: { pkglog?: BoxInstallLog | null } = {}): Promise<Box> => {
     if (!opening) startedWith = pkglog;
     opening ??= openBox({ root, runtime, env, home, log, pull: false, shims, pkglog, revive: true, shadows, platform, onState: (state) => { phase = state; } });
@@ -498,7 +506,7 @@ export type BoxRun = {
  * "off"; the shell runs on this machine, its chats are not labelled); later
  * failures are logged and that turn has no checkpoint.
  */
-export function boxRun(plan: ReadyPlan, { log = () => {}, readyWaitMs = 30_000, onNative = () => {}, onRevive = () => {}, onPort = () => {}, tmpRoot, pkglog = null, pollMs = REVIVE_POLL_MS, ping = client.ping, env = process.env, forwards: makeForwards = portForwards }: { log?: BoxLog; readyWaitMs?: number; onNative?: (reason: string) => void; onRevive?: (event: { ok: boolean; why: string; error?: string }) => void; onPort?: (event: { port: number; open: boolean; line?: string; why?: string }) => void; tmpRoot?: string; pkglog?: BoxInstallLog | null; pollMs?: number; ping?: typeof client.ping; env?: NodeJS.ProcessEnv; forwards?: (options: PortForwardOptions) => PortForwards } = {}): BoxRun {
+export function boxRun(plan: ReadyPlan, { log = () => {}, readyWaitMs = 30_000, onNative = () => {}, onRevive = () => {}, onPort = () => {}, tmpRoot, pkglog = null, pollMs = REVIVE_POLL_MS, ping = client.ping, env = process.env, forwards: makeForwards = portForwards, required = false }: { required?: boolean; log?: BoxLog; readyWaitMs?: number; onNative?: (reason: string) => void; onRevive?: (event: { ok: boolean; why: string; error?: string }) => void; onPort?: (event: { port: number; open: boolean; line?: string; why?: string }) => void; tmpRoot?: string; pkglog?: BoxInstallLog | null; pollMs?: number; ping?: typeof client.ping; env?: NodeJS.ProcessEnv; forwards?: (options: PortForwardOptions) => PortForwards } = {}): BoxRun {
   const { key, home, runtime, root } = plan.box;
   let box: Box | null = null;
   let native = false;
@@ -510,7 +518,8 @@ export function boxRun(plan: ReadyPlan, { log = () => {}, readyWaitMs = 30_000, 
   const opening = plan.start({ pkglog }).then((opened) => { box = opened; return opened; });
   // A box with its own network (Docker, Podman): its servers at the same port on this computer's 127.0.0.1
   // (ports.ts), polled while the box is usable (none before it is ready, after a failure, once let go).
-  const wantsForwards = driverFor(runtime).forwardsPorts === false && String(env.OMNIRUSH_BOX_PORTS ?? "").trim().toLowerCase() !== "off";
+  // Under the required sandbox only (a chat that would have run here keeps its servers reachable); OMNIRUSH_BOX_PORTS=off: never.
+  const wantsForwards = required && driverFor(runtime).forwardsPorts === false && String(env.OMNIRUSH_BOX_PORTS ?? "").trim().toLowerCase() !== "off";
   const forwards = wantsForwards ? makeForwards({
     endpoint: () => { const current: Box | null = box; return current?.ready && !native && !closed ? current.endpoint : null; },
     log,

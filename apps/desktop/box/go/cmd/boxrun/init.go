@@ -195,7 +195,7 @@ func stageInit(args []string) error {
 		}
 	}
 	// The box's own build folders, over the project's (after its bind: they are inside it).
-	shadowsOn := bindShadows(sp, in)
+	shadowsOn, shadowsMade := bindShadows(sp, in)
 	if len(shadowsOn) > 0 {
 		list, _ := json.Marshal(shadowsOn)
 		sp.Env = append(sp.Env, "BOXD_SHADOWS="+string(list))
@@ -211,7 +211,7 @@ func stageInit(args []string) error {
 		}
 	}
 	if sp.InitOut != "" {
-		info, _ := json.Marshal(map[string]any{"overlay": overlay, "ms": time.Since(t0).Milliseconds(), "shadows": nonNil(shadowsOn)})
+		info, _ := json.Marshal(map[string]any{"overlay": overlay, "ms": time.Since(t0).Milliseconds(), "shadows": nonNil(shadowsOn), "made": nonNil(shadowsMade)})
 		_ = os.WriteFile(sp.InitOut, info, 0o600)
 	}
 	// Switch root: pivot_root(".", ".") stacks the old root on the new one;

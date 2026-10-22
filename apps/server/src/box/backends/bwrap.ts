@@ -22,7 +22,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { GOARCH, RUN_DIR, SHIMS_DIR, containerName, containerRoot, helperPath, newToken, readJson, writeJson, type BoxInstallLog, type BoxRuntime } from "../common.js";
-import { shadowId, type ShadowPlan } from "../required.js";
+import { REQUIRED_RULES, shadowId, type ShadowPlan } from "../required.js";
 import { runCommand, type RunCommand, type RunOptions } from "../run.js";
 import type { RuntimeResult } from "../runtime.js";
 import { YOUNG_IMAGE_MS, removableImage, removeTree, staleEntries } from "../retention.mjs";
@@ -166,6 +166,14 @@ export function boxdEnv({ token, croot, idleMinutes = IDLE_MINUTES, listen = "12
   ];
 }
 
+/** The folders boxd may shadow mid-chat (required.json shadows.binds, even_if_absent), with their plain file markers. CLI: the same. */
+export function lazyShadowRules(): Array<{ dir: string; markers: string[] }> {
+  return REQUIRED_RULES.shadows.binds
+    .filter((rule) => rule.even_if_absent)
+    .map((rule) => ({ dir: rule.dir, markers: rule.when_any.filter((m) => !/[/@*?[,]/.test(m)) }))
+    .filter((rule) => rule.markers.length > 0);
+}
+
 /** `boxrun up` arguments for a project's box. */
 export function upArgs({ box, store, image, boxd, portFile, root, croot, runFolder, shims = null, pkglog = null, token, bwrap = null, idleMinutes = IDLE_MINUTES, listen, platform = "linux", mapPath = (p: string) => p, shadows = null, shadowStore = null }: { box: string; store: string; image: string; boxd: string; portFile: string; root: string; croot: string; runFolder: string; shims?: string | null; pkglog?: Pick<BoxInstallLog, "root"> | null; token: string; bwrap?: string | null; idleMinutes?: number; listen?: string; platform?: NodeJS.Platform; mapPath?: (p: string) => string; shadows?: Pick<ShadowPlan, "binds"> | null; shadowStore?: string | null }): string[] {
   const args = ["up", "--box", box, "--store", store, "--image", image, "--boxd", boxd, "--port-file", portFile,
@@ -179,6 +187,8 @@ export function upArgs({ box, store, image, boxd, portFile, root, croot, runFold
   if (shadows && shadowStore) {
     args.push("--shadow-store", shadowStore);
     for (const bind of shadows.binds ?? []) args.push("--shadow", `${bind.id ?? shadowId(bind.path)}=${bind.target}`);
+    // What boxd may shadow mid-chat (required.json): boxrun removes such a folder after a kill only when it fits these.
+    if (shadows.binds?.length) for (const rule of lazyShadowRules()) args.push("--shadow-lazy", `${rule.dir}=${rule.markers.join(",")}`);
   }
   return args;
 }

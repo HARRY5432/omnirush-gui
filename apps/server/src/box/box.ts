@@ -259,8 +259,11 @@ export async function openBox({ root, runtime, env = process.env, platform = pro
       else log("info", "box made before the install log: its wrappers are not in this box (Reset sandbox adds them)", { key });
     }
     try { box.useGitIdentity(); } catch (error) { log("warn", "box git identity not set", { error: error instanceof Error ? error.message : String(error) }); }
-    // The shadows boxrun really bound (a box another start made before keeps its own set until it stops).
-    if (wanted) box.useShadows(wanted, opened.shadows ?? null);
+    // The shadows boxrun really bound (a box another start made before keeps its own set until it stops):
+    // what a checkpoint leaves out follows those, whatever this plan said.
+    const bound = Array.isArray(opened.shadows) ? opened.shadows.filter((t): t is string => typeof t === "string") : null;
+    if (wanted || bound?.length) box.useShadows(wanted ?? { binds: [], env: {}, dirs: [], scanned: 0, truncated: false, ms: 0 }, bound, { lazy: Boolean(wanted) });
+    else rmSync(path.join(runFolder, "shadows.json"), { force: true });
     box.setState("ready", null, onState);
     return box;
   } catch (error) {
@@ -509,12 +512,15 @@ export class Box {
    * command; shadows.json in the run folder tells boxd which folders are
    * shadowed and what to bind when a new package appears mid-chat. CLI: the same.
    */
-  useShadows(plan: ShadowPlan, applied: string[] | null = null): void {
-    const set = Array.isArray(applied) ? new Set(applied) : null;
-    const binds = plan.binds.filter((b) => !set || set.has(b.target));
+  useShadows(plan: ShadowPlan, applied: string[] | null = null, { lazy: mid = true }: { lazy?: boolean } = {}): void {
+    // `applied` (boxrun's answer) wins over the plan: a box started before keeps the set it was made with.
+    const binds = Array.isArray(applied)
+      ? applied.map((target) => plan.binds.find((b) => b.target === target) ?? this.shadowOf(target)).filter((b): b is ShadowBind => b !== null)
+      : plan.binds;
     this.shadows = { ...plan, binds, dirs: [...new Set(binds.map((b) => b.path.split("/").pop()!))] };
     const rules = REQUIRED_RULES.shadows;
-    const lazy = rules.binds.filter((rule) => rule.even_if_absent).map((rule) => ({ dir: rule.dir, when_any: rule.when_any }));
+    // Folders shadowed mid-chat only under the plan's rules (the required sandbox); none otherwise.
+    const lazy = mid ? rules.binds.filter((rule) => rule.even_if_absent).map((rule) => ({ dir: rule.dir, when_any: rule.when_any })) : [];
     writeJson(path.join(this.runFolder, "shadows.json"), { v: 1, root: this.croot, store: rules.store, active: binds.map((b) => b.target), lazy, limits: rules.limits, skip_dirs: rules.skip_dirs }, 0o644);
     // The env file keeps what the wrappers and the git identity wrote; the redirections are set once.
     const names = Object.keys(plan.env ?? {});
@@ -524,6 +530,13 @@ export class Box {
     lines.push(...Object.entries(plan.env ?? {}).map(([k, v]) => `${k}=${v}`));
     writeFileSync(file, `${lines.join("\n")}\n`, { mode: 0o644 });
     this.writeRecord();
+  }
+
+  /** A bound folder (inside path) the plan does not list: its project-relative path, or null outside the project. */
+  shadowOf(target: string): ShadowBind | null {
+    const rel = path.posix.relative(this.croot, path.posix.normalize(String(target)));
+    if (!rel || rel.startsWith("..") || path.posix.isAbsolute(rel)) return null;
+    return { path: rel, existed: false, target: `${this.croot}/${rel}` };
   }
 
   /** The shadows in use now: the start's, plus the folders boxd bound mid-chat (shadows-lazy.json in the run folder). */

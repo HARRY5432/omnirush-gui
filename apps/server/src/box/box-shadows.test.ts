@@ -13,6 +13,7 @@ import path from "node:path";
 import { detectBackend, driverFor } from "./backends/index.js";
 import { upArgs } from "./backends/bwrap.js";
 import { Box, dependencyFolders, recordFile } from "./box.js";
+import { boxShadows } from "./launch.js";
 import { BOX_NOTE } from "./plugin-lib.js";
 import { REQUIRED_RULES, shadowId, shadowPlan, shadowRecord, shadowsApply, shadowsNotice } from "./required.js";
 import type { RunCommand } from "./run.js";
@@ -94,7 +95,7 @@ describe("build-artefact shadows: the backends", () => {
     const base = { box: "/b", store: "/s", image: "i", boxd: "/d", portFile: "/p", root: "/r", croot: "/r", runFolder: "/run", token: "t" };
     expect(upArgs(base).includes("--shadow-store")).toBe(false);
     const args = upArgs({ ...base, shadows: { binds: [{ path: "node_modules", existed: false, id: "0123456789ab", target: "/r/node_modules" }] }, shadowStore: "/var/lib/omnirush/shadows/k" });
-    expect(args.slice(args.indexOf("--shadow-store"))).toEqual(["--shadow-store", "/var/lib/omnirush/shadows/k", "--shadow", "0123456789ab=/r/node_modules"]);
+    expect(args.slice(args.indexOf("--shadow-store"))).toEqual(["--shadow-store", "/var/lib/omnirush/shadows/k", "--shadow", "0123456789ab=/r/node_modules", "--shadow-lazy", "node_modules=package.json"]);
   });
 
   test("only the WSL distro applies shadows; under required on Windows it comes first", async () => {
@@ -148,5 +149,43 @@ describe("build-artefact shadows: a box", () => {
     plain.writeRecord();
     expect("shadows" in plain.describe()).toBe(false);
     expect(JSON.parse(readFileSync(recordFile(home, "p"), "utf8")).shadows_note).toBeUndefined();
+  });
+
+  test("shadows only under required: a Windows WSL box (or the Mac VM) that is not required gets none, no line, no record key (CLI: the same)", () => {
+    const root = tmp("noshadow");
+    writeFileSync(path.join(root, "package.json"), "{}");
+    mkdirSync(path.join(root, "node_modules"));
+    for (const [platform, runtime] of [["win32", { name: "wsl", backend: "wsl", bin: "wsl.exe" }], ["darwin", { name: "lima", backend: "lima", bin: "limactl" }]] as const) {
+      const plain = boxShadows({ required: false, runtime, root, platform, env: {} });
+      expect(plain).toBeNull();
+      expect(shadowsNotice(plain, platform)).toBeNull();
+      const req = boxShadows({ required: true, runtime, root, platform, env: {} });
+      expect(req?.binds.some((b) => b.path === "node_modules")).toBe(true);
+    }
+    const home = tmp("noshadow-home");
+    const runFolder = path.join(home, "run", "k");
+    mkdirSync(runFolder, { recursive: true });
+    const box = new Box({ key: "k", name: "omnirush-box-k", root, croot: root, runtime: { name: "wsl", backend: "wsl", bin: "wsl.exe" }, home, runFolder, run: down, log: () => {}, platform: "win32", env: {} });
+    expect("shadows" in box.describe()).toBe(false);
+  });
+
+  test("what a checkpoint leaves out follows the shadows the box really has (boxrun's answer), not this run's plan (CLI: the same)", () => {
+    const root = tmp("opened");
+    writeFileSync(path.join(root, "package.json"), "{}");
+    mkdirSync(path.join(root, "node_modules"));
+    mkdirSync(path.join(root, "web", "node_modules"), { recursive: true });
+    const home = tmp("opened-home");
+    const runFolder = path.join(home, "run", "k");
+    mkdirSync(runFolder, { recursive: true });
+    const box = new Box({ key: "k", name: "omnirush-box-k", root, croot: root, runtime: { name: "wsl", backend: "wsl", bin: "wsl.exe" }, home, runFolder, run: down, log: () => {}, platform: "win32", env: {} });
+    const plan = shadowPlan(root, { platform: "win32", croot: root });
+    box.useShadows({ ...plan, binds: plan.binds.filter((b) => b.path === "node_modules") }, [`${root}/node_modules`, `${root}/web/node_modules`, "/elsewhere/node_modules"]);
+    const skip = new Set(box.currentShadows()!.binds.map((b) => b.path));
+    expect([...skip].sort()).toEqual(["node_modules", "web/node_modules"]);
+    expect(dependencyFolders(root, { skip })).toEqual([]);
+    const later = new Box({ key: "k", name: "omnirush-box-k", root, croot: root, runtime: { name: "wsl", backend: "wsl", bin: "wsl.exe" }, home, runFolder, run: down, log: () => {}, platform: "win32", env: {} });
+    later.useShadows({ binds: [], env: {}, dirs: [], scanned: 0, truncated: false, ms: 0 }, [`${root}/web/node_modules`], { lazy: false });
+    expect(later.currentShadows()!.binds.map((b) => b.path)).toEqual(["web/node_modules"]);
+    expect(JSON.parse(readFileSync(path.join(runFolder, "shadows.json"), "utf8")).lazy).toEqual([]);
   });
 });
