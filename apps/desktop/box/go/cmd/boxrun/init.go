@@ -63,7 +63,7 @@ func ensureDir(p string) error {
 
 // stageInit runs inside the namespaces as root: overlay root, the project
 // and run folders, /proc /dev /sys, DNS, then the root switch and boxd.
-func stageInit(args []string) error {
+func stageInit(args []string) (err error) {
 	if len(args) < 1 {
 		return errors.New("init: no spec")
 	}
@@ -92,6 +92,13 @@ func stageInit(args []string) error {
 		return err
 	}
 	if overlay == "fuse" {
+		defer func() {
+			// A start that fails from here leaves no fuse-overlayfs behind (it would keep the
+			// box's PID namespace alive): everything in it but this process goes.
+			if err != nil {
+				_ = syscall.Kill(-1, syscall.SIGKILL)
+			}
+		}()
 		// fuse-overlayfs serves the root from this mount namespace: the root switch would move
 		// its root into the box too, and a path it looks up (/proc/self/fd/N for xattrs) would
 		// then wait on itself, forever. The rest goes on in a copy of the namespace, on this
