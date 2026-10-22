@@ -104,6 +104,8 @@ import { ComputerUseInline, useComputerUseForChat } from "@/react-app/domains/se
 import { QueuedMessagesPanel } from "@/react-app/domains/session/modals/queued-messages-panel";
 import { GoodSessionChecklistBar, noteUserStop } from "@/react-app/domains/quality/good-session";
 import { PlacementTurnFooter } from "@/react-app/domains/placements/placements";
+import { SideAnswers } from "./side-answers";
+import { parseSideQuestion, type SideAnswer } from "./side-question";
 import { FeedbackTurnPrompt } from "@/react-app/domains/feedback/feedback";
 import { deriveOpenTargets, sameOpenTargets, selectAutoOpenTarget, type OpenTarget } from "@/react-app/domains/session/artifacts/open-target";
 import { usePanelTabStore } from "@/react-app/domains/session/panel/panel-tab-store";
@@ -1381,6 +1383,10 @@ export function SessionSurface(props: SessionSurfaceProps) {
   const mcpConnectPushRef = useRef(0);
   const pluginConnectPushRef = useRef(0);
   const [steering, setSteering] = useState(false);
+  // /btw side answers: shown above the composer, never sent to the agent (side-answers.tsx).
+  const [sideAnswers, setSideAnswers] = useState<SideAnswer[]>([]);
+  const sideAnswerIdRef = useRef(0);
+  useEffect(() => setSideAnswers([]), [props.sessionId]);
   const [verifiedOpenTargets, setVerifiedOpenTargets] = useState<OpenTarget[]>([]);
   const [cloudQueueRetryVersion, setCloudQueueRetryVersion] = useState(0);
   const [pendingSendSessions, setPendingSendSessions] = useState<string[]>([]);
@@ -2283,9 +2289,30 @@ export function SessionSurface(props: SessionSurfaceProps) {
     props.onDraftChange(buildDraft("", []));
   }, [buildDraft, clearComposerSession, props.onDraftChange, props.sessionId]);
 
+  // "/btw <question>": answered on the side from a snapshot of this chat; the agent's turn,
+  // queue and history are not touched (apps/server/src/side-question.ts). True when taken.
+  const askSideFromDraft = useCallback((text: string): boolean => {
+    const question = parseSideQuestion(text);
+    if (question === null) return false;
+    setSteering(false);
+    const id = ++sideAnswerIdRef.current;
+    const update = (patch: Partial<SideAnswer>) => setSideAnswers((list) => list.map((item) => (item.id === id ? { ...item, ...patch } : item)));
+    if (!question) {
+      setSideAnswers((list) => [...list, { id, question: "/btw", status: "error" as const, answer: "Type a question after /btw, e.g. /btw what is it changing right now?", sources: [] }].slice(-4));
+      return true;
+    }
+    clearComposer();
+    setSideAnswers((list) => [...list, { id, question, status: "thinking" as const, answer: "", sources: [] }].slice(-4));
+    void props.client.askSideQuestion(props.workspaceId, { sessionId: props.sessionId, question })
+      .then((result) => update(result.ok ? { status: "done", answer: result.answer ?? "", sources: result.sources ?? [] } : { status: "error", answer: result.error || "No answer." }))
+      .catch((error: unknown) => update({ status: "error", answer: error instanceof Error ? error.message : "No answer." }));
+    return true;
+  }, [clearComposer, props.client, props.sessionId, props.workspaceId]);
+
   // Initial send (agent idle) and explicit "Steer" follow-up (agent busy)
   // share the same immediate path.
   const handleSend = useCallback(async (sourceComposer?: ComposerSessionState) => {
+    if (!sourceComposer && askSideFromDraft(draft)) return;
     if ([...pendingSendsRef.current.values()].includes(sessionOwner)) return;
     const originalDraft = sourceComposer?.draft ?? draft;
     const sourceAttachments = sourceComposer?.attachments ?? attachments;
@@ -2399,7 +2426,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
     } finally {
       setAttachmentsUploading(false);
     }
-  }, [attachments, baseRenderedMessages, buildDraft, clearComposer, draft, liveStatus.type, persistedDraftKey, props.onDraftChange, props.sessionId, revertMessageId, revertedMessageCount, sendDraft, sessionOwner]);
+  }, [askSideFromDraft, attachments, baseRenderedMessages, buildDraft, clearComposer, draft, liveStatus.type, persistedDraftKey, props.onDraftChange, props.sessionId, revertMessageId, revertedMessageCount, sendDraft, sessionOwner]);
 
   // A chat command from a button ("/review", "/fix 1, 3"): sent like a typed one, the composer's draft left alone.
   const runChatCommand = useCallback(async (text: string) => {
@@ -2450,6 +2477,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
   // Queue: hold the draft locally and clear the composer. The drain effect
   // sends it once the session reports idle.
   const handleQueue = useCallback(() => {
+    if (askSideFromDraft(draft)) return;
     if ([...pendingSendsRef.current.values()].includes(sessionOwner)) return;
     const text = draft.trim();
     if (!text && attachments.length === 0) return;
@@ -2457,7 +2485,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
     if (!queuedDraft) return;
     appendQueuedDraft(props.sessionId, queuedDraft);
     clearComposer();
-  }, [appendQueuedDraft, attachments, buildDraft, clearComposer, draft, props.sessionId, sessionOwner]);
+  }, [appendQueuedDraft, askSideFromDraft, attachments, buildDraft, clearComposer, draft, props.sessionId, sessionOwner]);
 
   const removeQueuedDraft = useCallback((id: string) => {
     const target = queuedItems.find((item) => item.id === id);
@@ -3647,6 +3675,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
           sessionId={props.sessionId}
           turnRunning={chatStreaming || (effectiveActivityStatus !== "idle" && effectiveActivityStatus !== "error")}
         />
+        <SideAnswers answers={sideAnswers} onDismiss={(id) => setSideAnswers((list) => list.filter((item) => item.id !== id))} />
         <ReactSessionComposer
           runModeControl={<WorkspaceRunModeMenu client={props.client} workspaceId={props.workspaceId} busy={chatStreaming || preparingCloudTools || Boolean(props.activePermission || props.activeQuestion)} />}
           fullPermissionsControl={<FullPermissionsToggle client={props.client} workspaceId={props.workspaceId} />}

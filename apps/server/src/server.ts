@@ -184,7 +184,8 @@ import { boxHome } from "./box/common.js";
 import { buildathonProjectsFile, reproStateFromBody, writeReproState } from "./buildathon-repro.js";
 import { prepareBoxInstallLog } from "./box/install-log.js";
 import { rememberServerDefault, watchServerDefault } from "./box/launch.js";
-import { rememberWebSearchSwitch, watchWebSearchSwitch } from "./web-search.js";
+import { rememberWebSearchSwitch, watchWebSearchSwitch, webSearchSetting } from "./web-search.js";
+import { askSideQuestion, brokerSideCall } from "./side-question.js";
 import { createChatTracker, rememberComputerUseSwitch } from "./computer-use/desktop.js";
 import { registerComputerUseRoutes } from "./computer-use/routes.js";
 import {
@@ -266,6 +267,8 @@ const agentDiagnosticsLastRunByServer = new WeakMap<ServerConfig, Map<string, nu
 const agentDiagnosticsInFlightByServer = new WeakMap<ServerConfig, Set<string>>();
 const commandAdmissionsByServer = new WeakMap<ServerConfig, Map<string, { fingerprint: string; admittedAt: number }>>();
 const captureServicesByServer = new WeakMap<ServerConfig, CaptureService>();
+// /btw (side-question.ts): the model call through this server's gateway broker, when signed in.
+const sideCallsByServer = new WeakMap<ServerConfig, ReturnType<typeof brokerSideCall>>();
 /** The files the person saved through the desktop editor: an undo of the turns they were saved in keeps them (editor-saves.ts). */
 const editorSavesByServer = new WeakMap<ServerConfig, EditorSaveLog>();
 function editorSavesFor(config: ServerConfig): EditorSaveLog {
@@ -1304,6 +1307,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
     }));
   }
   if (gatewayBroker.enabled) sessionIntegrityByServer.set(config, (sessionId, options) => gatewayBroker.sessionIntegrity(sessionId, options));
+  if (gatewayBroker.enabled) sideCallsByServer.set(config, brokerSideCall(gatewayBroker, config.omnirushEngineToken ?? ""));
   if (gatewayBroker.enabled) computerUseCapabilitiesByServer.set(config, (maxAgeMs) => gatewayBroker.sessionUploadCapabilities({ strict: true, maxAgeMs }));
   voiceServicesByServer.set(config, new OmniRushVoiceService(gatewayBroker, {
     log: (level, message, attributes) => logger.log(level, message, attributes),
@@ -5026,6 +5030,21 @@ function createRoutes(
   // The desktop editor. A save or a hunk review that names a chat the session
   // uploader is tracking adds a "user_edit" / "user_review" trace event to it;
   // nothing else in a chat's upload changes (editor-events.ts).
+  // /btw: a side question about a chat, answered without touching it (side-question.ts).
+  addRoute(routes, "POST", "/workspace/:id/btw", "client", async (ctx) => {
+    const workspace = await resolveWorkspace(config, ctx.params.id);
+    const input = await readJsonBody(ctx.request);
+    const ask = sideCallsByServer.get(config);
+    if (!ask) return jsonResponse({ ok: false, error: "Sign in to omnirush.ai to ask side questions." });
+    const sessionId = typeof input.sessionId === "string" ? input.sessionId : "";
+    return jsonResponse(await askSideQuestion({
+      engine: sessionId ? await captureEngineTarget(config, sessionId, workspace.id) : null,
+      ask,
+      catalog: () => readOmniRushModelCatalog(config),
+      webSearch: () => webSearchSetting({ env: process.env, stateDir: runtimeStorageDir(config) }),
+      capture: captureServicesByServer.get(config) ?? null,
+    }, input));
+  });
   registerEditorSearchRoutes({ routes, config, jsonResponse, readJsonBody, resolveWorkspace });
   registerEditorFormatRoutes({ routes, config, jsonResponse, readJsonBody, resolveWorkspace, ensureWritable, requireClientScope, sandboxOn: (workspace) => boxServiceFor(config).sandboxOn(workspace) });
   registerEditorRoutes({

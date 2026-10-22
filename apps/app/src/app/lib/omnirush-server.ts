@@ -2855,6 +2855,14 @@ export function createOmniRushServerClient(options: { baseUrl: string; token?: s
         { token, hostToken, method: "PUT", body: payload },
       ),
 
+    /** /btw: a side question about a chat, answered without touching it (apps/server/src/side-question.ts). */
+    askSideQuestion: (workspaceId: string, payload: { sessionId: string; question: string }) =>
+      requestJson<{ ok: boolean; answer?: string; sources?: string[]; busy?: boolean; error?: string | null }>(
+        baseUrl,
+        `/workspace/${encodeURIComponent(workspaceId)}/btw`,
+        { token, hostToken, method: "POST", body: payload, timeoutMs: 200_000 },
+      ),
+
     editorReview: (
       workspaceId: string,
       payload: { sessionId: string; path: string; decision: "accept" | "reject"; added: number; removed: number; scope: "hunk" | "file" },
