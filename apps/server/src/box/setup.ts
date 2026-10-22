@@ -251,7 +251,8 @@ export function parseInstallLog(text: string): { result: "installed" } | { resul
 export function elevatedArgs(ps1: string, log: string): string[] {
   const q = (p: string) => p.replace(/'/g, "''");
   return ["-NoProfile", "-NonInteractive", "-Command",
-    `Start-Process -FilePath powershell.exe -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File "${q(ps1)}" "${q(log)}"'`];
+    // RemoteSigned, not Bypass: enough for our own local script on a Restricted default, and Bypass reads as malware to scanners.
+    `Start-Process -FilePath powershell.exe -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-NoProfile -ExecutionPolicy RemoteSigned -File "${q(ps1)}" "${q(log)}"'`];
 }
 
 /** The HKCU RunOnce value that reopens the app after the restart. */
