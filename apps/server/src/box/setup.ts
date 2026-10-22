@@ -19,9 +19,11 @@
 // - Windows that cannot run WSL 2 (virtualization off in the firmware, a VM
 //   without nested virtualization, S mode, an old build, a policy): why,
 //   before the install and from WSL's errors after it.
-// - macOS: the OmniRush VM (Lima) is its own backend; until it is in this
-//   build a Mac with no running container app reads "runtime" (the card's
-//   usual next step). `macVm` is the hook for it.
+// - macOS: the OmniRush VM (Lima, backends/lima.ts) sets itself up (no admin):
+//   while it is not made yet the need is "mac_vm" and the panel shows the VM's
+//   real progress (Lima, the VM image, the VM's first boot, the box image).
+//   A Mac where it cannot run (macOS < 13) reads cannot_run; one where it
+//   failed and no container app runs reads "runtime" (the card's next step).
 // Never edits .wslconfig.
 
 import { createHash } from "node:crypto";
@@ -117,6 +119,8 @@ function reasons(runtime: RuntimeResult | null): string[] {
 export function classifySetup({ runtime, platform, checks = null, state = {}, fallback, macVm = false, release = os.release(), now = Date.now() }: { runtime: RuntimeResult | null; platform: string; checks?: WindowsChecks | null; state?: SetupState; fallback: RequiredFallback; macVm?: boolean; release?: string; now?: number }): BoxSetup {
   const entry = platform === "win32" ? state.win : platform === "linux" ? state.linux : undefined;
   const base = { why: null, whyText: null, declined: recentlyDeclined(entry, { now }), result: entry?.message ? { ok: entry.state === "restart", message: entry.message, at: entry.at } : null, fallback };
+  // The OmniRush VM picked and not made yet: it sets itself up now (the panel shows how far).
+  if (platform === "darwin" && macVm && runtime?.ok) return { ...base, need: "mac_vm", declined: false };
   if (runtime?.ok) return { ...base, need: "none", declined: false };
   const said = reasons(runtime);
   const cannot = (why: CannotRunWhy | null, text?: string | null): BoxSetup => ({ ...base, need: "cannot_run", why, whyText: why ? whyText(why) : text ?? null, declined: false });
@@ -139,7 +143,8 @@ export function classifySetup({ runtime, platform, checks = null, state = {}, fa
     // Darwin 22 is macOS 13.
     const darwin = Number(/^(\d+)/.exec(release)?.[1] ?? 0);
     if (darwin && darwin < 22) return cannot("old_macos");
-    return { ...base, need: macVm ? "mac_vm" : "runtime" };
+    if (said.some((reason) => /needs macOS 1\d or later/.test(reason))) return cannot("old_macos");
+    return { ...base, need: "runtime" };
   }
   return { ...base, need: "runtime" };
 }

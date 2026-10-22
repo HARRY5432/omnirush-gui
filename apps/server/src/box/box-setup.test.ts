@@ -42,7 +42,15 @@ describe("sandbox setup: what is needed", () => {
     expect(classifySetup({ runtime: fail(OFF), platform: "win32", checks, fallback: "native", state: { win: { state: "declined", at: Date.now() } } })).toMatchObject({ need: "win_install", declined: true });
     expect(classifySetup({ runtime: fail(OFF), platform: "win32", checks, fallback: "native", state: { win: { state: "declined", at: 1 } } }).declined).toBe(false);
     expect(classifySetup({ runtime: fail("no backend"), platform: "darwin", fallback: "native", release: "21.6.0" }).why).toBe("old_macos");
-    expect(classifySetup({ runtime: fail("no backend"), platform: "darwin", fallback: "native", release: "24.1.0", macVm: true }).need).toBe("mac_vm");
+  });
+
+  test("macOS: the OmniRush VM being set up is mac_vm; too old a macOS cannot run; nothing working is the usual next step", () => {
+    const vm = { ok: true as const, name: "lima", backend: "lima", bin: "", version: "2.2.1", os: "linux", arch: "arm64", rootless: false, flavor: "omnirush-vm", vm: true, installed: false };
+    expect(classifySetup({ runtime: vm, platform: "darwin", fallback: "native", release: "25.0.0", macVm: true })).toMatchObject({ need: "mac_vm", declined: false });
+    expect(classifySetup({ runtime: { ...vm, installed: true }, platform: "darwin", fallback: "native", release: "25.0.0" }).need).toBe("none");
+    expect(classifySetup({ runtime: fail("no backend"), platform: "darwin", fallback: "native", release: "21.6.0" }).why).toBe("old_macos");
+    expect(classifySetup({ runtime: fail("no backend", ["the OmniRush VM needs macOS 13 or later (this is macOS 12)"]), platform: "darwin", fallback: "native", release: "25.0.0" }).why).toBe("old_macos");
+    expect(classifySetup({ runtime: fail("no backend", ["the OmniRush VM did not start (vz: not supported)"]), platform: "darwin", fallback: "native", release: "25.0.0", macVm: true }).need).toBe("runtime");
   });
 
   test("the CLI's checks: build, S mode, a running hypervisor passes, firmware off, a VM guest; the install log", () => {

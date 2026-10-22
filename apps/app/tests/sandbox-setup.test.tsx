@@ -100,9 +100,25 @@ describe("sandbox setup panel: what it shows", () => {
     expect(declined?.buttons.map((b) => b.label)).toEqual(["Set up now"]);
   });
 
-  test("macOS VM progress (the VM backend's hook) and the usual next step when no backend works", () => {
-    const mac = sandboxSetupView(box({ platform: "darwin", setup: setup({ need: "mac_vm" }) }));
-    expect(mac?.steps.map((step) => `${step.id}:${step.state}`)).toEqual(["vm:active", "download:todo", "start:todo"]);
+  test("macOS: the OmniRush VM's real setup steps from the server's progress, and the usual next step when no backend works", () => {
+    const vm = { ok: true, name: "lima", flavor: "omnirush-vm", version: "2.2.1", reason: null };
+    const mac = (progress: Partial<NonNullable<OmniRushWorkspaceBox["progress"]>> | null, state: OmniRushWorkspaceBox["state"] = "downloading") =>
+      sandboxSetupView(box({ platform: "darwin", state, runtime: vm, setup: setup({ need: "mac_vm" }), progress: progress ? { bytesDone: null, bytesTotal: null, layersDone: 0, layersTotal: 0, startedAt: 1, ...progress } : null }));
+    const steps = (view: ReturnType<typeof sandboxSetupView>) => view?.steps.map((step) => `${step.id}:${step.state}`);
+    // Nothing said yet: the first step; Lima downloading: its own bytes.
+    expect(steps(mac(null))).toEqual(["lima:active", "vm_image:todo", "vm_boot:todo", "download:todo", "start:todo"]);
+    const lima = mac({ setup: { step: "lima", bytesDone: 19_000_000, bytesTotal: 38_000_000 } });
+    expect(lima).toMatchObject({ kind: "progress", title: "Setting up the sandbox" });
+    expect(lima?.steps[0]?.progress).toEqual({ value: 50, label: "19 of 38 MB · 50%" });
+    // Lima shipped with the app (the first step named is the VM image): no Lima step.
+    const image = mac({ setup: { step: "vm_image", bytesDone: 84_000_000, bytesTotal: 336_000_000 } });
+    expect(steps(image)).toEqual(["vm_image:active", "vm_boot:todo", "download:todo", "start:todo"]);
+    expect(image?.steps[0]?.progress).toEqual({ value: 25, label: "84 of 336 MB · 25%" });
+    expect(steps(mac({ setup: { step: "vm_boot", bytesDone: null, bytesTotal: null } }))).toEqual(["vm_image:done", "vm_boot:active", "download:todo", "start:todo"]);
+    const box_ = mac({ bytesDone: 130_000_000, bytesTotal: 260_000_000, setup: { step: "image", bytesDone: null, bytesTotal: null } });
+    expect(steps(box_)).toEqual(["vm_image:done", "vm_boot:done", "download:active", "start:todo"]);
+    expect(box_?.steps[2]?.progress).toEqual({ value: 50, label: "130 of 260 MB · 50%" });
+    expect(steps(mac({ setup: { step: "image", bytesDone: null, bytesTotal: null } }, "starting"))).toEqual(["vm_image:done", "vm_boot:done", "download:done", "start:active"]);
     const runtime = sandboxSetupView(box({ platform: "linux", setup: setup({ need: "runtime" }) }));
     expect(runtime).toMatchObject({ kind: "action", title: "Install Podman or Docker" });
     expect(runtime?.next?.command).toBe("sudo apt install podman");

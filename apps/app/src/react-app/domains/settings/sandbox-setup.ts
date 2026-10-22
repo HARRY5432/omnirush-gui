@@ -7,7 +7,7 @@ export const WSL_TROUBLESHOOTING_URL = "https://learn.microsoft.com/windows/wsl/
 
 /** One step of the setup's progress list. */
 export type SandboxSetupStep = {
-  id: "download" | "import" | "vm" | "start";
+  id: "download" | "import" | "lima" | "vm_image" | "vm_boot" | "start";
   label: string;
   state: "done" | "active" | "todo";
   /** The download bar (bytes, parts), on the active download step. */
@@ -55,18 +55,61 @@ function base(): Omit<SandboxSetupView, "kind" | "tone" | "title"> {
   return { detail: null, steps: [], howTo: [], link: null, consent: null, buttons: [], next: null, result: null, fallbackLine: null };
 }
 
-/** The progress list: download, the WSL distro (Windows) or the VM (macOS), start. */
-function progressSteps(box: OmniRushWorkspaceBox, vm: boolean): SandboxSetupStep[] {
+/** The progress list: download (after the WSL distro on Windows), start. The OmniRush VM's: macVmSteps. */
+function progressSteps(box: OmniRushWorkspaceBox): SandboxSetupStep[] {
   const downloading = box.state === "downloading";
   const wsl = box.backend?.id === "wsl" || box.runtime?.name === "wsl";
   // WSL: the distro is added first (no byte count yet), then the image comes down inside it.
   const importing = wsl && downloading && !box.progress?.bytesDone;
   const steps: SandboxSetupStep[] = [];
-  if (vm) steps.push({ id: "vm", label: "Start the OmniRush VM", state: box.state === "unavailable" ? "active" : "done" });
   if (wsl) steps.push({ id: "import", label: "Add the OmniRush Linux distro to WSL", state: importing ? "active" : "done" });
-  steps.push({ id: "download", label: "Download the sandbox (once)", state: importing || (vm && box.state === "unavailable") ? "todo" : downloading ? "active" : "done", progress: downloading && !importing ? linuxSandboxProgress(box.progress) : null });
+  steps.push({ id: "download", label: "Download the sandbox (once)", state: importing ? "todo" : downloading ? "active" : "done", progress: downloading && !importing ? linuxSandboxProgress(box.progress) : null });
   steps.push({ id: "start", label: "Start the sandbox", state: box.state === "starting" ? "active" : box.state === "ready" ? "done" : "todo" });
   return steps;
+}
+
+/** The OmniRush VM's first setup, in order (the server's setup lines: backends/lima.ts SETUP_STEPS). */
+const VM_STEPS: Array<{ id: "lima" | "vm_image" | "vm_boot" | "download"; step: string; label: string }> = [
+  { id: "lima", step: "lima", label: "Download the VM tools (Lima)" },
+  { id: "vm_image", step: "vm_image", label: "Download the Linux VM (once)" },
+  { id: "vm_boot", step: "vm_boot", label: "Start the OmniRush VM" },
+  { id: "download", step: "image", label: "Download the sandbox (once)" },
+];
+
+function megabytes(bytes: number): string {
+  return String(Math.max(0, Math.round(bytes / 1_000_000)));
+}
+
+/** A setup step's own bytes as a bar (the VM tools, the VM image). */
+function stepBar(done: number | null, total: number | null): { value: number | null; label: string } {
+  if (total && done !== null) {
+    const value = Math.min(100, Math.round((done / total) * 100));
+    return { value, label: `${megabytes(done)} of ${megabytes(total)} MB · ${value}%` };
+  }
+  return done ? { value: null, label: `${megabytes(done)} MB so far` } : { value: null, label: "Starting the download…" };
+}
+
+/**
+ * macOS, the OmniRush VM being set up: its real steps from the server's
+ * progress (the VM tools, the VM image, the first start, the box image),
+ * then the sandbox start. Lima shipped with the app skips its step.
+ */
+export function macVmSteps(box: OmniRushWorkspaceBox): SandboxSetupStep[] {
+  const setup = box.progress?.setup ?? null;
+  const starting = box.state === "starting" || box.state === "ready";
+  const at = starting ? VM_STEPS.length : Math.max(0, VM_STEPS.findIndex((s) => s.step === setup?.step));
+  const steps: SandboxSetupStep[] = VM_STEPS.map((s, index) => {
+    const state = index < at ? "done" : index === at ? "active" : "todo";
+    const progress = state !== "active" ? null
+      : s.id === "download" ? linuxSandboxProgress(box.progress)
+      : s.id === "lima" || s.id === "vm_image" ? stepBar(setup?.bytesDone ?? null, setup?.bytesTotal ?? null)
+      : null;
+    return { id: s.id, label: s.label, state, ...(progress ? { progress } : {}) };
+  });
+  // The VM tools came with the app (no "lima" step was ever named): not shown.
+  const shown = setup && setup.step !== "lima" ? steps.filter((s) => s.id !== "lima") : steps;
+  shown.push({ id: "start", label: "Start the sandbox", state: box.state === "starting" ? "active" : box.state === "ready" ? "done" : "todo" });
+  return shown;
 }
 
 /**
@@ -81,14 +124,15 @@ export function sandboxSetupView(box: OmniRushWorkspaceBox | null, { pending = n
   const setup = box.setup ?? null;
   const result = setup?.result ? { ok: setup.result.ok, message: setup.result.message } : null;
   const busy = pending !== null;
+  if (setup?.need === "mac_vm" && (box.state === "downloading" || box.state === "starting")) return macVmView(box);
   if (box.state === "downloading" || box.state === "starting") {
-    return { ...base(), kind: "progress", tone: "busy", title: "Setting up the sandbox", detail: "New chats in this project start as soon as it is ready. This happens once.", steps: progressSteps(box, false) };
+    return { ...base(), kind: "progress", tone: "busy", title: "Setting up the sandbox", detail: "New chats in this project start as soon as it is ready. This happens once.", steps: progressSteps(box) };
   }
   if (box.state === "failed") {
     return { ...base(), kind: "action", tone: "error", title: "The sandbox could not start", detail: box.error ?? box.notice, buttons: [{ action: "retry", label: "Try again", primary: true, disabled: busy }], fallbackLine: RUNS_HERE };
   }
   if (!setup || setup.need === "none") {
-    return { ...base(), kind: "progress", tone: "busy", title: "Setting up the sandbox", detail: "Checking this computer…", steps: progressSteps(box, false) };
+    return { ...base(), kind: "progress", tone: "busy", title: "Setting up the sandbox", detail: "Checking this computer…", steps: progressSteps(box) };
   }
   if (setup.declined && setup.need !== "cannot_run") {
     return { ...base(), kind: "line", tone: "off", title: "Sandbox setup postponed", detail: "Chats run on this computer until it is set up.", buttons: [{ action: "check", label: "Set up now", disabled: busy }] };
@@ -129,7 +173,7 @@ export function sandboxSetupView(box: OmniRushWorkspaceBox | null, { pending = n
     case "win_update":
       return { ...base(), kind: "action", tone: "attention", title: "Update WSL", detail: "WSL needs an update before the sandbox can start. Windows may ask for permission.", buttons: [{ action: "win_update", label: "Update WSL", primary: true, disabled: busy }, { action: "check", label: "Check again", disabled: busy }], fallbackLine: RUNS_HERE };
     case "mac_vm":
-      return { ...base(), kind: "progress", tone: "busy", title: "Setting up the sandbox", detail: "OmniRush starts its own small Linux VM on this Mac (once, no admin password).", steps: progressSteps(box, true) };
+      return macVmView(box);
     case "cannot_run":
       return cannotRun(box, busy);
     case "runtime": {
@@ -137,6 +181,11 @@ export function sandboxSetupView(box: OmniRushWorkspaceBox | null, { pending = n
       return { ...base(), kind: "action", tone: "attention", title: next.title, detail: next.detail, next, buttons: [{ action: "check", label: "Check again", disabled: busy }, { action: "settings", label: "Sandbox settings" }], fallbackLine: RUNS_HERE };
     }
   }
+}
+
+/** macOS: the OmniRush VM sets itself up (no admin password); its real steps. */
+function macVmView(box: OmniRushWorkspaceBox): SandboxSetupView {
+  return { ...base(), kind: "progress", tone: "busy", title: "Setting up the sandbox", detail: "OmniRush sets up its own small Linux VM on this Mac (once, no admin password). New chats in this project start as soon as it is ready.", steps: macVmSteps(box) };
 }
 
 /** The box cannot run on this computer: why, what to try when there is something, and that chats run here. */

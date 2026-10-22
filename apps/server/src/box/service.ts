@@ -21,17 +21,19 @@
  *
  * Not to be confused with the OpenWork worker sandbox (`sandboxBackend`).
  */
+import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { boxHome, boxKey, boxSnapshotsDir, containerName, installShell, listBoxes, mountReplaced, readRecord, resetBox, savedTurns, type BoxLabel, type BoxLog } from "./box.js";
 import { LABELS, OPT_IN, backendsFor, driverFor } from "./backends/index.js";
+import { limaHome } from "./backends/lima.js";
 import type { BoxExec } from "./backends/types.js";
 import type { BoxEndpoint } from "./client.js";
 import { hostBuilds, hostBuildsNotice, hostBuildThings, hostRules } from "./host-builds.js";
 import { detectStack, imageFor, type BoxImage } from "./images.js";
 import { portLine } from "./ports.js";
-import { askedBackend, boxRun, planBox, pullLog, pullMarker, pulling, pullInBackground, resolveMode, saveBackend, serverBackends, serverDefault, serverRequired, shimsDir, type BoxRun, type ProjectBoxMode, type ServerBoxDefault } from "./launch.js";
+import { askedBackend, boxRun, planBox, pullActivityAt, pullLog, pullMarker, pulling, pullInBackground, setupWait, resolveMode, saveBackend, serverBackends, serverDefault, serverRequired, shimsDir, type BoxRun, type ProjectBoxMode, type ServerBoxDefault } from "./launch.js";
 import { desktopText, hostOnlyProject, shadowsApply, shadowsNotice, type RequiredFallback } from "./required.js";
 import { cachedWindowsChecks, classifySetup, linuxAllow, resumeWinSetup, saveSetupState, setupState, windowsInstall, windowsRestart, windowsUpdate, type BoxSetup } from "./setup.js";
 import type { BoxInstallLogPaths } from "./install-log.js";
@@ -191,8 +193,14 @@ const REPLAN_MS = 15_000;
 const FREEZE_WAIT_MS = 90_000;
 /** The full backend check (every backend, for the status card's "others") is reused this long. */
 const ALTERNATIVES_MS = 60_000;
-/** Required: a prompt waits this long at most for its project's box (the image download, the start). */
+/**
+ * Required: a prompt waits for its project's box while the first setup makes progress (the
+ * download's log moves: the VM's setup lines, the image's bytes) and stops waiting after this
+ * long with none (the CLI: a run's no-progress stop counts the setup too).
+ */
 const REQUIRED_WAIT_MS = 15 * 60_000;
+/** ...and at most this long in all, however slow the network (a first macOS VM setup is ~0.7 GB). */
+const REQUIRED_SETUP_MAX_MS = 60 * 60_000;
 /** How often a waiting prompt looks again. */
 const REQUIRED_POLL_MS = 1_000;
 
@@ -651,10 +659,18 @@ export class BoxService {
   /** What the sandbox needs here before it can run (the setup screen); this PC's checks are read (and cached) for it on Windows. */
   async setupFor(runtime: RuntimeResult | null, { fresh = false }: { fresh?: boolean } = {}): Promise<BoxSetup & { line: string | null }> {
     const checks = this.platform === "win32" && runtime && !runtime.ok ? await cachedWindowsChecks({ fresh }).catch(() => null) : null;
-    const setup = classifySetup({ runtime, platform: this.platform, checks, state: setupState(this.home), fallback: this.required().fallback });
+    // macOS: the OmniRush VM picked and not made yet (it sets itself up; the panel shows its progress).
+    const macVm = this.platform === "darwin" && Boolean(runtime?.ok && runtime.backend === "lima" && !runtime.installed && !this.limaMade(runtime));
+    const setup = classifySetup({ runtime, platform: this.platform, checks, state: setupState(this.home), fallback: this.required().fallback, macVm });
     // The one line (required.json texts.desktop.cannot_run) when the box cannot run here.
     const why = setup.whyText ?? (runtime && !runtime.ok ? runtime.reason.split("\n")[0]!.replace(/\.$/, "") : null);
     return { ...setup, line: setup.need === "cannot_run" && why ? desktopText("cannot_run", { why }) : null };
+  }
+
+  /** Whether the OmniRush VM was made since the (cached) probe said it was not: its LIMA_HOME has the instance. */
+  private limaMade(runtime: RuntimeResult): boolean {
+    if (!runtime.ok || runtime.backend !== "lima") return false;
+    try { return existsSync(join(limaHome(this.home, this.env, undefined, runtime.instance), runtime.instance ?? "omnirush-box", "lima.yaml")); } catch { return false; }
   }
 
   /**
@@ -812,14 +828,27 @@ export class BoxService {
    */
   private async waitForBox(workspace: BoxWorkspace): Promise<BoxRun | null> {
     const key = boxKey(boxRoot(workspace));
-    const until = Date.now() + REQUIRED_WAIT_MS;
+    const startedAt = Date.now();
+    let lastProgressAt = startedAt;
+    let said = false;
     for (;;) {
       const run = await this.ensure(workspace).catch(() => null);
       if (run) return run;
       const project = this.projects.get(key);
-      if (project?.why?.reason !== "downloading" || Date.now() >= until) return null;
-      await new Promise((resolve) => setTimeout(resolve, REQUIRED_POLL_MS));
+      if (project?.why?.reason !== "downloading") return null;
       const pull = project.pull;
+      const moved = pull ? pullActivityAt(this.home, pull.runtime, pull.image.pull) : null;
+      if (moved !== null && moved > lastProgressAt) lastProgressAt = moved;
+      const wait = setupWait({ startedAt, lastProgressAt, now: Date.now(), idleMs: REQUIRED_WAIT_MS, maxMs: REQUIRED_SETUP_MAX_MS });
+      if (wait.over) {
+        this.log("warn", "required sandbox wait over", { reason: wait.over, waitedMs: Date.now() - startedAt });
+        return null;
+      }
+      if (!said && Date.now() - startedAt >= 60_000) {
+        said = true;
+        this.log("info", "required sandbox: the prompt waits for the first setup", { maxMin: Math.round(REQUIRED_SETUP_MAX_MS / 60_000) });
+      }
+      await new Promise((resolve) => setTimeout(resolve, REQUIRED_POLL_MS));
       if (pull && !pulling(this.home, pull.runtime, pull.image.pull)) project.nextPlanAt = 0;
     }
   }
