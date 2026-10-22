@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import { createManagedOpencodeServer, type ManagedOpencodeServer } from "./managed-opencode.js";
 import { omnirushSwarmPluginPath } from "./omnirush-extensions-plugin-path.js";
 import { OMNIRUSH_AGENT_PROMPT } from "./omnirush-agent-prompt.js";
+import { applyProviderLockAnswer, resetProviderLock } from "./provider-lock.js";
 import { OMNIRUSH_TASK_TOOL_NOTE, omnirushSubagentNote } from "./omnirush-swarm.js";
 
 /**
@@ -85,6 +86,8 @@ describeMaybe("delegation rules on the bundled engine (mock provider)", () => {
   };
 
   beforeAll(async () => {
+    // The engine serves only the app's own provider while locked; this test serves a mock one.
+    applyProviderLockAnswer({ providers: { locked: false } });
     work = mkdtempSync(join(tmpdir(), "restraint-ws-"));
     data = mkdtempSync(join(tmpdir(), "restraint-data-"));
     provider = Bun.serve({
@@ -136,6 +139,7 @@ describeMaybe("delegation rules on the bundled engine (mock provider)", () => {
   }, 120_000);
 
   afterAll(async () => {
+    resetProviderLock();
     await engine?.close();
     provider?.stop(true);
     rmSync(work, { recursive: true, force: true });
@@ -153,7 +157,8 @@ describeMaybe("delegation rules on the bundled engine (mock provider)", () => {
 
     const main = await waitFor(() => seen.find((body) => !isChild(body)), "the main session's request");
     const mainSystem = systemOf(main);
-    expect(mainSystem).toContain("Split real work: for a task of more than a few tool calls, start one sub-agent per independent part in one message");
+    expect(mainSystem).not.toContain("Split real work");
+    expect(mainSystem).toContain("Do the work yourself by default");
     expect(mainSystem).toContain("make exactly that many task-tool calls, no more and no fewer, and start them all in one message");
     expect(mainSystem).toContain("Tell a sub-agent to start its own sub-agents only when the user explicitly asked for nested sub-agents.");
     expect(mainSystem).not.toContain(SUB_NOTE_MARK);
