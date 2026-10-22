@@ -16,9 +16,9 @@ import { PassThrough } from "node:stream";
 
 import { detectBackend, driverFor, normalizeBackend, runtimeBackend } from "./backends/index.js";
 import {
-  BASE_MOUNTS, HELPER_SCRIPT, LIMA_ARCH, PROVISION, VM_CONTRACT, contractFor, contractVerdict, ensureLimactl, ensureVm, fetchChecked, findLimactl, idleMain, idleStep, idleStopMinutes,
+  BASE_MOUNTS, HELPER_SCRIPT, LIMA_ARCH, PROVISION, VM_CONTRACT, alive, clearStale, contractFor, contractVerdict, ensureLimactl, ensureVm, fetchChecked, findLimactl, idleMain, idleStep, idleStopMinutes,
   inVm, keepIdleWatch, limaAsset, limaDir, limaDriver, limaEnv, limaError, limaHome, liveLeases, loadDarwinSetup, lockVm, parseList, probeLima, setupLine, startKeeper, stopIfIdle,
-  syncHelpers, takeLease, uncovered, vmAway, vmCall, vmConfig, vmImage, vmMounts, vmResources, vmRow, type LimaRuntime,
+  selfStart, syncHelpers, takeLease, uncovered, vmAway, vmCall, vmConfig, vmImage, vmMounts, vmResources, vmRow, type LimaRuntime,
 } from "./backends/lima.js";
 import type { SpawnLike } from "./backends/types.js";
 import { inProcessLog, pullLog, setupWait } from "./launch.js";
@@ -83,7 +83,7 @@ describe("lima: the probe and the order", () => {
     expect((await probeLima({ platform: "darwin", release: "25.0.0", env: { OMNIRUSH_BOX_LIMACTL: bin }, home, run: limaRun(state), now: Date.now() + 2 * 3_600_000 })).ok).toBe(true);
   });
 
-  test("macOS order: the OmniRush VM first, even with OrbStack running; a running runtime when the VM cannot run", async () => {
+  test("macOS order: under required the OmniRush VM first, even with OrbStack running; without required the order before the VM", async () => {
     const docker = "/usr/local/bin/docker";
     const run: RunCommand = async (_bin, args) => {
       if (args[0] === "context") return ok(JSON.stringify({ Name: "orbstack", DockerEndpoint: "unix:///x/orb.sock" }));
@@ -91,11 +91,21 @@ describe("lima: the probe and the order", () => {
       return fail("no");
     };
     const base = { platform: "darwin" as const, arch: "arm64", release: "25.0.0", home: "/Users/sam", exists: (f: string) => f === docker, run, fresh: true };
-    const vm = await detectBackend({ ...base, boxHome: tmp(), env: { PATH: "/usr/local/bin" }, all: true });
+    const vm = await detectBackend({ ...base, boxHome: tmp(), env: { PATH: "/usr/local/bin" }, all: true, required: true });
     expect(vm.ok && vm.backend).toBe("lima");
     expect(vm.alternatives?.some((a) => a.backend === "orbstack" && a.ok)).toBe(true);
-    const old = await detectBackend({ ...base, boxHome: tmp(), release: "21.0.0", env: { PATH: "/usr/local/bin" } });
+    const old = await detectBackend({ ...base, boxHome: tmp(), release: "21.0.0", env: { PATH: "/usr/local/bin" }, required: true });
     expect(old.ok && old.backend).toBe("orbstack");
+    // Not required: the order is the one before the VM (it runs only when chosen by name).
+    const plain = await detectBackend({ ...base, boxHome: tmp(), env: { PATH: "/usr/local/bin" }, all: true });
+    expect(plain.ok && plain.backend).toBe("orbstack");
+    expect(plain.ok && plain.why).toBe("the first that works here, in order: orbstack > colima > docker-desktop > rancher > podman > docker");
+    expect(plain.alternatives?.find((a) => a.backend === "lima")?.reason).toMatch(/used when the sandbox is required/);
+    const none = await detectBackend({ ...base, boxHome: tmp(), env: { PATH: "/usr/bin" }, exists: () => false });
+    expect(none.ok).toBe(false);
+    expect(none.ok ? "" : none.reason).not.toMatch(/OmniRush VM/);
+    const chosen = await detectBackend({ ...base, boxHome: tmp(), env: { PATH: "/usr/local/bin" }, asked: "lima" });
+    expect(chosen.ok && chosen.backend).toBe("lima");
     expect(normalizeBackend("omnirush-vm")).toBe("lima");
     expect(runtimeBackend("/Applications/omnirush.app/Contents/Resources/sidecars/lima/bin/limactl")).toBe("lima");
     expect(driverFor({ backend: "lima" })).toBe(limaDriver);
@@ -173,13 +183,13 @@ describe("lima: one VM for the CLI and the desktop", () => {
     expect(existsSync(path.join(limaDir(home), "vm.lock"))).toBe(false);
   });
 
-  test("leases: the CLI's file format (pid, key, client, at); a gone process' lease is dropped", () => {
+  test("leases: the CLI's file format (pid, started, key, client, at); a gone process' lease is dropped", () => {
     const home = tmp();
     const release = takeLease(home, "k1");
     takeLease(home, "k2", { pid: DEAD, client: "cli" });
     const file = readdirSync(path.join(limaDir(home), "leases")).find((n) => n.startsWith("k1-"))!;
     expect(file).toMatch(new RegExp(`^k1-${process.pid}-\\d+\\.json$`));
-    expect(Object.keys(JSON.parse(readFileSync(path.join(limaDir(home), "leases", file), "utf8"))).sort()).toEqual(["at", "client", "key", "pid"]);
+    expect(Object.keys(JSON.parse(readFileSync(path.join(limaDir(home), "leases", file), "utf8"))).sort()).toEqual(["at", "client", "key", "pid", "started"]);
     const live = liveLeases(home, { pidAlive: (pid) => pid !== DEAD });
     expect(live.map((l) => [l.key, l.client])).toEqual([["k1", "desktop"]]);
     expect(readdirSync(path.join(limaDir(home), "leases")).length).toBe(1);
@@ -291,6 +301,93 @@ describe("lima: limactl calls", () => {
     expect(readdirSync(path.join(dist, "bin"))).toEqual(["limactl"]);
     expect(readdirSync(path.join(dist, "share", "lima")).sort()).toEqual(["lima-guestagent.Linux-aarch64.gz", "templates"]);
     expect(lines).toEqual([setupLine("lima"), setupLine("lima", 10, 20)]);
+  });
+});
+
+describe("lima: two apps at once, reused pids", () => {
+  test("first setup at once (CLI and desktop): two downloads of one file never share a part file; a finished copy is a success", async () => {
+    const dir = tmp();
+    const body = Buffer.from("vm image body");
+    const sha256 = createHash("sha256").update(body).digest("hex");
+    const dest = path.join(dir, "img.qcow2");
+    const parts: string[] = [];
+    const slow = async (_url: string, part: string) => {
+      parts.push(part);
+      for (let i = 0; i < body.length; i += 4) {
+        writeFileSync(part, body.subarray(0, i + 4));
+        await new Promise((r) => setTimeout(r, 2));
+      }
+      return part;
+    };
+    const [a, b] = await Promise.all([fetchChecked("https://x/img", dest, { digest: sha256, fetchFile: slow }), fetchChecked("https://x/img", dest, { digest: sha256, fetchFile: slow })]);
+    expect([a, b]).toEqual([dest, dest]);
+    expect(parts[0]).not.toBe(parts[1]);
+    expect(readFileSync(dest)).toEqual(body);
+    expect(readdirSync(dir)).toEqual(["img.qcow2"]);
+    const other = path.join(dir, "other.qcow2");
+    expect(await fetchChecked("https://x/img", other, { digest: sha256, fetchFile: async () => { writeFileSync(other, body); throw new Error("download: HTTP 404"); } })).toBe(other);
+  });
+
+  test("Lima itself, two apps at once: both end with the one unpacked limactl", async () => {
+    const home = tmp();
+    const src = tmp();
+    for (const f of ["bin/limactl", "share/lima/lima-guestagent.Linux-aarch64.gz"]) {
+      mkdirSync(path.join(src, path.dirname(f)), { recursive: true });
+      writeFileSync(path.join(src, f), f);
+    }
+    const tarball = path.join(tmp(), "lima.tar.gz");
+    execFileSync("tar", ["-czf", tarball, "-C", src, "bin", "share"]);
+    const sha256 = createHash("sha256").update(readFileSync(tarball)).digest("hex");
+    const setup = { lima: { version: "2.2.1", assets: { arm64: { url: "https://x/lima.tar.gz", sha256 } } } };
+    const run: RunCommand = async (_bin, args) => { await new Promise((r) => setTimeout(r, 5)); try { execFileSync("tar", args); return ok(""); } catch (e) { return fail(String(e)); } };
+    const fetchFile = async (_url: string, dest: string) => { await new Promise((r) => setTimeout(r, 5)); writeFileSync(dest, readFileSync(tarball)); return dest; };
+    const one: LimaRuntime = { bin: "", home, instance: "omnirush-box" };
+    const two: LimaRuntime = { bin: "", home, instance: "omnirush-box" };
+    const got = await Promise.all([ensureLimactl(one, { arch: "arm64", setup, run, fetchFile }), ensureLimactl(two, { arch: "arm64", setup, run, fetchFile })]);
+    expect(got.map((g) => g.ok)).toEqual([true, true]);
+    const bin = path.join(limaDir(home), "dist", "2.2.1", "bin", "limactl");
+    expect([one.bin, two.bin]).toEqual([bin, bin]);
+    expect(readdirSync(path.join(limaDir(home), "dist"))).toEqual(["2.2.1"]);
+  });
+
+  test("owner lock: a stale lock is cleared through a name of its own (a lock taken meanwhile stays); a reused pid is not the holder", async () => {
+    const home = tmp();
+    mkdirSync(limaDir(home), { recursive: true });
+    const file = path.join(limaDir(home), "vm.lock");
+    writeFileSync(file, JSON.stringify({ pid: DEAD, nonce: "old", at: 1 }));
+    const stale = JSON.parse(readFileSync(file, "utf8"));
+    writeFileSync(file, JSON.stringify({ pid: process.pid, nonce: "new", at: 2 }));
+    expect(clearStale(file, stale)).toBe(false);
+    expect(JSON.parse(readFileSync(file, "utf8")).nonce).toBe("new");
+    expect(readdirSync(limaDir(home))).toEqual(["vm.lock"]);
+    writeFileSync(file, JSON.stringify({ pid: DEAD, nonce: "old", at: 1 }));
+    expect(clearStale(file, stale)).toBe(true);
+    expect(existsSync(file)).toBe(false);
+    writeFileSync(file, JSON.stringify({ pid: process.pid, started: 1_000, nonce: "reused", at: 1 }));
+    const taken = await lockVm(home, { waitMs: 0 });
+    expect(taken).toBeTruthy();
+    const mine = JSON.parse(readFileSync(file, "utf8"));
+    expect([mine.pid, mine.started]).toEqual([process.pid, selfStart()]);
+    taken!();
+    expect(alive(process.pid, selfStart())).toBe(true);
+    expect(alive(process.pid, null)).toBe(true);
+    expect(alive(process.pid, 1_000, { start: () => 99_000 })).toBe(false);
+  });
+
+  test("leases and the idle watcher keep the process start time; a lease whose pid was reused is dropped", () => {
+    const home = tmp();
+    const release = takeLease(home, "k1");
+    takeLease(home, "k2", { pid: process.pid, started: 1_000 });
+    expect(liveLeases(home).map((l) => l.key)).toEqual(["k1"]);
+    release();
+    let spawned = 0;
+    const spawnImpl = (() => { spawned += 1; return { pid: process.pid, unref() {} }; }) as unknown as SpawnLike;
+    const rt = { home, bin: "/x/limactl", instance: "omnirush-box" };
+    expect(keepIdleWatch(rt, { env: { OMNIRUSH_BOX_LIMA_IDLE_MIN: "30" }, spawnImpl, script: "/x/lima-idle.js" })).toBe(process.pid);
+    expect(JSON.parse(readFileSync(path.join(limaDir(home), "idle.json"), "utf8")).started).toBe(selfStart());
+    writeFileSync(path.join(limaDir(home), "idle.json"), JSON.stringify({ pid: process.pid, started: 1_000 }));
+    keepIdleWatch(rt, { env: { OMNIRUSH_BOX_LIMA_IDLE_MIN: "30" }, spawnImpl, script: "/x/lima-idle.js" });
+    expect(spawned).toBe(2);
   });
 });
 

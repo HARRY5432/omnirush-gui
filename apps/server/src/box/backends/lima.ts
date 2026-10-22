@@ -25,17 +25,17 @@
 // forwards guest loopback ports to this Mac's 127.0.0.1 (within ~3 s).
 //
 // One VM for the CLI and the desktop app:
-//   lima/vm.lock            the owner lock for create/start/stop/edit ({pid, nonce, at}; stale when the pid is gone)
-//   lima/leases/<key>-<pid>-<n>.json   one per running box of a live process
+//   lima/vm.lock            the owner lock for create/start/stop/edit ({pid, started, nonce, at}; stale when the pid is gone or reused)
+//   lima/leases/<key>-<pid>-<n>.json   one per running box of a live process ({pid, started, key})
 //   lima/idle.json          the idle watcher (lima-idle.ts / the CLI's lima-idle.js): stops the VM after
 //                           setup.darwin.vm.idle_stop_min with no live lease
 //   /opt/omnirush/vm.json   (in the VM) the contract the VM was made with: a newer
 //                           client never replaces the disk under an older one's box
 //   /opt/omnirush/h/<stamp> (in the VM) each install's boxrun and boxd
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, copyFileSync, createReadStream, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, copyFileSync, createReadStream, existsSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -199,23 +199,35 @@ export type FetchFile = (url: string, dest: string, sha256: string | null, optio
 
 /** Download `url` to `dest` and check it (any algorithm); nothing is left at `dest` on a mismatch. */
 export async function fetchChecked(url: string, dest: string, { algo = "sha256", digest, fetchFile = download, hash = hashFile, stallMs = 90_000, tries = 3, onProgress }: { algo?: "sha256" | "sha512"; digest: string; fetchFile?: FetchFile; hash?: typeof hashFile; stallMs?: number; tries?: number; onProgress?: DownloadOptions["onProgress"] }): Promise<string> {
-  if (existsSync(dest) && (await hash(dest, algo)) === digest) return dest;
-  const part = `${dest}.dl`;
+  const done = async () => existsSync(dest) && (await hash(dest, algo).catch(() => null)) === digest;
+  if (await done()) return dest;
+  // Its own part file per download: the desktop and a CLI setting up at once never write into one file.
+  const part = `${dest}.${process.pid}.${randomUUID().slice(0, 8)}.dl`;
   mkdirSync(path.dirname(dest), { recursive: true });
-  // A stalled or dropped connection is tried again (three tries); a wrong file is not.
-  for (let attempt = 1; ; attempt += 1) {
-    try {
-      await fetchFile(url, part, algo === "sha256" ? digest : null, { stallMs, ...(onProgress ? { onProgress } : {}) });
-      break;
-    } catch (error) {
-      rmSync(part, { force: true });
-      if (attempt >= tries || /mismatch|https only|HTTP 4\d\d/.test(String(error instanceof Error ? error.message : error))) throw error;
+  try {
+    // A stalled or dropped connection is tried again (three tries); a wrong file is not.
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await fetchFile(url, part, algo === "sha256" ? digest : null, { stallMs, ...(onProgress ? { onProgress } : {}) });
+        break;
+      } catch (error) {
+        rmSync(part, { force: true });
+        // Another app finished the same download meanwhile: that file is the one wanted.
+        if (await done()) return dest;
+        if (attempt >= tries || /mismatch|https only|HTTP 4\d\d/.test(String(error instanceof Error ? error.message : error))) throw error;
+      }
     }
+    const got = await hash(part, algo);
+    if (got !== digest) {
+      if (await done()) return dest;
+      throw new Error(`download: ${algo} mismatch (${got.slice(0, 12)}…)`);
+    }
+    // Same name, same checked content: a rename over another app's finished copy is harmless.
+    renameSync(part, dest);
+    return dest;
+  } finally {
+    rmSync(part, { force: true });
   }
-  const got = await hash(part, algo);
-  if (got !== digest) { rmSync(part, { force: true }); throw new Error(`download: ${algo} mismatch (${got.slice(0, 12)}…)`); }
-  renameSync(part, dest);
-  return dest;
 }
 
 // --- setup progress (Desktop) --------------------------------------------------------
@@ -389,17 +401,48 @@ export function vmConfig({ image, arch = process.arch, cpus, memory, disk, mount
 
 // --- the owner lock and the leases ---------------------------------------------------
 
-function alive(pid: number): boolean {
+/**
+ * When process `pid` started (ms since the epoch, whole seconds: `ps -o lstart`), or null when
+ * unknown (no such process, no ps). A lock, lease or watcher file keeps it next to the pid, so a
+ * pid the system gave to another process since never reads as the holder still alive.
+ */
+export function processStart(pid: number, { exec = execFileSync as (file: string, args: string[], opts: object) => string | Buffer }: { exec?: (file: string, args: string[], opts: object) => string | Buffer } = {}): number | null {
+  if (!Number.isInteger(Number(pid)) || Number(pid) <= 0 || process.platform === "win32") return null;
+  try {
+    const out = String(exec("/bin/ps", ["-o", "lstart=", "-p", String(Number(pid))], { env: { PATH: "/usr/bin:/bin", LC_ALL: "C", LANG: "C" }, encoding: "utf8", timeout: 2_000, stdio: ["ignore", "pipe", "ignore"] })).trim();
+    const at = Date.parse(out);
+    return Number.isFinite(at) ? at : null;
+  } catch { return null; }
+}
+
+let ownStart: number | null | undefined;
+/** This process' start (processStart), worked out once. */
+export function selfStart(): number | null {
+  if (ownStart === undefined) ownStart = processStart(process.pid);
+  return ownStart;
+}
+
+type PidAlive = (pid: number, started?: number | null) => boolean;
+
+/** Whether `pid` runs and (when its start is known on both sides) is the same process as when written. */
+export function alive(pid: number, started: number | null = null, { start = processStart }: { start?: (pid: number) => number | null } = {}): boolean {
   if (!pid) return false;
-  try { process.kill(pid, 0); return true; } catch (error) { return typeof error === "object" && error !== null && Reflect.get(error, "code") === "EPERM"; }
+  try { process.kill(pid, 0); } catch (error) { if (!(typeof error === "object" && error !== null && Reflect.get(error, "code") === "EPERM")) return false; }
+  if (started === null || started === undefined || !Number.isFinite(Number(started))) return true;
+  const now = start(pid);
+  // ps gives whole seconds: a second or two either way is the same process.
+  return now === null || Math.abs(now - Number(started)) <= 2_000;
 }
 
 /**
  * The owner lock on the VM (create, start, stop, edit): one process at a
- * time, CLI or desktop. Stale when its pid is gone or after `staleMs`.
- * Waits up to `waitMs`; returns release() or null.
+ * time, CLI or desktop. Stale when its pid is gone (or reused: the start
+ * time is kept with it) or after `staleMs`. A stale lock is first renamed to
+ * a name of its own and checked there, so two apps clearing it at once never
+ * remove the lock a third one just took. Waits up to `waitMs`; returns
+ * release() or null.
  */
-export async function lockVm(home: string, { waitMs = 5 * 60_000, staleMs = 15 * 60_000, pidAlive = alive, sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms)), now = () => Date.now(), what = "vm" }: { waitMs?: number; staleMs?: number; pidAlive?: (pid: number) => boolean; sleep?: (ms: number) => Promise<void>; now?: () => number; what?: string } = {}): Promise<(() => void) | null> {
+export async function lockVm(home: string, { waitMs = 5 * 60_000, staleMs = 15 * 60_000, pidAlive = alive, sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms)), now = () => Date.now(), what = "vm" }: { waitMs?: number; staleMs?: number; pidAlive?: PidAlive; sleep?: (ms: number) => Promise<void>; now?: () => number; what?: string } = {}): Promise<(() => void) | null> {
   const file = lockFile(home);
   mkdirSync(path.dirname(file), { recursive: true });
   const deadline = now() + waitMs;
@@ -407,45 +450,66 @@ export async function lockVm(home: string, { waitMs = 5 * 60_000, staleMs = 15 *
   for (;;) {
     try {
       const fd = openSync(file, "wx", 0o600);
-      try { writeSync(fd, JSON.stringify({ pid: process.pid, nonce, at: now(), what })); } finally { closeSync(fd); }
+      try { writeSync(fd, JSON.stringify({ pid: process.pid, started: selfStart(), nonce, at: now(), what })); } finally { closeSync(fd); }
       return () => {
         try { if (JSON.parse(readFileSync(file, "utf8"))?.nonce === nonce) unlinkSync(file); } catch { /* gone */ }
       };
     } catch (error) {
       if (!(typeof error === "object" && error !== null && Reflect.get(error, "code") === "EEXIST")) return null;
-      let held: { pid?: number } | null = null;
+      let held: { pid?: number; started?: number | null; nonce?: string } | null = null;
       try { held = JSON.parse(readFileSync(file, "utf8")); } catch { /* half written */ }
       let age = 0;
       try { age = now() - statSync(file).mtimeMs; } catch { continue; }
-      if ((held && !pidAlive(Number(held.pid))) || (!held && age > 5_000) || age > staleMs) { try { unlinkSync(file); } catch { /* raced */ } continue; }
+      if ((held && !pidAlive(Number(held.pid), held.started ?? null)) || (!held && age > 5_000) || age > staleMs) {
+        clearStale(file, held);
+        continue;
+      }
       if (now() > deadline) return null;
       await sleep(200);
     }
   }
 }
 
+/**
+ * Remove the stale lock `held` (read from `file`): renamed aside first, then
+ * removed only when the moved file is still that one; a lock someone took
+ * meanwhile is put back (a link: never over a newer one).
+ */
+export function clearStale(file: string, held: { pid?: number; nonce?: string } | null): boolean {
+  const aside = `${file}.stale.${process.pid}.${randomUUID().slice(0, 8)}`;
+  try { renameSync(file, aside); } catch { return false; }
+  let moved: { pid?: number; nonce?: string } | null = null;
+  try { moved = JSON.parse(readFileSync(aside, "utf8")); } catch { /* half written */ }
+  const same = held ? moved?.nonce === held.nonce && moved?.pid === held.pid : !moved;
+  if (!same) {
+    try { linkSync(aside, file); } catch { /* a newer lock is there: this one's holder sees it gone and asks again */ }
+  }
+  try { unlinkSync(aside); } catch { /* gone */ }
+  return same;
+}
+
 /** A lease: this process runs box `key` in the VM. Returns release(). */
 let leaseCount = 0;
-export function takeLease(home: string, key: string, { pid = process.pid, client = "desktop" }: { pid?: number; client?: string } = {}): () => void {
+export function takeLease(home: string, key: string, { pid = process.pid, client = "desktop", started = pid === process.pid ? selfStart() : processStart(pid) }: { pid?: number; client?: string; started?: number | null } = {}): () => void {
   // Its own file per lease (a keeper being replaced releases its old one later).
   leaseCount += 1;
   const file = path.join(leaseDir(home), `${key}-${pid}-${leaseCount}.json`);
   mkdirSync(path.dirname(file), { recursive: true });
-  writeJson(file, { pid, key, client, at: new Date().toISOString() });
+  writeJson(file, { pid, started, key, client, at: new Date().toISOString() });
   return () => { try { unlinkSync(file); } catch { /* gone */ } };
 }
 
 export type Lease = { pid: number; key: string; client: string; file: string };
 
-/** The live leases; a lease of a gone process is removed. */
-export function liveLeases(home: string, { pidAlive = alive, except = null }: { pidAlive?: (pid: number) => boolean; except?: number | null } = {}): Lease[] {
+/** The live leases; a lease of a gone process (or a reused pid) is removed. */
+export function liveLeases(home: string, { pidAlive = alive, except = null }: { pidAlive?: PidAlive; except?: number | null } = {}): Lease[] {
   let names: string[] = [];
   try { names = readdirSync(leaseDir(home)).filter((n) => n.endsWith(".json")); } catch { return []; }
   const out: Lease[] = [];
   for (const name of names) {
     const file = path.join(leaseDir(home), name);
-    const lease = readJson<{ pid?: number; key?: string; client?: string }>(file);
-    if (!lease?.pid || !pidAlive(Number(lease.pid))) { try { unlinkSync(file); } catch { /* raced */ } continue; }
+    const lease = readJson<{ pid?: number; started?: number | null; key?: string; client?: string }>(file);
+    if (!lease?.pid || !pidAlive(Number(lease.pid), lease.started ?? null)) { try { unlinkSync(file); } catch { /* raced */ } continue; }
     if (except && Number(lease.pid) === except) continue;
     out.push({ pid: Number(lease.pid), key: String(lease.key ?? ""), client: String(lease.client ?? ""), file });
   }
@@ -528,31 +592,53 @@ export async function ensureLimactl(runtime: LimaRuntime, { env = process.env, a
   const version = setup.lima?.version;
   if (!asset || !version) return { ok: false, error: "the OmniRush VM (Lima) is not published for this Mac yet" };
   const dir = limaDir(runtime.home);
+  const dest = path.join(dir, "dist", version);
+  const finished = path.join(dest, "bin", "limactl");
+  // Another app (a CLI) set it up first: the unpacked folder only ever appears whole (a rename).
+  const use = (): { ok: true; bin: string } => {
+    runtime.bin = finished;
+    runtime.limactlSource = "download";
+    return { ok: true, bin: finished };
+  };
+  if (existsSync(finished)) return use();
   const tarball = path.join(dir, "cache", `lima-${asset.sha256.slice(0, 16)}.tar.gz`);
   say(onLine, "lima");
   try {
     await fetchChecked(asset.url, tarball, { algo: "sha256", digest: asset.sha256, fetchFile, onProgress: stepProgress("lima", onLine) });
   } catch (error) {
+    if (existsSync(finished)) return use();
     return { ok: false, error: `could not download Lima: ${error instanceof Error ? error.message : String(error)}` };
   }
-  const dest = path.join(dir, "dist", version);
-  const tmp = `${dest}.${process.pid}.tmp`;
-  rmSync(tmp, { recursive: true, force: true });
+  if (existsSync(finished)) return use();
+  const tmp = `${dest}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
   mkdirSync(tmp, { recursive: true });
   const res = await run("/usr/bin/tar", ["-xzf", tarball, "-C", tmp], { env, timeoutMs: 120_000 });
-  if (res.code !== 0 || !existsSync(path.join(tmp, "bin", "limactl"))) { rmSync(tmp, { recursive: true, force: true }); return { ok: false, error: `could not unpack Lima: ${firstLine(res.stderr) || res.code}` }; }
+  if (res.code !== 0 || !existsSync(path.join(tmp, "bin", "limactl"))) {
+    rmSync(tmp, { recursive: true, force: true });
+    // The tarball another app unpacked and removed meanwhile.
+    if (existsSync(finished)) return use();
+    return { ok: false, error: `could not unpack Lima: ${firstLine(res.stderr) || res.code}` };
+  }
   // Only limactl and the Linux guest agent are used (vz is built in): the other drivers, the macOS guest agent and the wrappers go.
   const ls = (d: string) => { try { return readdirSync(d); } catch { return [] as string[]; } };
   rmSync(path.join(tmp, "libexec"), { recursive: true, force: true });
   for (const name of ls(path.join(tmp, "bin"))) if (name !== "limactl") rmSync(path.join(tmp, "bin", name), { force: true });
   for (const name of ls(path.join(tmp, "share", "lima"))) if (/^lima-guestagent\.Darwin/.test(name)) rmSync(path.join(tmp, "share", "lima", name), { force: true });
-  rmSync(dest, { recursive: true, force: true });
-  renameSync(tmp, dest);
+  if (existsSync(finished)) { rmSync(tmp, { recursive: true, force: true }); return use(); }
+  // A whole folder another app renamed in first wins; a half-made one (no limactl: never one of ours) makes way.
+  let moved: boolean | null = null;
+  for (let attempt = 0; attempt < 2 && !moved; attempt += 1) {
+    try { renameSync(tmp, dest); moved = true; } catch (error) {
+      if (existsSync(finished)) break;
+      if (attempt === 0 && existsSync(dest)) { rmSync(dest, { recursive: true, force: true }); continue; }
+      rmSync(tmp, { recursive: true, force: true });
+      return { ok: false, error: `could not unpack Lima: ${error instanceof Error ? error.message : String(error)}` };
+    }
+  }
+  if (!moved) { rmSync(tmp, { recursive: true, force: true }); return use(); }
   rmSync(tarball, { force: true });
-  runtime.bin = path.join(dest, "bin", "limactl");
-  runtime.limactlSource = "download";
   log("info", "box vm lima downloaded", { version });
-  return { ok: true, bin: runtime.bin };
+  return use();
 }
 
 /** The VM disk image, downloaded once and checked (a local OMNIRUSH_BOX_LIMA_IMAGE is used as it is). */
@@ -723,10 +809,10 @@ export function idleMain(dir = HERE, exists: (file: string) => boolean = existsS
  * pid): started detached when none runs. Desktop: run with this app's own
  * binary as node (ELECTRON_RUN_AS_NODE=1), so it outlives the app.
  */
-export function keepIdleWatch(runtime: Pick<LimaRuntime, "home" | "bin" | "instance">, { env = process.env, spawnImpl = spawn, node = process.execPath, pidAlive = alive, script = idleMain() }: { env?: Env; spawnImpl?: SpawnLike; node?: string; pidAlive?: (pid: number) => boolean; script?: string | null } = {}): number | null {
+export function keepIdleWatch(runtime: Pick<LimaRuntime, "home" | "bin" | "instance">, { env = process.env, spawnImpl = spawn, node = process.execPath, pidAlive = alive, script = idleMain() }: { env?: Env; spawnImpl?: SpawnLike; node?: string; pidAlive?: PidAlive; script?: string | null } = {}): number | null {
   if (idleStopMinutes({ env }) <= 0 || !script) return null;
-  const held = readJson<{ pid?: number }>(idleFile(runtime.home));
-  if (held?.pid && pidAlive(Number(held.pid))) return Number(held.pid);
+  const held = readJson<{ pid?: number; started?: number | null }>(idleFile(runtime.home));
+  if (held?.pid && pidAlive(Number(held.pid), held.started ?? null)) return Number(held.pid);
   try {
     const child: ChildProcess = spawnImpl(node, [script, runtime.home, runtime.bin, runtime.instance], {
       env: { ...env, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: "1" } : {}), OMNIRUSH_BOX_LIMA_IDLE_PARENT: String(process.pid) },
@@ -734,7 +820,7 @@ export function keepIdleWatch(runtime: Pick<LimaRuntime, "home" | "bin" | "insta
       stdio: "ignore",
     });
     child.unref?.();
-    if (child.pid) writeJson(idleFile(runtime.home), { pid: child.pid, at: new Date().toISOString() });
+    if (child.pid) writeJson(idleFile(runtime.home), { pid: child.pid, started: processStart(child.pid), at: new Date().toISOString() });
     return child.pid ?? null;
   } catch {
     return null;
@@ -746,7 +832,7 @@ export function keepIdleWatch(runtime: Pick<LimaRuntime, "home" | "bin" | "insta
  * live and it has been idle for `idleMs` since `busyAt` (the caller stops it
  * under the owner lock); { done: true } when the VM is not running.
  */
-export async function idleStep(runtime: LimaRuntime, { busyAt, now = Date.now(), idleMs, run = runCommand, env = process.env, pidAlive = alive }: { busyAt: number; now?: number; idleMs: number; run?: RunCommand; env?: Env; pidAlive?: (pid: number) => boolean }): Promise<{ busyAt: number; stop?: true; done?: true }> {
+export async function idleStep(runtime: LimaRuntime, { busyAt, now = Date.now(), idleMs, run = runCommand, env = process.env, pidAlive = alive }: { busyAt: number; now?: number; idleMs: number; run?: RunCommand; env?: Env; pidAlive?: PidAlive }): Promise<{ busyAt: number; stop?: true; done?: true }> {
   const { row, missing } = await vmRow(runtime, { run, env });
   if (missing || (row && row.status !== "Running")) return { done: true, busyAt };
   if (liveLeases(runtime.home, { pidAlive }).length) return { busyAt: now };
@@ -754,7 +840,7 @@ export async function idleStep(runtime: LimaRuntime, { busyAt, now = Date.now(),
 }
 
 /** Stop the VM when it is still idle, under the owner lock (the idle watcher's last step). */
-export async function stopIfIdle(runtime: LimaRuntime, { run = runCommand, env = process.env, pidAlive = alive, lock = lockVm }: { run?: RunCommand; env?: Env; pidAlive?: (pid: number) => boolean; lock?: typeof lockVm } = {}): Promise<{ stopped: boolean; reason?: string }> {
+export async function stopIfIdle(runtime: LimaRuntime, { run = runCommand, env = process.env, pidAlive = alive, lock = lockVm }: { run?: RunCommand; env?: Env; pidAlive?: PidAlive; lock?: typeof lockVm } = {}): Promise<{ stopped: boolean; reason?: string }> {
   const release = await lock(runtime.home, { waitMs: 30_000, what: "idle-stop" });
   if (!release) return { stopped: false, reason: "locked" };
   try {
