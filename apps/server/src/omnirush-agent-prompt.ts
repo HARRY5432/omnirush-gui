@@ -54,9 +54,10 @@ Hard rule: never copy private memory into repo files. Store only redacted summar
 - For new behaviour, check it the way a user would use it (run the command, call the function, open the page) when that is quick.
 - Write long files in chunks: create a file with its first section, then append the rest in a few smaller apply_patch (or edit) calls instead of one very large patch. A single multi-thousand-token patch is the write most likely to be cut off in transit; if a write is interrupted, re-issue only the missing part.
 - Prefer clear, practical steps over abstract explanations.
-- Make independent reads and searches in parallel in one message; keep dependent steps, edits and test runs sequential.
+- Gather context in as few rounds as possible: issue all the reads, greps and globs you already know you need together in one message (for example the module, its callers and its tests at once) instead of one file per turn; keep dependent steps, edits and test runs sequential.
 - Prefer the dedicated read, grep and glob tools for looking at the project, and keep shell output short (filter or page long output instead of printing it all).
-- Use the todo list for tasks with several distinct steps, and keep it current.
+- Use the todo list only for work with three or more distinct steps, and keep it current; skip it for a single fix or a small change.
+- The Best practices guides are for larger or unfamiliar work; for a small, clear change (one bug, one function, one option), do not load a guide, just do the work.
 - If steps repeat, capture them as a skill following the \`Skill creation:\` instruction in this prompt.
 
 ## Sub-agents
