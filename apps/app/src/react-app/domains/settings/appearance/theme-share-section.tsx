@@ -49,7 +49,7 @@ export function themeContrastSummary(theme: CustomTheme) {
   return { checked, failing };
 }
 
-function ImportPreviewCard(props: Pick<Props, "onKeep" | "onEditFirst" | "onCancelImport"> & { theme: CustomTheme; source: string; replaces: boolean }) {
+function ImportPreviewCard(props: Pick<Props, "onKeep" | "onEditFirst" | "onCancelImport"> & { theme: CustomTheme; source: string }) {
   const summary = themeContrastSummary(props.theme);
   const modes = props.theme.modes.join(" + ");
   return (
@@ -109,7 +109,7 @@ function ImportPreviewCard(props: Pick<Props, "onKeep" | "onEditFirst" | "onCanc
           Cancel
         </Button>
       </div>
-      {props.replaces ? <p className="text-xs text-muted-foreground">Keeping it replaces your current custom theme.</p> : null}
+      <p className="text-xs text-muted-foreground">Keeping it adds it to your custom themes.</p>
     </div>
   );
 }
@@ -274,7 +274,6 @@ export function ThemeShareSection(props: Props) {
             <ImportPreviewCard
               theme={props.importing.theme}
               source={props.importing.source}
-              replaces={Boolean(props.customTheme)}
               onKeep={props.onKeep}
               onEditFirst={props.onEditFirst}
               onCancelImport={props.onCancelImport}

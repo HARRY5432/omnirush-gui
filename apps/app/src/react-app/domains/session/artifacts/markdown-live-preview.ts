@@ -358,7 +358,7 @@ const livePreviewTheme = EditorView.baseTheme({
   ".cm-md-emphasis": { fontStyle: "italic" },
   ".cm-md-strike": { textDecoration: "line-through" },
   ".cm-md-code": {
-    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+    fontFamily: "var(--omnirush-code-font, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace)",
     backgroundColor: "hsl(var(--muted) / 0.6)",
     borderRadius: "4px",
     padding: "0.1em 0.3em",
@@ -372,7 +372,7 @@ const livePreviewTheme = EditorView.baseTheme({
   },
   ".cm-md-codeblock": {
     backgroundColor: "hsl(var(--muted) / 0.4)",
-    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+    fontFamily: "var(--omnirush-code-font, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace)",
   },
   ".cm-md-bullet": { paddingRight: "0.4em", color: "hsl(var(--muted-foreground))" },
   // `contain: inline-size` keeps a wide table from stretching the editor (which

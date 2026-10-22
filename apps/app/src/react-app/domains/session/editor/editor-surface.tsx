@@ -8,7 +8,7 @@
 import { useEffect, useRef, useState } from "react";
 import type * as MonacoApi from "monaco-editor/editor/editor.api.js";
 
-import { subscribeToTheme } from "@/app/theme";
+import { getCodeFontStack, subscribeToTheme } from "@/app/theme";
 import { addGroupKeys, applyMonacoTheme, monacoThemeName, scopeEditor, type Monaco } from "./monaco";
 import type { FileDoc } from "./editor-models";
 import { hunkCounts, type LineHunk } from "./hunk-ops";
@@ -54,7 +54,6 @@ export type SurfaceHandle = {
 
 const BASE_OPTIONS: MonacoApi.editor.IStandaloneEditorConstructionOptions = {
   automaticLayout: true,
-  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
   scrollBeyondLastLine: false,
   renderLineHighlight: "line",
   smoothScrolling: false,
@@ -133,9 +132,10 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
     if (!codeHostRef.current || !diffHostRef.current) return;
     const themeName = monacoThemeName();
     const settingsOptions = monacoOptionsFor(useEditorSettings.getState());
-    const code = monaco.editor.create(codeHostRef.current, { ...BASE_OPTIONS, ...settingsOptions, model: null, theme: themeName });
+    const code = monaco.editor.create(codeHostRef.current, { ...BASE_OPTIONS, fontFamily: getCodeFontStack(), ...settingsOptions, model: null, theme: themeName });
     const diff = monaco.editor.createDiffEditor(diffHostRef.current, {
       ...BASE_OPTIONS,
+      fontFamily: getCodeFontStack(),
       ...settingsOptions,
       theme: themeName,
       renderSideBySide: false,
@@ -205,6 +205,9 @@ export function EditorSurface({ monaco, surface, onSave, onCursor, onHunks, navi
     // Follows the app theme: light/dark, presets and custom themes (app/theme.ts).
     const unsubscribeTheme = subscribeToTheme(() => {
       applyMonacoTheme();
+      // Monaco ignores an unchanged option, so this only re-lays out when the code font changed.
+      code.updateOptions({ fontFamily: getCodeFontStack() });
+      diff.updateOptions({ fontFamily: getCodeFontStack() });
       // Repaint now: a composited editor layer can otherwise keep the old background until it scrolls.
       code.render(true);
       diff.getModifiedEditor().render(true);

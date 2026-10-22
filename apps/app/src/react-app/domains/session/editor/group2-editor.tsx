@@ -5,6 +5,7 @@
  */
 import { useEffect, useRef } from "react";
 import type * as MonacoApi from "monaco-editor/editor/editor.api.js";
+import { getCodeFontStack } from "@/app/theme";
 
 import { monacoOptionsFor, useEditorSettings } from "./editor-settings";
 import type { AgentAction } from "./editor-surface";
@@ -29,7 +30,7 @@ export function Group2Editor(props: {
     const monaco = props.monaco;
     const editor = monaco.editor.create(host, {
       automaticLayout: true,
-      fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+      fontFamily: getCodeFontStack(),
       scrollBeyondLastLine: false,
       renderLineHighlight: "line",
       padding: { top: 6, bottom: 6 },

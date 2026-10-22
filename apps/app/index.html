@@ -46,6 +46,23 @@
               }
             }
           }
+          // Density/wallpaper switches and font stacks saved by app/theme.ts (same checks as readBootVars).
+          var attrs = (boot && boot.attrs) || {};
+          for (var attr in attrs) {
+            if ((attr === "density" || attr === "wallpaper") && typeof attrs[attr] === "string" && /^[a-z-]{1,20}$/.test(attrs[attr])) {
+              document.documentElement.dataset[attr] = attrs[attr];
+            }
+          }
+          var fonts = (boot && boot.fonts) || {};
+          for (var font in fonts) {
+            if (
+              (font === "--omnirush-ui-font" || font === "--omnirush-code-font" || font === "--omnirush-panel-blur") &&
+              typeof fonts[font] === "string" &&
+              /^[\w\s",.-]{1,300}$/.test(fonts[font])
+            ) {
+              document.documentElement.style.setProperty(font, fonts[font]);
+            }
+          }
           document.documentElement.dataset.theme = resolved;
           document.documentElement.style.colorScheme = resolved;
         } catch (e) {

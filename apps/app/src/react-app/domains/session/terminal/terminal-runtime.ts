@@ -5,7 +5,7 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { create } from "zustand";
-import { getActiveTheme, subscribeToTheme } from "@/app/theme";
+import { getActiveTheme, getCodeFontStack, subscribeToTheme } from "@/app/theme";
 import { xtermThemeFor } from "@/app/themes/editor-themes";
 import { useTerminalTabsStore } from "./terminal-tabs-store";
 
@@ -53,8 +53,11 @@ function followAppTheme() {
   themeSubscribed = true;
   subscribeToTheme(() => {
     const theme = xtermThemeFor(getActiveTheme());
+    const fontFamily = getCodeFontStack();
     for (const entry of live.values()) {
-      if (!entry.disposed) entry.term.options.theme = theme;
+      if (entry.disposed) continue;
+      entry.term.options.theme = theme;
+      if (entry.term.options.fontFamily !== fontFamily) entry.term.options.fontFamily = fontFamily;
     }
   });
 }
@@ -90,7 +93,7 @@ function makeLive(tabId: string, bridge: TerminalBridge, options: Live["options"
     cursorBlink: true,
     convertEol: true,
     scrollback: 5000,
-    fontFamily: "'SFMono-Regular', 'Cascadia Code', 'Liberation Mono', Menlo, monospace",
+    fontFamily: getCodeFontStack(),
     fontSize: 12,
     theme: xtermThemeFor(getActiveTheme()),
   });

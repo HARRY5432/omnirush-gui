@@ -9,6 +9,7 @@ import { initializeDenBootstrapConfig } from "./app/lib/den";
 import { startWebErrorMonitoring } from "./app/lib/error-monitoring";
 import { getOmniRushDeployment } from "./app/lib/omnirush-deployment";
 import { bootstrapTheme } from "./app/theme";
+import { restoreWallpaper } from "./app/wallpaper";
 import { isDesktopRuntime } from "./app/utils";
 import { initLocale } from "./i18n";
 import { getReactQueryClient } from "./react-app/infra/query-client";
@@ -24,6 +25,7 @@ import "./app/index.css";
 
 startWebErrorMonitoring();
 bootstrapTheme();
+void restoreWallpaper();
 initLocale();
 startDeepLinkBridge();
 await initializeDenBootstrapConfig();

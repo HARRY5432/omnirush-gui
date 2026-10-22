@@ -2,7 +2,9 @@ import { useSyncExternalStore } from "react";
 import { captureAnalyticsEvent } from "@/app/lib/analytics";
 import {
   getActiveTheme,
-  getCustomTheme,
+  getAppearancePrefs,
+  getCustomThemes,
+  getSelectedCustomId,
   getThemeSelection,
   subscribeToTheme,
   type ThemeMode,
@@ -18,8 +20,16 @@ export function useThemeSelection() {
   return useSyncExternalStore(subscribeToTheme, getThemeSelection, getThemeSelection);
 }
 
-export function useSavedCustomTheme() {
-  return useSyncExternalStore(subscribeToTheme, getCustomTheme, getCustomTheme);
+export function useCustomThemes() {
+  return useSyncExternalStore(subscribeToTheme, getCustomThemes, getCustomThemes);
+}
+
+export function useSelectedCustomId() {
+  return useSyncExternalStore(subscribeToTheme, getSelectedCustomId, getSelectedCustomId);
+}
+
+export function useAppearancePrefs() {
+  return useSyncExternalStore(subscribeToTheme, getAppearancePrefs, getAppearancePrefs);
 }
 
 /**

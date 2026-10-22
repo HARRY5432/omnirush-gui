@@ -102,7 +102,7 @@ describe("preset resolution", () => {
     fontSizePx: 14,
   };
 
-  test("there are 8 presets and 15 variants with the agreed ids", () => {
+  test("there are 11 presets and 21 variants with the agreed ids", () => {
     expect(THEME_PRESETS.map((p) => p.id)).toEqual([
       "default",
       "midnight",
@@ -112,8 +112,11 @@ describe("preset resolution", () => {
       "forest",
       "high-contrast",
       "omnirush",
+      "graphite",
+      "paper",
+      "nocturne",
     ]);
-    expect(THEME_PRESETS.reduce((sum, p) => sum + presetModes(p).length, 0)).toBe(15);
+    expect(THEME_PRESETS.reduce((sum, p) => sum + presetModes(p).length, 0)).toBe(21);
     expect(presetModes(findPreset("midnight")!)).toEqual(["dark"]);
   });
 
@@ -387,7 +390,11 @@ describe("theme state and persistence", () => {
     expect(theme.getActiveTheme().legacy).toBe(true);
     expect(root.dataset.omnirushPalette).toBeUndefined();
     expect(props.get("--muted-foreground")).toBe("#858991");
-    expect(theme.readBootVars(storage.getItem(theme.THEME_BOOT_KEY), "dark")).toEqual({ mode: "dark", vars: { "--muted-foreground": "#858991" } });
+    expect(theme.readBootVars(storage.getItem(theme.THEME_BOOT_KEY), "dark")).toEqual({
+      mode: "dark",
+      vars: { "--muted-foreground": "#858991" },
+      attrs: {},
+    });
     storage.values.clear();
     props.clear();
     root.dataset = {};
@@ -450,7 +457,7 @@ describe("theme state and persistence", () => {
     expect(props.get("--radius")).toBe("12px");
     theme.resetThemeStateForTests();
     expect(theme.getCustomTheme()).toEqual(custom);
-    storage.setItem(theme.THEME_CUSTOM_KEY, '{"v":1,"name":"x","modes":["light"],"light":{"background":"red;}"}}');
+    storage.setItem(theme.THEME_CUSTOMS_KEY, '[{"id":"custom","theme":{"v":1,"name":"x","modes":["light"],"light":{"background":"red;}"}}}]');
     theme.resetThemeStateForTests();
     expect(theme.getCustomTheme()).toBeNull();
     theme.bootstrapTheme();
@@ -497,7 +504,7 @@ describe("theme state and persistence", () => {
     expect(boot.mode).toBe("dark");
     expect(boot.vars["--background"]).toBe(findPreset("midnight")!.variants.dark!.background);
     const tampered = JSON.stringify({ only: null, light: { "--background": "red;}body{x}", "--primary": "#123456", "x": "#ffffff" } });
-    expect(theme.readBootVars(tampered, "light")).toEqual({ mode: "light", vars: { "--primary": "#123456" } });
+    expect(theme.readBootVars(tampered, "light")).toEqual({ mode: "light", vars: { "--primary": "#123456" }, attrs: {} });
     expect(theme.readBootVars("garbage", "light")).toBeNull();
   });
 });

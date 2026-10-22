@@ -95,7 +95,7 @@ export function ArtifactTextEditor(props: ArtifactTextEditorProps) {
               })
             : EditorView.theme({
                 "&": { height: "100%", background: "transparent" },
-                ".cm-scroller": { fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" },
+                ".cm-scroller": { fontFamily: "var(--omnirush-code-font, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace)" },
                 ".cm-content": { minHeight: "100%", padding: "12px 0", fontSize: "12px", lineHeight: "20px" },
                 ".cm-gutters": { background: "transparent", borderRight: "1px solid hsl(var(--border))" },
                 ".cm-lineNumbers .cm-gutterElement": { padding: "0 8px", color: "hsl(var(--muted-foreground))" },

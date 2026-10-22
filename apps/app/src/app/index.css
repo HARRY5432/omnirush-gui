@@ -181,6 +181,32 @@ body {
   overflow: hidden;
 }
 
+/* Compact density: every Tailwind spacing step is 12.5% tighter. */
+html[data-density="compact"] {
+  --spacing: 0.21875rem;
+}
+
+/* Wallpaper: the picture sits on body under a wash of the page colour; page and sidebar are
+   see-through (alpha set in app/themes/palette.ts) and the sidebar blurs what is behind it. */
+html[data-wallpaper] body {
+  background:
+    linear-gradient(var(--omnirush-wallpaper-wash), var(--omnirush-wallpaper-wash)),
+    var(--omnirush-wallpaper-image, none) center / cover no-repeat,
+    var(--omnirush-wallpaper-base);
+}
+
+html[data-wallpaper] [data-slot="sidebar-inner"],
+html[data-wallpaper] [data-slot="sidebar-inset"] {
+  backdrop-filter: blur(var(--omnirush-panel-blur, 0px));
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  html[data-wallpaper] [data-slot="sidebar-inner"],
+  html[data-wallpaper] [data-slot="sidebar-inset"] {
+    backdrop-filter: none;
+  }
+}
+
 html {
   /* --omnirush-theme-font-scale: custom theme text size (app/themes/palette.ts). */
   font-size: calc(var(--omnirush-font-size, 16px) * var(--omnirush-theme-font-scale, 1));
@@ -188,7 +214,9 @@ html {
 
 body {
   margin: 0;
-  font-family:
+  /* --omnirush-ui-font: Settings > Appearance > Fonts (app/themes/appearance-prefs.ts). */
+  font-family: var(
+    --omnirush-ui-font,
     -apple-system,
     BlinkMacSystemFont,
     system-ui,
@@ -199,7 +227,8 @@ body {
     Arial,
     "Noto Sans",
     "Apple Color Emoji",
-    "Segoe UI Emoji";
+    "Segoe UI Emoji"
+  );
   font-size: 13px;
   line-height: 1.5;
   color: var(--dls-text-primary);
@@ -796,8 +825,9 @@ select:disabled {
 }
 
 @theme inline {
-  --font-sans: -apple-system, BlinkMacSystemFont, system-ui, ui-sans-serif, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-heading: -apple-system, BlinkMacSystemFont, system-ui, ui-sans-serif, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-sans: var(--omnirush-ui-font, -apple-system, BlinkMacSystemFont, system-ui, ui-sans-serif, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif);
+  --font-heading: var(--omnirush-ui-font, -apple-system, BlinkMacSystemFont, system-ui, ui-sans-serif, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif);
+  --font-mono: var(--omnirush-code-font, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);
   --text-sm: 0.8125rem;
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);

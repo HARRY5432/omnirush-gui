@@ -1,10 +1,11 @@
 /** @jsxImportSource react */
-import { Check, Moon, Pencil, Plus } from "lucide-react";
+import { Check, Moon, Pencil, Plus, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
 import { THEME_PRESETS } from "@/app/themes/presets";
 import { presetModes } from "@/app/themes/palette";
-import type { CustomTheme, ThemeVariant } from "@/app/themes/types";
+import type { SavedCustomTheme } from "@/app/theme";
+import type { ThemeVariant } from "@/app/themes/types";
 import {
   LayoutSectionItem,
   LayoutSectionItemDescription,
@@ -15,13 +16,15 @@ import { ThemeVariantThumb } from "./theme-preview";
 
 type Props = {
   busy: boolean;
-  /** Selected preset id, or "custom" for My theme. */
+  /** Selected preset id, or `custom:<id>` for a saved custom theme. */
   selectedId: string;
-  customTheme: CustomTheme | null;
+  customThemes: SavedCustomTheme[];
+  maxCustomThemes: number;
   note: string | null;
   onPickPreset: (id: string) => void;
-  onPickCustom: () => void;
-  onEditCustom: () => void;
+  onPickCustom: (id: string) => void;
+  onEditCustom: (id: string) => void;
+  onDeleteCustom: (id: string) => void;
   onNewCustom: () => void;
 };
 
@@ -106,40 +109,54 @@ export function ThemePresetsSection(props: Props) {
             <Thumbs light={preset.variants.light} dark={preset.variants.dark} />
           </Card>
         ))}
-        {props.customTheme ? (
+        {props.customThemes.map(({ id, theme }) => (
           <Card
-            testId="theme-preset-custom"
-            selected={props.selectedId === "custom"}
-            label={props.customTheme.name}
-            meta={modesLabel(props.customTheme.modes)}
+            key={id}
+            testId={`theme-custom-${id}`}
+            selected={props.selectedId === `custom:${id}`}
+            label={theme.name}
+            meta={modesLabel(theme.modes)}
             disabled={props.busy}
-            onClick={props.onPickCustom}
+            onClick={() => props.onPickCustom(id)}
             action={
-              <button
-                type="button"
-                onClick={props.onEditCustom}
-                aria-label="Edit custom theme"
-                data-testid="theme-edit-custom"
-                className="absolute right-3 top-3 flex size-6 items-center justify-center rounded-md border border-border bg-popover text-foreground shadow-xs hover:bg-muted"
-              >
-                <Pencil className="size-3" />
-              </button>
+              <div className="absolute right-3 top-3 flex gap-1">
+                <button
+                  type="button"
+                  onClick={() => props.onEditCustom(id)}
+                  aria-label={`Edit ${theme.name}`}
+                  data-testid={`theme-edit-${id}`}
+                  className="flex size-6 items-center justify-center rounded-md border border-border bg-popover text-foreground shadow-xs outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <Pencil className="size-3" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => props.onDeleteCustom(id)}
+                  aria-label={`Delete ${theme.name}`}
+                  data-testid={`theme-delete-${id}`}
+                  className="flex size-6 items-center justify-center rounded-md border border-border bg-popover text-foreground shadow-xs outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <Trash2 className="size-3" />
+                </button>
+              </div>
             }
           >
-            <Thumbs light={props.customTheme.light} dark={props.customTheme.dark} />
+            <Thumbs light={theme.light} dark={theme.dark} />
           </Card>
-        ) : null}
+        ))}
         <button
           type="button"
           onClick={props.onNewCustom}
-          disabled={props.busy}
+          disabled={props.busy || props.customThemes.length >= props.maxCustomThemes}
           data-testid="theme-new-custom"
           className="flex flex-col gap-2 rounded-xl border border-dashed border-border p-1.5 text-left text-xs text-muted-foreground outline-none hover:border-foreground/25 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
         >
           <span className="flex h-16 w-full items-center justify-center rounded-lg border border-dashed border-border">
             <Plus className="size-4" />
           </span>
-          <span className="px-1 pb-0.5 font-medium">{props.customTheme && props.selectedId === "custom" ? "Edit custom theme" : "New custom theme"}</span>
+          <span className="px-1 pb-0.5 font-medium">
+            {props.customThemes.length >= props.maxCustomThemes ? `Up to ${props.maxCustomThemes} custom themes` : "New custom theme"}
+          </span>
         </button>
       </div>
       <p className="flex items-center gap-1.5 text-xs text-muted-foreground" data-testid="theme-mode-note" role="status">

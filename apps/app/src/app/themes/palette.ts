@@ -21,7 +21,8 @@ import {
 export const DEFAULT_PRESET_ID = "default";
 export const CUSTOM_THEME_ID = "custom";
 
-export type ThemeSelection = { kind: "preset"; id: string } | { kind: "custom" };
+/** A custom selection without an id means the first saved custom theme (older saves had one slot). */
+export type ThemeSelection = { kind: "preset"; id: string } | { kind: "custom"; id?: string };
 
 export type ActiveTheme = {
   selection: ThemeSelection;
@@ -37,6 +38,12 @@ export type ActiveTheme = {
   fontSizePx: number;
   /** High contrast: secondary text steps aim for 7:1. */
   aaa?: boolean;
+  /** The user's accent replaces the theme's (also on Default). */
+  accentOverride?: boolean;
+  /** The theme's own accent, before the user's accent replaced it. */
+  themeAccent?: string;
+  /** Wallpaper on: page and sidebar become see-through by `opacity`, the picture is washed by `dim` (0-1). */
+  glass?: { opacity: number; dim: number } | null;
 };
 
 export function findPreset(id: string): ThemePreset | undefined {
@@ -159,10 +166,14 @@ const DEFAULT_PRESET_FIXES: Record<ThemeVariantMode, Record<string, string>> = {
 
 /** CSS custom property name -> value for an active theme. */
 export function paletteVars(
-  active: Pick<ActiveTheme, "variant" | "mode" | "legacy" | "radiusPx" | "fontSizePx" | "aaa">,
+  active: Pick<ActiveTheme, "variant" | "mode" | "legacy" | "radiusPx" | "fontSizePx" | "aaa" | "accentOverride" | "glass">,
   darkVariant?: ThemeVariant | null,
 ): Record<string, string> {
-  if (active.legacy) return { ...DEFAULT_PRESET_FIXES[active.mode] };
+  if (active.legacy) {
+    const vars: Record<string, string> = { ...DEFAULT_PRESET_FIXES[active.mode] };
+    if (active.accentOverride) Object.assign(vars, accentVars(active.variant));
+    return Object.assign(vars, sizingVars(active), glassVars(active));
+  }
   const v = active.variant;
   const dark = isDarkColour(v.background);
   const scale = neutralScale(v, Boolean(active.aaa));
@@ -191,10 +202,7 @@ export function paletteVars(
     v.text,
   );
   set(["--muted-foreground", "--dls-text-secondary"], v.textMuted);
-  set(["--primary", "--dls-accent", "--sidebar-primary", "--ring", "--sidebar-ring"], v.accent);
-  set(["--primary-foreground", "--dls-accent-fg", "--sidebar-primary-foreground"], v.accentText);
-  set(["--dls-accent-hover"], mix(v.accent, dark ? "#ffffff" : "#000000", 0.12));
-  set(["--dls-accent-rgb"], rgbTriplet(v.accent));
+  Object.assign(vars, accentVars(v));
   set(["--dls-secondary-rgb"], rgbTriplet(v.textMuted));
   set(["--accent", "--sidebar-accent", "--dls-hover"], scale[2]!);
   set(["--dls-active"], scale[4]!);
@@ -204,9 +212,6 @@ export function paletteVars(
   // Decorative highlight (connected dot, usage bar, ".ai" in the logo): at least 3:1 on light pages.
   const highlight = v.highlight ?? v.accent;
   set(["--omnirush-highlight"], dark ? highlight : suggestColour(highlight, [v.background, v.surface], 3));
-  const link = textSafeAccent(v);
-  set(["--omnirush-link"], link);
-  set(["--omnirush-link-hover"], mix(link, v.text, 0.3));
   set(["--omnirush-terminal-bg"], v.terminal.bg);
   set(["--omnirush-terminal-fg"], v.terminal.fg);
   set(["--omnirush-terminal-header"], mix(v.terminal.bg, v.terminal.fg, 0.06));
@@ -217,10 +222,44 @@ export function paletteVars(
   if (darkVariant) set(["--omnirush-gate-bg"], darkVariant.background);
   scale.forEach((value, index) => set([`--gray-${index + 1}`, `--slate-${index + 1}`], value));
   NEUTRAL_ALPHA.forEach((alpha, index) => set([`--gray-a${index + 1}`, `--slate-a${index + 1}`], withAlpha(v.text, alpha)));
+  return Object.assign(vars, sizingVars(active), glassVars(active));
+}
+
+/** Buttons, focus rings, selection and links from the accent (links keep 4.5:1 on every background). */
+function accentVars(v: ThemeVariant): Record<string, string> {
+  const dark = isDarkColour(v.background);
+  const link = textSafeAccent(v);
+  const vars: Record<string, string> = {};
+  for (const name of ["--primary", "--dls-accent", "--sidebar-primary", "--ring", "--sidebar-ring"]) vars[name] = v.accent;
+  for (const name of ["--primary-foreground", "--dls-accent-fg", "--sidebar-primary-foreground"]) vars[name] = v.accentText;
+  vars["--dls-accent-hover"] = mix(v.accent, dark ? "#ffffff" : "#000000", 0.12);
+  vars["--dls-accent-rgb"] = rgbTriplet(v.accent);
+  vars["--omnirush-link"] = link;
+  vars["--omnirush-link-hover"] = mix(link, v.text, 0.3);
+  return vars;
+}
+
+function sizingVars(active: Pick<ActiveTheme, "radiusPx" | "fontSizePx">): Record<string, string> {
+  const vars: Record<string, string> = {};
   const radius = Math.min(RADIUS_RANGE.max, Math.max(RADIUS_RANGE.min, active.radiusPx));
   if (radius !== DEFAULT_RADIUS_PX) vars["--radius"] = `${radius}px`;
   const fontSize = Math.min(FONT_SIZE_RANGE.max, Math.max(FONT_SIZE_RANGE.min, active.fontSizePx));
   if (fontSize !== DEFAULT_FONT_SIZE_PX) vars["--omnirush-theme-font-scale"] = String(Math.round((fontSize / DEFAULT_FONT_SIZE_PX) * 10000) / 10000);
+  return vars;
+}
+
+/** Wallpaper: the page and sidebar let the picture through; the wash keeps text readable over it. */
+function glassVars(active: Pick<ActiveTheme, "variant" | "glass">): Record<string, string> {
+  const glass = active.glass;
+  if (!glass) return {};
+  const v = active.variant;
+  const opacity = Math.min(1, Math.max(0, glass.opacity));
+  const vars: Record<string, string> = {
+    "--omnirush-wallpaper-base": v.background,
+    "--omnirush-wallpaper-wash": withAlpha(v.background, Math.min(1, Math.max(0, glass.dim))),
+  };
+  for (const name of ["--background", "--dls-background", "--dls-app-bg"]) vars[name] = withAlpha(v.background, opacity);
+  for (const name of ["--sidebar", "--dls-sidebar"]) vars[name] = withAlpha(v.surface, opacity);
   return vars;
 }
 
@@ -254,7 +293,14 @@ export function allPaletteVarNames(): string[] {
   const preset = findPreset("fjord")!;
   const names = Object.keys(
     paletteVars(
-      { variant: preset.variants.light!, mode: "light", legacy: false, radiusPx: 0, fontSizePx: FONT_SIZE_RANGE.max },
+      {
+        variant: preset.variants.light!,
+        mode: "light",
+        legacy: false,
+        radiusPx: 0,
+        fontSizePx: FONT_SIZE_RANGE.max,
+        glass: { opacity: 0.5, dim: 0.5 },
+      },
       preset.variants.dark,
     ),
   );

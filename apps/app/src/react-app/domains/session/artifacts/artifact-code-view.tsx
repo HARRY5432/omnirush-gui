@@ -5,7 +5,7 @@ import { Editor } from "@pierre/diffs/edit";
 
 const OMNIRUSH_CODE_CSS = `
   :host {
-    --diffs-font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    --diffs-font-family: var(--omnirush-code-font, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
     --diffs-font-size: 12px;
     --diffs-line-height: 20px;
     display: block;
