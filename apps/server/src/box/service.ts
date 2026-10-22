@@ -30,8 +30,9 @@ import type { BoxExec } from "./backends/types.js";
 import type { BoxEndpoint } from "./client.js";
 import { hostBuilds, hostBuildsNotice, hostBuildThings, hostRules } from "./host-builds.js";
 import { detectStack, imageFor, type BoxImage } from "./images.js";
+import { portLine } from "./ports.js";
 import { askedBackend, boxRun, planBox, pullLog, pullMarker, pulling, pullInBackground, resolveMode, saveBackend, serverBackends, serverDefault, serverRequired, shimsDir, type BoxRun, type ProjectBoxMode, type ServerBoxDefault } from "./launch.js";
-import { desktopText, hostOnlyProject, type RequiredFallback } from "./required.js";
+import { desktopText, hostOnlyProject, shadowsApply, shadowsNotice, type RequiredFallback } from "./required.js";
 import { cachedWindowsChecks, classifySetup, linuxAllow, resumeWinSetup, saveSetupState, setupState, windowsInstall, windowsRestart, windowsUpdate, type BoxSetup } from "./setup.js";
 import type { BoxInstallLogPaths } from "./install-log.js";
 import { DESKTOP_PROJECTS_FILE } from "./plugin-lib.js";
@@ -106,6 +107,8 @@ export type BoxStatus = {
   setup: (BoxSetup & { line: string | null }) | null;
   /** Asked for one chat (`?session=`): it ran on this computer before the sandbox was required and stays here. */
   chatKept: boolean;
+  /** Servers in the box open at the same port on this computer's 127.0.0.1 (Docker/Podman boxes; ports.ts). */
+  ports: Array<{ port: number; url: string; line: string }>;
 };
 
 /** The setup screen's steps (POST /workspace/:id/box/setup). */
@@ -257,10 +260,12 @@ export class BoxService {
    * The backend detection's inputs: the setting (or OMNIRUSH_BOX_BACKEND) and the server's allowlist.
    * While the sandbox is required, a saved "native" reads as automatic (OMNIRUSH_BOX_BACKEND=native still counts).
    */
-  private detectOptions(): Pick<DetectOptions, "asked" | "allow"> {
+  private detectOptions(): Pick<DetectOptions, "asked" | "allow" | "preferShadows"> {
     const asked = askedBackend({ env: this.env, stateDir: this.options.stateDir });
-    const backend = asked.source === "setting" && asked.backend === "native" && this.required().required ? "auto" : asked.backend;
-    return { asked: backend, allow: serverBackends(this.options.stateDir) };
+    const required = this.required().required;
+    const backend = asked.source === "setting" && asked.backend === "native" && required ? "auto" : asked.backend;
+    // Under required on macOS / Windows the backends that give the box its own build folders (shadows) come first.
+    return { asked: backend, allow: serverBackends(this.options.stateDir), ...(required && shadowsApply(this.platform, this.env) ? { preferShadows: true } : {}) };
   }
 
   private detect(extra: DetectOptions = {}): Promise<RuntimeResult> {
@@ -419,7 +424,7 @@ export class BoxService {
         project.nextPlanAt = 0;
       }
       if (Date.now() < project.nextPlanAt) return null;
-      const plan = await planBox({ env: this.env, home: this.home, root, log: this.log, shims: shimsDir(this.env), ...this.detectOptions() });
+      const plan = await planBox({ env: this.env, home: this.home, root, log: this.log, shims: shimsDir(this.env), platform: this.platform, stateDir: this.options.stateDir, ...this.detectOptions() });
       project.waitingImage = !plan.box && plan.downloading === true;
       project.lastRuntime = plan.box ? null : plan.runtime;
       project.pull = !plan.box && plan.downloading === true && plan.image && plan.runtime?.ok ? { runtime: plan.runtime, image: plan.image } : null;
@@ -449,6 +454,8 @@ export class BoxService {
             project.notice = `Sandbox stopped: ${event.error}.`;
           }
         },
+        // A server in the box (its own network) at the same port on this computer's 127.0.0.1: one log line (ports.ts).
+        onPort: (event) => { if (event.open) this.log("info", event.line ?? `box port ${event.port} open`, { key, port: event.port }); },
         onNative: (reason) => {
           project.notice = `Sandbox off for now: ${reason}.`;
           project.nextPlanAt = Date.now() + REPLAN_MS;
@@ -561,7 +568,7 @@ export class BoxService {
     const needed = required === true;
     const requiredText = needed ? { line: desktopText("required_line"), optOut: desktopText("opt_out_refused"), keptOldChat: desktopText("kept_old_chat") } : null;
     const chatKept = Boolean(sessionId && this.nativeChats.has(sessionId));
-    const base = { mode: settings.mode, serverDefault: server, on, source, offer, error: null, hostBuilds: gate, boxNotice: null, required: needed, requiredText, hostOnly, setup: null, chatKept };
+    const base = { mode: settings.mode, serverDefault: server, on, source, offer, error: null, hostBuilds: gate, boxNotice: null, required: needed, requiredText, hostOnly, setup: null, chatKept, ports: [] as BoxStatus["ports"] };
     const backendSetting = { ...askedBackend({ env: this.env, stateDir: this.options.stateDir }), choices: backendChoices() };
     const setting = { value: backendSetting.backend, source: backendSetting.source, choices: backendSetting.choices };
     if (workspace.workspaceType !== "local") return { ...base, on: false, offer: false, state: "off", runtime: null, backend: null, backendSetting: setting, image: null, progress: null, container: null, platform: this.platform, notice: "The sandbox is for folders on this computer." };
@@ -633,8 +640,11 @@ export class BoxService {
         : offer && source === "buildathon" ? BUILDATHON_OFFER_NOTICE
         : null,
       error: run?.box?.error ?? (record?.state === "off" || record?.state === "failed" ? record.error || null : null),
-      boxNotice: on && hostRules(this.platform) ? hostBuildsNotice("box", { platform: this.platform }) : null,
+      // The box's own build folders in use (required.json texts.desktop.shadows), else the plain macOS/Windows line.
+      boxNotice: on && run && !run.native && run.box?.shadows ? shadowsNotice(run.box.currentShadows(), this.platform) ?? hostBuildsNotice("box", { platform: this.platform })
+        : on && hostRules(this.platform) ? hostBuildsNotice("box", { platform: this.platform }) : null,
       setup,
+      ports: run && !run.native ? (run.forwardedPorts?.() ?? []).map((port) => ({ port, url: `http://127.0.0.1:${port}`, line: portLine(port) })) : [],
     };
   }
 

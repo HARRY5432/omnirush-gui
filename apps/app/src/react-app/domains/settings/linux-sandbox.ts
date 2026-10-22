@@ -96,6 +96,12 @@ export function linuxSandboxNextStep(box: OmniRushWorkspaceBox): LinuxSandboxNex
   return { title: "No sandbox backend works here", detail: box.runtime?.reason ?? "No container runtime was found on this computer.", command: null };
 }
 
+/** A ready box's detail, then one line per server in it open on this computer (Docker/Podman boxes). */
+function withPorts(detail: string, box: OmniRushWorkspaceBox): string {
+  const lines = (box.ports ?? []).slice(0, 3).map((item) => item.line);
+  return lines.length ? [detail, ...lines].join(" ") : detail;
+}
+
 /** The status row: what the sandbox is doing now, or why it is not used and what to do. */
 export function linuxSandboxView(box: OmniRushWorkspaceBox, pending: LinuxSandboxPending = null): LinuxSandboxView {
   const base = { progress: null, step: null, action: null, errorDetail: null };
@@ -121,8 +127,8 @@ export function linuxSandboxView(box: OmniRushWorkspaceBox, pending: LinuxSandbo
       return { ...base, tone: "busy", title: "Starting the sandbox…", detail: using ? `Using ${using}. This takes a few seconds.` : "This takes a few seconds." };
     case "ready":
       // On by choice in a folder with this computer's builds: the warning; on macOS / Windows: that chats run in Linux.
-      if (box.hostBuilds && !box.hostBuilds.native) return { ...base, tone: "attention", title: "Ready", detail: box.hostBuilds.notice };
-      return { ...base, tone: "ready", title: "Ready", detail: box.boxNotice ?? (using ? `Commands run in a Linux container (${using}).` : "Commands run in a Linux container.") };
+      if (box.hostBuilds && !box.hostBuilds.native) return { ...base, tone: "attention", title: "Ready", detail: withPorts(box.hostBuilds.notice, box) };
+      return { ...base, tone: "ready", title: "Ready", detail: withPorts(box.boxNotice ?? (using ? `Commands run in a Linux container (${using}).` : "Commands run in a Linux container."), box) };
     case "failed":
       return { ...base, tone: "error", title: "The sandbox could not start", detail: RUNS_HERE, action: { kind: "retry", label: "Try again" }, errorDetail: box.error ?? box.notice };
     case "unavailable": {

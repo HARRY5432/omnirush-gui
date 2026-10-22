@@ -22,12 +22,13 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, r
 import path from "node:path";
 
 import * as client from "./client.js";
-import { boxKey, containerName, gcBoxes, installShell, openBox, recordFile, reviveFile, savedTurns, type Box, type BoxInstallLog, type BoxLabel, type BoxLog, type BoxRuntime, type CheckpointSummary } from "./box.js";
+import { boxKey, containerName, containerRoot, gcBoxes, installShell, openBox, recordFile, reviveFile, savedTurns, type Box, type BoxInstallLog, type BoxLabel, type BoxLog, type BoxRuntime, type CheckpointSummary } from "./box.js";
 import { driverFor, normalizeBackend } from "./backends/index.js";
 import type { BoxExec } from "./backends/types.js";
 import { detectStack, imageFor, loadPins, type BoxImage } from "./images.js";
+import { portForwards, type PortForwardOptions, type PortForwards } from "./ports.js";
 import { rememberPins } from "./retention.mjs";
-import { requiredFallback, type RequiredFallback } from "./required.js";
+import { requiredFallback, shadowPlan, shadowsApply, shadowsNotice, type RequiredFallback, type ShadowPlan } from "./required.js";
 import { detectRuntime, runCommand, type RunCommand, type RuntimeResult } from "./runtime.js";
 
 export const MODES = ["off", "offer", "on"] as const;
@@ -277,6 +278,10 @@ export type ReadyPlan = {
   restart?: () => Promise<Box>;
   /** What the box start is doing ("starting", "pulling", "ready", "failed"; null before it starts). */
   readonly phase: string | null;
+  /** macOS / Windows with a backend that runs boxrun as root: the box's own build folders (required.ts), else null. */
+  shadows?: ShadowPlan | null;
+  /** The one line that says so (required.json texts.desktop.shadows), else null. */
+  shadowsLine?: string | null;
 };
 export type NativePlan = { box: null; notice: string | null; runtime: RuntimeResult | null; image?: BoxImage; downloading?: boolean };
 export type BoxPlan = ReadyPlan | NativePlan;
@@ -286,10 +291,10 @@ export type BoxPlan = ReadyPlan | NativePlan;
  * { box: null, notice } when its chats run on this machine for now (no
  * runtime, no helpers, the image still downloading), else a ready plan.
  */
-export async function planBox({ env = process.env, home, root, log = () => {}, run = runCommand, probeMs = 4_000, shims = null, asked = null, allow = null }: { env?: NodeJS.ProcessEnv; home: string; root: string; log?: BoxLog; run?: RunCommand; probeMs?: number; shims?: string | null; asked?: string | null; allow?: string[] | null }): Promise<BoxPlan> {
+export async function planBox({ env = process.env, home, root, log = () => {}, run = runCommand, probeMs = 4_000, shims = null, asked = null, allow = null, platform = process.platform, stateDir = null, preferShadows = false }: { env?: NodeJS.ProcessEnv; home: string; root: string; log?: BoxLog; run?: RunCommand; probeMs?: number; shims?: string | null; asked?: string | null; allow?: string[] | null; platform?: NodeJS.Platform; stateDir?: string | null; preferShadows?: boolean }): Promise<BoxPlan> {
   const key = boxKey(root);
   const bounded = <T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> => Promise.race([promise, new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms))]);
-  const runtime = await bounded<RuntimeResult>(detectRuntime({ boxHome: home, env, run, ...(asked ? { asked } : {}), allow }), probeMs, { ok: false, reason: "the sandbox backend did not answer in time" });
+  const runtime = await bounded<RuntimeResult>(detectRuntime({ boxHome: home, env, run, ...(asked ? { asked } : {}), allow, ...(preferShadows ? { preferShadows } : {}) }), probeMs, { ok: false, reason: "the sandbox backend did not answer in time" });
   if (!runtime.ok) {
     log("info", "box unavailable", { reason: runtime.reason });
     return { box: null, notice: `Sandbox off for now: ${runtime.reason}.`, runtime };
@@ -317,9 +322,16 @@ export async function planBox({ env = process.env, home, root, log = () => {}, r
   let opening: Promise<Box> | null = null;
   let phase: string | null = null;
   let startedWith: BoxInstallLog | null = null;
+  // macOS / Windows with a backend that runs boxrun as root (the WSL distro): the box's own build folders
+  // (required.ts shadowPlan), found now (bounded) so the project's one line can say so.
+  let shadows: ShadowPlan | null = null;
+  if (driver.shadows && shadowsApply(platform, env)) {
+    try { shadows = shadowPlan(root, { platform, croot: containerRoot(root, platform), stateDir, env }); } catch (error) { log("warn", "box shadows scan failed", { error: error instanceof Error ? error.message : String(error) }); }
+    if (shadows) log("info", "box shadows", { binds: shadows.binds.length, env: Object.keys(shadows.env), ms: shadows.ms, truncated: shadows.truncated });
+  }
   const start = ({ pkglog = null }: { pkglog?: BoxInstallLog | null } = {}): Promise<Box> => {
     if (!opening) startedWith = pkglog;
-    opening ??= openBox({ root, runtime, env, home, log, pull: false, shims, pkglog, revive: true, onState: (state) => { phase = state; } });
+    opening ??= openBox({ root, runtime, env, home, log, pull: false, shims, pkglog, revive: true, shadows, platform, onState: (state) => { phase = state; } });
     return opening;
   };
   return {
@@ -329,10 +341,12 @@ export async function planBox({ env = process.env, home, root, log = () => {}, r
     start,
     restart: () => {
       if (!opening) return start();
-      opening = openBox({ root, runtime, env, home, log, pull: false, shims, pkglog: startedWith, revive: true });
+      opening = openBox({ root, runtime, env, home, log, pull: false, shims, pkglog: startedWith, revive: true, shadows, platform });
       return opening;
     },
     get phase() { return phase; },
+    shadows,
+    shadowsLine: shadowsNotice(shadows, platform),
   };
 }
 
@@ -418,7 +432,9 @@ export type BoxRun = {
   setTurn: (turn: number) => void;
   /** Start boxd again when it does not answer (resolves the Box now in use). */
   heal: (why: string) => Promise<Box | null>;
-  /** Stop watching for restart requests (the project's box is let go). */
+  /** The box's ports open on this computer now (ports.ts). */
+  forwardedPorts?: () => number[];
+  /** Stop watching for restart requests and close the port forwards (the project's box is let go). */
   close: () => void;
   /** `sessionTurn`: the chat's own number of the prompt the checkpoint comes before (written as session_turn). */
   freeze: (label: string, options: { sessionId: string; turn?: number | null; sessionTurn?: number | null; chain?: string | null }) => Promise<Frozen | null>;
@@ -432,18 +448,29 @@ export type BoxRun = {
  * "off"; the shell runs on this machine, its chats are not labelled); later
  * failures are logged and that turn has no checkpoint.
  */
-export function boxRun(plan: ReadyPlan, { log = () => {}, readyWaitMs = 30_000, onNative = () => {}, onRevive = () => {}, tmpRoot, pkglog = null, pollMs = REVIVE_POLL_MS, ping = client.ping }: { log?: BoxLog; readyWaitMs?: number; onNative?: (reason: string) => void; onRevive?: (event: { ok: boolean; why: string; error?: string }) => void; tmpRoot?: string; pkglog?: BoxInstallLog | null; pollMs?: number; ping?: typeof client.ping } = {}): BoxRun {
+export function boxRun(plan: ReadyPlan, { log = () => {}, readyWaitMs = 30_000, onNative = () => {}, onRevive = () => {}, onPort = () => {}, tmpRoot, pkglog = null, pollMs = REVIVE_POLL_MS, ping = client.ping, env = process.env, forwards: makeForwards = portForwards }: { log?: BoxLog; readyWaitMs?: number; onNative?: (reason: string) => void; onRevive?: (event: { ok: boolean; why: string; error?: string }) => void; onPort?: (event: { port: number; open: boolean; line?: string; why?: string }) => void; tmpRoot?: string; pkglog?: BoxInstallLog | null; pollMs?: number; ping?: typeof client.ping; env?: NodeJS.ProcessEnv; forwards?: (options: PortForwardOptions) => PortForwards } = {}): BoxRun {
   const { key, home, runtime, root } = plan.box;
   let box: Box | null = null;
   let native = false;
+  let closed = false;
   const checkpoints = new Map<string, number>();
   const requestFile = reviveFile(home, key);
   // A restart request nobody answered before (the app quit): this start answers it.
   try { rmSync(requestFile, { force: true }); } catch { /* not there */ }
   const opening = plan.start({ pkglog }).then((opened) => { box = opened; return opened; });
+  // A box with its own network (Docker, Podman): its servers at the same port on this computer's 127.0.0.1
+  // (ports.ts), polled while the box is usable (none before it is ready, after a failure, once let go).
+  const wantsForwards = driverFor(runtime).forwardsPorts === false && String(env.OMNIRUSH_BOX_PORTS ?? "").trim().toLowerCase() !== "off";
+  const forwards = wantsForwards ? makeForwards({
+    endpoint: () => { const current: Box | null = box; return current?.ready && !native && !closed ? current.endpoint : null; },
+    log,
+    onOpen: (port, line) => { try { onPort({ port, line, open: true }); } catch { /* the caller's problem */ } },
+    onClose: (port, why) => { try { onPort({ port, open: false, why }); } catch { /* the caller's problem */ } },
+  }) : null;
   const goNative = (reason: string) => {
     if (native) return;
     native = true;
+    forwards?.close();
     recordOff(home, key, reason);
     log("warn", "box off for this project", { reason });
     onNative(reason);
@@ -539,7 +566,8 @@ export function boxRun(plan: ReadyPlan, { log = () => {}, readyWaitMs = 30_000, 
     label: (sessionId) => (box?.ready && !native && (checkpoints.get(sessionId) ?? 0) > 0 ? box.label() : null),
     setTurn: (turn) => { lastTurn = turn; box?.setTurn(turn); },
     heal,
-    close: () => clearInterval(watcher),
+    forwardedPorts: () => forwards?.ports() ?? [],
+    close: () => { closed = true; clearInterval(watcher); forwards?.close(); },
     /**
      * The old sandbox's freeze(label, { turn, chain }) -> { save(dir), discard() } | null:
      * the checkpoint is taken now and placed by save(); `final` (the state a

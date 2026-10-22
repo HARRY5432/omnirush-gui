@@ -22,6 +22,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { GOARCH, RUN_DIR, SHIMS_DIR, containerName, containerRoot, helperPath, newToken, readJson, writeJson, type BoxInstallLog, type BoxRuntime } from "../common.js";
+import { shadowId, type ShadowPlan } from "../required.js";
 import { runCommand, type RunCommand, type RunOptions } from "../run.js";
 import type { RuntimeResult } from "../runtime.js";
 import { YOUNG_IMAGE_MS, removableImage, removeTree, staleEntries } from "../retention.mjs";
@@ -166,13 +167,19 @@ export function boxdEnv({ token, croot, idleMinutes = IDLE_MINUTES, listen = "12
 }
 
 /** `boxrun up` arguments for a project's box. */
-export function upArgs({ box, store, image, boxd, portFile, root, croot, runFolder, shims = null, pkglog = null, token, bwrap = null, idleMinutes = IDLE_MINUTES, listen, platform = "linux", mapPath = (p: string) => p }: { box: string; store: string; image: string; boxd: string; portFile: string; root: string; croot: string; runFolder: string; shims?: string | null; pkglog?: Pick<BoxInstallLog, "root"> | null; token: string; bwrap?: string | null; idleMinutes?: number; listen?: string; platform?: NodeJS.Platform; mapPath?: (p: string) => string }): string[] {
+export function upArgs({ box, store, image, boxd, portFile, root, croot, runFolder, shims = null, pkglog = null, token, bwrap = null, idleMinutes = IDLE_MINUTES, listen, platform = "linux", mapPath = (p: string) => p, shadows = null, shadowStore = null }: { box: string; store: string; image: string; boxd: string; portFile: string; root: string; croot: string; runFolder: string; shims?: string | null; pkglog?: Pick<BoxInstallLog, "root"> | null; token: string; bwrap?: string | null; idleMinutes?: number; listen?: string; platform?: NodeJS.Platform; mapPath?: (p: string) => string; shadows?: Pick<ShadowPlan, "binds"> | null; shadowStore?: string | null }): string[] {
   const args = ["up", "--box", box, "--store", store, "--image", image, "--boxd", boxd, "--port-file", portFile,
     "--bind", `${mapPath(root)}=${croot}`, "--bind", `${mapPath(runFolder)}=${RUN_DIR}`];
   if (shims) args.push("--ro-bind", `${mapPath(shims)}=${SHIMS_DIR}-src`);
   if (pkglog) args.push("--bind", `${mapPath(pkglog.root)}=${containerRoot(pkglog.root, platform)}`);
   for (const kv of boxdEnv({ token, croot, idleMinutes, ...(listen ? { listen } : {}) })) args.push("--env", kv);
   if (bwrap) args.push("--bwrap", bwrap);
+  // The box's own build folders (required.ts shadowPlan; backends whose boxrun runs as root):
+  // the per-box store on the backend's own disk, and each folder bound from it (boxrun init Binds).
+  if (shadows && shadowStore) {
+    args.push("--shadow-store", shadowStore);
+    for (const bind of shadows.binds ?? []) args.push("--shadow", `${bind.id ?? shadowId(bind.path)}=${bind.target}`);
+  }
   return args;
 }
 

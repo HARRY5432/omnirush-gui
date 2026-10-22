@@ -358,4 +358,6 @@ export type DetectOptions = {
   allow?: string[] | null;
   arch?: string;
   release?: string;
+  /** Under the required sandbox on macOS/Windows: the backends whose boxes get their own build folders (driver.shadows) first. */
+  preferShadows?: boolean;
 };

@@ -212,14 +212,14 @@ function alternative(r: Probed | { backend: string; name: string; ok: false; rea
  * flavor, ..., why }) or { ok: false, reason, tried }. `asked`: a backend id
  * or "auto" (the setting); `allow`: the server's allowlist (null: any).
  */
-export async function detectBackend({ boxHome, env = process.env, platform = process.platform, home = os.homedir(), exists = existsSync, run = runCommand, wsl = platform === "linux" && isWsl(env), now = Date.now(), fresh = false, all = false, timeoutMs, asked = env.OMNIRUSH_BOX_BACKEND, allow = null, arch = process.arch, release = os.release() }: DetectOptions = {}): Promise<RuntimeResult> {
+export async function detectBackend({ boxHome, env = process.env, platform = process.platform, home = os.homedir(), exists = existsSync, run = runCommand, wsl = platform === "linux" && isWsl(env), now = Date.now(), fresh = false, all = false, timeoutMs, asked = env.OMNIRUSH_BOX_BACKEND, allow = null, arch = process.arch, release = os.release(), preferShadows = false }: DetectOptions = {}): Promise<RuntimeResult> {
   let wanted = normalizeBackend(asked);
   let legacyRuntime = String(env.OMNIRUSH_BOX_RUNTIME || "").trim();
   // OMNIRUSH_BOX_RUNTIME naming a backend's own program picks that backend (the host kits do).
   const named = runtimeBackend(legacyRuntime, platform);
   if (named && wanted === "auto") { wanted = normalizeBackend(named); legacyRuntime = ""; }
   const allowList = Array.isArray(allow) ? allow.map(normalizeBackend).filter((id): id is BackendId | "auto" | "native" => Boolean(id)) : null;
-  const key = JSON.stringify([2, platform, wanted, allowList, legacyRuntime, env.DOCKER_HOST || "", env.PATH || env.Path || "", env.OMNIRUSH_BOX_BWRAP || ""]);
+  const key = JSON.stringify([2, platform, wanted, allowList, ...(preferShadows ? ["shadows"] : []), legacyRuntime, env.DOCKER_HOST || "", env.PATH || env.Path || "", env.OMNIRUSH_BOX_BWRAP || ""]);
   if (boxHome && !fresh && !all) {
     const cached = readCache(boxHome, now, key);
     if (cached) return { ...cached, cached: true };
@@ -229,6 +229,9 @@ export async function detectBackend({ boxHome, env = process.env, platform = pro
   let order: string[] = backendsFor(platform);
   // OMNIRUSH_BOX_RUNTIME (docker, podman or a path) keeps meaning "this container CLI".
   if (legacyRuntime) order = order.filter((id) => !["bwrap", "apple", "wslc", "wsl", "wsl-engine"].includes(id));
+  // Under the required sandbox on macOS/Windows: the backends whose boxes get their own build
+  // folders (driver.shadows: boxrun as root, the WSL distro) before the others.
+  if (preferShadows && wanted === "auto") order = [...order.filter((id) => driverFor({ backend: id }).shadows), ...order.filter((id) => !driverFor({ backend: id }).shadows)];
   let why = `the first that works here, in order: ${order.join(" > ")}`;
   if (wanted !== "auto") {
     order = [wanted];

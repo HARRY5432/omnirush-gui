@@ -50,6 +50,8 @@ type WslRuntime = Pick<BoxRuntime, "bin" | "distro" | "arch" | "installed">;
 export const DEFAULT_DISTRO = "OmniRushBox";
 export const STORE = "/var/lib/omnirush/store";
 export const BOXES = "/var/lib/omnirush/boxes";
+/** Where a box's own build folders (shadows) live in the distro: one folder per box, mounted at the same path inside it. */
+export const SHADOW_STORES = "/var/lib/omnirush/shadows";
 export const ENABLE_HINT = "WSL 2 is not enabled on this Windows. One time, in an administrator terminal: `wsl --install --no-distribution`, then restart Windows";
 
 export type WslAsset = { url: string | null; sha256: string | null; bytes?: number | null };
@@ -317,10 +319,10 @@ export function startKeeper(runtime: WslRuntime, args: string[], { env = process
   });
 }
 
-type WslMeta = BoxMeta & { mounts?: string[] };
+type WslMeta = BoxMeta & { mounts?: string[]; shadows?: string[] };
 
 async function open(ctx: OpenContext): Promise<Opened> {
-  const { key, root, croot, runtime, run, home, runFolder, image, pull: mayPull, shims, pkglog, env, log, onPulling, spawnImpl } = ctx;
+  const { key, root, croot, runtime, run, home, runFolder, image, pull: mayPull, shims, pkglog, shadows = null, env, log, onPulling, spawnImpl } = ctx;
   const file = metaFile(home, key);
   let meta = readJson<WslMeta>(file);
   if (meta && meta.root !== root) return { ok: false, error: `box ${key} belongs to another folder` };
@@ -331,7 +333,7 @@ async function open(ctx: OpenContext): Promise<Opened> {
     const asks = ctx.ping ?? ping;
     const answers = (await asks(live.endpoint, { timeoutMs: 1_500 })) || (live.alternates.length > 0 && (await asks(live.alternates[0]!, { timeoutMs: 1_500 })));
     if (answers) {
-      return { ok: true, created: null, endpoint: live.endpoint, alternates: live.alternates, uid: 0, gid: 0, containerId: `wsl_${key}_${meta.instance}`, imageId: meta.config || meta.image, mounts: meta.mounts ?? [] };
+      return { ok: true, created: null, endpoint: live.endpoint, alternates: live.alternates, uid: 0, gid: 0, containerId: `wsl_${key}_${meta.instance}`, imageId: meta.config || meta.image, mounts: meta.mounts ?? [], shadows: meta.shadows ?? [] };
     }
     log("info", "box keeper running but boxd not answering; starting it again", { key });
     try { live.child.kill(); } catch { /* gone */ }
@@ -363,7 +365,7 @@ async function open(ctx: OpenContext): Promise<Opened> {
   const args = upArgs({
     box: boxPath(key), store: STORE, image: meta.image, boxd: "/opt/omnirush/boxd", portFile: `${wslPath(runFolder)}/boxd.port`,
     root, croot, runFolder, shims, pkglog, token: meta.token, idleMinutes: idle, listen: listenAny ? "0.0.0.0:0" : "127.0.0.1:0",
-    platform: "win32", mapPath: wslPath,
+    platform: "win32", mapPath: wslPath, shadows, shadowStore: shadows ? `${SHADOW_STORES}/${key}` : null,
   });
   const kept = await startKeeper(runtime, args, { env, ...(spawnImpl ? { spawnImpl } : {}) });
   if (!kept.ok) return { ok: false, error: `could not start the sandbox: ${kept.error}` };
@@ -376,9 +378,12 @@ async function open(ctx: OpenContext): Promise<Opened> {
     if (addr) alternates.push({ host: addr, port, token: meta.token });
   }
   const mounts = [croot, "/run/omnirush", ...(shims ? ["/opt/omnirush/pkglog-src"] : []), ...(pkglog ? [containerRoot(pkglog.root, "win32")] : [])];
-  if (!kept.out.reused) writeJson(file, { ...meta, mounts, started_at: new Date().toISOString() });
+  // The folders boxrun shadowed (a box it found running keeps the set it started with).
+  const reported = Array.isArray(kept.out.shadows) ? kept.out.shadows.filter((item): item is string => typeof item === "string") : null;
+  const shadowed = reported ?? (kept.out.reused ? (meta.shadows ?? []) : []);
+  if (!kept.out.reused) writeJson(file, { ...meta, mounts, shadows: shadowed, started_at: new Date().toISOString() });
   keepers.set(key, { child: kept.child, endpoint, alternates });
-  return { ok: true, created, endpoint, alternates, uid: 0, gid: 0, containerId: `wsl_${key}_${meta.instance}`, imageId: meta.config || meta.image, mounts: kept.out.reused ? (meta.mounts ?? mounts) : mounts };
+  return { ok: true, created, endpoint, alternates, uid: 0, gid: 0, containerId: `wsl_${key}_${meta.instance}`, imageId: meta.config || meta.image, mounts: kept.out.reused ? (meta.mounts ?? mounts) : mounts, shadows: shadowed };
 }
 
 function keeperAlive(key: string): boolean {
@@ -389,6 +394,8 @@ function keeperAlive(key: string): boolean {
 export const wslDriver: BoxDriver = {
   kind: "wsl",
   execFallback: false,
+  /** boxrun runs as root in the distro: a box here gets its own build folders on a Windows host (required.ts). */
+  shadows: true,
   imagePresent,
   pull,
   /** Desktop: the distro import, the helpers and the image download run in this process (launch.ts pullInBackground). */

@@ -540,6 +540,8 @@ export type OmniRushWorkspaceBox = {
   setup?: OmniRushWorkspaceBoxSetup | null;
   /** Asked for one chat: it started on this computer before the sandbox was required and stays here. */
   chatKept?: boolean;
+  /** Servers in the sandbox open at the same port on this computer's 127.0.0.1 (Docker/Podman). Older servers: absent. */
+  ports?: Array<{ port: number; url: string; line: string }>;
 };
 export type OmniRushWorkspaceBoxSetup = {
   need: "none" | "linux_allow" | "win_install" | "win_restart" | "win_update" | "mac_vm" | "runtime" | "cannot_run";

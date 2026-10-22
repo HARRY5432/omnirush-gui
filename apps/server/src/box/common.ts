@@ -96,6 +96,8 @@ export type BoxRecord = {
   home: string; shell: string; path_prefix: string; env_file: string; updated: number; pid: number;
   /** The app restarts boxd when boxsh asks (boxes/<key>.revive). */
   revive?: boolean;
+  /** The agent's box notice adds this line (plugin-lib.ts BOX_NOTE): the box's own build folders (macOS/Windows hosts). */
+  shadows_note?: string;
 };
 
 export function readRecord(home: string, key: string): BoxRecord | null {

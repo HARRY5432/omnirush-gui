@@ -121,6 +121,12 @@ describe("Linux sandbox card", () => {
     expect(markup).not.toContain("Try again");
   });
 
+  test("ready with a server in the box open on this computer: its line after the usual one", () => {
+    const ports = [{ port: 8765, url: "http://127.0.0.1:8765", line: "Port 8765 in the sandbox is open on this computer at http://127.0.0.1:8765" }];
+    const ready = linuxSandboxView(box({ ...on, state: "ready", ports }));
+    expect(ready.detail).toBe("Commands run in a Linux container (Docker Desktop 27.1). Port 8765 in the sandbox is open on this computer at http://127.0.0.1:8765");
+  });
+
   test("failed: plain words, Try again, the raw error behind Show details", () => {
     const raw = "could not start the sandbox: boxd did not answer on 127.0.0.1:41871 within 20s";
     const view = linuxSandboxView(box({ ...on, state: "failed", error: raw }));

@@ -84,7 +84,7 @@ export const OmniRushBox = async ({ directory, client }: { directory?: string; c
         const line = output.system[i];
         if (typeof line === "string") output.system[i] = line.replace(/^(\s*Platform:\s*)(darwin|win32|linux)\s*$/m, "$1linux");
       }
-      output.system.push(BOX_NOTE(root, Number(rec.uid) || 0, typeof rec.croot === "string" ? rec.croot : root));
+      output.system.push(BOX_NOTE(root, Number(rec.uid) || 0, typeof rec.croot === "string" ? rec.croot : root, rec.shadows_note));
     },
   };
 };
