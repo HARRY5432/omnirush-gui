@@ -1,0 +1,134 @@
+{
+  "version": 1,
+  "about": "The mandatory sandbox ('required' level of GET /collect/capabilities local_box) for the CLI (src/box/required.js) and the desktop app (apps/server/src/box/required.ts): what a client told required:true does, the setup it runs per OS, the build-artefact shadows on macOS/Windows hosts and the projects that stay on the host. Shared byte for byte (src/box/PARITY.sha256 and apps/server/src/box/PARITY.sha256).",
+  "capability": {
+    "required_key": "required",
+    "fallback_key": "required_fallback",
+    "fallbacks": ["native", "native_uncounted"],
+    "default_fallback": "native"
+  },
+  "reasons": {
+    "required": "box",
+    "kept_old_chat": "kept_old_chat",
+    "host_only": "host_only",
+    "env_off": "env_off",
+    "setup_needed": "setup_needed",
+    "cannot_run": "cannot_run",
+    "setup_declined": "setup_declined"
+  },
+  "host_only": {
+    "about": "Projects that only build and run on their own OS: their new chats stay on the machine and count as today (launch reason host_only). Markers are matched in the project root and one level down.",
+    "darwin": {
+      "dirs_suffix": [".xcodeproj", ".xcworkspace"],
+      "files": [],
+      "file_patterns": [{ "name": "Package.swift", "contains": "\\.(?:iOS|macOS|tvOS|watchOS|visionOS)\\(" }]
+    },
+    "win32": {
+      "dirs_suffix": [],
+      "files": [],
+      "file_patterns": [
+        { "suffix": ".csproj", "contains": "<(?:UseWPF|UseWindowsForms|UseMaui)>\\s*true|net\\d+\\.\\d+-windows" },
+        { "suffix": ".vcxproj", "contains": "." }
+      ]
+    }
+  },
+  "shadows": {
+    "about": "On macOS/Windows hosts the box keeps its own Linux copy of each build-artefact folder, so the host's builds are never written and the host's Mac/Windows builds never run in the box. Tools that can be pointed elsewhere get an environment variable (no folder appears on the host); node_modules (harmless when empty) and folders that already exist on the host are bind-mounted from the box's own disk (boxrun init Binds). Shadows are never in the box snapshots: a rebuild recreates them from the manifests and the recorded installs. Linux hosts: none.",
+    "hosts": ["darwin", "win32"],
+    "store": "/var/lib/omnirush/shadows",
+    "limits": { "entries": 4000, "ms": 150, "depth": 4, "max": 64 },
+    "skip_dirs": [".git", "node_modules", ".venv", "venv", "target", ".hg", ".svn"],
+    "env": [
+      { "id": "uv", "when_any": ["pyproject.toml", "uv.lock"], "root_only": true, "set": { "UV_PROJECT_ENVIRONMENT": "{store}/venv" } },
+      { "id": "poetry", "when_any": ["poetry.lock"], "root_only": true, "set": { "POETRY_VIRTUALENVS_IN_PROJECT": "false", "POETRY_VIRTUALENVS_PATH": "{store}/poetry" } },
+      { "id": "cargo", "when_any": ["Cargo.toml"], "root_only": true, "set": { "CARGO_TARGET_DIR": "{store}/cargo-target" } }
+    ],
+    "binds": [
+      { "dir": "node_modules", "when_any": ["package.json"], "even_if_absent": true },
+      { "dir": ".venv", "when_any": ["pyvenv.cfg@dir", "pyproject.toml", "requirements.txt"], "even_if_absent": false },
+      { "dir": "venv", "when_any": ["pyvenv.cfg@dir"], "even_if_absent": false },
+      { "dir": "target", "when_any": ["Cargo.toml", "pom.xml"], "even_if_absent": false },
+      { "dir": "build", "when_any": ["build.gradle", "build.gradle.kts", "CMakeLists.txt"], "even_if_absent": false },
+      { "dir": ".gradle", "when_any": ["build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"], "even_if_absent": false },
+      { "dir": ".next", "when_any": ["package.json"], "even_if_absent": false },
+      { "dir": ".nuxt", "when_any": ["package.json"], "even_if_absent": false },
+      { "dir": ".svelte-kit", "when_any": ["package.json"], "even_if_absent": false },
+      { "dir": ".turbo", "when_any": ["package.json"], "even_if_absent": false },
+      { "dir": ".parcel-cache", "when_any": ["package.json"], "even_if_absent": false },
+      { "dir": ".dart_tool", "when_any": ["pubspec.yaml"], "even_if_absent": false },
+      { "dir": ".build", "when_any": ["Package.swift"], "even_if_absent": false },
+      { "dir": "vendor/bundle", "when_any": ["Gemfile"], "even_if_absent": false },
+      { "dir": "obj", "when_any": ["*.csproj", "*.fsproj"], "even_if_absent": false },
+      { "dir": "bin", "when_any": ["*.csproj", "*.fsproj"], "even_if_absent": false },
+      { "dir": ".zig-cache", "when_any": ["build.zig"], "even_if_absent": false },
+      { "dir": "zig-out", "when_any": ["build.zig"], "even_if_absent": false },
+      { "dir": "dist", "when_any": ["@host-binaries"], "even_if_absent": false },
+      { "dir": "out", "when_any": ["@host-binaries"], "even_if_absent": false }
+    ],
+    "record_key": "shadows"
+  },
+  "setup": {
+    "linux": {
+      "order": ["bwrap", "podman", "docker"],
+      "enable": { "cli": "sudo omnirush sandbox enable", "desktop": "pkexec" }
+    },
+    "win32": {
+      "min_build": 19041,
+      "virtualization_errors": "0x80370102|0x80370114|HCS_E_HYPERV_NOT_INSTALLED|Please enable the Virtual Machine Platform|virtualization is enabled in the BIOS|WSL_E_VM_MODE_INVALID_STATE",
+      "install_script": [
+        "$ErrorActionPreference = 'Stop'",
+        "$log = $args[0]",
+        "try { & wsl.exe --install --no-distribution 2>&1 | Out-File -Append -Encoding utf8 $log; $code = $LASTEXITCODE } catch { $code = 1 }",
+        "if ($code -ne 0) {",
+        "  dism.exe /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart | Out-File -Append -Encoding utf8 $log",
+        "  dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart | Out-File -Append -Encoding utf8 $log",
+        "  & wsl.exe --update --web-download 2>&1 | Out-File -Append -Encoding utf8 $log",
+        "}",
+        "'done' | Out-File -Append -Encoding utf8 $log"
+      ],
+      "resume_run_once": "OmniRushSandboxSetup"
+    },
+    "darwin": {
+      "backend": "lima",
+      "min_macos": "13.0",
+      "lima": {
+        "version": "2.2.1",
+        "assets": {
+          "arm64": { "url": "https://github.com/lima-vm/lima/releases/download/v2.2.1/lima-2.2.1-Darwin-arm64.tar.gz", "sha256": "9e9eacce88f37e185c346bad73aa6136f738d8cdf8c3bb23cd42b071824bc66e" },
+          "x64": { "url": "https://github.com/lima-vm/lima/releases/download/v2.2.1/lima-2.2.1-Darwin-x86_64.tar.gz", "sha256": "6b776e4bc41f358e6ee01fefcc78e2eb26f11635a0fcff632234af77a566c6c4" }
+        }
+      },
+      "vm": { "name": "omnirush-box", "cpus_max": 4, "memory_min_gib": 3, "memory_fraction": 0.25, "disk_gib": 30, "idle_stop_min": 30 }
+    }
+  },
+  "texts": {
+    "cli": {
+      "required_line": "This account runs new chats in the OmniRush sandbox (a Linux box set up for you), so sessions can be rebuilt.",
+      "opt_out_refused": "The sandbox is required for new chats on this account; chats started before stay as they were.",
+      "kept_old_chat": "This chat started on this machine before the sandbox was required, so it stays here.",
+      "host_only": "This project only builds on {label} ({things}), so its chats run on {machine}.",
+      "shadows": "In the sandbox, {dirs} are the sandbox's own Linux copies; your {label} copies are left as they are. Install dependencies inside as needed.",
+      "setup_needed": "Setting up the sandbox ({step})…",
+      "cannot_run": "The sandbox can't run on this computer: {why}. This chat runs on {machine}.",
+      "win_setup": "The sandbox needs WSL 2. Run `omnirush sandbox setup` (one Windows admin prompt, then a restart).",
+      "win_restart": "WSL 2 is installed; restart Windows to finish. OmniRush finishes the setup on its next start."
+    },
+    "desktop": {
+      "required_line": "New chats run in the OmniRush sandbox, set up for you.",
+      "opt_out_refused": "Required for new chats on this account. Chats started before keep running where they started.",
+      "kept_old_chat": "Started on this computer before the sandbox was required: it stays here.",
+      "host_only": "This project only builds on {label} ({things}), so its chats run on {machine}.",
+      "shadows": "In the sandbox, {dirs} are the sandbox's own Linux copies; your {label} copies are left as they are.",
+      "cannot_run": "The sandbox can't run on this computer: {why}."
+    },
+    "why": {
+      "firmware_off": "virtualization is turned off in the BIOS/UEFI settings (Intel VT-x or AMD SVM)",
+      "nested_vm": "this Windows runs inside a virtual machine without nested virtualization",
+      "s_mode": "Windows in S mode can't run WSL",
+      "old_windows": "Windows 10 version 2004 (build 19041) or later is needed",
+      "old_macos": "macOS 13 or later is needed",
+      "policy": "your organisation's settings block WSL",
+      "declined": "the setup was cancelled"
+    }
+  }
+}
