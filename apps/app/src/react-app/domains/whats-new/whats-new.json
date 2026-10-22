@@ -3,6 +3,22 @@
   "schema": 1,
   "cli": [
     {
+      "version": "2.6.8",
+      "date": "2026-10-22",
+      "new": [
+        "The sandbox now sets itself up: on macOS OmniRush starts its own small Linux VM (no Docker or other app needed), on Windows `omnirush sandbox setup` installs WSL 2 with one admin prompt and finishes after a restart, and on Linux it offers the one-time permission step.",
+        "Servers you start in the sandbox open on this computer at the same localhost port."
+      ],
+      "improved": [
+        "In the sandbox, node_modules, Python environments and build folders are the sandbox's own Linux copies on macOS and Windows, so your Mac or Windows builds are never overwritten.",
+        "The sandbox image downloads in the background at start, so the first chat in a project waits less.",
+        "The agent carries multi-step tasks through to the end instead of stopping to ask whether to continue."
+      ],
+      "fixed": [
+        "Sandbox: a box with a fuse overlay no longer hangs on package installs, and starting a box never writes outside it."
+      ]
+    },
+    {
       "version": "2.6.7",
       "date": "2026-10-21",
       "new": [
@@ -226,6 +242,22 @@
     }
   ],
   "desktop": [
+    {
+      "version": "3.7.3",
+      "date": "2026-10-22",
+      "new": [
+        "The sandbox now sets itself up: on macOS the app starts its own small Linux VM (no Docker or other app needed), on Windows a Set up button installs WSL 2 with one admin prompt and resumes after the restart, and on Linux an Allow button does the one-time permission step. Progress and clear next steps show in the chat.",
+        "Servers you start in the sandbox open on this computer at the same localhost port."
+      ],
+      "improved": [
+        "Opening a project starts its sandbox right away, and the image downloads in the background, so the first message waits less.",
+        "In the sandbox, node_modules, Python environments and build folders are the sandbox's own Linux copies on macOS and Windows, so your Mac or Windows builds are never overwritten.",
+        "The agent carries multi-step tasks through to the end instead of stopping to ask whether to continue."
+      ],
+      "fixed": [
+        "Sandbox: a box with a fuse overlay no longer hangs on package installs, and starting a box never writes outside it."
+      ]
+    },
     {
       "version": "3.7.2",
       "date": "2026-10-21",
