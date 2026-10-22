@@ -727,6 +727,8 @@ export class BoxService {
   async setup(workspace: BoxWorkspace, action: BoxSetupAction): Promise<BoxStatus> {
     const home = this.home;
     const which = this.platform === "win32" ? "win" : this.platform === "linux" ? "linux" : null;
+    // The admin steps (pkexec, UAC, a restart) run only where the server requires the sandbox.
+    if (!this.required().required && action !== "check") return this.status(workspace, { fresh: true });
     if (action === "linux_allow" && this.platform === "linux") await linuxAllow({ home, env: this.env });
     else if (action === "win_install" && this.platform === "win32") await windowsInstall({ home, env: this.env });
     else if (action === "win_update" && this.platform === "win32") await windowsUpdate({ env: this.env });
