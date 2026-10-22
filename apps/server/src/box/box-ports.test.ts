@@ -255,7 +255,20 @@ describe("box ports on this computer", () => {
     }
   });
 
-  test("boxRun: forwards only for a backend with its own network, unless OMNIRUSH_BOX_PORTS=off; closed with the run", async () => {
+  test("boxRun: no port forwards without the required sandbox (as before), whatever the backend", () => {
+    const box = { ready: true, error: null, endpoint: { host: "127.0.0.1", port: 1, token: "t" }, setTurn() {} };
+    const made: PortForwardOptions[] = [];
+    const stub = (opts: PortForwardOptions): PortForwards => { made.push(opts); return { tick: async () => {}, ports: () => [], close() {} }; };
+    for (const backend of ["docker", "podman", "apple", "wslc"]) {
+      const home = mkdtempSync(path.join(os.tmpdir(), "box-ports-"));
+      mkdirSync(path.join(home, "boxes"), { recursive: true });
+      const plan = { box: { key: "k1", home, root: "/p", runtime: { name: backend, backend, bin: "/x/rt" } }, notice: null, shell: "/x/boxsh", phase: "ready", start: async () => box as unknown as Box } as unknown as ReadyPlan;
+      boxRun(plan, { forwards: stub, env: {}, ping: (async () => ({})) as never }).close();
+    }
+    expect(made.length).toBe(0);
+  });
+
+  test("boxRun under required: forwards only for a backend with its own network, unless OMNIRUSH_BOX_PORTS=off; closed with the run", async () => {
     const box = { ready: true, error: null, endpoint: { host: "127.0.0.1", port: 1, token: "t" }, setTurn() {} };
     const plan = (backend: string): ReadyPlan => {
       const home = mkdtempSync(path.join(os.tmpdir(), "box-ports-"));
@@ -269,7 +282,7 @@ describe("box ports on this computer", () => {
       return { tick: async () => {}, ports: () => [4000], close() { entry.closed = true; } };
     };
     const said: unknown[] = [];
-    const docker = boxRun(plan("docker"), { forwards: stub, env: {}, ping: (async () => ({})) as never, onPort: (e) => said.push(e) });
+    const docker = boxRun(plan("docker"), { forwards: stub, env: {}, ping: (async () => ({})) as never, onPort: (e) => said.push(e), required: true });
     expect(made.length).toBe(1);
     await docker.ready();
     expect(made[0]!.opts.endpoint()).toEqual(box.endpoint);
@@ -279,9 +292,9 @@ describe("box ports on this computer", () => {
     docker.close();
     expect(made[0]!.closed).toBe(true);
     expect(made[0]!.opts.endpoint()).toBeNull();
-    boxRun(plan("bwrap"), { forwards: stub, env: {} }).close();
-    boxRun(plan("wsl"), { forwards: stub, env: {} }).close();
-    boxRun(plan("podman"), { forwards: stub, env: { OMNIRUSH_BOX_PORTS: "off" } }).close();
+    boxRun(plan("bwrap"), { forwards: stub, env: {}, required: true }).close();
+    boxRun(plan("wsl"), { forwards: stub, env: {}, required: true }).close();
+    boxRun(plan("podman"), { forwards: stub, env: { OMNIRUSH_BOX_PORTS: "off" }, required: true }).close();
     expect(made.length).toBe(1);
   });
 });

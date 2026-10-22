@@ -28,6 +28,24 @@ export function requiredFallback(value: unknown): RequiredFallback {
   return value === "native" || value === "native_uncounted" ? value : "native";
 }
 
+/** The required part of a chat's launch record (required.json launch_record). */
+export type RequiredLaunch = { required: true; capable?: boolean; fallback?: RequiredFallback };
+
+/**
+ * The required part of a chat's box.plan outcome (required.json
+ * launch_record; CLI: required.js requiredLaunch): { required, capable,
+ * fallback } so the server can tell a machine that can't run the box
+ * (counted in full, fallback native) from one where it was turned off or
+ * the setup declined (the server's required_fallback).
+ */
+export function requiredLaunch(reason: string, { native, serverFallback }: { native: boolean; serverFallback?: unknown }): RequiredLaunch {
+  const record = rules.launch_record;
+  if (!native) return { required: true, capable: true };
+  if (record.kept.includes(reason)) return { required: true, fallback: "native" };
+  if (record.opted_out.includes(reason)) return { required: true, capable: true, fallback: requiredFallback(serverFallback) };
+  return { required: true, capable: false, fallback: "native" };
+}
+
 /** A desktop text of required.json with its `{name}` parts filled in. */
 export function desktopText(key: keyof typeof rules.texts.desktop, vars: Record<string, string> = {}): string {
   return fill(rules.texts.desktop[key], vars);

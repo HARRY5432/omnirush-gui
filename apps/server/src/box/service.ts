@@ -26,7 +26,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { boxHome, boxKey, boxSnapshotsDir, containerName, installShell, listBoxes, mountReplaced, readRecord, resetBox, savedTurns, type BoxLabel, type BoxLog } from "./box.js";
-import { LABELS, OPT_IN, backendsFor, driverFor } from "./backends/index.js";
+import { LABELS, OPT_IN, REQUIRED_FIRST, backendsFor, driverFor } from "./backends/index.js";
 import { limaHome } from "./backends/lima.js";
 import type { BoxExec } from "./backends/types.js";
 import type { BoxEndpoint } from "./client.js";
@@ -34,7 +34,7 @@ import { hostBuilds, hostBuildsNotice, hostBuildThings, hostRules } from "./host
 import { detectStack, imageFor, type BoxImage } from "./images.js";
 import { portLine } from "./ports.js";
 import { askedBackend, boxRun, planBox, pullActivityAt, pullLog, pullMarker, pulling, pullInBackground, setupWait, resolveMode, saveBackend, serverBackends, serverDefault, serverRequired, shimsDir, type BoxRun, type ProjectBoxMode, type ServerBoxDefault } from "./launch.js";
-import { desktopText, hostOnlyProject, shadowsApply, shadowsNotice, type RequiredFallback } from "./required.js";
+import { desktopText, hostOnlyProject, requiredLaunch, shadowsApply, shadowsNotice, type RequiredFallback } from "./required.js";
 import { cachedWindowsChecks, classifySetup, linuxAllow, resumeWinSetup, saveSetupState, setupState, windowsInstall, windowsRestart, windowsUpdate, type BoxSetup } from "./setup.js";
 import type { BoxInstallLogPaths } from "./install-log.js";
 import { DESKTOP_PROJECTS_FILE } from "./plugin-lib.js";
@@ -145,7 +145,9 @@ export type BoxBackendView = {
 /** The backend choices of a platform: auto, the ranked ids there, the opt-in ones, native. */
 export function backendChoices(platform: NodeJS.Platform = process.platform): Array<{ id: string; label: string }> {
   const optIn = (OPT_IN[platform] ?? []).map((id) => ({ id, label: `${LABELS[id] ?? id} (opt-in)` }));
-  return [{ id: "auto", label: "Automatic" }, ...backendsFor(platform).map((id) => ({ id, label: LABELS[id] ?? id })), ...optIn, { id: "native", label: "Off (this computer)" }];
+  // macOS' own VM: first under the required sandbox, else chosen by name only.
+  const first = (REQUIRED_FIRST[platform] ?? []).map((id) => ({ id, label: LABELS[id] ?? id }));
+  return [{ id: "auto", label: "Automatic" }, ...first, ...backendsFor(platform).map((id) => ({ id, label: LABELS[id] ?? id })), ...optIn, { id: "native", label: "Off (this computer)" }];
 }
 
 export type BoxServiceOptions = {
@@ -177,7 +179,7 @@ type PlanWhy = { reason: "no_runtime" | "helpers_missing" | "downloading"; runti
  * helpers_missing, downloading, planning; `source`: what turned the box on or
  * off (project, server, default, flag, host-builds, chat).
  */
-export type BoxPlanOutcome = { native: boolean; source: string | null; reason: string; runtime?: { name: string | null; code: string | null }; required?: true; fallback?: RequiredFallback };
+export type BoxPlanOutcome = { native: boolean; source: string | null; reason: string; runtime?: { name: string | null; code: string | null }; required?: true; capable?: boolean; fallback?: RequiredFallback };
 
 /** The backend tried and its failure code (bubblewrap's apparmor, no_bwrap, ...; `timeout`), never its text or a path. */
 export function runtimeWhy(runtime: { name?: unknown; code?: unknown; reason?: unknown } | null | undefined): { name: string | null; code: string | null } {
@@ -268,12 +270,12 @@ export class BoxService {
    * The backend detection's inputs: the setting (or OMNIRUSH_BOX_BACKEND) and the server's allowlist.
    * While the sandbox is required, a saved "native" reads as automatic (OMNIRUSH_BOX_BACKEND=native still counts).
    */
-  private detectOptions(): Pick<DetectOptions, "asked" | "allow" | "preferShadows"> {
+  private detectOptions(): Pick<DetectOptions, "asked" | "allow" | "preferShadows" | "required"> {
     const asked = askedBackend({ env: this.env, stateDir: this.options.stateDir });
     const required = this.required().required;
     const backend = asked.source === "setting" && asked.backend === "native" && required ? "auto" : asked.backend;
     // Under required on macOS / Windows the backends that give the box its own build folders (shadows) come first.
-    return { asked: backend, allow: serverBackends(this.options.stateDir), ...(required && shadowsApply(this.platform, this.env) ? { preferShadows: true } : {}) };
+    return { asked: backend, allow: serverBackends(this.options.stateDir), ...(required && shadowsApply(this.platform, this.env) ? { preferShadows: true } : {}), ...(required ? { required: true } : {}) };
   }
 
   private detect(extra: DetectOptions = {}): Promise<RuntimeResult> {
@@ -451,6 +453,8 @@ export class BoxService {
       project.run?.close();
       project.run = boxRun(plan, {
         log: this.log,
+        // Box ports on this computer's 127.0.0.1: only under the required sandbox.
+        required: this.required().required,
         pkglog: this.installLog ? { root: this.installLog.root, bin: this.installLog.bin, py: this.installLog.py } : null,
         tmpRoot: join(this.home, "pending"),
         // boxd stopped while the app ran: started again (installs kept), or once why not and what to do.
@@ -680,13 +684,17 @@ export class BoxService {
    */
   async resumeSetup(): Promise<boolean> {
     if (this.platform !== "win32" || setupState(this.home).win?.state !== "restart") return false;
-    const resumed = await resumeWinSetup({ home: this.home, env: this.env, log: (level, message) => this.log(level, message) }).catch(() => null);
+    // A slow `wsl --update` goes on in the background (setup.ts RESUME_UPDATE_WAIT_MS) and finishes the same way.
+    const ready = async (): Promise<void> => {
+      this.alternatives = null;
+      await this.detect({ fresh: true }).catch(() => null);
+      void this.ensureAll();
+      void this.prefetch().catch(() => false);
+    };
+    const resumed = await resumeWinSetup({ home: this.home, env: this.env, log: (level, message) => this.log(level, message), onReady: () => { this.log("info", "sandbox setup resume", { state: "ready" }); void ready(); } }).catch(() => null);
     this.log("info", "sandbox setup resume", { state: resumed?.state ?? "failed" });
     if (!resumed?.ok) return false;
-    this.alternatives = null;
-    await this.detect({ fresh: true }).catch(() => null);
-    void this.ensureAll();
-    void this.prefetch().catch(() => false);
+    await ready();
     return true;
   }
 
@@ -860,13 +868,12 @@ export class BoxService {
     const mode = await this.mode(workspace).catch(() => null);
     if (!mode) return { native: true, source: null, reason: "plan_failed" };
     const { fallback } = this.required();
-    // Required: every outcome says so; a chat that runs here by the fallback rule (the box cannot run, setup
-    // needed or declined, a box that failed to start) names the fallback the server set (as the CLI's launch event).
-    const required = mode.required ? { required: true as const } : {};
-    const byFallback = new Set(["cannot_run", "setup_needed", "setup_declined", "box_failed"]);
-    const native = (reason: string, extra: Partial<BoxPlanOutcome> = {}): BoxPlanOutcome => ({ native: true, source: mode.source, reason, ...required, ...(mode.required && byFallback.has(reason) ? { fallback } : {}), ...extra });
+    // Required (required.ts requiredLaunch, as the CLI's launch event): whether this machine can run the box and,
+    // on this machine, the fallback in force: `native` where it can't (counted in full), the server's
+    // required_fallback where the box was turned off (OMNIRUSH_BOX=0) or the setup declined.
+    const native = (reason: string, extra: Partial<BoxPlanOutcome> = {}): BoxPlanOutcome => ({ native: true, source: mode.source, reason, ...(mode.required ? requiredLaunch(reason, { native: true, serverFallback: fallback }) : {}), ...extra });
     if (this.nativeChats.has(sessionId)) return native("kept_old_chat", { source: "chat" });
-    if (this.boxedChats.has(sessionId)) return { native: false, source: mode.source, reason: "box", ...required };
+    if (this.boxedChats.has(sessionId)) return { native: false, source: mode.source, reason: "box", ...(mode.required ? requiredLaunch("box", { native: false }) : {}) };
     if (!mode.on) {
       if (mode.required && mode.source === "env") return native("env_off");
       if (mode.source === "host-only") return native("host_only");

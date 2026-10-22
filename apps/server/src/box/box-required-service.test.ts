@@ -92,10 +92,10 @@ describe("required sandbox: the desktop's projects", () => {
     expect(status.setup).toMatchObject({ need: process.platform === "linux" ? "runtime" : expect.any(String), fallback: "native", declined: false });
     // No step this app can run here (no backend at all): the chat runs here, as cannot_run (the CLI's reason too).
     expect(await boxes.beforePrompt("ses_req_none1", workspace)).toBeNull();
-    expect(await boxes.planOutcome("ses_req_none1", workspace)).toMatchObject({ native: true, source: "required", reason: "cannot_run", required: true, fallback: "native" });
+    expect(await boxes.planOutcome("ses_req_none1", workspace)).toMatchObject({ native: true, source: "required", reason: "cannot_run", required: true, capable: false, fallback: "native" });
   });
 
-  test("a box that fails to start under required reports the fallback in force", async () => {
+  test("a box that fails to start under required is a machine that can't run it: fallback native (counted in full)", async () => {
     const stateDir = await temp("state");
     const root = await temp("project");
     const workspace: BoxWorkspace = { id: "ws_fail", path: root, workspaceType: "local" };
@@ -103,7 +103,7 @@ describe("required sandbox: the desktop's projects", () => {
     const boxes = service({ stateDir, workspaces: [workspace], env: { OMNIRUSH_BOX_HOME: await temp("boxhome"), ...NO_RUNTIME } });
     const projects: Map<string, unknown> = Reflect.get(boxes, "projects");
     projects.set(boxKey(root), { run: { ...fakeRun(root, []), native: true }, notice: null, planning: null, nextPlanAt: Date.now() + 60_000, waitingImage: false });
-    expect(await boxes.planOutcome("ses_req_fail1", workspace)).toEqual({ native: true, source: "required", reason: "box_failed", required: true, fallback: "native_uncounted" });
+    expect(await boxes.planOutcome("ses_req_fail1", workspace)).toEqual({ native: true, source: "required", reason: "box_failed", required: true, capable: false, fallback: "native" });
   });
 
   test("planBox under required: a backend slow to answer (a VM booting) is waited for, not \"did not answer in time\"", async () => {
@@ -142,8 +142,8 @@ describe("required sandbox: the desktop's projects", () => {
     expect(await boxes.beforePrompt("ses_req_old1", workspace, { turnsBefore: 3 })).toBeNull();
     await boxes.beforePrompt("ses_req_new1", workspace);
     expect(frozen).toEqual(["ses_req_new1 turn-1"]);
-    expect(await boxes.planOutcome("ses_req_old1", workspace)).toEqual({ native: true, source: "chat", reason: "kept_old_chat", required: true });
-    expect(await boxes.planOutcome("ses_req_new1", workspace)).toEqual({ native: false, source: "required", reason: "box", required: true });
+    expect(await boxes.planOutcome("ses_req_old1", workspace)).toEqual({ native: true, source: "chat", reason: "kept_old_chat", required: true, fallback: "native" });
+    expect(await boxes.planOutcome("ses_req_new1", workspace)).toEqual({ native: false, source: "required", reason: "box", required: true, capable: true });
     expect(JSON.parse(await readFile(join(home, DESKTOP_PROJECTS_FILE), "utf8")).native_chats).toEqual(["ses_req_old1"]);
   });
 
@@ -178,7 +178,7 @@ describe("required sandbox: the desktop's projects", () => {
     rememberServerDefault(stateDir, { local_box: { default: "on", required: true } });
     const workspace: BoxWorkspace = { id: "ws_env", path: root, workspaceType: "local" };
     const off = service({ stateDir, workspaces: [workspace], env: { OMNIRUSH_BOX_HOME: await temp("boxhome"), OMNIRUSH_BOX: "0" } });
-    expect(await off.planOutcome("ses_req_env1", workspace)).toEqual({ native: true, source: "env", reason: "env_off", required: true });
+    expect(await off.planOutcome("ses_req_env1", workspace)).toEqual({ native: true, source: "env", reason: "env_off", required: true, capable: true, fallback: "native" });
 
     const mac = await temp("macproject");
     await mkdir(join(mac, "App.xcodeproj"));
@@ -187,7 +187,7 @@ describe("required sandbox: the desktop's projects", () => {
     const status = await boxes.status(macWs);
     expect(status).toMatchObject({ on: false, source: "host-only", required: true, hostOnly: { things: ["App.xcodeproj"] } });
     expect(status.notice).toContain("only builds on Mac (App.xcodeproj)");
-    expect(await boxes.planOutcome("ses_req_mac1", macWs)).toEqual({ native: true, source: "host-only", reason: "host_only", required: true });
+    expect(await boxes.planOutcome("ses_req_mac1", macWs)).toEqual({ native: true, source: "host-only", reason: "host_only", required: true, fallback: "native" });
 
     // A Mac-built node_modules: required puts the chat in the box anyway (no host-builds gate).
     const built = await temp("builtproject");

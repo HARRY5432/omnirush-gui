@@ -27,7 +27,7 @@
 // Never edits .wslconfig.
 
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -144,6 +144,8 @@ export function classifySetup({ runtime, platform, checks = null, state = {}, fa
   }
   if (platform === "win32") {
     if (entry?.state === "blocked" && entry.why) return cannot(entry.why);
+    // Before the restart WSL says what a PC without virtualization says: the restart step first (CLI: the same).
+    if (entry?.state === "restart" && said.some((reason) => VIRTUALIZATION.test(reason) || /WSL 2 is not enabled/.test(reason))) return { ...base, need: "win_restart" };
     if (said.some((reason) => VIRTUALIZATION.test(reason))) return cannot(blockedWhy(checks));
     const decision = checks ? setupDecision(checks) : { ok: true as const };
     if (!decision.ok) return cannot(decision.why);
@@ -230,15 +232,17 @@ export function setupDecision(checks: Partial<WindowsChecks> | null, { minBuild 
 }
 
 /**
- * What the elevated install's log says: installed (it got to its last
- * line), blocked (virtualization, policy) or failed with a line.
+ * What the elevated install's log says: installed (its last line is `done`:
+ * the install, or the DISM route after it, worked; a virtualization message
+ * wsl.exe printed on the way does not undo that), blocked (virtualization,
+ * policy) or failed with a line. CLI: win-setup.js, the same.
  */
 export function parseInstallLog(text: string): { result: "installed" } | { result: "blocked"; why: CannotRunWhy } | { result: "failed"; line: string } {
   const clean = String(text ?? "").replace(/^\uFEFF/, "").replace(/\u0000/g, "");
-  if (VIRTUALIZATION.test(clean)) return { result: "blocked", why: "firmware_off" };
-  if (POLICY.test(clean)) return { result: "blocked", why: "policy" };
   const lines = clean.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   if (lines.at(-1) === "done") return { result: "installed" };
+  if (VIRTUALIZATION.test(clean)) return { result: "blocked", why: "firmware_off" };
+  if (POLICY.test(clean)) return { result: "blocked", why: "policy" };
   const failed = [...lines].reverse().find((l) => /error|failed|denied/i.test(l));
   return { result: "failed", line: (failed ?? lines.at(-1) ?? "no output").slice(0, 240) };
 }
@@ -268,20 +272,21 @@ export async function windowsInstall({ home, env = process.env, run = runCommand
   const checks = given ?? await windowsChecks({ run, env, release });
   const decision = setupDecision(checks);
   if (!decision.ok) return saved({ state: "blocked", why: decision.why });
-  const base = path.join(tmpDir, `omnirush-wsl-setup-${process.pid}-${now}`);
-  const ps1 = `${base}.ps1`;
-  const logFile = `${base}.log`;
-  writeFileSync(ps1, `${WIN.install_script.join("\r\n")}\r\n`, "utf8");
-  writeFileSync(logFile, "", "utf8");
+  // The elevated script: in a new folder of its own (a random name, made only for this run) and
+  // created there exclusively, so nothing else can put its own script in its place first.
+  const dir = mkdtempSync(path.join(tmpDir, "omnirush-wsl-setup-"));
+  const ps1 = path.join(dir, "setup.ps1");
+  const logFile = path.join(dir, "setup.log");
   let text = "";
   let res: Awaited<ReturnType<RunCommand>> | null = null;
   try {
+    writeFileSync(ps1, `${WIN.install_script.join("\r\n")}\r\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    writeFileSync(logFile, "", { encoding: "utf8", flag: "wx", mode: 0o600 });
     res = await run(powershellExe(env), elevatedArgs(ps1, logFile), { env, timeoutMs: 30 * 60_000 });
     try { text = readFileSync(logFile, "utf8"); } catch { text = ""; }
     try { if (text.trim()) writeFileSync(installLogFile(home), text, "utf8"); } catch { /* best effort */ }
   } finally {
-    rmSync(ps1, { force: true });
-    rmSync(logFile, { force: true });
+    rmSync(dir, { recursive: true, force: true });
   }
   // No log at all and a failed Start-Process: the admin prompt was answered "No" (or never shown).
   if (!text.trim() && res?.code !== 0) return saved({ state: "declined", message: "The administrator prompt was cancelled; nothing changed." });
@@ -306,37 +311,53 @@ export function windowsRestart({ run = runCommand }: { run?: RunCommand } = {}):
  * as unable, with why (nested_vm when this PC is a VM, else firmware_off).
  * WSL 1 notes in `wsl --status` are not "WSL 2 off".
  */
-export async function resumeWinSetup({ home, env = process.env, run = runCommand, log = () => {}, now = Date.now(), bin: given = null, checks = null, bootedAt = now - os.uptime() * 1000 }: { home: string; env?: NodeJS.ProcessEnv; run?: RunCommand; log?: (level: "info" | "warn", message: string) => void; now?: number; bin?: string | null; checks?: Partial<WindowsChecks> | null; bootedAt?: number }): Promise<{ ok: boolean; state: "none" | "restart" | "blocked" | "ready"; why?: CannotRunWhy }> {
+export async function resumeWinSetup({ home, env = process.env, run = runCommand, log = () => {}, now = Date.now(), bin: given = null, checks = null, bootedAt = now - os.uptime() * 1000, updateWaitMs = RESUME_UPDATE_WAIT_MS, onReady = () => {} }: { home: string; env?: NodeJS.ProcessEnv; run?: RunCommand; log?: (level: "info" | "warn", message: string) => void; now?: number; bin?: string | null; checks?: Partial<WindowsChecks> | null; bootedAt?: number; updateWaitMs?: number; onReady?: (result: ResumeResult) => void }): Promise<ResumeResult> {
   const marker = setupState(home).win;
   if (marker?.state !== "restart") return { ok: false, state: "none" };
   // Before the restart WSL says the same as on a PC that cannot run a VM: only after it does that mean "cannot".
   const restarted = !Number.isFinite(Number(marker.at)) || bootedAt > Number(marker.at);
   const bin = given ?? wslExe({ env });
   if (!bin) return { ok: false, state: "restart" };
-  let status = await wslCall(bin, ["--status"], { run, env, timeoutMs: 30_000 });
-  let said = withoutWsl1Notes(`${status.stdout}\n${status.stderr}`);
-  if (/wsl --update|requires an update|kernel (?:file|component)|update the wsl/i.test(said)) {
-    log("info", "sandbox setup resume: wsl --update");
-    await wslCall(bin, ["--update", "--web-download"], { run, env, timeoutMs: 10 * 60_000 });
-    status = await wslCall(bin, ["--status"], { run, env, timeoutMs: 30_000 });
-    said = withoutWsl1Notes(`${status.stdout}\n${status.stderr}`);
-  }
-  const noVm = VIRTUALIZATION.test(said) || NO_VM_START.test(said);
-  if (restarted && noVm) {
-    const why = blockedWhy(checks ?? await windowsChecks({ run, env }).catch(() => null));
-    saveSetupState(home, "win", { state: "blocked", why }, { now });
-    log("info", `sandbox setup resume: WSL 2 cannot start a VM here (${why})`);
-    return { ok: false, state: "blocked", why };
-  }
-  if ((!restarted && noVm) || /not installed|is not enabled|optional component|WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED/i.test(said)) {
-    log("info", "sandbox setup resume: WSL 2 not on yet (restart pending)");
-    return { ok: false, state: "restart" };
-  }
-  saveSetupState(home, "win", null, { now });
-  await run("reg.exe", ["delete", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce", "/v", WIN.resume_run_once, "/f"], { env, timeoutMs: 15_000 });
-  log("info", "sandbox setup resumed: WSL 2 ready");
-  return { ok: true, state: "ready" };
+  const status = async (): Promise<string> => {
+    const res = await wslCall(bin, ["--status"], { run, env, timeoutMs: 30_000 });
+    return withoutWsl1Notes(`${res.stdout}\n${res.stderr}`);
+  };
+  const decide = async (said: string): Promise<ResumeResult> => {
+    const noVm = VIRTUALIZATION.test(said) || NO_VM_START.test(said);
+    if (restarted && noVm) {
+      const why = blockedWhy(checks ?? await windowsChecks({ run, env }).catch(() => null));
+      saveSetupState(home, "win", { state: "blocked", why }, { now });
+      log("info", `sandbox setup resume: WSL 2 cannot start a VM here (${why})`);
+      return { ok: false, state: "blocked", why };
+    }
+    if ((!restarted && noVm) || /not installed|is not enabled|optional component|WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED/i.test(said)) {
+      log("info", "sandbox setup resume: WSL 2 not on yet (restart pending)");
+      return { ok: false, state: "restart" };
+    }
+    saveSetupState(home, "win", null, { now });
+    await run("reg.exe", ["delete", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce", "/v", WIN.resume_run_once, "/f"], { env, timeoutMs: 15_000 });
+    log("info", "sandbox setup resumed: WSL 2 ready");
+    return { ok: true, state: "ready" };
+  };
+  const said = await status();
+  if (!/wsl --update|requires an update|kernel (?:file|component)|update the wsl/i.test(said)) return decide(said);
+  // `wsl --update` can take minutes (a download): waited for up to updateWaitMs, then it goes on in
+  // the background and finishes the setup itself (onReady). CLI: win-setup.js, the same.
+  log("info", "sandbox setup resume: wsl --update");
+  const finishing = wslCall(bin, ["--update", "--web-download"], { run, env, timeoutMs: 10 * 60_000 }).then(async () => decide(await status()));
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const waited = await Promise.race([finishing.then((result) => ({ result })), new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), updateWaitMs); timer.unref?.(); })]);
+  if (timer) clearTimeout(timer);
+  if (waited) return waited.result;
+  log("info", "sandbox setup resume: wsl --update goes on in the background");
+  finishing.then((result) => { if (result.ok) { try { onReady(result); } catch { /* the caller's */ } } }).catch((error) => log("warn", `sandbox setup resume failed: ${error instanceof Error ? error.message : String(error)}`));
+  return { ok: false, state: "updating" };
 }
+
+export type ResumeResult = { ok: boolean; state: "none" | "restart" | "blocked" | "ready" | "updating"; why?: CannotRunWhy };
+
+/** How long the resume waits for its `wsl --update` before it goes on in the background. */
+export const RESUME_UPDATE_WAIT_MS = 2 * 60_000;
 
 // --- Linux (CLI: backends/bwrap.js enableBwrap) ----------------------------------------------
 

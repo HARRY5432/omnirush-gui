@@ -7,6 +7,12 @@
     "fallbacks": ["native", "native_uncounted"],
     "default_fallback": "native"
   },
+  "launch_record": {
+    "about": "What client.launch `box` says under required: {required: true, reason, fallback, capable}. In the box: capable true, no fallback. cannot_run: this machine can't run the box (no virtualization, setup not possible or not done yet, a box that failed to start): capable false, fallback native (counted in full). opted_out: it could, but the box was turned off (--no-sandbox / OMNIRUSH_BOX=0) or the setup declined: capable true, fallback = the server's required_fallback. kept: an old chat or a host-only project, on this machine as before: fallback native, capable not checked (absent). Any other reason on this machine reads as cannot_run.",
+    "cannot_run": ["cannot_run", "box_failed", "setup_needed"],
+    "opted_out": ["env_off", "setup_declined"],
+    "kept": ["kept_old_chat", "host_only"]
+  },
   "reasons": {
     "required": "box",
     "kept_old_chat": "kept_old_chat",
@@ -74,17 +80,25 @@
     },
     "win32": {
       "min_build": 19041,
-      "virtualization_errors": "0x80370102|0x80370114|HCS_E_HYPERV_NOT_INSTALLED|Please enable the Virtual Machine Platform|virtualization is enabled in the BIOS|WSL_E_VM_MODE_INVALID_STATE",
+      "virtualization_errors": "0x80370102|0x80370114|HCS_E_HYPERV_NOT_INSTALLED|Please enable the Virtual Machine Platform|virtualization is enabled in the BIOS|WSL_E_VM_MODE_INVALID_STATE|virtualization is not enabled on this machine",
       "install_script": [
         "$ErrorActionPreference = 'Stop'",
         "$log = $args[0]",
-        "try { & wsl.exe --install --no-distribution 2>&1 | Out-File -Append -Encoding utf8 $log; $code = $LASTEXITCODE } catch { $code = 1 }",
-        "if ($code -ne 0) {",
-        "  dism.exe /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart | Out-File -Append -Encoding utf8 $log",
-        "  dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart | Out-File -Append -Encoding utf8 $log",
-        "  & wsl.exe --update --web-download 2>&1 | Out-File -Append -Encoding utf8 $log",
+        "function Add-Log([string]$line) { try { $line | Out-File -Append -Encoding utf8 $log } catch {} }",
+        "function Invoke-Native([string]$exe, [string[]]$argv) {",
+        "  $ErrorActionPreference = 'Continue'",
+        "  $global:LASTEXITCODE = 1",
+        "  try { & $exe @argv 2>&1 | ForEach-Object { Add-Log \"$_\" } } catch { Add-Log \"${exe}: $_\" }",
+        "  return [int]$global:LASTEXITCODE",
         "}",
-        "'done' | Out-File -Append -Encoding utf8 $log"
+        "$code = Invoke-Native 'wsl.exe' @('--install', '--no-distribution')",
+        "if ($code -ne 0) {",
+        "  $a = Invoke-Native 'dism.exe' @('/online', '/enable-feature', '/featurename:Microsoft-Windows-Subsystem-Linux', '/all', '/norestart')",
+        "  $b = Invoke-Native 'dism.exe' @('/online', '/enable-feature', '/featurename:VirtualMachinePlatform', '/all', '/norestart')",
+        "  $null = Invoke-Native 'wsl.exe' @('--update', '--web-download')",
+        "  if (($a -eq 0 -or $a -eq 3010) -and ($b -eq 0 -or $b -eq 3010)) { $code = 0 } else { Add-Log \"dism exit $a $b\" }",
+        "}",
+        "if ($code -eq 0) { Add-Log 'done' } else { Add-Log \"failed $code\" }"
       ],
       "resume_run_once": "OmniRushSandboxSetup"
     },
@@ -123,7 +137,8 @@
       "setup_needed": "Setting up the sandbox ({step})…",
       "cannot_run": "The sandbox can't run on this computer: {why}. This chat runs on {machine}.",
       "win_setup": "The sandbox needs WSL 2. Run `omnirush sandbox setup` (one Windows admin prompt, then a restart).",
-      "win_restart": "WSL 2 is installed; restart Windows to finish. OmniRush finishes the setup on its next start."
+      "win_restart": "WSL 2 is installed; restart Windows to finish. OmniRush finishes the setup on its next start.",
+      "win_updating": "WSL is updating for the sandbox in the background; this chat runs on this PC, the next one in the sandbox."
     },
     "desktop": {
       "required_line": "New chats run in the OmniRush sandbox, set up for you.",

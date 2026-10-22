@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import path, { join } from "node:path";
 
 import type { RunCommand } from "./run.js";
 import { ENABLE_HINT, probeWslDistro, withoutWsl1Notes } from "./backends/wsl.js";
-import { blockedWhy, classifySetup, elevatedArgs, installLogFile, linuxAllow, linuxAllowScript, parseInstallLog, recentlyDeclined, resumeWinSetup, runOnceArgs, saveSetupState, setupDecision, setupState, windowsBuild, windowsInstall } from "./setup.js";
+import { RESUME_UPDATE_WAIT_MS, blockedWhy, classifySetup, elevatedArgs, installLogFile, linuxAllow, linuxAllowScript, parseInstallLog, recentlyDeclined, resumeWinSetup, runOnceArgs, saveSetupState, setupDecision, setupState, windowsBuild, windowsInstall } from "./setup.js";
+import { REQUIRED_RULES } from "./required.js";
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -67,8 +68,10 @@ describe("sandbox setup: what is needed", () => {
     expect(setupDecision({ ...checks, firmware: false, model: "innotek GmbH VirtualBox" })).toEqual({ ok: false, why: "nested_vm" });
     expect(setupDecision(null)).toEqual({ ok: true });
     expect(parseInstallLog("\uFEFFInstalling\r\nThe operation completed successfully.\r\ndone\r\n")).toEqual({ result: "installed" });
-    expect(parseInstallLog("Error: 0x80370102 Please enable the Virtual Machine Platform\r\ndone")).toEqual({ result: "blocked", why: "firmware_off" });
-    expect(parseInstallLog("This feature is blocked by group policy\r\ndone")).toEqual({ result: "blocked", why: "policy" });
+    expect(parseInstallLog("Error: 0x80370102 Please enable the Virtual Machine Platform\r\nfailed 1")).toEqual({ result: "blocked", why: "firmware_off" });
+    expect(parseInstallLog("This feature is blocked by group policy\r\nfailed 1")).toEqual({ result: "blocked", why: "policy" });
+    // wsl --install said "enable the Virtual Machine Platform", the DISM route then turned it on: installed (CLI: the same).
+    expect(parseInstallLog("Please enable the Virtual Machine Platform Windows feature and ensure virtualization is enabled in the BIOS.\r\nThe operation completed successfully.\r\ndone\r\n")).toEqual({ result: "installed" });
     expect(parseInstallLog("Error: access denied")).toEqual({ result: "failed", line: "Error: access denied" });
   });
 
@@ -84,18 +87,27 @@ describe("sandbox setup: what is needed", () => {
     const home = await temp("home");
     const calls: string[] = [];
     let script = "";
+    let scriptPath = "";
     const run: RunCommand = async (bin, args) => {
       calls.push(bin.split(/[\\/]/).pop() ?? bin);
       const m = /-File "([^"]+)" "([^"]+)"/.exec(args.at(-1) ?? "");
       if (m?.[1] && m[2]) {
+        scriptPath = m[1];
         script = await readFile(m[1], "utf8");
         await writeFile(m[2], "Installing: Virtual Machine Platform\r\ndone\r\n");
       }
       return ok;
     };
-    const entry = await windowsInstall({ home, env: { SystemRoot: "C:\\Windows" }, run, exe: "C:\\App\\OmniRush.ai.exe", tmpDir: await temp("tmp"), checks });
+    const tmpDir = await temp("tmp");
+    const entry = await windowsInstall({ home, env: { SystemRoot: "C:\\Windows" }, run, exe: "C:\\App\\OmniRush.ai.exe", tmpDir, checks });
+    // The script sat in a folder made for this run only (random name), never at a name known in advance; gone after.
+    expect(scriptPath.split(/[\\/]/).pop()).toBe("setup.ps1");
+    expect(path.basename(path.dirname(scriptPath))).toMatch(/^omnirush-wsl-setup-[A-Za-z0-9]{6}$/);
+    expect(path.dirname(path.dirname(scriptPath))).toBe(tmpDir);
+    expect(await readdir(tmpDir)).toEqual([]);
     expect(entry.state).toBe("restart");
-    expect(script).toContain("wsl.exe --install --no-distribution");
+    expect(script).toContain("Invoke-Native 'wsl.exe' @('--install', '--no-distribution')");
+    expect(script).toBe(`${REQUIRED_RULES.setup.win32.install_script.join("\r\n")}\r\n`);
     expect(script.endsWith("\r\n")).toBe(true);
     expect(calls).toEqual(["powershell.exe", "reg.exe"]);
     expect(setupState(home).win?.state).toBe("restart");
@@ -161,11 +173,11 @@ describe("sandbox setup: what is needed", () => {
       return ok;
     };
     const vm = { ...checks, build: 26100, hypervisor: true, model: "QEMU Standard PC (Q35 + ICH9, 2009)" };
-    expect(await windowsInstall({ home, run: install("Error code: Wsl/0x80370102\r\ndone\r\n"), exe: null, tmpDir, checks: vm })).toMatchObject({ state: "blocked", why: "nested_vm" });
+    expect(await windowsInstall({ home, run: install("Error code: Wsl/0x80370102\r\ndism exit 50 50\r\nfailed 1\r\n"), exe: null, tmpDir, checks: vm })).toMatchObject({ state: "blocked", why: "nested_vm" });
     expect(await readFile(installLogFile(home), "utf8")).toContain("0x80370102");
     expect(installLogFile(home)).toBe(join(home, "setup-win.log"));
     expect(await readdir(tmpDir)).toEqual([]);
-    expect(await windowsInstall({ home, run: install("Error code: Wsl/0x80370102\r\ndone\r\n"), exe: null, tmpDir, checks: { ...vm, model: "LENOVO 20XW" } })).toMatchObject({ state: "blocked", why: "firmware_off" });
+    expect(await windowsInstall({ home, run: install("Error code: Wsl/0x80370102\r\nfailed 1\r\n"), exe: null, tmpDir, checks: { ...vm, model: "LENOVO 20XW" } })).toMatchObject({ state: "blocked", why: "firmware_off" });
     const failed = await windowsInstall({ home, run: install("Error: access denied\r\n"), exe: null, tmpDir, checks: vm });
     expect(failed).toMatchObject({ state: "failed" });
     expect(failed.message).toBe(`The WSL install did not finish: Error: access denied (log: ${installLogFile(home)})`);
@@ -208,5 +220,37 @@ describe("sandbox setup: what is needed", () => {
     expect(script).toContain("profile omnirush-bwrap /usr/local/lib/omnirush/bwrap flags=(unconfined)");
     expect(script).toContain('"$parser" -r "$prof"');
     expect(script).not.toContain("sysctl");
+  });
+
+  test("resume: a slow `wsl --update` is waited for a short while, then goes on in the background and finishes the setup (CLI: the same)", async () => {
+    const home = await temp("home");
+    saveSetupState(home, "win", { state: "restart" });
+    let finish: () => void = () => {};
+    let updated = false;
+    const run: RunCommand = async (_bin, args) => {
+      if (args[0] === "--update") { await new Promise<void>((resolve) => { finish = resolve; }); updated = true; return ok; }
+      if (args[0] === "--status") return updated ? { code: 0, stdout: "Default Version: 2\n", stderr: "" } : { code: 1, stdout: "WSL 2 requires an update to its kernel component. Run 'wsl --update'.\n", stderr: "" };
+      return ok;
+    };
+    let ready: unknown = null;
+    const alive = setInterval(() => {}, 1_000);
+    const started = Date.now();
+    const res = await resumeWinSetup({ home, bin: "wsl.exe", run, bootedAt: Date.now() + 60_000, updateWaitMs: 50, onReady: (r) => { ready = r; } });
+    expect(res).toEqual({ ok: false, state: "updating" });
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(setupState(home).win?.state).toBe("restart");
+    finish();
+    for (let i = 0; i < 50 && !ready; i += 1) await new Promise((r) => setTimeout(r, 10));
+    clearInterval(alive);
+    expect(ready).toEqual({ ok: true, state: "ready" });
+    expect(setupState(home).win).toBeUndefined();
+    expect(RESUME_UPDATE_WAIT_MS).toBe(120_000);
+  });
+
+  test("install script: every native call guarded (PowerShell 5.1 stops on a redirected stderr line under Stop); done only after it worked", () => {
+    const script = REQUIRED_RULES.setup.win32.install_script;
+    for (const line of script.filter((l) => /\b(?:wsl|dism)\.exe\b/.test(l))) expect(line).toMatch(/Invoke-Native '(?:wsl|dism)\.exe'/);
+    expect(script.every((line) => !/2>&1/.test(line) || /try \{/.test(line))).toBe(true);
+    expect(script.at(-1)).toBe("if ($code -eq 0) { Add-Log 'done' } else { Add-Log \"failed $code\" }");
   });
 });

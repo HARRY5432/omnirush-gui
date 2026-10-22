@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { desktopText, hostOnlyProject, requiredFallback, whyText } from "./required.js";
+import { desktopText, hostOnlyProject, requiredFallback, requiredLaunch, whyText } from "./required.js";
 
 describe("required sandbox rules", () => {
   test("fallback and texts", () => {
@@ -33,5 +33,13 @@ describe("required sandbox rules", () => {
     expect(hostOnlyProject(swift, { platform: "darwin" })?.things).toEqual(["Package.swift"]);
     writeFileSync(path.join(swift, "Package.swift"), "let package = Package(name: \"x\")");
     expect(hostOnlyProject(swift, { platform: "darwin" })).toBeNull();
+  });
+
+  test("launch record: a machine that can't run the box says so (fallback native, counted); turned off or declined gets the server's fallback (CLI: the same)", () => {
+    expect(requiredLaunch("box", { native: false })).toEqual({ required: true, capable: true });
+    for (const reason of ["cannot_run", "box_failed", "setup_needed", "planning", "downloading"]) expect(requiredLaunch(reason, { native: true, serverFallback: "native_uncounted" })).toEqual({ required: true, capable: false, fallback: "native" });
+    for (const reason of ["env_off", "setup_declined"]) expect(requiredLaunch(reason, { native: true, serverFallback: "native_uncounted" })).toEqual({ required: true, capable: true, fallback: "native_uncounted" });
+    expect(requiredLaunch("env_off", { native: true, serverFallback: "bogus" }).fallback).toBe("native");
+    for (const reason of ["kept_old_chat", "host_only"]) expect(requiredLaunch(reason, { native: true, serverFallback: "native_uncounted" })).toEqual({ required: true, fallback: "native" });
   });
 });
