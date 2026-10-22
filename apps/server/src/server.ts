@@ -1427,6 +1427,8 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
       everyMs: BOX_DEFAULT_REFRESH_MS,
     });
   }
+  // Windows, back after "Set up (one restart)": the setup finishes (WSL update, then the usual box start).
+  void boxes.resumeSetup().catch(() => false);
   void boxes.ensureAll();
   // The server asks for the sandbox images ahead (local_box.setup.prefetch): the base image too, in the background.
   void boxes.prefetch().catch(() => false);

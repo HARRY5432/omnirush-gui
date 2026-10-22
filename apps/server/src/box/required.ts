@@ -68,98 +68,39 @@ function entries(dir: string, read: (dir: string) => Dirent[]): Dirent[] {
 
 /**
  * A project that only builds on this OS (an Xcode project on macOS; a WPF,
- * WinForms or MAUI app, a C++ .vcxproj on Windows): the markers it has (the
- * project root and one level down), else null. Linux: never.
+ * WinForms or MAUI app, a C++ .vcxproj on Windows): its markers, the root
+ * first, then one level down (CLI: required.js hostOnly), else null. Linux:
+ * never. Bounded: a couple of directory reads and a few small files.
  */
-export function hostOnlyProject(root: string, { platform = process.platform, readDir = (dir: string) => readdirSync(dir, { withFileTypes: true }), readHead = head }: { platform?: string; readDir?: (dir: string) => Dirent[]; readHead?: (file: string) => string } = {}): { things: string[]; notice: string } | null {
+export function hostOnlyProject(root: string, { platform = process.platform, readDir = (dir: string) => readdirSync(dir, { withFileTypes: true }), readHead = head, maxFiles = 40 }: { platform?: string; readDir?: (dir: string) => Dirent[]; readHead?: (file: string) => string; maxFiles?: number } = {}): { things: string[]; notice: string } | null {
   const table: Record<string, HostOnlyRules> = { darwin: rules.host_only.darwin, win32: rules.host_only.win32 };
   const set = table[platform];
   if (!set) return null;
   const things: string[] = [];
-  const look = (dir: string, depth: number) => {
+  let read = 0;
+  const contains = (file: string, pattern: string) => {
+    if (read >= maxFiles) return false;
+    read += 1;
+    return new RegExp(pattern).test(readHead(file));
+  };
+  const check = (dir: string, prefix: string) => {
     for (const entry of entries(dir, readDir)) {
-      if (things.length >= 3) return;
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        if (set.dirs_suffix.some((suffix) => entry.name.endsWith(suffix))) things.push(entry.name);
-        else if (depth === 0 && !entry.name.startsWith(".") && entry.name !== "node_modules") look(full, 1);
-        continue;
-      }
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory() && set.dirs_suffix.some((suffix) => entry.name.endsWith(suffix))) { things.push(rel); continue; }
       if (!entry.isFile()) continue;
-      if (set.files.includes(entry.name)) { things.push(entry.name); continue; }
-      const pattern = set.file_patterns.find((p) => (p.name ? entry.name === p.name : p.suffix ? entry.name.endsWith(p.suffix) : false));
-      if (pattern && new RegExp(pattern.contains).test(readHead(full))) things.push(entry.name);
+      if (set.files.includes(entry.name)) { things.push(rel); continue; }
+      for (const pattern of set.file_patterns) {
+        const named = pattern.name ? entry.name === pattern.name : pattern.suffix ? entry.name.endsWith(pattern.suffix) : false;
+        if (named && contains(path.join(dir, entry.name), pattern.contains)) { things.push(rel); break; }
+      }
     }
   };
-  look(root, 0);
+  check(root, "");
+  for (const entry of entries(root, readDir)) {
+    if (things.length > 0) break;
+    if (entry.isDirectory() && !entry.name.startsWith(".") && !rules.shadows.skip_dirs.includes(entry.name) && !set.dirs_suffix.some((suffix) => entry.name.endsWith(suffix))) check(path.join(root, entry.name), entry.name);
+  }
   if (!things.length) return null;
   const host = HOST_BUILD_RULES.hosts[platform];
-  return { things, notice: desktopText("host_only", { label: host?.label ?? platform, things: things.join(", "), machine: host?.machine ?? "this computer" }) };
-}
-
-/** What a Windows machine says about running WSL 2 (PowerShell CIM, the build, S mode). */
-export type WindowsFacts = {
-  build: number | null;
-  hypervisorPresent: boolean | null;
-  firmwareEnabled: boolean | null;
-  /** Win32_ComputerSystem Model / Manufacturer (a VM guest names its hypervisor). */
-  model: string | null;
-  sMode: boolean | null;
-  /** WSL's own output (`wsl --status`, the setup log), checked for a virtualization error. */
-  wslSaid?: string | null;
-  /** WSL is blocked by policy (the setup log, `wsl` output). */
-  policy?: boolean;
-};
-
-const VM_MODEL = /virtual machine|vmware|virtualbox|kvm|qemu|hvm domu|parallels|xen|bochs/i;
-
-/**
- * Why WSL 2 cannot run on this Windows (required.json texts.why keys), or
- * null when nothing rules it out. A running hypervisor is a pass (the
- * firmware flag reads false while Hyper-V runs).
- */
-export function windowsWhy(facts: WindowsFacts): CannotRunWhy | null {
-  if (facts.sMode) return "s_mode";
-  if (facts.build !== null && facts.build < rules.setup.win32.min_build) return "old_windows";
-  if (facts.policy) return "policy";
-  const vmError = Boolean(facts.wslSaid && virtualizationError(facts.wslSaid));
-  if (facts.hypervisorPresent === true && !vmError) return null;
-  if (facts.firmwareEnabled === false || vmError) return facts.model && VM_MODEL.test(facts.model) ? "nested_vm" : "firmware_off";
-  return null;
-}
-
-/** Whether WSL's output is one of its "no virtualization" errors. */
-export function virtualizationError(text: string): boolean {
-  return new RegExp(rules.setup.win32.virtualization_errors, "i").test(text);
-}
-
-/** The PowerShell that reads the facts windowsWhy needs (one JSON line). */
-export const WINDOWS_FACTS_SCRIPT = [
-  "$ErrorActionPreference = 'SilentlyContinue'",
-  "$cpu = Get-CimInstance Win32_Processor | Select-Object -First 1",
-  "$cs = Get-CimInstance Win32_ComputerSystem",
-  "$s = (Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\CI\\Policy' -Name SkuPolicyRequired).SkuPolicyRequired",
-  "[pscustomobject]@{ build = [Environment]::OSVersion.Version.Build; hypervisor = $cs.HypervisorPresent; firmware = $cpu.VirtualizationFirmwareEnabled; model = \"$($cs.Manufacturer) $($cs.Model)\"; smode = ($s -eq 1) } | ConvertTo-Json -Compress",
-].join("; ");
-
-/** The facts from WINDOWS_FACTS_SCRIPT's output (unknown fields: null). */
-export function parseWindowsFacts(stdout: string): WindowsFacts {
-  let value: Record<string, unknown> = {};
-  try {
-    const parsed: unknown = JSON.parse(String(stdout).trim().split("\n").pop() ?? "");
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) value = Object.fromEntries(Object.entries(parsed));
-  } catch { /* nothing known */ }
-  const bool = (v: unknown) => (typeof v === "boolean" ? v : null);
-  return {
-    build: typeof value.build === "number" ? value.build : null,
-    hypervisorPresent: bool(value.hypervisor),
-    firmwareEnabled: bool(value.firmware),
-    model: typeof value.model === "string" ? value.model.trim() || null : null,
-    sMode: bool(value.smode),
-  };
-}
-
-/** The elevated setup script (required.json setup.win32.install_script) as a .ps1 file's text. */
-export function windowsInstallScript(): string {
-  return `${rules.setup.win32.install_script.join("\r\n")}\r\n`;
+  return { things, notice: desktopText("host_only", { label: host?.label ?? platform, things: things.slice(0, 3).join(", "), machine: host?.machine ?? "this computer" }) };
 }

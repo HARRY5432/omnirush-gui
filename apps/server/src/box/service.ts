@@ -32,7 +32,7 @@ import { hostBuilds, hostBuildsNotice, hostBuildThings, hostRules } from "./host
 import { detectStack, imageFor, type BoxImage } from "./images.js";
 import { askedBackend, boxRun, planBox, pullLog, pullMarker, pulling, pullInBackground, resolveMode, saveBackend, serverBackends, serverDefault, serverRequired, shimsDir, type BoxRun, type ProjectBoxMode, type ServerBoxDefault } from "./launch.js";
 import { desktopText, hostOnlyProject, type RequiredFallback } from "./required.js";
-import { classifySetup, linuxAllow, readSetupState, setupDone, windowsFacts, windowsInstall, windowsRestart, windowsUpdate, writeSetupState, type BoxSetup } from "./setup.js";
+import { cachedWindowsChecks, classifySetup, linuxAllow, resumeWinSetup, saveSetupState, setupState, windowsInstall, windowsRestart, windowsUpdate, type BoxSetup } from "./setup.js";
 import type { BoxInstallLogPaths } from "./install-log.js";
 import { DESKTOP_PROJECTS_FILE } from "./plugin-lib.js";
 import { BUILDATHON_OFFER_NOTICE, buildathonBoxFor, buildathonProjectsFile, LESS_REPRO_NOTICE } from "../buildathon-repro.js";
@@ -613,8 +613,6 @@ export class BoxService {
       : downloading || (!present && !container?.exists) ? "downloading"
       : project?.notice ? "unavailable" : "starting";
     const setup = needed && on && state !== "ready" ? await this.setupFor(runtime, { fresh }) : null;
-    // Ready: a setup step that led here is finished (its state and the RunOnce value go).
-    if (needed && state === "ready") await setupDone(this.home, { platform: this.platform }).catch(() => undefined);
     return {
       ...base,
       state,
@@ -637,23 +635,29 @@ export class BoxService {
     };
   }
 
-  /** What the sandbox needs here before it can run (the setup screen); Windows facts are read (and cached) for it. */
+  /** What the sandbox needs here before it can run (the setup screen); this PC's checks are read (and cached) for it on Windows. */
   async setupFor(runtime: RuntimeResult | null, { fresh = false }: { fresh?: boolean } = {}): Promise<BoxSetup> {
-    const state = readSetupState(this.home);
-    const facts = this.platform === "win32" && runtime && !runtime.ok ? await windowsFacts({ fresh }).catch(() => null) : null;
-    const setup = classifySetup({ runtime, platform: this.platform, facts, state, fallback: this.required().fallback });
-    // Back after the restart, and WSL asks for an update: run it once, in the background.
-    if (setup.need === "win_update" && state.win?.state === "installed" && !state.win.update && !this.updating) {
-      this.updating = windowsUpdate({ home: this.home }).catch(() => null).finally(() => {
-        this.updating = null;
-        this.alternatives = null;
-        void this.ensureAll();
-      });
-    }
-    return setup;
+    const checks = this.platform === "win32" && runtime && !runtime.ok ? await cachedWindowsChecks({ fresh }).catch(() => null) : null;
+    return classifySetup({ runtime, platform: this.platform, checks, state: setupState(this.home), fallback: this.required().fallback });
   }
 
-  private updating: Promise<unknown> | null = null;
+  /**
+   * App start on Windows after "Set up (one restart)" (the resume marker):
+   * `wsl --update` when WSL asks for it, then every project is planned (the
+   * distro import and the image download follow). Never throws.
+   */
+  async resumeSetup(): Promise<boolean> {
+    if (this.platform !== "win32" || setupState(this.home).win?.state !== "restart") return false;
+    const resumed = await resumeWinSetup({ home: this.home, env: this.env, log: (level, message) => this.log(level, message) }).catch(() => null);
+    this.log("info", "sandbox setup resume", { state: resumed?.state ?? "failed" });
+    if (!resumed?.ok) return false;
+    this.alternatives = null;
+    await this.detect({ fresh: true }).catch(() => null);
+    void this.ensureAll();
+    void this.prefetch().catch(() => false);
+    return true;
+  }
+
 
   /**
    * Try again now (the card's retry): a box that failed to start, or a
@@ -682,12 +686,13 @@ export class BoxService {
    */
   async setup(workspace: BoxWorkspace, action: BoxSetupAction): Promise<BoxStatus> {
     const home = this.home;
+    const which = this.platform === "win32" ? "win" : this.platform === "linux" ? "linux" : null;
     if (action === "linux_allow" && this.platform === "linux") await linuxAllow({ home, env: this.env });
-    else if (action === "win_install" && this.platform === "win32") await windowsInstall({ home });
-    else if (action === "win_update" && this.platform === "win32") await windowsUpdate({ home });
+    else if (action === "win_install" && this.platform === "win32") await windowsInstall({ home, env: this.env });
+    else if (action === "win_update" && this.platform === "win32") await windowsUpdate({ env: this.env });
     else if (action === "win_restart" && this.platform === "win32") await windowsRestart();
-    else if (action === "decline") writeSetupState(home, (state) => ({ ...state, declinedAt: Date.now() }));
-    if (action === "check" && this.platform === "win32") await windowsFacts({ fresh: true }).catch(() => null);
+    else if (action === "decline" && which) saveSetupState(home, which, { state: "declined", message: "Set up later; chats run on this computer meanwhile." });
+    if (action === "check" && this.platform === "win32") await cachedWindowsChecks({ fresh: true }).catch(() => null);
     if (action === "win_restart") return this.status(workspace);
     const status = await this.retry(workspace);
     if (status.setup?.need === "none") void this.prefetch().catch(() => false);
