@@ -33,7 +33,7 @@ import path from "node:path";
 
 import { GOARCH, helperPath } from "./common.js";
 import { APPARMOR_PROFILE, ENABLED_BWRAP, apparmorProfile } from "./backends/bwrap.js";
-import { wslCall, wslExe } from "./backends/wsl.js";
+import { withoutWsl1Notes, wslCall, wslExe } from "./backends/wsl.js";
 import { REQUIRED_RULES, whyText, type CannotRunWhy, type RequiredFallback } from "./required.js";
 import { runCommand, type RunCommand, type RuntimeResult } from "./runtime.js";
 
@@ -41,6 +41,18 @@ const WIN = REQUIRED_RULES.setup.win32;
 const VIRTUALIZATION = new RegExp(WIN.virtualization_errors, "i");
 const POLICY = /group policy|blocked by (?:your|the) (?:administrator|organi[sz]ation)|0x800f0950|0x800f0922|0x80070422/i;
 const VM_MODEL = /virtual machine|vmware|virtualbox|kvm|qemu|xen|parallels|hyper-v|bochs/i;
+// `wsl --status` on a PC whose WSL 2 cannot start a VM (after the restart).
+const NO_VM_START = /unable to start since virtualization is not enabled|virtualization is not enabled on this machine/i;
+
+/** The install log kept for support (<box home>/setup-win.log, the last run's). */
+export function installLogFile(home: string): string {
+  return path.join(home, "setup-win.log");
+}
+
+/** Why a PC that cannot start WSL 2's VM can't: inside a VM (its model says so), else the firmware switch. */
+export function blockedWhy(checks: Partial<WindowsChecks> | null | undefined): "nested_vm" | "firmware_off" {
+  return VM_MODEL.test(String(checks?.model ?? "")) ? "nested_vm" : "firmware_off";
+}
 
 // --- setup.json (CLI: setup-state.js) --------------------------------------------------
 
@@ -132,7 +144,7 @@ export function classifySetup({ runtime, platform, checks = null, state = {}, fa
   }
   if (platform === "win32") {
     if (entry?.state === "blocked" && entry.why) return cannot(entry.why);
-    if (said.some((reason) => VIRTUALIZATION.test(reason))) return cannot("firmware_off");
+    if (said.some((reason) => VIRTUALIZATION.test(reason))) return cannot(blockedWhy(checks));
     const decision = checks ? setupDecision(checks) : { ok: true as const };
     if (!decision.ok) return cannot(decision.why);
     if (said.some((reason) => /wsl --update/.test(reason))) return { ...base, need: "win_update" };
@@ -213,7 +225,7 @@ export function setupDecision(checks: Partial<WindowsChecks> | null, { minBuild 
   if (Number.isFinite(checks?.build) && Number(checks?.build) < minBuild) return { ok: false, why: "old_windows" };
   if (checks?.s_mode === true) return { ok: false, why: "s_mode" };
   if (checks?.hypervisor === true) return { ok: true };
-  if (checks?.firmware === false) return { ok: false, why: VM_MODEL.test(String(checks.model ?? "")) ? "nested_vm" : "firmware_off" };
+  if (checks?.firmware === false) return { ok: false, why: blockedWhy(checks) };
   return { ok: true };
 }
 
@@ -266,6 +278,7 @@ export async function windowsInstall({ home, env = process.env, run = runCommand
   try {
     res = await run(powershellExe(env), elevatedArgs(ps1, logFile), { env, timeoutMs: 30 * 60_000 });
     try { text = readFileSync(logFile, "utf8"); } catch { text = ""; }
+    try { if (text.trim()) writeFileSync(installLogFile(home), text, "utf8"); } catch { /* best effort */ }
   } finally {
     rmSync(ps1, { force: true });
     rmSync(logFile, { force: true });
@@ -273,8 +286,8 @@ export async function windowsInstall({ home, env = process.env, run = runCommand
   // No log at all and a failed Start-Process: the admin prompt was answered "No" (or never shown).
   if (!text.trim() && res?.code !== 0) return saved({ state: "declined", message: "The administrator prompt was cancelled; nothing changed." });
   const parsed = parseInstallLog(text);
-  if (parsed.result === "blocked") return saved({ state: "blocked", why: parsed.why });
-  if (parsed.result === "failed") return saved({ state: "failed", message: `The WSL install did not finish: ${parsed.line}` });
+  if (parsed.result === "blocked") return saved({ state: "blocked", why: parsed.why === "firmware_off" ? blockedWhy(checks) : parsed.why });
+  if (parsed.result === "failed") return saved({ state: "failed", message: `The WSL install did not finish: ${parsed.line} (log: ${installLogFile(home)})` });
   if (exe) await run("reg.exe", runOnceArgs(exe), { env, timeoutMs: 15_000 });
   return saved({ state: "restart", message: "WSL 2 is installed. Restart Windows to finish." });
 }
@@ -288,25 +301,37 @@ export function windowsRestart({ run = runCommand }: { run?: RunCommand } = {}):
  * The start after the restart (the resume marker): `wsl --update` when WSL
  * asks for it, then the marker goes (the box start imports the distro and
  * downloads the image). WSL still off: the marker stays (no restart yet);
- * virtualization errors: the machine is marked as unable.
+ * WSL 2 unable to start a VM: before the restart (Windows booted before the
+ * marker) that is the same text, so it waits; after it the machine is marked
+ * as unable, with why (nested_vm when this PC is a VM, else firmware_off).
+ * WSL 1 notes in `wsl --status` are not "WSL 2 off".
  */
-export async function resumeWinSetup({ home, env = process.env, run = runCommand, log = () => {}, now = Date.now(), bin: given = null }: { home: string; env?: NodeJS.ProcessEnv; run?: RunCommand; log?: (level: "info" | "warn", message: string) => void; now?: number; bin?: string | null }): Promise<{ ok: boolean; state: "none" | "restart" | "blocked" | "ready" }> {
-  if (setupState(home).win?.state !== "restart") return { ok: false, state: "none" };
+export async function resumeWinSetup({ home, env = process.env, run = runCommand, log = () => {}, now = Date.now(), bin: given = null, checks = null, bootedAt = now - os.uptime() * 1000 }: { home: string; env?: NodeJS.ProcessEnv; run?: RunCommand; log?: (level: "info" | "warn", message: string) => void; now?: number; bin?: string | null; checks?: Partial<WindowsChecks> | null; bootedAt?: number }): Promise<{ ok: boolean; state: "none" | "restart" | "blocked" | "ready"; why?: CannotRunWhy }> {
+  const marker = setupState(home).win;
+  if (marker?.state !== "restart") return { ok: false, state: "none" };
+  // Before the restart WSL says the same as on a PC that cannot run a VM: only after it does that mean "cannot".
+  const restarted = !Number.isFinite(Number(marker.at)) || bootedAt > Number(marker.at);
   const bin = given ?? wslExe({ env });
   if (!bin) return { ok: false, state: "restart" };
   let status = await wslCall(bin, ["--status"], { run, env, timeoutMs: 30_000 });
-  let said = `${status.stdout}\n${status.stderr}`;
+  let said = withoutWsl1Notes(`${status.stdout}\n${status.stderr}`);
   if (/wsl --update|requires an update|kernel (?:file|component)|update the wsl/i.test(said)) {
     log("info", "sandbox setup resume: wsl --update");
     await wslCall(bin, ["--update", "--web-download"], { run, env, timeoutMs: 10 * 60_000 });
     status = await wslCall(bin, ["--status"], { run, env, timeoutMs: 30_000 });
-    said = `${status.stdout}\n${status.stderr}`;
+    said = withoutWsl1Notes(`${status.stdout}\n${status.stderr}`);
   }
-  if (VIRTUALIZATION.test(said)) {
-    saveSetupState(home, "win", { state: "blocked", why: "firmware_off" }, { now });
-    return { ok: false, state: "blocked" };
+  const noVm = VIRTUALIZATION.test(said) || NO_VM_START.test(said);
+  if (restarted && noVm) {
+    const why = blockedWhy(checks ?? await windowsChecks({ run, env }).catch(() => null));
+    saveSetupState(home, "win", { state: "blocked", why }, { now });
+    log("info", `sandbox setup resume: WSL 2 cannot start a VM here (${why})`);
+    return { ok: false, state: "blocked", why };
   }
-  if (/not installed|is not enabled|optional component|WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED/i.test(said)) return { ok: false, state: "restart" };
+  if ((!restarted && noVm) || /not installed|is not enabled|optional component|WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED/i.test(said)) {
+    log("info", "sandbox setup resume: WSL 2 not on yet (restart pending)");
+    return { ok: false, state: "restart" };
+  }
   saveSetupState(home, "win", null, { now });
   await run("reg.exe", ["delete", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce", "/v", WIN.resume_run_once, "/f"], { env, timeoutMs: 15_000 });
   log("info", "sandbox setup resumed: WSL 2 ready");

@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { RunCommand } from "./run.js";
-import { classifySetup, elevatedArgs, linuxAllow, linuxAllowScript, parseInstallLog, recentlyDeclined, resumeWinSetup, runOnceArgs, saveSetupState, setupDecision, setupState, windowsBuild, windowsInstall } from "./setup.js";
+import { ENABLE_HINT, probeWslDistro, withoutWsl1Notes } from "./backends/wsl.js";
+import { blockedWhy, classifySetup, elevatedArgs, installLogFile, linuxAllow, linuxAllowScript, parseInstallLog, recentlyDeclined, resumeWinSetup, runOnceArgs, saveSetupState, setupDecision, setupState, windowsBuild, windowsInstall } from "./setup.js";
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -20,6 +21,11 @@ const fail = (reason: string, tried: string[] = []) => ({ ok: false as const, re
 const checks = { build: 22631, hypervisor: false, firmware: true, model: "Dell Inc. XPS", s_mode: false };
 const OFF = "WSL 2 is not enabled on this Windows. One time, in an administrator terminal: `wsl --install --no-distribution`, then restart Windows";
 const ok: Awaited<ReturnType<RunCommand>> = { code: 0, stdout: "", stderr: "" };
+
+// Windows 11 24H2 after `wsl --install --no-distribution` and the restart (seen on the CLI's VM rig, 2026-10-22).
+const STATUS_WSL1_NOTE = "Default Version: 2\r\n\r\nWSL1 is not supported with your current machine configuration.\r\nPlease enable the \"Windows Subsystem for Linux\" optional component to use WSL1.\r\n";
+// The same PC before the restart (and a PC that cannot start a VM after it).
+const STATUS_NO_VM = `${STATUS_WSL1_NOTE}WSL2 is unable to start since virtualization is not enabled on this machine.\r\nPlease ensure the "Virtual Machine Platform" optional component is enabled and virtualization is turned on in your computer's firmware settings.\r\n`;
 
 describe("sandbox setup: what is needed", () => {
   test("Linux: AppArmor is the one-click allow; a container without user namespaces cannot run; otherwise the usual next step", () => {
@@ -115,6 +121,63 @@ describe("sandbox setup: what is needed", () => {
     expect(calls).toEqual(["wsl.exe --status", "wsl.exe --update --web-download", "wsl.exe --status", "reg.exe delete HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce"]);
     expect(setupState(home)).toEqual({});
     expect(await resumeWinSetup({ home, run, bin: "wsl.exe" })).toEqual({ ok: false, state: "none" });
+  });
+
+  test("resume: a WSL 1 note alone is WSL 2 ready; no VM before the restart waits, after it is blocked with why", async () => {
+    const reply = (stdout: string): RunCommand => async () => ({ code: 0, stdout, stderr: "" });
+    const home = await temp("home");
+    saveSetupState(home, "win", { state: "restart" }, { now: 1_000 });
+    expect(await resumeWinSetup({ home, bin: "wsl.exe", bootedAt: 2_000, run: reply(STATUS_WSL1_NOTE) })).toEqual({ ok: true, state: "ready" });
+    expect(setupState(home).win).toBeUndefined();
+    saveSetupState(home, "win", { state: "restart" }, { now: 5_000 });
+    expect((await resumeWinSetup({ home, bin: "wsl.exe", bootedAt: 2_000, now: 6_000, run: reply(STATUS_NO_VM) })).state).toBe("restart");
+    expect(setupState(home).win?.state).toBe("restart");
+    expect(await resumeWinSetup({ home, bin: "wsl.exe", bootedAt: 7_000, now: 8_000, checks: { model: "QEMU Standard PC (Q35 + ICH9, 2009)" }, run: reply(STATUS_NO_VM) })).toEqual({ ok: false, state: "blocked", why: "nested_vm" });
+    expect(setupState(home).win?.why).toBe("nested_vm");
+    saveSetupState(home, "win", { state: "restart" }, { now: 5_000 });
+    expect((await resumeWinSetup({ home, bin: "wsl.exe", bootedAt: 7_000, checks: { model: "LENOVO 20XW" }, run: reply(STATUS_NO_VM) })).why).toBe("firmware_off");
+    // Still off after the restart (the optional component): the marker stays.
+    saveSetupState(home, "win", { state: "restart" }, { now: 5_000 });
+    expect((await resumeWinSetup({ home, bin: "wsl.exe", bootedAt: 7_000, run: async () => ({ code: 1, stdout: "The Windows Subsystem for Linux optional component is not enabled.\n", stderr: "" }) })).state).toBe("restart");
+    // A virtualization error code after the restart on a PC: firmware_off.
+    expect(await resumeWinSetup({ home, bin: "wsl.exe", bootedAt: 7_000, checks: { model: "Dell Inc. XPS 13" }, run: async () => ({ code: 1, stdout: "Error code: Wsl/Service/CreateInstance/CreateVm/HCS/HCS_E_HYPERV_NOT_INSTALLED\n", stderr: "" }) })).toEqual({ ok: false, state: "blocked", why: "firmware_off" });
+  });
+
+  test("the WSL probe: a WSL 1 note in wsl --status is not \"WSL 2 is not enabled\"", async () => {
+    expect(withoutWsl1Notes(STATUS_WSL1_NOTE).trim()).toBe("Default Version: 2");
+    const run: RunCommand = async (_bin, args) => (args[0] === "--status" ? { code: 0, stdout: STATUS_WSL1_NOTE, stderr: "" } : ok);
+    const probe = await probeWslDistro({ platform: "win32", env: { SystemRoot: "C:\\Windows" }, exists: () => true, run });
+    expect(probe.ok ? null : probe.reason).not.toBe(ENABLE_HINT);
+    const off = await probeWslDistro({ platform: "win32", env: { SystemRoot: "C:\\Windows" }, exists: () => true, run: async () => ({ code: 0, stdout: STATUS_NO_VM, stderr: "" }) });
+    expect(off.ok ? null : off.reason).toBe(ENABLE_HINT);
+  });
+
+  test("windows install: the log is kept in the box home; a blocked install in a VM says nested_vm; a failed one names the log", async () => {
+    const home = await temp("home");
+    const tmpDir = await temp("tmp");
+    const install = (log: string): RunCommand => async (_bin, args) => {
+      const m = /-File "([^"]+)" "([^"]+)"/.exec((args.at(-1) ?? "").replace(/''/g, "'"));
+      if (m?.[2]) await writeFile(m[2], log);
+      return ok;
+    };
+    const vm = { ...checks, build: 26100, hypervisor: true, model: "QEMU Standard PC (Q35 + ICH9, 2009)" };
+    expect(await windowsInstall({ home, run: install("Error code: Wsl/0x80370102\r\ndone\r\n"), exe: null, tmpDir, checks: vm })).toMatchObject({ state: "blocked", why: "nested_vm" });
+    expect(await readFile(installLogFile(home), "utf8")).toContain("0x80370102");
+    expect(installLogFile(home)).toBe(join(home, "setup-win.log"));
+    expect(await readdir(tmpDir)).toEqual([]);
+    expect(await windowsInstall({ home, run: install("Error code: Wsl/0x80370102\r\ndone\r\n"), exe: null, tmpDir, checks: { ...vm, model: "LENOVO 20XW" } })).toMatchObject({ state: "blocked", why: "firmware_off" });
+    const failed = await windowsInstall({ home, run: install("Error: access denied\r\n"), exe: null, tmpDir, checks: vm });
+    expect(failed).toMatchObject({ state: "failed" });
+    expect(failed.message).toBe(`The WSL install did not finish: Error: access denied (log: ${installLogFile(home)})`);
+    expect(await readFile(installLogFile(home), "utf8")).toContain("access denied");
+  });
+
+  test("a virtualization error from the probe: nested_vm in a VM guest, else firmware_off", () => {
+    const vmError = fail("WSL 2 could not start: Wsl/Service/CreateInstance/CreateVm/HCS/HCS_E_HYPERV_NOT_INSTALLED");
+    expect(blockedWhy({ model: "VMware, Inc. VMware7,1" })).toBe("nested_vm");
+    expect(blockedWhy(null)).toBe("firmware_off");
+    expect(classifySetup({ runtime: vmError, platform: "win32", checks: { ...checks, hypervisor: true, model: "QEMU Standard PC" }, fallback: "native" })).toMatchObject({ need: "cannot_run", why: "nested_vm" });
+    expect(classifySetup({ runtime: vmError, platform: "win32", checks: { ...checks, hypervisor: true }, fallback: "native" })).toMatchObject({ need: "cannot_run", why: "firmware_off" });
   });
 
   test("Linux allow: pkexec runs the enable step with the staged bubblewrap and its sha256; dismissed is declined", async () => {

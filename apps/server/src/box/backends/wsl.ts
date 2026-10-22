@@ -104,6 +104,16 @@ export function parseWslList(text: unknown): WslRow[] {
   return rows;
 }
 
+/**
+ * `wsl --status` without its WSL 1 notes: Windows 11 with only Virtual
+ * Machine Platform on (what `wsl --install --no-distribution` turns on) says
+ * "WSL1 is not supported ... enable the "Windows Subsystem for Linux"
+ * optional component to use WSL1", while WSL 2 works.
+ */
+export function withoutWsl1Notes(text: unknown): string {
+  return String(text ?? "").split(/\r?\n/).filter((line) => !/\bWSL ?1\b/i.test(line)).join("\n");
+}
+
 const NOT_ENABLED = /not installed|is not enabled|optional component|virtual machine platform|HCS_E_HYPERV_NOT_INSTALLED|WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED|0x8007019e|0x80370102|wsl\.exe --install|enable the .*feature/i;
 const NO_DISTROS = /no installed distributions|WSL_E_DEFAULT_DISTRO_NOT_FOUND|has no installed distributions/i;
 
@@ -130,7 +140,7 @@ export async function probeWslDistro({ env = process.env, platform = process.pla
   const bin = wslExe({ env, exists });
   if (!bin) return { ...base, ok: false, reason: ENABLE_HINT };
   const status = await wslCall(bin, ["--status"], { run, env, timeoutMs });
-  const said = `${status.stdout}\n${status.stderr}`;
+  const said = withoutWsl1Notes(`${status.stdout}\n${status.stderr}`);
   if (NOT_ENABLED.test(said) || (status.code !== 0 && !NO_DISTROS.test(said))) {
     return { ...base, ok: false, bin, reason: NOT_ENABLED.test(said) || status.error === "ENOENT" ? ENABLE_HINT : `\`wsl --status\` failed: ${firstLine(said) || status.code}` };
   }
