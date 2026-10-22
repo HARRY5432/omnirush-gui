@@ -89,11 +89,9 @@ describe("required sandbox: the desktop's projects", () => {
     expect(status).toMatchObject({ on: true, source: "required", required: true, state: "unavailable" });
     expect(status.requiredText?.optOut).toBe("Required for new chats on this account. Chats started before keep running where they started.");
     expect(status.setup).toMatchObject({ need: process.platform === "linux" ? "runtime" : expect.any(String), fallback: "native", declined: false });
-    // "Not now": chats run here meanwhile, and say so.
-    const declined = await boxes.setup(workspace, "decline");
-    expect(declined.setup?.declined).toBe(true);
-    expect(await boxes.beforePrompt("ses_req_decl1", workspace)).toBeNull();
-    expect(await boxes.planOutcome("ses_req_decl1", workspace)).toMatchObject({ native: true, source: "required", reason: "setup_declined", required: true, fallback: "native" });
+    // No step this app can run here (no backend at all): the chat runs here, as cannot_run (the CLI's reason too).
+    expect(await boxes.beforePrompt("ses_req_none1", workspace)).toBeNull();
+    expect(await boxes.planOutcome("ses_req_none1", workspace)).toMatchObject({ native: true, source: "required", reason: "cannot_run", required: true, fallback: "native" });
   });
 
   test("a new chat goes in the box; a reopened native chat stays here without waiting (kept_old_chat)", async () => {

@@ -837,7 +837,9 @@ export class BoxService {
       const runtime = project.why.runtime ? { runtime: project.why.runtime } : {};
       if (mode.required && project.why.reason !== "downloading") {
         const setup = await this.setupFor(project.lastRuntime ?? null).catch(() => null);
-        const reason = setup?.need === "cannot_run" || project.why.reason === "helpers_missing" ? "cannot_run" : setup?.declined ? "setup_declined" : "setup_needed";
+        // As the CLI: only a step this app can run here (Allow, the WSL setup, the VM) is setup; else it cannot run.
+        const fixable = setup && ["linux_allow", "win_install", "win_restart", "win_update", "mac_vm"].includes(setup.need);
+        const reason = !fixable || project.why.reason === "helpers_missing" ? "cannot_run" : setup.declined ? "setup_declined" : "setup_needed";
         return native(reason, runtime);
       }
       return native(project.why.reason, runtime);
