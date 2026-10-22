@@ -34,11 +34,12 @@ export type PullProgress = {
   setup?: SetupProgress | null;
 };
 
-export type SetupProgress = { step: string; bytesDone: number | null; bytesTotal: number | null };
+export type SetupProgress = { step: string; bytesDone: number | null; bytesTotal: number | null; seen: string[] };
 
-/** The last setup step a log names (`{"setup":{"step","bytes","total"}}`), with its bytes; null: none. */
+/** The last setup step a log names (`{"setup":{"step","bytes","total"}}`), with its bytes and every step named so far; null: none. */
 export function parseSetupLines(text: string): SetupProgress | null {
   let last: SetupProgress | null = null;
+  const seen: string[] = [];
   for (const raw of text.split(/\r?\n|\r/)) {
     const line = raw.trim();
     if (!line.startsWith("{\"setup\"")) continue;
@@ -49,8 +50,10 @@ export function parseSetupLines(text: string): SetupProgress | null {
       const bytes = Number(parsed?.setup?.bytes);
       const total = Number(parsed?.setup?.total);
       const same: boolean = last !== null && last.step === step;
+      if (!seen.includes(step)) seen.push(step);
       last = {
         step,
+        seen: [...seen],
         bytesDone: Number.isFinite(bytes) ? bytes : same ? last!.bytesDone : null,
         bytesTotal: total > 0 ? total : same ? last!.bytesTotal : null,
       };

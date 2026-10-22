@@ -561,7 +561,7 @@ export type OmniRushWorkspaceBoxProgress = {
   layersTotal: number;
   startedAt: number | null;
   /** macOS, the OmniRush VM's first setup: its step ("lima", "vm_image", "vm_boot", "image") and that step's bytes. Older servers: absent. */
-  setup?: { step: string; bytesDone: number | null; bytesTotal: number | null } | null;
+  setup?: { step: string; bytesDone: number | null; bytesTotal: number | null; seen?: string[] } | null;
 };
 export type OmniRushWorkspaceBoxChange = OmniRushWorkspaceBox & {
   engine: { status: "unchanged" | "applied" | "deferred" | "failed" | "unmanaged" };

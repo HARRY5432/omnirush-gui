@@ -436,8 +436,8 @@ describe("lima: boxes", () => {
 describe("lima: the first setup's progress and the wait for it", () => {
   test("setup lines: the step the VM setup is at, with that step's bytes; the image's own bytes after it", () => {
     const text = [setupLine("lima"), setupLine("lima", 1_000, 38_000_000), setupLine("vm_image"), setupLine("vm_image", 84_000_000, 336_000_000)].join("\n");
-    expect(parseSetupLines(text)).toEqual({ step: "vm_image", bytesDone: 84_000_000, bytesTotal: 336_000_000 });
-    expect(parseSetupLines(`${text}\n${setupLine("vm_boot")}`)).toEqual({ step: "vm_boot", bytesDone: null, bytesTotal: null });
+    expect(parseSetupLines(text)).toEqual({ step: "vm_image", bytesDone: 84_000_000, bytesTotal: 336_000_000, seen: ["lima", "vm_image"] });
+    expect(parseSetupLines(`${text}\n${setupLine("vm_boot")}`)).toEqual({ step: "vm_boot", bytesDone: null, bytesTotal: null, seen: ["lima", "vm_image", "vm_boot"] });
     expect(parseSetupLines('{"progress":{"bytes":1,"total":2}}')).toBeNull();
     const dir = tmp();
     const marker = path.join(dir, "pulls", "lima-x.pid");

@@ -97,7 +97,8 @@ function stepBar(done: number | null, total: number | null): { value: number | n
 export function macVmSteps(box: OmniRushWorkspaceBox): SandboxSetupStep[] {
   const setup = box.progress?.setup ?? null;
   const starting = box.state === "starting" || box.state === "ready";
-  const at = starting ? VM_STEPS.length : Math.max(0, VM_STEPS.findIndex((s) => s.step === setup?.step));
+  // Nothing said yet: the VM image is the first step (Lima, when it is downloaded, names itself first).
+  const at = starting ? VM_STEPS.length : setup ? Math.max(0, VM_STEPS.findIndex((s) => s.step === setup.step)) : 1;
   const steps: SandboxSetupStep[] = VM_STEPS.map((s, index) => {
     const state = index < at ? "done" : index === at ? "active" : "todo";
     const progress = state !== "active" ? null
@@ -106,8 +107,8 @@ export function macVmSteps(box: OmniRushWorkspaceBox): SandboxSetupStep[] {
       : null;
     return { id: s.id, label: s.label, state, ...(progress ? { progress } : {}) };
   });
-  // The VM tools came with the app (no "lima" step was ever named): not shown.
-  const shown = setup && setup.step !== "lima" ? steps.filter((s) => s.id !== "lima") : steps;
+  // The VM tools came with the app (the setup never named a "lima" step): not shown.
+  const shown = setup?.step === "lima" || setup?.seen?.includes("lima") ? steps : steps.filter((s) => s.id !== "lima");
   shown.push({ id: "start", label: "Start the sandbox", state: box.state === "starting" ? "active" : box.state === "ready" ? "done" : "todo" });
   return shown;
 }

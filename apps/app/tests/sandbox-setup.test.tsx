@@ -105,9 +105,9 @@ describe("sandbox setup panel: what it shows", () => {
     const mac = (progress: Partial<NonNullable<OmniRushWorkspaceBox["progress"]>> | null, state: OmniRushWorkspaceBox["state"] = "downloading") =>
       sandboxSetupView(box({ platform: "darwin", state, runtime: vm, setup: setup({ need: "mac_vm" }), progress: progress ? { bytesDone: null, bytesTotal: null, layersDone: 0, layersTotal: 0, startedAt: 1, ...progress } : null }));
     const steps = (view: ReturnType<typeof sandboxSetupView>) => view?.steps.map((step) => `${step.id}:${step.state}`);
-    // Nothing said yet: the first step; Lima downloading: its own bytes.
-    expect(steps(mac(null))).toEqual(["lima:active", "vm_image:todo", "vm_boot:todo", "download:todo", "start:todo"]);
-    const lima = mac({ setup: { step: "lima", bytesDone: 19_000_000, bytesTotal: 38_000_000 } });
+    // Nothing said yet: the VM's steps (Lima only once the setup names it); Lima downloading: its own bytes.
+    expect(steps(mac(null))).toEqual(["vm_image:active", "vm_boot:todo", "download:todo", "start:todo"]);
+    const lima = mac({ setup: { step: "lima", bytesDone: 19_000_000, bytesTotal: 38_000_000, seen: ["lima"] } });
     expect(lima).toMatchObject({ kind: "progress", title: "Setting up the sandbox" });
     expect(lima?.steps[0]?.progress).toEqual({ value: 50, label: "19 of 38 MB · 50%" });
     // Lima shipped with the app (the first step named is the VM image): no Lima step.
@@ -119,6 +119,9 @@ describe("sandbox setup panel: what it shows", () => {
     expect(steps(box_)).toEqual(["vm_image:done", "vm_boot:done", "download:active", "start:todo"]);
     expect(box_?.steps[2]?.progress).toEqual({ value: 50, label: "130 of 260 MB · 50%" });
     expect(steps(mac({ setup: { step: "image", bytesDone: null, bytesTotal: null } }, "starting"))).toEqual(["vm_image:done", "vm_boot:done", "download:done", "start:active"]);
+    expect(steps(mac(null, "starting"))).toEqual(["vm_image:done", "vm_boot:done", "download:done", "start:active"]);
+    // Lima downloaded first (not shipped with this build): its step stays, done.
+    expect(steps(mac({ setup: { step: "vm_boot", bytesDone: null, bytesTotal: null, seen: ["lima", "vm_image", "vm_boot"] } }))).toEqual(["lima:done", "vm_image:done", "vm_boot:active", "download:todo", "start:todo"]);
     const runtime = sandboxSetupView(box({ platform: "linux", setup: setup({ need: "runtime" }) }));
     expect(runtime).toMatchObject({ kind: "action", title: "Install Podman or Docker" });
     expect(runtime?.next?.command).toBe("sudo apt install podman");
