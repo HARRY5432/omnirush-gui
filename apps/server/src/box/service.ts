@@ -432,7 +432,7 @@ export class BoxService {
         project.nextPlanAt = 0;
       }
       if (Date.now() < project.nextPlanAt) return null;
-      const plan = await planBox({ env: this.env, home: this.home, root, log: this.log, shims: shimsDir(this.env), platform: this.platform, stateDir: this.options.stateDir, ...this.detectOptions() });
+      const plan = await planBox({ env: this.env, home: this.home, root, log: this.log, shims: shimsDir(this.env), platform: this.platform, stateDir: this.options.stateDir, ...this.detectOptions(), required: this.required().required });
       project.waitingImage = !plan.box && plan.downloading === true;
       project.lastRuntime = plan.box ? null : plan.runtime;
       project.pull = !plan.box && plan.downloading === true && plan.image && plan.runtime?.ok ? { runtime: plan.runtime, image: plan.image } : null;

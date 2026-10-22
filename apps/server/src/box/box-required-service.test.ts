@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { boxKey, setToolsRoot } from "./box.js";
-import { rememberServerDefault, resolveMode, serverRequired, type BoxRun } from "./launch.js";
+import { planBox, rememberServerDefault, REQUIRED_REDETECT_MS, resolveMode, serverRequired, type BoxRun } from "./launch.js";
+import type { RunCommand } from "./run.js";
 import { DESKTOP_PROJECTS_FILE } from "./plugin-lib.js";
 import { BoxRequiredError, BoxService, type BoxWorkspace } from "./service.js";
 
@@ -103,6 +104,30 @@ describe("required sandbox: the desktop's projects", () => {
     const projects: Map<string, unknown> = Reflect.get(boxes, "projects");
     projects.set(boxKey(root), { run: { ...fakeRun(root, []), native: true }, notice: null, planning: null, nextPlanAt: Date.now() + 60_000, waitingImage: false });
     expect(await boxes.planOutcome("ses_req_fail1", workspace)).toEqual({ native: true, source: "required", reason: "box_failed", required: true, fallback: "native_uncounted" });
+  });
+
+  test("planBox under required: a backend slow to answer (a VM booting) is waited for, not \"did not answer in time\"", async () => {
+    if (process.platform !== "linux") return;
+    const home = await temp("boxhome");
+    const root = await temp("project");
+    const bin = await temp("bin");
+    await mkdir(join(bin, `linux-${process.arch === "arm64" ? "arm64" : "amd64"}`), { recursive: true });
+    await writeFile(join(bin, `linux-${process.arch === "arm64" ? "arm64" : "amd64"}`, "boxsh"), "#!/bin/sh\n");
+    const dockerDir = await temp("dockerbin");
+    await writeFile(join(dockerDir, "docker"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const env = { OMNIRUSH_BOX_HOME: home, OMNIRUSH_BOX_BIN_DIR: bin, PATH: dockerDir, OMNIRUSH_BOX_RUNTIME: join(dockerDir, "docker"), OMNIRUSH_BOX_GC: "off" };
+    const run: RunCommand = async (cmd, args) => {
+      if (/docker$/.test(String(cmd)) && args[0] === "info") {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        return { code: 0, stdout: JSON.stringify({ OSType: "linux", ServerVersion: "29.0.0", Architecture: "x86_64" }), stderr: "" };
+      }
+      return { code: 1, stdout: "", stderr: "Error: No such object" };
+    };
+    const slow = await planBox({ env, home, root, run, asked: "docker", probeMs: 100, platform: "linux" });
+    expect(slow.box ? slow.box.runtime : slow.runtime).toMatchObject({ ok: false, reason: "the sandbox backend did not answer in time" });
+    const waited = await planBox({ env, home: await temp("boxhome2"), root, run, asked: "docker", probeMs: 100, platform: "linux", required: true });
+    expect(waited.box !== null || waited.runtime?.ok === true).toBe(true);
+    expect(REQUIRED_REDETECT_MS).toBe(45_000);
   });
 
   test("a new chat goes in the box; a reopened native chat stays here without waiting (kept_old_chat)", async () => {

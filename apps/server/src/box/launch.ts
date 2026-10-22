@@ -331,15 +331,20 @@ export type ReadyPlan = {
 export type NativePlan = { box: null; notice: string | null; runtime: RuntimeResult | null; image?: BoxImage; downloading?: boolean };
 export type BoxPlan = ReadyPlan | NativePlan;
 
+/** How long a plan under required waits for the backend to answer before it is "cannot run" (cold WSL / VM start). */
+export const REQUIRED_REDETECT_MS = 45_000;
+
 /**
  * Plan the box of the project at `root` (the project's box is on). Returns
  * { box: null, notice } when its chats run on this machine for now (no
  * runtime, no helpers, the image still downloading), else a ready plan.
  */
-export async function planBox({ env = process.env, home, root, log = () => {}, run = runCommand, probeMs = 4_000, shims = null, asked = null, allow = null, platform = process.platform, stateDir = null, preferShadows = false }: { env?: NodeJS.ProcessEnv; home: string; root: string; log?: BoxLog; run?: RunCommand; probeMs?: number; shims?: string | null; asked?: string | null; allow?: string[] | null; platform?: NodeJS.Platform; stateDir?: string | null; preferShadows?: boolean }): Promise<BoxPlan> {
+export async function planBox({ env = process.env, home, root, log = () => {}, run = runCommand, probeMs = 4_000, shims = null, asked = null, allow = null, platform = process.platform, stateDir = null, preferShadows = false, required = false }: { env?: NodeJS.ProcessEnv; home: string; root: string; log?: BoxLog; run?: RunCommand; probeMs?: number; shims?: string | null; asked?: string | null; allow?: string[] | null; platform?: NodeJS.Platform; stateDir?: string | null; preferShadows?: boolean; required?: boolean }): Promise<BoxPlan> {
   const key = boxKey(root);
   const bounded = <T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> => Promise.race([promise, new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms))]);
-  const runtime = await bounded<RuntimeResult>(detectRuntime({ boxHome: home, env, run, ...(asked ? { asked } : {}), allow, ...(preferShadows ? { preferShadows } : {}) }), probeMs, { ok: false, reason: "the sandbox backend did not answer in time" });
+  // Under required the chat waits for the box anyway: a backend slow to answer (a WSL VM booting) is not "cannot run".
+  const detectMs = required ? Math.max(probeMs, REQUIRED_REDETECT_MS) : probeMs;
+  const runtime = await bounded<RuntimeResult>(detectRuntime({ boxHome: home, env, run, ...(asked ? { asked } : {}), allow, ...(preferShadows ? { preferShadows } : {}) }), detectMs, { ok: false, reason: "the sandbox backend did not answer in time" });
   if (!runtime.ok) {
     log("info", "box unavailable", { reason: runtime.reason });
     return { box: null, notice: `Sandbox off for now: ${runtime.reason}.`, runtime };
