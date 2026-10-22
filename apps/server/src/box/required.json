@@ -116,8 +116,12 @@
         "name": "omnirush-box", "cpus_max": 4, "memory_min_gib": 3, "memory_fraction": 0.25, "disk_gib": 30, "idle_stop_min": 30,
         "contract": 1,
         "image": {
-          "about": "The VM's disk. custom: OmniRush's own small Debian image (box/vm), sha256 per arch, null until published; fallback: the official Debian genericcloud image, pinned by its published sha512.",
-          "custom": { "version": null, "arm64": { "url": null, "sha256": null }, "x64": { "url": null, "sha256": null } },
+          "about": "The VM's disk. custom: OmniRush's own small Debian image (box/vm), sha256 per arch from the box-<version> release (box-images workflow; null: not published); fallback: the official Debian genericcloud image, pinned by its published sha512.",
+          "custom": {
+            "version": "2026.10.2",
+            "arm64": { "url": "https://github.com/omnirush-ai/omnirush-gui/releases/download/box-2026.10.2/omnirush-vm-2026.10.2-arm64.qcow2", "sha256": "d8a0ddd0505dba325ad0a1a683ed7e8d21c490bd80ccdb361a85529ec5dced3d" },
+            "x64": { "url": "https://github.com/omnirush-ai/omnirush-gui/releases/download/box-2026.10.2/omnirush-vm-2026.10.2-amd64.qcow2", "sha256": "b5ddc14fdf35fd066dc194e44dde5851721b35c05834812d0440314769eff718" }
+          },
           "fallback": {
             "version": "debian-13-genericcloud-20261021-2638",
             "arm64": { "url": "https://cloud.debian.org/images/cloud/trixie/20261021-2638/debian-13-genericcloud-arm64-20261021-2638.qcow2", "sha512": "e66eea33be9e1345e6c8737e65096e5b31031f4bd4f3f7d59a6f8b53f995a9c41996e97c5b4ab89f1587663efed11dfbd10c4d35b7bcc85b2545e58a12cd0e83" },
