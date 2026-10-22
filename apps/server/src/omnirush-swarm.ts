@@ -150,7 +150,7 @@ export const OMNIRUSH_SWARM_SKILL_DESCRIPTION = `Required before starting ${OMNI
  */
 export const OMNIRUSH_SWARM_PROMPT = `## Sub-agent swarms
 
-Before you start ${OMNIRUSH_SWARM_MIN_AGENTS} or more sub-agents for implementation work (large work that splits into ${OMNIRUSH_SWARM_MIN_AGENTS}+ independent parts, or the user asks for a swarm or for ${OMNIRUSH_SWARM_MIN_AGENTS}+ agents), load the \`${OMNIRUSH_SWARM_SKILL_NAME}\` skill first and follow it. Handle questions, investigations, reviews, tests, docs and explanations yourself unless the user explicitly asks for sub-agents. For smaller implementation work, use 1-2 sub-agents directly when they help.`;
+Before you start ${OMNIRUSH_SWARM_MIN_AGENTS} or more sub-agents for implementation work (large work that splits into ${OMNIRUSH_SWARM_MIN_AGENTS}+ independent parts, or the user asks for a swarm or for ${OMNIRUSH_SWARM_MIN_AGENTS}+ agents), load the \`${OMNIRUSH_SWARM_SKILL_NAME}\` skill first and follow it. Below that, follow the Sub-agents rules above.`;
 
 /** The body of the omnirush-swarm skill (without frontmatter). */
 export const OMNIRUSH_SWARM_SKILL = `# Sub-agent swarm

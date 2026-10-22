@@ -363,7 +363,10 @@ describe("omnirush runtime config file", () => {
     expect(prompt).toContain("## Memory\n");
     expect(prompt).toContain("## Artifacts");
     expect(prompt).toContain("## Connected work");
-    expect(prompt).toContain("Split real work: for a task of more than a few tool calls, start one sub-agent per independent part in one message");
+    expect(prompt).not.toContain("Split real work");
+    expect(prompt).toContain("Do the work yourself by default");
+    expect(prompt).toContain("## Autonomy and persistence");
+    expect(prompt).toContain("Verify before you finish.");
     expect(prompt).toContain("make exactly that many task-tool calls, no more and no fewer, and start them all in one message");
     expect(prompt).toContain("Never paste the user's whole message, or the user's instructions about sub-agents, into a sub-agent's prompt");
     expect(prompt).toContain("Never replace an explicit delegation request with a simulated multi-role answer");
@@ -415,7 +418,8 @@ describe("omnirush runtime config file", () => {
     const section = prompt.slice(prompt.indexOf("## Sub-agent swarms"), prompt.indexOf("## Editing files"));
     expect(section).toContain(`load the \`${OMNIRUSH_SWARM_SKILL_NAME}\` skill first`);
     expect(section).toContain("Before you start 3 or more sub-agents for implementation work");
-    expect(section).toContain("For smaller implementation work, use 1-2 sub-agents directly when they help");
+    expect(section).toContain("follow the Sub-agents rules above");
+    expect(section).not.toContain("use 1-2 sub-agents directly when they help");
     // No board mechanics on every request: no file name, no table, no layers.
     expect(prompt).not.toContain("swarm.md");
     expect(prompt).not.toContain("## Tasks");
