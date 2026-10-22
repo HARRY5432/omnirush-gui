@@ -179,6 +179,7 @@ import {
   writeOmniRushWorkspaceConfig,
 } from "./omnirush-workspace-config-store.js";
 import { boxServiceFor } from "./box/desktop.js";
+import { BOX_SETUP_ACTIONS, BoxRequiredError, isBoxSetupAction } from "./box/service.js";
 import { boxHome } from "./box/common.js";
 import { buildathonProjectsFile, reproStateFromBody, writeReproState } from "./buildathon-repro.js";
 import { prepareBoxInstallLog } from "./box/install-log.js";
@@ -1427,6 +1428,8 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
     });
   }
   void boxes.ensureAll();
+  // The server asks for the sandbox images ahead (local_box.setup.prefetch): the base image too, in the background.
+  void boxes.prefetch().catch(() => false);
   if (config.clearUploadQueue) {
     // The user signed out: what the last account queued stays on disk for it (stamped with it, set aside
     // at the next start under another account, sent after its own next sign-in).
@@ -3182,6 +3185,7 @@ async function applyServerBoxDefault(config: ServerConfig, boxes: ReturnType<typ
   await boxes.serverBackendsChanged();
   await applyBoxEngineConfig(config, "local_box_default");
   await boxes.ensureAll();
+  void boxes.prefetch().catch(() => false);
 }
 
 /**
@@ -3615,6 +3619,8 @@ function createRoutes(
         trigger: "workspace_activate",
       }),
     stopWorkspaceWork: stopWorkspaceEngineWork,
+    // Opening a project starts its sandbox now (not at its first prompt).
+    onWorkspaceOpened: (routeConfig, workspace) => boxServiceFor(routeConfig).opened(workspace),
   });
 
   registerWorkspaceTaskRoutes({
@@ -4256,8 +4262,15 @@ function createRoutes(
     if (workspace.workspaceType !== "local") throw new ApiError(400, "box_unsupported", "The sandbox is for folders on this computer");
     const boxes = boxServiceFor(config);
     const before = JSON.stringify(await boxes.engineBits());
-    if (typeof body.backend === "string") await boxes.setBackend(body.backend);
-    const status = "mode" in body && (mode === "on" || mode === "off" || mode === null) ? await boxes.setMode(workspace, mode) : await boxes.status(workspace, { fresh: true });
+    // Required for new chats (local_box.required): "off" and the backend "native" are refused.
+    let status: Awaited<ReturnType<typeof boxes.status>>;
+    try {
+      if (typeof body.backend === "string") await boxes.setBackend(body.backend);
+      status = "mode" in body && (mode === "on" || mode === "off" || mode === null) ? await boxes.setMode(workspace, mode) : await boxes.status(workspace, { fresh: true });
+    } catch (error) {
+      if (error instanceof BoxRequiredError) throw new ApiError(409, error.code, error.message);
+      throw error;
+    }
     // The engine gets the box shell and plugin when the first workspace turns its box on (and loses them with the last).
     const engine = JSON.stringify(await boxes.engineBits()) === before ? { status: "unchanged" as const } : await applyBoxEngineConfig(config, "local_box");
     return jsonResponse({ ...status, engine });
@@ -4290,6 +4303,25 @@ function createRoutes(
     const workspace = await resolveWorkspace(config, ctx.params.id);
     if (workspace.workspaceType !== "local") throw new ApiError(400, "box_unsupported", "The sandbox is for folders on this computer");
     return jsonResponse(await boxServiceFor(config).retry(workspace));
+  });
+
+  // The sandbox's one-time setup when it is required (box/setup.ts): `linux_allow` (pkexec), `win_install`
+  // (one UAC prompt), `win_restart` (refused while a chat runs), `win_update`, `decline` ("Not now": chats
+  // run here meanwhile), `check` (look again). Answers the status after the step.
+  addRoute(routes, "POST", "/workspace/:id/box/setup", "client", async (ctx) => {
+    ensureWritable(config);
+    requireClientScope(ctx, "collaborator");
+    const workspace = await resolveWorkspace(config, ctx.params.id);
+    const body = await readJsonBody(ctx.request);
+    const action = body.action;
+    if (Object.keys(body).some((key) => key !== "action") || !isBoxSetupAction(action)) {
+      throw new ApiError(400, "invalid_payload", `action must be one of ${BOX_SETUP_ACTIONS.join(", ")}`);
+    }
+    if (workspace.workspaceType !== "local") throw new ApiError(400, "box_unsupported", "The sandbox is for folders on this computer");
+    if (action === "win_restart" && (await collectBusyEngineSessions(config).catch(() => ({ sessions: [], unknown: 0 }))).sessions.length > 0) {
+      throw new ApiError(409, "chat_running", "A chat is running: restart when it has finished.");
+    }
+    return jsonResponse(await boxServiceFor(config).setup(workspace, action));
   });
 
   addRoute(routes, "POST", "/workspace/:id/box/reset", "client", async (ctx) => {
