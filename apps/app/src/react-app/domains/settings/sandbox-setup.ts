@@ -43,7 +43,7 @@ export type SandboxSetupView = {
   fallbackLine: string | null;
 };
 
-const RUNS_HERE = "Chats on this computer run here meanwhile.";
+const RUNS_HERE = "Chats run on this computer meanwhile.";
 
 const FIRMWARE_STEPS = [
   "Restart the computer and open its BIOS/UEFI settings (often F2, F10, Del or Esc right at start; on Windows also Settings › System › Recovery › Advanced startup › UEFI Firmware Settings).",

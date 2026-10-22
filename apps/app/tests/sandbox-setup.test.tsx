@@ -64,7 +64,7 @@ describe("sandbox setup panel: what it shows", () => {
     const view = sandboxSetupView(box({ setup: setup({ need: "linux_allow", result: { ok: false, message: "The password prompt was dismissed; nothing changed.", at: 1 } }) }));
     expect(view).toMatchObject({ kind: "action", title: "Allow the sandbox on this computer", result: { ok: false } });
     expect(view?.buttons.map((b) => b.action)).toEqual(["linux_allow", "decline"]);
-    expect(view?.fallbackLine).toBe("Chats on this computer run here meanwhile.");
+    expect(view?.fallbackLine).toBe("Chats run on this computer meanwhile.");
   });
 
   test("Windows: Set up (one restart), then the explicit consent; Restart needed waits for a running chat", () => {
@@ -87,14 +87,14 @@ describe("sandbox setup panel: what it shows", () => {
       const view = sandboxSetupView(box({ platform: "win32", setup: setup({ need: "cannot_run", why }) }));
       expect(view?.title).toBe(title);
       expect(view?.buttons.map((b) => b.action)).toEqual(["check"]);
-      expect(view?.fallbackLine).toBe("Chats on this computer run here meanwhile.");
+      expect(view?.fallbackLine).toBe("Chats run on this computer meanwhile.");
     }
     expect(WSL_TROUBLESHOOTING_URL).toBe("https://learn.microsoft.com/windows/wsl/troubleshooting");
   });
 
   test("cannot run, no known why: one calm line (the shared text); declined: postponed with Set up now", () => {
     const line = sandboxSetupView(box({ setup: setup({ need: "cannot_run", line: "The sandbox can't run on this computer: unprivileged user namespaces are off." }) }));
-    expect(line).toMatchObject({ kind: "line", title: "The sandbox can't run on this computer: unprivileged user namespaces are off.", detail: "Chats on this computer run here meanwhile." });
+    expect(line).toMatchObject({ kind: "line", title: "The sandbox can't run on this computer: unprivileged user namespaces are off.", detail: "Chats run on this computer meanwhile." });
     const declined = sandboxSetupView(box({ setup: setup({ need: "linux_allow", declined: true }) }));
     expect(declined).toMatchObject({ kind: "line", title: "Sandbox setup postponed" });
     expect(declined?.buttons.map((b) => b.label)).toEqual(["Set up now"]);

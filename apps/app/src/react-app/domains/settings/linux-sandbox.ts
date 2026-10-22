@@ -324,6 +324,8 @@ export function useLinuxSandbox(client: LinuxSandboxClient | null, workspaceId: 
   }, [change, client, workspaceId]);
 
   const refresh = useCallback(() => load(true), [load]);
+  /** Look again without the full backend check (a chat's turn started or ended). */
+  const reload = useCallback(() => load(false), [load]);
 
   /** One setup step of the setup screen (Allow, Set up, Restart now, Not now, Check again). */
   const setup = useCallback((action: OmniRushWorkspaceBoxSetupAction) => {
@@ -332,7 +334,7 @@ export function useLinuxSandbox(client: LinuxSandboxClient | null, workspaceId: 
     return change("setup", () => run(workspaceId, action), action === "win_restart" ? "Windows could not be restarted from here. Restart it from the Start menu." : "The setup step did not finish.", () => void setup(action));
   }, [change, client, workspaceId]);
 
-  return { box, pending, problem, notice, setEnabled, setBackend, retry, reset, refresh, setup };
+  return { box, pending, problem, notice, setEnabled, setBackend, retry, reset, refresh, reload, setup };
 }
 
 export type LinuxSandboxState = ReturnType<typeof useLinuxSandbox>;

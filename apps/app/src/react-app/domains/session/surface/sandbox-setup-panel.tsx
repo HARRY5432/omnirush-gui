@@ -33,6 +33,9 @@ export function SandboxSetupPanel(props: Props) {
   return <Panel key={props.workspaceId} client={props.client} workspaceId={props.workspaceId} sessionId={props.sessionId ?? null} chatRunning={props.chatRunning ?? false} onOpenSettings={props.onOpenSettings} />;
 }
 
+/** As wide as the composer below it (its max-w-[800px] mx-auto), a little inset on narrow chats. */
+const WIDTH = "mx-auto mb-2 w-[calc(100%-1.5rem)] max-w-[800px]";
+
 const TONE: Record<SandboxSetupView["tone"], string> = {
   busy: "text-dls-secondary",
   attention: "text-warning",
@@ -88,6 +91,12 @@ function Panel(props: { client: LinuxSandboxClient; workspaceId: string; session
   const [justReady, setJustReady] = useState(false);
   const shown = useRef(false);
   const box: OmniRushWorkspaceBox | null = sandbox.box;
+  // A turn started or ended: look again (a reopened chat is known to stay on this computer after its first prompt here).
+  const { reload } = sandbox;
+  const required = box?.required === true;
+  useEffect(() => {
+    if (required && props.sessionId) void reload();
+  }, [props.chatRunning, props.sessionId, required, reload]);
   // Shown while not ready, then "ready" for a few seconds.
   useEffect(() => {
     if (!box?.required || !box.on) return;
@@ -105,7 +114,7 @@ function Panel(props: { client: LinuxSandboxClient; workspaceId: string; session
   if (!box) return null;
   if (box.required && box.chatKept && props.sessionId) {
     return (
-      <div className="mx-3 mb-2 flex items-center gap-2 rounded-xl border border-dls-border bg-dls-surface px-3 py-2 text-xs text-dls-secondary" data-testid="sandbox-kept-chat">
+      <div className={`${WIDTH} flex items-center gap-2 rounded-xl border border-dls-border bg-dls-surface px-3 py-2 text-xs text-dls-secondary`} data-testid="sandbox-kept-chat">
         <Monitor aria-hidden className="size-4 shrink-0" />
         <span className="min-w-0 flex-1">{box.requiredText?.keptOldChat}</span>
       </div>
@@ -126,7 +135,7 @@ function Panel(props: { client: LinuxSandboxClient; workspaceId: string; session
 
   if (view.kind === "line" || view.kind === "ready") {
     return (
-      <div className="mx-3 mb-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-xl border border-dls-border bg-dls-surface px-3 py-2" data-testid="sandbox-setup-panel" data-kind={view.kind}>
+      <div className={`${WIDTH} flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-xl border border-dls-border bg-dls-surface px-3 py-2`} data-testid="sandbox-setup-panel" data-kind={view.kind}>
         <ToneIcon tone={view.tone} />
         <div className="min-w-0 flex-1 text-xs">
           <span className="font-medium text-dls-text" role="status">{view.title}</span>
@@ -138,7 +147,7 @@ function Panel(props: { client: LinuxSandboxClient; workspaceId: string; session
   }
 
   return (
-    <section className="mx-3 mb-2 rounded-2xl border border-dls-border bg-dls-surface" aria-labelledby="sandbox-setup-title" data-testid="sandbox-setup-panel" data-kind={view.kind} data-need={box.setup?.need ?? box.state}>
+    <section className={`${WIDTH} rounded-2xl border border-dls-border bg-dls-surface`} aria-labelledby="sandbox-setup-title" data-testid="sandbox-setup-panel" data-kind={view.kind} data-need={box.setup?.need ?? box.state}>
       <div className="flex items-start gap-3 px-4 pt-3.5 pb-3">
         <ToneIcon tone={view.tone} />
         <div className="min-w-0 flex-1">
