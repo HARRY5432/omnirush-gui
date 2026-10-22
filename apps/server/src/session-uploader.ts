@@ -873,8 +873,11 @@ export type TraceCapabilities = {
   triggers?: string[];
   /** The install log switch (context/install-log.ts): absent is off. */
   install_log?: { enabled: boolean; sample_percent: number };
-  /** The Linux sandbox's server default (box/launch.ts serverDefault): "off" | "offer" | "on", and the backends it allows (serverBackends). */
-  local_box?: { default: string; max_turn_bytes?: number | null; backends?: string[] | null };
+  /**
+   * The Linux sandbox's server default (box/launch.ts serverDefault): "off" | "offer" | "on", the backends it
+   * allows (serverBackends), whether new chats must run in it (serverRequired) and whether images are fetched at start.
+   */
+  local_box?: { default: string; max_turn_bytes?: number | null; backends?: string[] | null; required?: boolean; required_fallback?: string | null; setup?: { prefetch: boolean } };
   /** Automatic compaction (session-archive/auto-compact.ts): absent is off. */
   auto_compact?: { enabled: boolean; after_turns: number; min_context_tokens?: number };
   /** The model's own web search (web-search.ts): the block as the server sent it; absent is off. */

@@ -27,6 +27,7 @@ import { driverFor, normalizeBackend } from "./backends/index.js";
 import type { BoxExec } from "./backends/types.js";
 import { detectStack, imageFor, loadPins, type BoxImage } from "./images.js";
 import { rememberPins } from "./retention.mjs";
+import { requiredFallback, type RequiredFallback } from "./required.js";
 import { detectRuntime, runCommand, type RunCommand, type RuntimeResult } from "./runtime.js";
 
 export const MODES = ["off", "offer", "on"] as const;
@@ -60,19 +61,46 @@ export function serverBackends(stateDir: string): string[] | null {
   }
 }
 
-/** Remembers local_box.default (and its backends allowlist) of a capabilities answer; whether either changed. */
+/**
+ * Whether the server requires the sandbox for this device's new chats
+ * (local_box.required, said only to a client at or above its minimum
+ * version), what a machine that cannot run it does (`required_fallback`), and
+ * whether images are fetched at app start (`setup.prefetch`). An older
+ * server: not required, no prefetch.
+ */
+export function serverRequired(stateDir: string): { required: boolean; fallback: RequiredFallback; prefetch: boolean } {
+  try {
+    const value = JSON.parse(readFileSync(path.join(stateDir, "box-server.json"), "utf8"));
+    return { required: value?.required === true, fallback: requiredFallback(value?.required_fallback), prefetch: value?.prefetch === true };
+  } catch {
+    return { required: false, fallback: "native", prefetch: false };
+  }
+}
+
+/**
+ * Remembers local_box.default (with its backends allowlist, `required`,
+ * `required_fallback` and `setup.prefetch`) of a capabilities answer; whether
+ * what decides where chats run changed: the default, the allowlist, or
+ * `required` (with its fallback). Keys that first appear with their old
+ * meaning (required false; prefetch) are no change, so boxes are not planned
+ * again for them.
+ */
 export function rememberServerDefault(stateDir: string, capabilities: { local_box?: unknown } | null | undefined): boolean {
   const block = capabilities?.local_box;
   if (!block || typeof block !== "object") return false;
-  const fields: { default?: unknown; max_turn_bytes?: unknown; backends?: unknown } = block;
+  const fields: { default?: unknown; max_turn_bytes?: unknown; backends?: unknown; required?: unknown; required_fallback?: unknown; setup?: unknown } = block;
   const value = isMode(fields.default) ? fields.default : "off";
   const backends = Array.isArray(fields.backends) ? fields.backends.filter((b): b is string => typeof b === "string").slice(0, 32) : null;
-  const before = JSON.stringify([serverDefault(stateDir), serverBackends(stateDir)]);
+  const required = fields.required === true;
+  const fallback = requiredFallback(fields.required_fallback);
+  const setup: { prefetch?: unknown } = fields.setup && typeof fields.setup === "object" ? fields.setup : {};
+  const was = serverRequired(stateDir);
+  const before = JSON.stringify([serverDefault(stateDir), serverBackends(stateDir), was.required, was.required ? was.fallback : null]);
   try {
     mkdirSync(stateDir, { recursive: true });
-    writeFileSync(path.join(stateDir, "box-server.json"), JSON.stringify({ default: value, max_turn_bytes: fields.max_turn_bytes ?? null, backends, at: Date.now() }), { mode: 0o600 });
+    writeFileSync(path.join(stateDir, "box-server.json"), JSON.stringify({ default: value, max_turn_bytes: fields.max_turn_bytes ?? null, backends, required, required_fallback: fallback, prefetch: setup.prefetch === true, at: Date.now() }), { mode: 0o600 });
   } catch { /* best effort */ }
-  return before !== JSON.stringify([value, backends]);
+  return before !== JSON.stringify([value, backends, required, required ? fallback : null]);
 }
 
 /**
@@ -142,17 +170,22 @@ export function askedBackend({ env = process.env, stateDir }: { env?: NodeJS.Pro
 
 /**
  * On or off for a project, and why: OMNIRUSH_BOX=1|0 (every project), then
- * the project's setting, then (a buildathon project, buildathon-repro.ts) the
+ * the server's `required` (every new chat in the box: the project's own
+ * switch and the buildathon's choice no longer turn it off), then the
+ * project's setting, then (a buildathon project, buildathon-repro.ts) the
  * event's `repro.box`, then the server's default ("on"; "offer" shows a
  * one-line offer until the project was offered it once; "off"). A buildathon
  * project kept off by OMNIRUSH_BOX=0 or its own switch says so (`lessRepro`).
+ * OMNIRUSH_BOX=0 while the sandbox is required is the support-only escape:
+ * `required` stays set so the chat reports it (launch reason env_off).
  * CLI: src/box/launch.js resolveMode, the same order.
  */
-export function resolveMode({ env = process.env, project, server, offered = false, buildathon = null }: { env?: NodeJS.ProcessEnv; project: ProjectBoxMode; server: ServerBoxDefault; offered?: boolean; buildathon?: "on" | "offer" | "off" | null }): { on: boolean; source: "env" | "project" | "server" | "default" | "buildathon"; offer: boolean; lessRepro?: true } {
+export function resolveMode({ env = process.env, project, server, offered = false, buildathon = null, required = false }: { env?: NodeJS.ProcessEnv; project: ProjectBoxMode; server: ServerBoxDefault; offered?: boolean; buildathon?: "on" | "offer" | "off" | null; required?: boolean }): { on: boolean; source: "env" | "project" | "server" | "default" | "buildathon" | "required"; offer: boolean; lessRepro?: true; required?: true } {
   const lessRepro = buildathon === "on" || buildathon === "offer" ? { lessRepro: true as const } : {};
   const asked = String(env.OMNIRUSH_BOX ?? "").trim().toLowerCase();
-  if (["1", "on", "true"].includes(asked)) return { on: true, source: "env", offer: false };
-  if (["0", "off", "false"].includes(asked)) return { on: false, source: "env", offer: false, ...lessRepro };
+  if (["1", "on", "true"].includes(asked)) return { on: true, source: "env", offer: false, ...(required ? { required: true as const } : {}) };
+  if (["0", "off", "false"].includes(asked)) return { on: false, source: "env", offer: false, ...lessRepro, ...(required ? { required: true as const } : {}) };
+  if (required) return { on: true, source: "required", offer: false, required: true };
   if (project === "on" || project === "off") return { on: project === "on", source: "project", offer: false, ...(project === "off" ? lessRepro : {}) };
   if (buildathon === "on") return { on: true, source: "buildathon", offer: false };
   if (buildathon === "offer" && server !== "on") return { on: false, source: "buildathon", offer: !offered };
