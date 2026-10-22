@@ -103,7 +103,9 @@ export type BoxStatus = {
   /** Required, but the project only builds on this OS (an Xcode project, a WPF app): its chats run here. */
   hostOnly: { things: string[]; notice: string } | null;
   /** Required and not ready: what the sandbox needs on this computer (the setup screen). Null otherwise. */
-  setup: BoxSetup | null;
+  setup: (BoxSetup & { line: string | null }) | null;
+  /** Asked for one chat (`?session=`): it ran on this computer before the sandbox was required and stays here. */
+  chatKept: boolean;
 };
 
 /** The setup screen's steps (POST /workspace/:id/box/setup). */
@@ -549,7 +551,7 @@ export class BoxService {
     return (await this.mode(workspace)).on;
   }
 
-  async status(workspace: BoxWorkspace, { fresh = false }: { fresh?: boolean } = {}): Promise<BoxStatus> {
+  async status(workspace: BoxWorkspace, { fresh = false, sessionId = null }: { fresh?: boolean; sessionId?: string | null } = {}): Promise<BoxStatus> {
     const { settings, server, on, source, offer, hostBuilds: gate, lessRepro, hostOnly, required } = await this.mode(workspace);
     // The server's "offer": shown once per folder (CLI: the tip, once per folder).
     if (offer && workspace.workspaceType === "local") await this.options.writeSettings(workspace.id, { offered: true }).catch(() => undefined);
@@ -558,7 +560,8 @@ export class BoxService {
     const project = this.projects.get(key);
     const needed = required === true;
     const requiredText = needed ? { line: desktopText("required_line"), optOut: desktopText("opt_out_refused"), keptOldChat: desktopText("kept_old_chat") } : null;
-    const base = { mode: settings.mode, serverDefault: server, on, source, offer, error: null, hostBuilds: gate, boxNotice: null, required: needed, requiredText, hostOnly, setup: null };
+    const chatKept = Boolean(sessionId && this.nativeChats.has(sessionId));
+    const base = { mode: settings.mode, serverDefault: server, on, source, offer, error: null, hostBuilds: gate, boxNotice: null, required: needed, requiredText, hostOnly, setup: null, chatKept };
     const backendSetting = { ...askedBackend({ env: this.env, stateDir: this.options.stateDir }), choices: backendChoices() };
     const setting = { value: backendSetting.backend, source: backendSetting.source, choices: backendSetting.choices };
     if (workspace.workspaceType !== "local") return { ...base, on: false, offer: false, state: "off", runtime: null, backend: null, backendSetting: setting, image: null, progress: null, container: null, platform: this.platform, notice: "The sandbox is for folders on this computer." };
@@ -636,9 +639,12 @@ export class BoxService {
   }
 
   /** What the sandbox needs here before it can run (the setup screen); this PC's checks are read (and cached) for it on Windows. */
-  async setupFor(runtime: RuntimeResult | null, { fresh = false }: { fresh?: boolean } = {}): Promise<BoxSetup> {
+  async setupFor(runtime: RuntimeResult | null, { fresh = false }: { fresh?: boolean } = {}): Promise<BoxSetup & { line: string | null }> {
     const checks = this.platform === "win32" && runtime && !runtime.ok ? await cachedWindowsChecks({ fresh }).catch(() => null) : null;
-    return classifySetup({ runtime, platform: this.platform, checks, state: setupState(this.home), fallback: this.required().fallback });
+    const setup = classifySetup({ runtime, platform: this.platform, checks, state: setupState(this.home), fallback: this.required().fallback });
+    // The one line (required.json texts.desktop.cannot_run) when the box cannot run here.
+    const why = setup.whyText ?? (runtime && !runtime.ok ? runtime.reason.split("\n")[0]!.replace(/\.$/, "") : null);
+    return { ...setup, line: setup.need === "cannot_run" && why ? desktopText("cannot_run", { why }) : null };
   }
 
   /**

@@ -4245,7 +4245,7 @@ function createRoutes(
   // The Linux sandbox (box/): a workspace's choice, its status, and its reset.
   addRoute(routes, "GET", "/workspace/:id/box", "client", async (ctx) => {
     const workspace = await resolveWorkspace(config, ctx.params.id);
-    return jsonResponse(await boxServiceFor(config).status(workspace, { fresh: ctx.url.searchParams.get("fresh") === "1" }));
+    return jsonResponse(await boxServiceFor(config).status(workspace, { fresh: ctx.url.searchParams.get("fresh") === "1", sessionId: ctx.url.searchParams.get("session") }));
   });
 
   addRoute(routes, "PUT", "/workspace/:id/box", "client", async (ctx) => {
