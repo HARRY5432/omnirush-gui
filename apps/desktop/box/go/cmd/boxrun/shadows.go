@@ -213,58 +213,72 @@ func union(a, b []string) []string {
 
 // bindShadows (init, as root, before the root switch): the store at shadowStore, then each
 // shadow over its folder. A folder that cannot be shadowed is left as it is (never fails the box).
-// Returns the inside paths shadowed and the ones made here as mount points.
-func bindShadows(sp spec, in func(string) string) (on, made []string) {
+// Every path is walked in the box's root (inroot.go), and a shadow's folder must really be in the
+// project's. Returns the inside paths shadowed and the ones made here as mount points.
+func bindShadows(sp spec, r *rootFS) (on, made []string) {
 	if sp.ShadowStore == "" || len(sp.Shadows) == 0 || sp.ShadowProject == "" {
 		return nil, nil
 	}
-	if err := ensureDir(in(shadowStore)); err != nil {
+	if err := r.bindIn(sp.ShadowStore, shadowStore, true, false, false); err != nil {
 		fmt.Fprintf(os.Stderr, "boxrun: shadows: %v\n", err)
 		return nil, nil
 	}
-	if err := bind(sp.ShadowStore, in(shadowStore), false, false); err != nil {
-		fmt.Fprintf(os.Stderr, "boxrun: shadows: %v\n", err)
-		return nil, nil
-	}
-	projReal, err := filepath.EvalSymlinks(in(sp.ShadowProject))
+	pfd, projNames, err := r.open(sp.ShadowProject, "")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "boxrun: shadows: %v\n", err)
 		return nil, nil
 	}
+	_ = syscall.Close(pfd)
+	projReal := "/" + strings.Join(projNames, "/")
 	for _, b := range sp.Shadows {
 		if b.Dst == sp.ShadowProject || !within(b.Dst, sp.ShadowProject) {
 			continue
 		}
-		target := in(b.Dst)
 		// A link in the project (written by the box) must not take the folder elsewhere.
-		parentReal, err := filepath.EvalSymlinks(filepath.Dir(target))
-		if err != nil || !within(parentReal, projReal) {
+		dfd, dirNames, err := r.open(filepath.Dir(b.Dst), "")
+		if err != nil {
 			continue
 		}
-		target = filepath.Join(parentReal, filepath.Base(target))
+		parentReal := "/" + strings.Join(dirNames, "/")
+		name := filepath.Base(b.Dst)
+		if !within(parentReal, projReal) || name == "." || name == ".." || name == "/" {
+			_ = syscall.Close(dfd)
+			continue
+		}
+		names := append(append([]string{}, dirNames...), name)
 		madeHere := false
-		if fi, err := os.Lstat(target); err != nil {
+		mode, err := statAt(dfd, name)
+		if err == syscall.ENOENT {
 			// Only the leaf is made (its parent is the project's folder, e.g. next to package.json).
-			if parent, err := os.Lstat(parentReal); err != nil || !parent.IsDir() {
-				continue
-			}
-			if os.Mkdir(target, 0o755) != nil {
+			if syscall.Mkdirat(dfd, name, 0o755) != nil {
+				_ = syscall.Close(dfd)
 				continue
 			}
 			madeHere = true
-		} else if !fi.IsDir() {
+		} else if err != nil || mode != syscall.S_IFDIR {
+			_ = syscall.Close(dfd)
 			continue
 		}
-		if err := bind(b.Src, target, false, false); err != nil {
+		fd, err := syscall.Openat(dfd, name, oPath|syscall.O_NOFOLLOW|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
+		if err == nil {
+			err = r.check(fd, names)
+			if err == nil {
+				err = r.bindAt(b.Src, fd, names, false, false)
+			}
+			_ = syscall.Close(fd)
+		}
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "boxrun: shadow %s: %v\n", b.Dst, err)
 			if madeHere {
-				_ = os.Remove(target)
+				_ = rmdirAt(dfd, name)
 			}
+			_ = syscall.Close(dfd)
 			continue
 		}
+		_ = syscall.Close(dfd)
 		if madeHere {
 			// Recorded where it really is (a link inside the project may have led there).
-			if rel, err := filepath.Rel(projReal, target); err == nil && rel != "." && !hasDotDot(rel) {
+			if rel, err := filepath.Rel(projReal, "/"+strings.Join(names, "/")); err == nil && rel != "." && !hasDotDot(rel) {
 				made = append(made, filepath.Join(sp.ShadowProject, rel))
 			}
 		}

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -61,45 +60,6 @@ func ensureDir(p string) error {
 	return os.MkdirAll(p, 0o755)
 }
 
-func ensureFile(p string) error {
-	if fi, err := os.Lstat(p); err == nil {
-		if fi.Mode().IsRegular() {
-			return nil
-		}
-		return fmt.Errorf("%s is not a file", p)
-	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	return f.Close()
-}
-
-func bind(src, dst string, ro bool, rec bool) error {
-	flags := uintptr(syscall.MS_BIND)
-	if rec {
-		flags |= syscall.MS_REC
-	}
-	if err := syscall.Mount(src, dst, "", flags, ""); err != nil {
-		return fmt.Errorf("bind %s: %w", dst, err)
-	}
-	if ro {
-		// Read-only needs a remount of the bind; flags locked by the parent namespace must be kept.
-		var st syscall.Statfs_t
-		extra := uintptr(0)
-		if syscall.Statfs(dst, &st) == nil {
-			extra = uintptr(st.Flags) & (syscall.MS_NOSUID | syscall.MS_NODEV | syscall.MS_NOEXEC | syscall.MS_NOATIME | syscall.MS_RELATIME)
-		}
-		if err := syscall.Mount("", dst, "", syscall.MS_BIND|syscall.MS_REMOUNT|syscall.MS_RDONLY|extra, ""); err != nil {
-			return fmt.Errorf("read-only %s: %w", dst, err)
-		}
-	}
-	return nil
-}
-
 // stageInit runs inside the namespaces as root: overlay root, the project
 // and run folders, /proc /dev /sys, DNS, then the root switch and boxd.
 func stageInit(args []string) error {
@@ -130,85 +90,13 @@ func stageInit(args []string) error {
 	if err != nil {
 		return err
 	}
-	in := func(p string) string { return filepath.Join(m, p) }
-	// The command folders boxd and the launcher use. They are made once, in
-	// the upper layer, before boxd's first index, so they are no change.
-	for _, d := range []string{"proc", "dev", "sys", "tmp", "run", "opt/omnirush/bin"} {
-		if err := ensureDir(in(d)); err != nil {
-			return err
-		}
-	}
-	_ = os.Chmod(in("tmp"), 0o1777)
-	if err := syscall.Mount("proc", in("proc"), "proc", syscall.MS_NOSUID|syscall.MS_NODEV|syscall.MS_NOEXEC, ""); err != nil {
-		// Some kernels refuse a fresh proc while the host's is partly covered: bind the namespace's own.
-		if err2 := bind("/proc", in("proc"), false, true); err2 != nil {
-			return fmt.Errorf("proc: %v; %v", err, err2)
-		}
-	}
-	if err := bind("/dev", in("dev"), false, true); err != nil {
+	shadowsOn, shadowsMade, err := prepareRoot(sp, m)
+	if err != nil {
 		return err
 	}
-	if fi, err := os.Stat(in("dev/shm")); err == nil && fi.IsDir() {
-		_ = syscall.Mount("tmpfs", in("dev/shm"), "tmpfs", syscall.MS_NOSUID|syscall.MS_NODEV, "mode=1777")
-	}
-	if err := bind("/sys", in("sys"), true, true); err != nil {
-		// /sys is only read by a few tools: go on without it.
-		fmt.Fprintf(os.Stderr, "boxrun: %v\n", err)
-	}
-	if err := ensureFile(in("opt/omnirush/bin/boxd")); err != nil {
-		return err
-	}
-	if err := bind(sp.Boxd, in("opt/omnirush/bin/boxd"), true, false); err != nil {
-		return err
-	}
-	for _, f := range []struct{ src, dst string }{{sp.Resolv, "etc/resolv.conf"}, {sp.Hosts, "etc/hosts"}} {
-		if f.src == "" {
-			continue
-		}
-		if _, err := os.Stat(f.src); err != nil {
-			continue
-		}
-		target := in(f.dst)
-		if fi, err := os.Lstat(target); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-			continue // the image links it somewhere: leave it
-		}
-		if ensureFile(target) == nil {
-			_ = bind(f.src, target, true, false)
-		}
-	}
-	for _, b := range sp.Binds {
-		target := in(b.Dst)
-		fi, err := os.Stat(b.Src)
-		if err != nil {
-			return fmt.Errorf("bind source %s: %w", b.Dst, err)
-		}
-		if fi.IsDir() {
-			err = ensureDir(target)
-		} else {
-			err = ensureFile(target)
-		}
-		if err != nil {
-			return err
-		}
-		if err := bind(b.Src, target, b.RO, true); err != nil {
-			return err
-		}
-	}
-	// The box's own build folders, over the project's (after its bind: they are inside it).
-	shadowsOn, shadowsMade := bindShadows(sp, in)
 	if len(shadowsOn) > 0 {
 		list, _ := json.Marshal(shadowsOn)
 		sp.Env = append(sp.Env, "BOXD_SHADOWS="+string(list))
-	}
-	if sp.AptRoot {
-		// One uid is mapped (the user's, as root): apt cannot drop to _apt.
-		conf := in("etc/apt/apt.conf.d")
-		if fi, err := os.Stat(conf); err == nil && fi.IsDir() {
-			file := filepath.Join(conf, "00omnirush-box")
-			if _, err := os.Stat(file); err != nil {
-				_ = os.WriteFile(file, []byte("APT::Sandbox::User \"root\";\n"), 0o644)
-			}
-		}
 	}
 	if sp.InitOut != "" {
 		info, _ := json.Marshal(map[string]any{"overlay": overlay, "ms": time.Since(t0).Milliseconds(), "shadows": nonNil(shadowsOn), "made": nonNil(shadowsMade)})
@@ -229,4 +117,111 @@ func stageInit(args []string) error {
 		return err
 	}
 	return syscall.Exec("/opt/omnirush/bin/boxd", []string{"boxd"}, sp.Env)
+}
+
+// prepareRoot fills the mounted root m (inroot.go: nothing here follows a link the box left
+// out of it): the command folders, /proc /dev /sys, boxd, DNS, the binds and the shadows.
+func prepareRoot(sp spec, m string) (shadowsOn, shadowsMade []string, err error) {
+	r, err := openRoot(m)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer r.Close()
+	// The command folders boxd and the launcher use. They are made once, in
+	// the upper layer, before boxd's first index, so they are no change.
+	for _, d := range []string{"proc", "dev", "sys", "tmp", "run", "opt/omnirush/bin"} {
+		if err := r.ensureDirIn(d); err != nil {
+			return nil, nil, err
+		}
+	}
+	_ = r.chmodIn("tmp", 0o1777)
+	err = r.mountIn("proc", true, "", func(target string) error {
+		return syscall.Mount("proc", target, "proc", syscall.MS_NOSUID|syscall.MS_NODEV|syscall.MS_NOEXEC, "")
+	})
+	if err != nil {
+		// Some kernels refuse a fresh proc while the host's is partly covered: bind the namespace's own.
+		if err2 := r.bindIn("/proc", "proc", true, false, true); err2 != nil {
+			return nil, nil, fmt.Errorf("proc: %v; %v", err, err2)
+		}
+	}
+	r.special["proc"] = true
+	if err := r.bindIn("/dev", "dev", true, false, true); err != nil {
+		return nil, nil, err
+	}
+	r.special["dev"] = true
+	if fd, names, err := r.open("dev/shm", "dev"); err == nil {
+		var st syscall.Stat_t
+		if syscall.Fstat(fd, &st) == nil && st.Mode&syscall.S_IFMT == syscall.S_IFDIR && len(names) > 0 && names[0] == "dev" {
+			_ = syscall.Mount("tmpfs", r.target(fd, names), "tmpfs", syscall.MS_NOSUID|syscall.MS_NODEV, "mode=1777")
+		}
+		_ = syscall.Close(fd)
+	}
+	if err := r.bindIn("/sys", "sys", true, true, true); err != nil {
+		// /sys is only read by a few tools: go on without it.
+		fmt.Fprintf(os.Stderr, "boxrun: %v\n", err)
+	}
+	r.special["sys"] = true
+	if err := r.bindIn(sp.Boxd, "opt/omnirush/bin/boxd", false, true, false); err != nil {
+		return nil, nil, err
+	}
+	for _, f := range []struct{ src, dst string }{{sp.Resolv, "etc/resolv.conf"}, {sp.Hosts, "etc/hosts"}} {
+		if f.src == "" {
+			continue
+		}
+		if _, err := os.Stat(f.src); err != nil {
+			continue
+		}
+		if imageLinksFile(r, f.dst) {
+			continue // the image links it to a file of its own: leave it
+		}
+		if err := r.bindIn(f.src, f.dst, false, true, false); err != nil {
+			fmt.Fprintf(os.Stderr, "boxrun: %v\n", err)
+		}
+	}
+	for _, b := range sp.Binds {
+		fi, err := os.Stat(b.Src)
+		if err != nil {
+			return nil, nil, fmt.Errorf("bind source %s: %w", b.Dst, err)
+		}
+		if err := r.bindIn(b.Src, b.Dst, fi.IsDir(), b.RO, true); err != nil {
+			return nil, nil, err
+		}
+	}
+	// The box's own build folders, over the project's (after its bind: they are inside it).
+	shadowsOn, shadowsMade = bindShadows(sp, r)
+	if sp.AptRoot {
+		// One uid is mapped (the user's, as root): apt cannot drop to _apt.
+		if fd, _, err := r.open("etc/apt/apt.conf.d", ""); err == nil {
+			if mode, err := statAt(fd, "."); err == nil && mode == syscall.S_IFDIR {
+				if f, err := syscall.Openat(fd, "00omnirush-box", syscall.O_CREAT|syscall.O_EXCL|syscall.O_WRONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o644); err == nil {
+					_, _ = syscall.Write(f, []byte("APT::Sandbox::User \"root\";\n"))
+					_ = syscall.Close(f)
+				}
+			}
+			_ = syscall.Close(fd)
+		}
+	}
+	return shadowsOn, shadowsMade, nil
+}
+
+// imageLinksFile: rel is a link (the image's, or the box's) to a file in the root, followed
+// inside it as the box will: left alone. A link to nothing, a folder or init's mounts is
+// replaced by the real file.
+func imageLinksFile(r *rootFS, rel string) bool {
+	pfd, _, name, err := r.parent(rel, "")
+	if err != nil {
+		return false
+	}
+	mode, err := statAt(pfd, name)
+	_ = syscall.Close(pfd)
+	if err != nil || mode != syscall.S_IFLNK {
+		return false
+	}
+	fd, _, err := r.open(rel, "")
+	if err != nil {
+		return false
+	}
+	defer syscall.Close(fd)
+	var st syscall.Stat_t
+	return syscall.Fstat(fd, &st) == nil && st.Mode&syscall.S_IFMT == syscall.S_IFREG
 }

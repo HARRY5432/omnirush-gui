@@ -297,7 +297,6 @@ func TestBindShadowsStaysInTheProject(t *testing.T) {
 		{Src: filepath.Join(store, "bbbbbbbbbbbb"), Dst: "/c/p/evil/node_modules"},
 		{Src: filepath.Join(store, "cccccccccccc"), Dst: "/elsewhere/node_modules"},
 	}}
-	in := func(p string) string { return filepath.Join(rootfs, p) }
 	type result struct {
 		on, made []string
 		err      error
@@ -313,7 +312,13 @@ func TestBindShadowsStaysInTheProject(t *testing.T) {
 			done <- result{err: err}
 			return
 		}
-		on, made := bindShadows(sp, in)
+		r, err := openRoot(rootfs)
+		if err != nil {
+			done <- result{err: err}
+			return
+		}
+		defer r.Close()
+		on, made := bindShadows(sp, r)
 		done <- result{on: on, made: made}
 	}()
 	r := <-done
