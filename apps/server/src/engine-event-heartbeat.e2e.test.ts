@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { connect } from "node:net";
 
 import { clearEnginePoolForConfig, computeEngineConfigFingerprint, type EngineSpawnTemplate } from "./engine-pool.js";
 import type { ManagedOpencodeServer } from "./managed-opencode.js";
@@ -37,12 +38,15 @@ function setEnv(name: string, value: string): void {
   process.env[name] = value;
 }
 
-function startMockEngine() {
+function startMockEngine(eventBody?: () => ReadableStream<Uint8Array>) {
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     fetch(request) {
       const url = new URL(request.url);
+      if (url.pathname === "/event" && eventBody) {
+        return new Response(eventBody(), { headers: { "content-type": "text/event-stream" } });
+      }
       if (url.pathname === "/event") {
         // Held open and silent like a real engine between task events; ends
         // when the proxy aborts it after its client disconnects.
@@ -171,4 +175,38 @@ describe("engine event stream heartbeat", () => {
     expect(heartbeats).toBeGreaterThanOrEqual(2);
     expect(buffered).not.toContain(": ping");
   }, 20_000);
+
+  test("closes the stream of a client that stopped reading instead of queueing every event", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omnirush-event-backlog-"));
+    roots.push(root);
+    await mkdir(join(root, ".opencode"), { recursive: true });
+    const frame = new TextEncoder().encode(`data: ${JSON.stringify({ type: "message.part.updated", properties: { text: "x".repeat(1024 * 1024) } })}\n\n`);
+    let sent = 0;
+    const engine = startMockEngine(() => new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent < 200) { sent += 1; controller.enqueue(frame); }
+      },
+    }));
+    const omnirush = await startPooledOmniRushServer({ root, engineUrl: engine.url });
+    const warnings: string[] = [];
+    const warn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+    // A window that never reads (frozen): its socket is paused after the request.
+    const port = Number(new URL(omnirush.base).port);
+    const socket = connect(port, "127.0.0.1", () => {
+      socket.write(`GET /workspace/ws_heartbeat/opencode/event HTTP/1.1\r\nhost: x\r\nauthorization: Bearer ${omnirush.token}\r\naccept: text/event-stream\r\n\r\n`);
+      socket.pause();
+    });
+    socket.on("error", () => undefined);
+    try {
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline && !warnings.some((line) => line.includes("client stopped reading"))) await Bun.sleep(50);
+      expect(warnings.some((line) => line.includes("client stopped reading"))).toBe(true);
+      // Cut near the cap, not after the whole turn's events were queued.
+      expect(sent).toBeLessThan(200);
+    } finally {
+      console.warn = warn;
+      socket.destroy();
+    }
+  }, 30_000);
 });

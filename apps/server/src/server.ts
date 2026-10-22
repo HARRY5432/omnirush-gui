@@ -2984,6 +2984,11 @@ function parseSsePayload(frame: string): unknown {
   }
 }
 
+// What the merged event stream may hold unread for its client. A window that
+// stops reading (frozen, suspended) otherwise keeps every engine event of a long
+// turn in this process until it runs out of memory.
+const ENGINE_EVENT_BACKLOG_BYTES = 64 * 1024 * 1024;
+
 function mergedEventBody(input: {
   pool: EnginePool;
   streams: Array<{ connection: EnginePoolConnection; body: ReadableStream<Uint8Array> }>;
@@ -3011,6 +3016,19 @@ function mergedEventBody(input: {
         for (const entry of readers) void entry.reader.cancel(input.lease.signal.reason).catch(() => undefined);
         close();
       };
+      // The client stopped reading: the queue is dropped (error, not close, which
+      // would keep it for the client) and the client reconnects by itself.
+      const overflow = () => {
+        if (closed || cancelled) return;
+        cancelled = true;
+        closed = true;
+        if (pingTimer) clearInterval(pingTimer);
+        input.lease.signal.removeEventListener("abort", abort);
+        input.lease.release();
+        for (const entry of readers) void entry.reader.cancel().catch(() => undefined);
+        console.warn("[omnirush-server] engine event stream closed: its client stopped reading");
+        controller.error(new Error("event stream backlog"));
+      };
       const finish = () => {
         active -= 1;
         if (active > 0 || closed || cancelled) return;
@@ -3027,6 +3045,10 @@ function mergedEventBody(input: {
               if (input.pool.shouldForwardEvent(entry.connection.generationId, parseSsePayload(frame))) {
                 controller.enqueue(encoder.encode(`${frame}\n\n`));
               }
+            }
+            if ((controller.desiredSize ?? 0) < -ENGINE_EVENT_BACKLOG_BYTES) {
+              overflow();
+              break;
             }
             if (parsed.overflow) {
               // A frame that never terminates would buffer without bound;
@@ -3063,7 +3085,7 @@ function mergedEventBody(input: {
       input.lease.release();
       await Promise.all(readers.map((entry) => entry.reader.cancel(reason).catch(() => undefined)));
     },
-  });
+  }, new ByteLengthQueuingStrategy({ highWaterMark: 0 }));
 }
 
 // Read lazily so tests can shrink the deadline at runtime. Matches the 5s
