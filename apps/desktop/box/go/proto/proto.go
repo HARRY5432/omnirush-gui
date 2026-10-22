@@ -43,7 +43,7 @@ const MaxRequestLine = 16 << 20
 type Request struct {
 	V     int               `json:"v"`
 	Token string            `json:"token"`
-	Op    string            `json:"op"` // exec | stat | tar | ping
+	Op    string            `json:"op"` // exec | stat | tar | ping | ports | connect
 	Argv  []string          `json:"argv,omitempty"`
 	Cwd   string            `json:"cwd,omitempty"`
 	Env   map[string]string `json:"env,omitempty"`
@@ -53,6 +53,14 @@ type Request struct {
 	// Root: exec as root instead of the box's command user (the launcher's
 	// own setup steps; the shell client never sets it).
 	Root bool `json:"root,omitempty"`
+	// Port: for connect, the TCP port inside the box (on its loopback).
+	Port int `json:"port,omitempty"`
+}
+
+// Listener is one listening TCP socket inside the box (op "ports").
+type Listener struct {
+	Port int    `json:"port"`
+	Addr string `json:"addr"` // the bound address: 0.0.0.0, 127.0.0.1, ::, ::1
 }
 
 // ExitInfo ends an operation.

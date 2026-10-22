@@ -19,6 +19,7 @@
 //	BOXD_PORT_FILE  where to write the port it listens on (BOXD_LISTEN may end in :0)
 //	BOXD_IDLE_EXIT  minutes with no request after which it exits (0: never; the
 //	                bubblewrap and WSL boxes, which have no engine to keep them)
+//	BOXD_SHADOWS  the build folders boxrun init shadowed (JSON list; shadows.go)
 package main
 
 import (
@@ -63,6 +64,7 @@ type config struct {
 	portFile string
 	idle    time.Duration
 	baseEnv []string
+	shadows string
 }
 
 // snapshotGate lets a snapshot read the files with no new command starting
@@ -138,6 +140,7 @@ func main() {
 		os.Exit(runInit())
 	}
 	cfg := loadConfig()
+	initShadows(cfg, cfg.shadows)
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	log.SetPrefix("boxd ")
 	// The command user first, then the image's file index (once per
@@ -154,6 +157,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("listen: %v", err)
 	}
+	ownPort.Store(int64(ln.Addr().(*net.TCPAddr).Port))
 	if cfg.portFile != "" {
 		port := ln.Addr().(*net.TCPAddr).Port
 		tmp := cfg.portFile + ".tmp"
@@ -168,6 +172,8 @@ func main() {
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		<-sigs
+		// Before the listener closes: main returns as soon as it does.
+		removeMade()
 		_ = ln.Close()
 		os.Exit(0)
 	}()
@@ -208,6 +214,7 @@ func idleExit(idle time.Duration, ln net.Listener) {
 		time.Sleep(idle / 20)
 		if activity.Load() == 0 && time.Since(time.Unix(0, lastActive.Load())) > idle {
 			log.Printf("idle for %v: exiting", idle)
+			removeMade()
 			_ = ln.Close()
 			os.Exit(0)
 		}
@@ -238,6 +245,7 @@ func loadConfig() config {
 		shell:   os.Getenv("BOXD_SHELL"),
 		portFile: os.Getenv("BOXD_PORT_FILE"),
 		idle:    time.Duration(atoi("BOXD_IDLE_EXIT")) * time.Minute,
+		shadows: os.Getenv("BOXD_SHADOWS"),
 	}
 	if cfg.shell == "" {
 		cfg.shell = "/bin/bash"
@@ -251,7 +259,7 @@ func loadConfig() config {
 		}
 		cfg.baseEnv = append(cfg.baseEnv, kv)
 	}
-	for _, k := range []string{"BOXD_TOKEN", "BOXD_LISTEN", "BOXD_UID", "BOXD_GID", "BOXD_HOME", "BOXD_ROOT", "BOXD_PATH", "BOXD_ENV_FILE", "BOXD_SHELL", "BOXD_PORT_FILE", "BOXD_IDLE_EXIT"} {
+	for _, k := range []string{"BOXD_TOKEN", "BOXD_LISTEN", "BOXD_UID", "BOXD_GID", "BOXD_HOME", "BOXD_ROOT", "BOXD_PATH", "BOXD_ENV_FILE", "BOXD_SHELL", "BOXD_PORT_FILE", "BOXD_IDLE_EXIT", "BOXD_SHADOWS"} {
 		_ = os.Unsetenv(k)
 	}
 	if cfg.token == "" {
@@ -400,6 +408,14 @@ func serve(cfg config, raw net.Conn) {
 		c.exit(proto.ExitInfo{Ms: ms(start)})
 	case "exec":
 		runExec(cfg, c, req, start)
+	case "ports":
+		// The box's listening TCP ports (ports.go), for the launcher's forwards.
+		out, _ := json.Marshal(listeners())
+		_ = c.frame(proto.Data, out)
+		c.exit(proto.ExitInfo{Ms: ms(start)})
+	case "connect":
+		// A TCP stream to a port inside the box (ports.go): raw bytes after one Data frame.
+		connectPort(c, req, start)
 	case "stat":
 		out, _ := json.Marshal(statPaths(req.Paths))
 		_ = c.frame(proto.Data, out)
@@ -553,6 +569,8 @@ func runExec(cfg config, c *conn, req proto.Request, start time.Time) {
 	defer gate.leave()
 	waited := ms(waitStart)
 
+	// A package made since the last command gets its own node_modules before this one runs (shadows.go).
+	checkShadows(cfg)
 	argv := req.Argv
 	if argv[0] == "" || argv[0] == "$SHELL" {
 		argv = append([]string{cfg.shell}, argv[1:]...)
@@ -738,6 +756,13 @@ func walkPaths(roots []string, max int) ([]proto.StatEntry, bool) {
 			if len(paths) >= max {
 				truncated = true
 				return filepath.SkipAll
+			}
+			// The box's own build folders are never in a snapshot (a rebuild makes them from the manifests).
+			if shadowed(p) {
+				if d != nil && d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
 			}
 			paths = append(paths, p)
 			return nil

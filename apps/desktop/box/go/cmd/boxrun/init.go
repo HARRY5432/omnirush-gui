@@ -194,6 +194,12 @@ func stageInit(args []string) error {
 			return err
 		}
 	}
+	// The box's own build folders, over the project's (after its bind: they are inside it).
+	shadowsOn := bindShadows(sp, in)
+	if len(shadowsOn) > 0 {
+		list, _ := json.Marshal(shadowsOn)
+		sp.Env = append(sp.Env, "BOXD_SHADOWS="+string(list))
+	}
 	if sp.AptRoot {
 		// One uid is mapped (the user's, as root): apt cannot drop to _apt.
 		conf := in("etc/apt/apt.conf.d")
@@ -205,7 +211,7 @@ func stageInit(args []string) error {
 		}
 	}
 	if sp.InitOut != "" {
-		info, _ := json.Marshal(map[string]any{"overlay": overlay, "ms": time.Since(t0).Milliseconds()})
+		info, _ := json.Marshal(map[string]any{"overlay": overlay, "ms": time.Since(t0).Milliseconds(), "shadows": nonNil(shadowsOn)})
 		_ = os.WriteFile(sp.InitOut, info, 0o600)
 	}
 	// Switch root: pivot_root(".", ".") stacks the old root on the new one;
