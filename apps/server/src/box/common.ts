@@ -125,6 +125,11 @@ export function setToolsRoot(dir: string | null | undefined): void {
   platformTools = dir || null;
 }
 
+/** The sidecars folder set at start (null: none; tests, a dev server). */
+export function toolsRoot(): string | null {
+  return platformTools;
+}
+
 /** The helper's file, or null when no folder has it (the box is then unavailable). */
 export function helperPath(name: string, { goos, goarch, env = process.env, toolsRoot = platformTools }: { goos: string | undefined; goarch: string | undefined; env?: Env; toolsRoot?: string | null }): string | null {
   if (!goos || !goarch) return null;

@@ -68,16 +68,16 @@ export type Removed = { kind: string; name: string; reason: string; size?: strin
 export type DriverOptions = { run?: RunCommand; env?: Env; home?: string; timeoutMs?: number; log?: BoxLog; onLine?: RunOptions["onLine"] };
 
 export type BoxDriver = {
-  kind: "container" | "bwrap" | "apple" | "wsl" | "wslc";
+  kind: "container" | "bwrap" | "apple" | "wsl" | "wslc" | "lima";
   /** boxsh may fall back to `<runtime> exec` when boxd does not answer (container engines and wslc). */
   execFallback: boolean;
-  /** boxrun runs as root here (the WSL distro): a box on a macOS/Windows host gets its own build folders (required.ts). */
+  /** boxrun runs as root here (the WSL distro, the Lima VM): a box on a macOS/Windows host gets its own build folders (required.ts). */
   shadows?: boolean;
   /** false: the box has its own network; its servers reach this computer's 127.0.0.1 through boxd (ports.ts). */
   forwardsPorts?: boolean;
   imagePresent: (runtime: BoxRuntime, image: BoxImage, opts?: DriverOptions) => Promise<PresentImage | null>;
   pull: (runtime: BoxRuntime, image: BoxImage, opts?: DriverOptions) => Promise<{ ok: true } | { ok: false; error: string }>;
-  /** The detached download; null: the download runs in this process (Desktop: the WSL distro). */
+  /** The detached download; null: the download runs in this process (Desktop: the WSL distro, the Lima VM). */
   pullCommand: (runtime: BoxRuntime, image: BoxImage, home: string) => { bin: string; args: string[] } | null;
   exists: (runtime: BoxRuntime, key: string, opts?: DriverOptions) => Promise<boolean>;
   open: (ctx: OpenContext) => Promise<Opened>;

@@ -10,8 +10,9 @@
 // `__sandbox__` format, so the converter and the rebuild do not change.
 //
 //   Linux:   bwrap (no daemon, no root) > rootless Podman > Docker
-//   macOS:   OrbStack > colima > Docker Desktop > Rancher > Podman machine
-//            (Apple container is opt-in only: never picked on its own, never started unasked)
+//   macOS:   OmniRush's own Lima VM (macOS 13+, set up by itself) > OrbStack > colima
+//            > Docker Desktop > Rancher > Podman machine, the runtimes only when already
+//            running (Apple container is opt-in only: never picked on its own, never started unasked)
 //   Windows: WSL containers (wslc, WSL 3.0.1+) > OmniRush's WSL distro > Docker Desktop > Podman machine
 //            > Docker in the default WSL distro
 //
@@ -27,6 +28,7 @@ import { CACHE_FAIL_MS, CACHE_OK_MS, candidates, isWsl, probe as probeContainer,
 import { appleDriver, probeApple } from "./apple.js";
 import { bwrapDriver, probeBwrap } from "./bwrap.js";
 import { containerDriver } from "./container.js";
+import { limaDriver, probeLima } from "./lima.js";
 import type { BoxDriver } from "./types.js";
 import { probeWslDistro, wslDriver } from "./wsl.js";
 import { probeWslc, wslcDriver } from "./wslc.js";
@@ -35,7 +37,7 @@ type Env = NodeJS.ProcessEnv;
 
 export const ORDER: Record<"linux" | "darwin" | "win32", string[]> = {
   linux: ["bwrap", "podman", "docker"],
-  darwin: ["orbstack", "colima", "docker-desktop", "rancher", "podman", "docker"],
+  darwin: ["lima", "orbstack", "colima", "docker-desktop", "rancher", "podman", "docker"],
   win32: ["wslc", "wsl", "docker-desktop", "podman", "docker", "wsl-engine"],
 };
 
@@ -49,10 +51,10 @@ export const ORDER: Record<"linux" | "darwin" | "win32", string[]> = {
 export const OPT_IN: Partial<Record<NodeJS.Platform, string[]>> = { darwin: ["apple"] };
 
 /** What the backend setting takes (and what uploads record as sandbox.backend). */
-export const BACKENDS = ["bwrap", "apple", "wslc", "wsl", "orbstack", "colima", "docker-desktop", "rancher", "docker", "podman", "wsl-engine"] as const;
+export const BACKENDS = ["bwrap", "lima", "apple", "wslc", "wsl", "orbstack", "colima", "docker-desktop", "rancher", "docker", "podman", "wsl-engine"] as const;
 export type BackendId = (typeof BACKENDS)[number];
 export const LABELS: Record<string, string> = {
-  bwrap: "bubblewrap (no daemon)", apple: "Apple container", wslc: "WSL containers (wslc)", wsl: "OmniRush WSL distro", orbstack: "OrbStack", colima: "colima",
+  bwrap: "bubblewrap (no daemon)", lima: "OmniRush VM (Lima)", apple: "Apple container", wslc: "WSL containers (wslc)", wsl: "OmniRush WSL distro", orbstack: "OrbStack", colima: "colima",
   "docker-desktop": "Docker Desktop", rancher: "Rancher Desktop", docker: "Docker", podman: "Podman", "wsl-engine": "Docker/Podman in WSL",
 };
 
@@ -66,6 +68,7 @@ export function driverFor(runtime: { backend?: string } | null | undefined): Box
   switch (runtime?.backend) {
     case "bwrap": return bwrapDriver;
     case "apple": return appleDriver;
+    case "lima": return limaDriver;
     case "wsl": return wslDriver;
     case "wslc": return wslcDriver;
     default: return containerDriver;
@@ -91,8 +94,9 @@ export function runtimeBackend(value: unknown, platform: NodeJS.Platform = proce
   if (base === "wslc") return "wslc";
   if (base === "container" && platform !== "win32") return "apple";
   if (base === "boxrun" || base === "bwrap") return "bwrap";
+  if (base === "limactl") return "lima";
   const lower = String(value || "").toLowerCase();
-  if (["bwrap", "apple", "wslc", "wsl"].includes(lower)) return lower;
+  if (["bwrap", "lima", "apple", "wslc", "wsl"].includes(lower)) return lower;
   return null;
 }
 
@@ -104,7 +108,7 @@ function isBackendId(value: string): value is BackendId {
 export function normalizeBackend(value: unknown): BackendId | "auto" | "native" | null {
   const v = String(value ?? "").trim().toLowerCase();
   if (!v || v === "auto" || v === "default") return "auto";
-  const alias: Record<string, string> = { bubblewrap: "bwrap", "apple-container": "apple", container: "apple", "wsl-containers": "wslc", "wsl-container": "wslc", desktop: "docker-desktop", "docker desktop": "docker-desktop", "podman-machine": "podman", off: "native", none: "native", host: "native" };
+  const alias: Record<string, string> = { bubblewrap: "bwrap", "omnirush-vm": "lima", vm: "lima", "apple-container": "apple", container: "apple", "wsl-containers": "wslc", "wsl-container": "wslc", desktop: "docker-desktop", "docker desktop": "docker-desktop", "podman-machine": "podman", off: "native", none: "native", host: "native" };
   const id = alias[v] ?? v;
   if (id === "native") return "native";
   return isBackendId(id) ? id : null;
@@ -193,7 +197,7 @@ function writeCache(boxHome: string, key: string, result: RuntimeResult, now: nu
 /** One line when nothing works, with the free option to install. */
 export function noneReason(platform: NodeJS.Platform): string {
   if (platform === "linux") return "no sandbox backend works here (install bubblewrap, Podman or Docker)";
-  if (platform === "darwin") return "no container runtime found (free: `brew install colima docker && colima start`; also OrbStack, Docker Desktop, Podman; Apple container only when chosen in Settings)";
+  if (platform === "darwin") return "the OmniRush VM cannot run here and no container runtime found (free: `brew install colima docker && colima start`; also OrbStack, Docker Desktop, Podman; Apple container only when chosen in Settings)";
   return "no sandbox backend found (turn on WSL 2: `wsl --install --no-distribution` as administrator, then `wsl --update` for WSL containers; or Docker Desktop, Podman)";
 }
 
@@ -228,9 +232,9 @@ export async function detectBackend({ boxHome, env = process.env, platform = pro
   if (wanted === "native") return { ok: false, reason: "the sandbox backend is set to native (this machine)", tried: [], native: true };
   let order: string[] = backendsFor(platform);
   // OMNIRUSH_BOX_RUNTIME (docker, podman or a path) keeps meaning "this container CLI".
-  if (legacyRuntime) order = order.filter((id) => !["bwrap", "apple", "wslc", "wsl", "wsl-engine"].includes(id));
+  if (legacyRuntime) order = order.filter((id) => !["bwrap", "lima", "apple", "wslc", "wsl", "wsl-engine"].includes(id));
   // Under the required sandbox on macOS/Windows: the backends whose boxes get their own build
-  // folders (driver.shadows: boxrun as root, the WSL distro) before the others.
+  // folders (driver.shadows: boxrun as root, the WSL distro, the Lima VM) before the others.
   if (preferShadows && wanted === "auto") order = [...order.filter((id) => driverFor({ backend: id }).shadows), ...order.filter((id) => !driverFor({ backend: id }).shadows)];
   let why = `the first that works here, in order: ${order.join(" > ")}`;
   if (wanted !== "auto") {
@@ -251,6 +255,7 @@ export async function detectBackend({ boxHome, env = process.env, platform = pro
   for (const id of order) {
     let found: Probed[];
     if (id === "bwrap") found = [{ backend: "bwrap", ...(await probeBwrap({ env, boxHome: boxHome ?? path.join(home, ".omnirush", "box"), run, exists, platform, arch, ...limit })) }];
+    else if (id === "lima") found = [{ backend: "lima", ...(await probeLima({ env, platform, arch, release, run, exists, home: boxHome ?? path.join(home, ".omnirush", "box"), explicit: wanted === "lima", ...limit })) }];
     else if (id === "apple") found = [{ backend: "apple", ...(await probeApple({ env, platform, arch, release, run, exists, ...limit })) }];
     else if (id === "wsl") found = [{ backend: "wsl", ...(await probeWslDistro({ env, platform, run, exists, arch, ...limit })) }];
     else if (id === "wslc") found = [{ backend: "wslc", ...(await probeWslc({ env, platform, run, exists, arch, explicit: wanted === "wslc", ...limit })) }];

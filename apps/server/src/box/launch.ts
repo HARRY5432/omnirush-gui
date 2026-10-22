@@ -18,7 +18,7 @@
 // background, and a shell call waits for it (boxsh).
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import path from "node:path";
 
 import * as client from "./client.js";
@@ -205,6 +205,23 @@ export function pullLog(marker: string): string {
   return marker.replace(/\.pid$/, ".log");
 }
 
+/** When a download's log last moved (ms since the epoch), or null: no log. */
+export function pullActivityAt(home: string, runtime: Pick<BoxRuntime, "backend" | "name">, image: string): number | null {
+  try { return Math.round(statSync(pullLog(pullMarker(home, runtime, image))).mtimeMs); } catch { return null; }
+}
+
+/**
+ * Whether a wait for the first sandbox setup is over: `idle` (no progress
+ * for `idleMs`: nothing moved in the download's log) or `max` (`maxMs` in all);
+ * null while it goes on. The CLI's run limit counts the setup the same way
+ * (src/box/setup-wait.js).
+ */
+export function setupWait({ startedAt, lastProgressAt, now, idleMs, maxMs }: { startedAt: number; lastProgressAt: number; now: number; idleMs: number; maxMs: number }): { over: "idle" | "max" | null } {
+  if (now - startedAt >= maxMs) return { over: "max" };
+  if (now - Math.max(startedAt, lastProgressAt) >= idleMs) return { over: "idle" };
+  return { over: null };
+}
+
 /** Downloads running in this process (a backend with no detached command: the WSL distro). */
 const inProcess = new Set<string>();
 
@@ -220,6 +237,31 @@ export function pulling(home: string, runtime: Pick<BoxRuntime, "backend" | "nam
   } catch {
     return false;
   }
+}
+
+/**
+ * The log of a download in this process (the WSL distro, the Lima VM): its
+ * lines appended as they come, for the setup panel's progress; the marker
+ * (this process's pid) is touched so the start time reads right.
+ */
+export function inProcessLog(marker: string): { onLine: (stream: "stdout" | "stderr", line: string) => void; close: () => void } {
+  let fd: number | null = null;
+  try {
+    mkdirSync(path.dirname(marker), { recursive: true });
+    writeFileSync(marker, String(process.pid));
+    fd = openSync(pullLog(marker), "w", 0o600);
+  } catch { /* no progress then */ }
+  return {
+    onLine: (_stream, line) => {
+      if (fd === null) return;
+      try { writeSync(fd, `${line}\n`); } catch { /* best effort */ }
+    },
+    close: () => {
+      if (fd !== null) { try { closeSync(fd); } catch { /* closed */ } fd = null; }
+      // The marker names this (still running) process: gone once the download ends, so it never reads as running.
+      try { rmSync(marker, { force: true }); } catch { /* none */ }
+    },
+  };
 }
 
 /**
@@ -239,10 +281,13 @@ export function pullInBackground(runtime: BoxRuntime, image: BoxImage, home: str
   const cmd = driver.pullCommand(runtime, image, home);
   if (!cmd) {
     inProcess.add(marker);
-    void driver.pull(runtime, image, { home, env, log })
+    // Its progress lines (the Lima VM's setup steps, boxrun's bytes) go to the same log a detached
+    // download writes (pull-progress.ts reads it); the marker's time is when it started.
+    const progress = inProcessLog(marker);
+    void driver.pull(runtime, image, { home, env, log, onLine: progress.onLine })
       .then((res) => { if (!res.ok) log("warn", "box download failed", { backend: runtime.backend, error: res.error }); })
       .catch((error) => log("warn", "box download failed", { backend: runtime.backend, error: String(error?.message || error) }))
-      .finally(() => inProcess.delete(marker));
+      .finally(() => { progress.close(); inProcess.delete(marker); });
     return { started: true, pid: process.pid };
   }
   // Its output goes to a log next to the marker (the Settings card reads its progress there).
@@ -313,7 +358,7 @@ export async function planBox({ env = process.env, home, root, log = () => {}, r
     const present = await bounded(driver.imagePresent(runtime, image, { run, home, env }), probeMs, null);
     if (!present) {
       pullInBackground(runtime, image, home, { env, log });
-      return { box: null, notice: `Sandbox is downloading (${image.approxMb ? `about ${image.approxMb} MB, ` : ""}once${runtime.backend === "wsl" && !runtime.installed ? ", with the OmniRush WSL distro" : ""}); chats here run on this machine until it is ready.`, runtime, image, downloading: true };
+      return { box: null, notice: `Sandbox is downloading (${image.approxMb ? `about ${image.approxMb} MB, ` : ""}once${runtime.backend === "wsl" && !runtime.installed ? ", with the OmniRush WSL distro" : runtime.backend === "lima" && !runtime.installed ? ", with the OmniRush VM" : ""}); chats here run on this machine until it is ready.`, runtime, image, downloading: true };
     }
   }
   // The pins this box starts on are remembered: the next box version keeps their images as the previous ones.

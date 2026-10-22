@@ -166,22 +166,49 @@ export function sha256File(file: string): Promise<string> {
   });
 }
 
+export type DownloadOptions = {
+  fetcher?: (input: string, init?: RequestInit) => Promise<Response>;
+  /** A download that sends nothing for this long fails (0: never; the CLI's download has the same option). */
+  stallMs?: number;
+  /** Bytes so far and the total (null when the server does not say), as they come. */
+  onProgress?: (done: number, total: number | null) => void;
+};
+
 /** Download over https (redirects followed, through externalFetch: the app's proxy and CA settings) to `dest`, checked against `sha256`. */
-export async function download(url: string, dest: string, sha256: string | null, { fetcher = externalFetch }: { fetcher?: (input: string, init?: RequestInit) => Promise<Response> } = {}): Promise<string> {
+export async function download(url: string, dest: string, sha256: string | null, { fetcher = externalFetch, stallMs = 0, onProgress }: DownloadOptions = {}): Promise<string> {
   if (!/^https:\/\//.test(url)) throw new Error("download: https only");
   mkdirSync(path.dirname(dest), { recursive: true });
   const tmp = `${dest}.${process.pid}.part`;
-  const res = await fetcher(url, { headers: { "user-agent": "omnirush" }, redirect: "follow" });
-  if (res.status !== 200 || !res.body) {
-    await res.body?.cancel().catch(() => undefined);
-    throw new Error(`download: HTTP ${res.status}`);
-  }
-  if (res.url && !res.url.startsWith("https://")) throw new Error("download: https only");
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const arm = () => {
+    if (!stallMs) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => controller.abort(new Error(`download: no data for ${Math.round(stallMs / 1000)} s`)), stallMs);
+  };
+  arm();
   try {
-    await pipeline(Readable.fromWeb(res.body as unknown as NodeReadableStream<Uint8Array>), createWriteStream(tmp));
+    const res = await fetcher(url, { headers: { "user-agent": "omnirush" }, redirect: "follow", signal: controller.signal });
+    if (res.status !== 200 || !res.body) {
+      await res.body?.cancel().catch(() => undefined);
+      throw new Error(`download: HTTP ${res.status}`);
+    }
+    if (res.url && !res.url.startsWith("https://")) throw new Error("download: https only");
+    const total = Number(res.headers.get("content-length")) > 0 ? Number(res.headers.get("content-length")) : null;
+    let done = 0;
+    const source = Readable.fromWeb(res.body as unknown as NodeReadableStream<Uint8Array>);
+    source.on("data", (chunk: Buffer) => {
+      arm();
+      done += chunk.length;
+      try { onProgress?.(done, total); } catch { /* a listener's problem */ }
+    });
+    await pipeline(source, createWriteStream(tmp));
   } catch (error) {
     rmSync(tmp, { force: true });
-    throw error;
+    const reason = controller.signal.aborted ? controller.signal.reason : null;
+    throw reason instanceof Error ? reason : error;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
   const got = await sha256File(tmp);
   if (sha256 && got !== sha256) { rmSync(tmp, { force: true }); throw new Error(`download: sha256 mismatch (${got.slice(0, 12)}…)`); }

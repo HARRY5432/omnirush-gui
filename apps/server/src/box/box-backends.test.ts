@@ -55,7 +55,7 @@ function helperBin(): string {
 describe("box backends: ranking and overrides", () => {
   test("the ranked order per OS", () => {
     expect(ORDER.linux).toEqual(["bwrap", "podman", "docker"]);
-    expect(ORDER.darwin).toEqual(["orbstack", "colima", "docker-desktop", "rancher", "podman", "docker"]);
+    expect(ORDER.darwin).toEqual(["lima", "orbstack", "colima", "docker-desktop", "rancher", "podman", "docker"]);
     expect(OPT_IN.darwin).toEqual(["apple"]);
     expect(ORDER.win32).toEqual(["wslc", "wsl", "docker-desktop", "podman", "docker", "wsl-engine"]);
     for (const list of Object.values(ORDER)) for (const id of list) expect(BACKENDS.some((b) => b === id)).toBe(true);
@@ -270,11 +270,12 @@ describe("box backends: macOS", () => {
       return fail("no");
     };
     const home = tmp();
-    const found = await detectBackend({ boxHome: home, platform: "darwin", arch: "arm64", release: "24.0.0", home: "/Users/sam", env: { PATH: "/usr/local/bin" }, exists: set(docker), run, fresh: true, all: true });
+    // (the OmniRush VM off: these are the runtimes it falls back to)
+    const found = await detectBackend({ boxHome: home, platform: "darwin", arch: "arm64", release: "24.0.0", home: "/Users/sam", env: { PATH: "/usr/local/bin", OMNIRUSH_BOX_LIMA: "0" }, exists: set(docker), run, fresh: true, all: true });
     expect(found).toMatchObject({ ok: true, backend: "colima", prefix: ["--context", "colima"] });
     expect(found.alternatives?.find((a) => a.backend === "apple")?.reason).toMatch(/opt-in only/);
     expect(found.alternatives?.some((a) => a.backend === "docker-desktop" && a.ok)).toBe(true);
-    const none = await detectBackend({ boxHome: home, platform: "darwin", home: "/Users/sam", env: { PATH: "/usr/bin" }, exists: () => false, run, fresh: true });
+    const none = await detectBackend({ boxHome: home, platform: "darwin", home: "/Users/sam", env: { PATH: "/usr/bin", OMNIRUSH_BOX_LIMA: "0" }, exists: () => false, run, fresh: true });
     expect(none).toMatchObject({ ok: false, hint: "colima" });
   });
 
@@ -285,7 +286,7 @@ describe("box backends: macOS", () => {
       if (bin === APPLE_BIN) return args[1] === "version" ? ok(appleVersions) : ok("apiserver is running");
       return fail("Cannot connect to the Docker daemon");
     };
-    const base = { boxHome: tmp(), platform: "darwin" as const, arch: "arm64", release: "26.0.0", home: "/Users/sam", env: { PATH: "/usr/local/bin" }, exists: set(APPLE_BIN), run, fresh: true };
+    const base = { boxHome: tmp(), platform: "darwin" as const, arch: "arm64", release: "26.0.0", home: "/Users/sam", env: { PATH: "/usr/local/bin", OMNIRUSH_BOX_LIMA: "0" }, exists: set(APPLE_BIN), run, fresh: true };
     const auto = await detectBackend(base);
     expect(auto.ok).toBe(false);
     expect(calls.some(([bin]) => bin === APPLE_BIN)).toBe(false);

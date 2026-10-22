@@ -27,7 +27,37 @@ export type PullProgress = {
   layersTotal: number;
   /** When the download started (ms since the epoch), when known. */
   startedAt: number | null;
+  /**
+   * The OmniRush VM's first setup (macOS, backends/lima.ts setup lines): the step it is at
+   * ("lima", "vm_image", "vm_boot", "image") and that step's bytes; null for other backends.
+   */
+  setup?: SetupProgress | null;
 };
+
+export type SetupProgress = { step: string; bytesDone: number | null; bytesTotal: number | null };
+
+/** The last setup step a log names (`{"setup":{"step","bytes","total"}}`), with its bytes; null: none. */
+export function parseSetupLines(text: string): SetupProgress | null {
+  let last: SetupProgress | null = null;
+  for (const raw of text.split(/\r?\n|\r/)) {
+    const line = raw.trim();
+    if (!line.startsWith("{\"setup\"")) continue;
+    try {
+      const parsed: { setup?: { step?: unknown; bytes?: unknown; total?: unknown } } | null = JSON.parse(line);
+      const step = typeof parsed?.setup?.step === "string" ? parsed.setup.step : null;
+      if (!step) continue;
+      const bytes = Number(parsed?.setup?.bytes);
+      const total = Number(parsed?.setup?.total);
+      const same: boolean = last !== null && last.step === step;
+      last = {
+        step,
+        bytesDone: Number.isFinite(bytes) ? bytes : same ? last!.bytesDone : null,
+        bytesTotal: total > 0 ? total : same ? last!.bytesTotal : null,
+      };
+    } catch { /* a torn line */ }
+  }
+  return last;
+}
 
 const DOWNLOADED = /^(Download complete|Extracting|Pull complete|Already exists)\b/;
 /** At most this much of the log's end is read (a pull writes a few lines per layer). */
@@ -144,10 +174,14 @@ export function pullProgress(log: string, marker: string, sizes: LayerSizes | nu
   let startedAt: number | null = null;
   try { startedAt = Math.round(statSync(marker).mtimeMs); } catch { /* unknown */ }
   const { seen, done, bytes, layers } = parsePullLog(text);
-  if (bytes?.total) return { bytesDone: Math.min(bytes.done, bytes.total), bytesTotal: bytes.total, layersDone: done.size, layersTotal: layers, startedAt };
+  const setup = parseSetupLines(text);
+  // The VM's setup before the box image: its own step's bytes, none of the image's yet.
+  if (setup && setup.step !== "image") return { bytesDone: null, bytesTotal: null, layersDone: 0, layersTotal: 0, startedAt, setup };
+  const extra = setup ? { setup } : {};
+  if (bytes?.total) return { bytesDone: Math.min(bytes.done, bytes.total), bytesTotal: bytes.total, layersDone: done.size, layersTotal: layers, startedAt, ...extra };
   // Bytes only when every layer the runtime named has a size (else the sizes are another image's or platform's).
   const sized = sizes && seen.length && seen.every((id) => sizes.has(id)) ? sizes : null;
   const bytesTotal = sized ? seen.reduce((sum, id) => sum + (sized.get(id) ?? 0), 0) : null;
   const bytesDone = sized ? [...done].reduce((sum, id) => sum + (sized.get(id) ?? 0), 0) : null;
-  return { bytesDone, bytesTotal, layersDone: done.size, layersTotal: layers, startedAt };
+  return { bytesDone, bytesTotal, layersDone: done.size, layersTotal: layers, startedAt, ...extra };
 }
