@@ -35,12 +35,14 @@ type SectionProps = { busy: boolean };
 
 function Section(props: { title: string; description: string; children: ReactNode; testId: string }) {
   return (
-    <LayoutSectionItem data-testid={props.testId}>
+    <LayoutSectionItem>
       <LayoutSectionItemHeader className="w-full">
         <LayoutSectionItemTitle>{props.title}</LayoutSectionItemTitle>
         <LayoutSectionItemDescription>{props.description}</LayoutSectionItemDescription>
       </LayoutSectionItemHeader>
-      <div className="flex flex-col gap-1">{props.children}</div>
+      <div className="flex flex-col gap-1" data-testid={props.testId}>
+        {props.children}
+      </div>
     </LayoutSectionItem>
   );
 }
@@ -80,7 +82,7 @@ function Slider(props: {
         value={props.value}
         disabled={props.disabled}
         onChange={(event) => props.onChange(Number(event.target.value))}
-        className="w-44 accent-primary focus-visible:outline-2 focus-visible:outline-ring"
+        className="w-44 accent-foreground focus-visible:outline-2 focus-visible:outline-ring"
         data-testid={props.testId}
       />
       <span className="font-mono text-xs text-muted-foreground tabular-nums">
