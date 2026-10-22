@@ -72,7 +72,10 @@ export function serverBackends(stateDir: string): string[] | null {
 export function serverRequired(stateDir: string): { required: boolean; fallback: RequiredFallback; prefetch: boolean } {
   try {
     const value = JSON.parse(readFileSync(path.join(stateDir, "box-server.json"), "utf8"));
-    return { required: value?.required === true, fallback: requiredFallback(value?.required_fallback), prefetch: value?.prefetch === true };
+    const required = value?.required === true;
+    // Prefetch is part of the requirement: a server that says `on` also says prefetch, and a
+    // device it does not require keeps today's behaviour (the image is fetched by a chat's plan).
+    return { required, fallback: requiredFallback(value?.required_fallback), prefetch: required && value?.prefetch === true };
   } catch {
     return { required: false, fallback: "native", prefetch: false };
   }
@@ -99,7 +102,10 @@ export function rememberServerDefault(stateDir: string, capabilities: { local_bo
   const before = JSON.stringify([serverDefault(stateDir), serverBackends(stateDir), was.required, was.required ? was.fallback : null]);
   try {
     mkdirSync(stateDir, { recursive: true });
-    writeFileSync(path.join(stateDir, "box-server.json"), JSON.stringify({ default: value, max_turn_bytes: fields.max_turn_bytes ?? null, backends, required, required_fallback: fallback, prefetch: setup.prefetch === true, at: Date.now() }), { mode: 0o600 });
+    // The required keys are written only when the server requires the sandbox, so the file is
+    // exactly what it was before them otherwise (the CLI's requiredBlock does the same).
+    const extra = required ? { required, required_fallback: fallback, prefetch: setup.prefetch === true } : {};
+    writeFileSync(path.join(stateDir, "box-server.json"), JSON.stringify({ default: value, max_turn_bytes: fields.max_turn_bytes ?? null, backends, ...extra, at: Date.now() }), { mode: 0o600 });
   } catch { /* best effort */ }
   return before !== JSON.stringify([value, backends, required, required ? fallback : null]);
 }

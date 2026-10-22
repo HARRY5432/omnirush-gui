@@ -57,7 +57,9 @@ describe("required sandbox: the server's answer", () => {
     expect(rememberServerDefault(state, { local_box: { default: "on" } })).toBe(true);
     // A newer server says the same thing with more keys: nothing to plan again.
     expect(rememberServerDefault(state, { local_box: { default: "on", required: false, required_fallback: null, setup: { prefetch: true } } })).toBe(false);
-    expect(serverRequired(state)).toEqual({ required: false, fallback: "native", prefetch: true });
+    // Not required: prefetch is never on and the file holds exactly the keys it held before.
+    expect(serverRequired(state)).toEqual({ required: false, fallback: "native", prefetch: false });
+    expect(Object.keys(JSON.parse(await readFile(join(state, "box-server.json"), "utf8"))).sort()).toEqual(["at", "backends", "default", "max_turn_bytes"]);
     expect(rememberServerDefault(state, { local_box: { default: "on", required: true, required_fallback: "native", setup: { prefetch: true } } })).toBe(true);
     expect(serverRequired(state)).toEqual({ required: true, fallback: "native", prefetch: true });
     expect(rememberServerDefault(state, { local_box: { default: "on", required: true, required_fallback: "native_uncounted", setup: { prefetch: true } } })).toBe(true);
@@ -211,6 +213,17 @@ describe("required sandbox: the desktop's projects", () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(asked).toEqual(["ws_open"]);
     expect(await boxes.prefetch()).toBe(false);
+  });
+
+  test("a server that says `on` with prefetch: no prefetch for a device it does not require", async () => {
+    const stateDir = await temp("state");
+    rememberServerDefault(stateDir, { local_box: { default: "on", required: false, setup: { prefetch: true } } });
+    expect(serverRequired(stateDir).prefetch).toBe(false);
+    const boxes = service({ stateDir, workspaces: [], env: { OMNIRUSH_BOX_HOME: await temp("boxhome") } });
+    let detected = false;
+    (boxes as unknown as { detect: () => Promise<null> }).detect = async () => { detected = true; return null; };
+    expect(await boxes.prefetch()).toBe(false);
+    expect(detected).toBe(false);
   });
 
   test("an older server: unchanged (the project's off still turns it off, no setup, not required)", async () => {
