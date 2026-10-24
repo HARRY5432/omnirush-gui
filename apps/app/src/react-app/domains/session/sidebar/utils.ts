@@ -3,7 +3,7 @@ import type { WorkspaceSessionGroup } from "../../../../app/types";
 import { isSandboxWorkspace } from "../../../../app/utils";
 import { t } from "../../../../i18n";
 
-export const MAX_SESSIONS_PREVIEW = 6;
+export const MAX_SESSIONS_PREVIEW = 10;
 
 /**
  * A group with no sessions to show whose list failed to load. It renders a

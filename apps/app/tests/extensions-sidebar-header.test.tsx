@@ -41,10 +41,10 @@ describe("Extensions sidebar destination", () => {
     expect(html).toContain("text-sidebar-foreground/70");
   });
 
-  test("sits below Search and above Pinned sessions", () => {
+  test("sits in the tools row below Search and above Pinned sessions", () => {
     const source = readFileSync(appSidebarPath, "utf8");
-    const searchIndex = source.indexOf("<Search");
-    const extensionsIndex = source.indexOf("<SidebarDestination");
+    const searchIndex = source.indexOf("icon={Search}");
+    const extensionsIndex = source.indexOf('label={t("settings.tab_extensions")}');
     const pinnedIndex = source.indexOf("{pinnedSessions.length");
     // The native account footer component is defined above the sidebar body
     // and renders its own <SidebarFooter>; measure the body footer instead.
@@ -54,7 +54,7 @@ describe("Extensions sidebar destination", () => {
     expect(extensionsIndex).toBeGreaterThan(searchIndex);
     expect(pinnedIndex).toBeGreaterThan(extensionsIndex);
     expect(footerIndex).toBeGreaterThan(extensionsIndex);
-    expect(source.slice(footerIndex)).not.toContain("<SidebarDestination");
+    expect(source.slice(footerIndex)).not.toContain("settings.tab_extensions");
   });
 });
 

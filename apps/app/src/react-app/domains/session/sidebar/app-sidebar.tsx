@@ -39,6 +39,7 @@ import {
   Sparkles,
   CircleHelp,
 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { LazyMotion, Reorder, domMax, m, useDragControls } from "motion/react";
 
 import { getDisplaySessionTitle } from "../../../../app/lib/session-title";
@@ -47,7 +48,7 @@ import { omnirushUsageSummary } from "../../../../app/lib/omnirush-usage";
 import { isDesktopRuntime } from "../../../../app/lib/runtime-env";
 import { refreshAccountStatus, setQualitySessionId, useAccountStatusStore, useQualityUiStore, type AccountQuality } from "../../../../app/lib/quality";
 import { goodSessionWording } from "../../../../app/lib/good-session";
-import { ProgressRing, QualityTierBadge, SpinCounts, spinRowTitle } from "../../quality/quality-parts";
+import { ProgressRing, QualityTierBadge, spinRowTitle } from "../../quality/quality-parts";
 import { openAllowanceHelp } from "../../quality/allowance-help";
 import { ALLOWANCE_HELP_TITLE } from "../../../../app/lib/allowance-help";
 import { buildathonProjects, useBuildathonStore } from "../../../../app/lib/buildathon";
@@ -178,7 +179,6 @@ import {
 import { WorkspaceAvatarPicker } from "./workspace-avatar-picker";
 import { copySessionId } from "./copy-session-id";
 import { isSameWorkbenchSession, useWorkbenchStore, workbenchSessionKey } from "../chat/workbench-store";
-import { SidebarDestination } from "./sidebar-destination";
 import { SessionTitle } from "./session-title";
 import { AuditTrailMiniPanel } from "../../audit/audit-trail-mini-panel";
 import { useAuditTrailController } from "../../audit/use-audit-trail-controller";
@@ -251,7 +251,7 @@ function ShowMoreSessionsButton({
   return (
     <SidebarMenuSubItem>
       <SidebarMenuSubButton
-        className="h-8 text-[13px] text-muted-foreground"
+        className="h-7 text-[13px] text-muted-foreground"
         style={{ paddingInlineStart: sidebarRowPaddingInlineStart(0) }}
         onClick={onClick}
       >
@@ -907,7 +907,7 @@ function SessionSideChatControl({ workspaceId, sessionId, title }: {
       disabled={!sideChat && ctx.newTaskDisabled}
       title={sideChat?.title || t("session_management.new_split")}
       className={cn(
-        "flex h-8 shrink-0 items-center gap-1 rounded-r-md border-l border-sidebar-border/60 px-2 text-[11px] text-sidebar-foreground/60 hover:bg-sidebar-accent disabled:opacity-50",
+        "flex h-7 shrink-0 items-center gap-1 rounded-r-md border-l border-sidebar-border/60 px-2 text-[11px] text-sidebar-foreground/60 hover:bg-sidebar-accent disabled:opacity-50",
         selected && focusedPane === "secondary" && "bg-sidebar-accent text-sidebar-accent-foreground",
       )}
       onClick={() => {
@@ -997,12 +997,56 @@ function OmniRushWordmark({ className }: { className?: string }) {
   );
 }
 
+/** An icon button for the sidebar's compact rows: the label is the tooltip, a badge sits on the corner. */
+function SidebarIconButton({ icon: Icon, label, active, badge, className, ...props }: Omit<React.ComponentProps<"button">, "children"> & {
+  icon: LucideIcon;
+  label: string;
+  active?: boolean;
+  badge?: React.ReactNode;
+}) {
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon-sm"
+      aria-label={label}
+      title={label}
+      aria-current={active ? "page" : undefined}
+      data-active={active ? "" : undefined}
+      className={cn(
+        "relative size-7 shrink-0 rounded-md text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground data-active:bg-sidebar-accent data-active:text-sidebar-accent-foreground",
+        className,
+      )}
+      {...props}
+    >
+      <Icon className="size-4" />
+      {badge}
+    </Button>
+  );
+}
+
+function IconCount({ value, label, ...props }: { value: number; label: string; "data-testid"?: string }) {
+  return (
+    <span
+      aria-label={label}
+      className="absolute -end-0.5 -top-0.5 flex min-w-3.5 items-center justify-center rounded-full bg-primary px-0.5 text-[9px] font-semibold leading-3.5 text-primary-foreground tabular-nums"
+      {...props}
+    >
+      {value > 9 ? "9+" : value}
+    </span>
+  );
+}
+
+function IconDot({ className, label }: { className: string; label?: string }) {
+  return <span aria-label={label} aria-hidden={label ? undefined : true} className={cn("absolute end-1 top-1 size-1.5 rounded-full", className)} />;
+}
+
 /**
- * Quality rewards as a sidebar row: "Spin" with the ready count as a small
- * badge, and a muted ring with the progress toward the next spin. Opens the
- * spin dialog (or, without spins, the quality panel: tips, streak, coaching).
+ * Quality rewards in the footer row: a gift with the ready count (opens the
+ * spin dialog, or without spins the quality panel: tips, streak, coaching),
+ * and a muted ring with the progress toward the next spin.
  */
-function QualitySpinRow({ quality }: { quality: AccountQuality }) {
+function QualitySpinButtons({ quality }: { quality: AccountQuality }) {
   const openPanel = useQualityUiStore((store) => store.openPanel);
   const openSpin = useQualityUiStore((store) => store.openSpin);
   const hint = quality.nextSpinHint;
@@ -1010,21 +1054,18 @@ function QualitySpinRow({ quality }: { quality: AccountQuality }) {
   const stars = Math.min(ready, quality.clientSpinsAvailable ?? 0);
   const progress = hint ? `${Math.round(hint.progress * 100)}%` : null;
   return (
-    <SidebarMenuItem data-testid="quality-footer-strip">
-      <SidebarMenuButton
-        type="button"
+    <span className="flex items-center gap-0.5" data-testid="quality-footer-strip">
+      <SidebarIconButton
+        icon={Gift}
+        label={ready > 0 ? `Spin, ${ready} ready` : "How to earn spins"}
+        title={spinRowTitle(quality)}
         onClick={ready > 0 ? openSpin : openPanel}
-        tooltip={spinRowTitle(quality)}
-        aria-label={ready > 0 ? `Spin, ${ready} ready` : "How to earn spins"}
         data-testid="quality-spin-button"
         data-spins={ready}
         data-client-spins={stars}
-        className={cn(progress && "pe-14")}
-      >
-        <Gift className="size-4" />
-        <span className="truncate">{ready > 0 ? "Spin" : "Earn spins"}</span>
-        <SpinCounts quality={quality} />
-      </SidebarMenuButton>
+        className={cn(ready > 0 && "text-sidebar-foreground")}
+        badge={ready > 0 ? <IconCount value={ready} label={`${ready} ready`} /> : null}
+      />
       {progress ? (
         <button
           type="button"
@@ -1032,34 +1073,29 @@ function QualitySpinRow({ quality }: { quality: AccountQuality }) {
           title={goodSessionWording(hint?.text ?? quality.nextTierHint ?? "Quality rewards")}
           aria-label={`Next spin ${progress}`}
           data-testid="quality-footer-next"
-          className="absolute inset-e-1 top-1.5 flex h-5 items-center gap-1 rounded-md px-1 text-[11px] text-muted-foreground tabular-nums transition hover:bg-sidebar-accent hover:text-foreground group-data-[collapsible=icon]:hidden"
+          className="flex h-7 items-center gap-1 rounded-md px-1 text-[11px] text-muted-foreground tabular-nums transition hover:bg-sidebar-accent hover:text-foreground"
         >
           <ProgressRing progress={hint!.progress} size={12} stroke={1.75} />
           {progress}
         </button>
       ) : null}
-    </SidebarMenuItem>
+    </span>
   );
 }
 
-/** Sidebar footer: opens the release notes; a dot until they were opened on this version. */
-function WhatsNewSidebarItem() {
+/** Opens the release notes; a dot until they were opened on this version. */
+function WhatsNewIconButton() {
   const unseen = useWhatsNewUnseen();
   const label = t("whats_new.title");
   return (
-    <SidebarMenuItem>
-      <SidebarMenuButton
-        type="button"
-        onClick={() => openWhatsNew("menu")}
-        tooltip={label}
-        aria-label={unseen ? `${label} (${t("whats_new.unseen")})` : label}
-        data-testid="sidebar-whats-new"
-      >
-        <Sparkles className="size-4" />
-        <span className="flex-1">{label}</span>
-        {unseen ? <span data-testid="whats-new-dot" className="size-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" /> : null}
-      </SidebarMenuButton>
-    </SidebarMenuItem>
+    <SidebarIconButton
+      icon={Sparkles}
+      label={unseen ? `${label} (${t("whats_new.unseen")})` : label}
+      title={label}
+      onClick={() => openWhatsNew("menu")}
+      data-testid="sidebar-whats-new"
+      badge={unseen ? <span data-testid="whats-new-dot" aria-hidden="true" className="absolute end-1 top-1 size-1.5 rounded-full bg-primary" /> : null}
+    />
   );
 }
 
@@ -1149,34 +1185,22 @@ function NativeAccountFooter({ onOpenAccountSettings }: { onOpenAccountSettings:
             </SidebarMenuAction>
           ) : null}
         </SidebarMenuItem>
-        {quality ? <QualitySpinRow quality={quality} /> : null}
-        {shellConfig.feedbackButton ? (
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              type="button"
-              onClick={() => openFeedbackDialog({ trigger: "menu" })}
-              tooltip="Send feedback"
-              aria-label="Send feedback"
-              data-testid="sidebar-send-feedback"
-            >
-              <MessageCircleMore className="size-4" />
-              <span>Send feedback</span>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        ) : null}
-        <WhatsNewSidebarItem />
-        <SidebarMenuItem>
-          <SidebarMenuButton
-            type="button"
-            onClick={onOpenAccountSettings}
-            tooltip="Settings"
-            aria-label="Settings"
-          >
-            <Settings className="size-4" />
-            <span>Settings</span>
-          </SidebarMenuButton>
-        </SidebarMenuItem>
       </SidebarMenu>
+      {/* Rewards on the left, feedback, release notes and Settings on the right: one row. */}
+      <div role="group" aria-label="Account tools" data-testid="sidebar-footer-tools" className="flex items-center gap-0.5 pe-1.5">
+        {quality ? <QualitySpinButtons quality={quality} /> : null}
+        <span className="flex-1" />
+        {shellConfig.feedbackButton ? (
+          <SidebarIconButton
+            icon={MessageCircleMore}
+            label="Send feedback"
+            onClick={() => openFeedbackDialog({ trigger: "menu" })}
+            data-testid="sidebar-send-feedback"
+          />
+        ) : null}
+        <WhatsNewIconButton />
+        <SidebarIconButton icon={Settings} label="Settings" onClick={onOpenAccountSettings} data-testid="sidebar-settings" />
+      </div>
     </SidebarFooter>
   );
 }
@@ -1386,7 +1410,7 @@ export function AppSidebar(props: AppSidebarProps) {
         )}
         {props.conversationHistory ? (
           <div
-            className="flex shrink-0 items-center justify-end gap-0.5 px-2 pb-1 max-lg:hidden mac:absolute mac:right-1.5 mac:top-[7px] mac:z-50 mac:p-0 mac:titlebar-no-drag"
+            className="absolute end-1.5 top-2.5 z-50 flex items-center gap-0.5 max-lg:hidden mac:top-[7px] mac:titlebar-no-drag"
             role="group"
             aria-label="Conversation history controls"
           >
@@ -1416,13 +1440,13 @@ export function AppSidebar(props: AppSidebarProps) {
             </Button>
           </div>
         ) : null}
-        <SidebarHeader className="mb-0 mt-2">
+        <SidebarHeader className="mb-0 mt-2 gap-1">
           <SidebarMenu>
-            <SidebarMenuItem>
+            <SidebarMenuItem className="flex items-center gap-0.5">
               <SidebarMenuButton
                 type="button"
                 data-sidebar-new-chat
-                className="bg-sidebar-accent font-medium text-sidebar-accent-foreground"
+                className="min-w-0 flex-1 bg-sidebar-accent font-medium text-sidebar-accent-foreground"
                 aria-label={t("session.new_task")}
                 tooltip={t("session.new_task")}
                 disabled={props.newTaskDisabled}
@@ -1431,127 +1455,99 @@ export function AppSidebar(props: AppSidebarProps) {
                 <SquarePen className="size-4" />
                 <span className="flex-1 truncate">{t("session.new_task")}</span>
               </SidebarMenuButton>
-            </SidebarMenuItem>
-            {props.onOpenSessionSearch ? (
-              <SidebarMenuItem>
-                <SidebarMenuButton
-                  onClick={props.onOpenSessionSearch}
+              {props.onOpenSessionSearch ? (
+                <SidebarIconButton
+                  icon={Search}
+                  label={t("workspace_list.search_sessions")}
+                  title={`${t("workspace_list.search_sessions")} (${isMacPlatform() ? "⌘⇧F" : "Ctrl+Shift+F"})`}
                   aria-keyshortcuts={isMacPlatform() ? "Meta+Shift+F" : "Control+Shift+F"}
-                  className="text-sidebar-foreground/70"
-                >
-                  <Search className="size-4" />
-                  <span className="flex-1 truncate">{t("workspace_list.search_sessions")}</span>
-                  <kbd className="ml-auto font-sans text-[11px] tracking-wide text-sidebar-foreground/50 max-lg:hidden pointer-coarse:hidden">
-                    {isMacPlatform() ? "⌘⇧F" : "Ctrl+Shift+F"}
-                  </kbd>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-            ) : null}
-            <SidebarMenuItem>
-              <SidebarMenuButton
-                type="button"
-                data-testid="audit-trail-toggle"
-                aria-expanded={auditOpen}
-                aria-label="Audit trail"
-                title="A local activity record reconstructed from this task and workspace. Integrity verification is not enabled in this version."
-                onClick={() => setAuditOpen((value) => !value)}
-                className="text-sidebar-foreground/70"
-              >
-                <ShieldCheck className="size-4" />
-                <span className="flex-1 truncate">Audit trail</span>
-                {props.selectedWorkspaceId && auditSummary.records.length > 0 ? <span className="rounded bg-muted px-1 text-[10px] text-muted-foreground">{auditSummary.records.length}</span> : null}
-                {auditSummary.records.some((record) => record.status === "failed") ? <span className="size-1.5 rounded-full bg-destructive" aria-label="Audit trail has a failure" /> : auditSummary.records.some((record) => record.status === "waiting") ? <span className="size-1.5 rounded-full bg-warning" aria-label="Audit trail is waiting for approval" /> : null}
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-            {auditOpen ? (
-              <SidebarMenuItem>
-                <AuditTrailMiniPanel
-                  open={auditOpen}
-                  onClose={() => setAuditOpen(false)}
-                  client={props.auditClient}
-                  workspaceId={props.selectedWorkspaceId}
-                  sessionId={props.selectedSessionId}
-                  workspacePath={props.workspaceSessionGroups.find((group) => group.workspace.id === props.selectedWorkspaceId)?.workspace.path}
+                  onClick={props.onOpenSessionSearch}
+                  data-testid="sidebar-search"
+                  className="size-8"
                 />
-              </SidebarMenuItem>
-            ) : null}
-            <SidebarMenuItem>
-              <SidebarMenuButton
-                type="button"
-                data-testid="local-workflows-toggle"
-                aria-expanded={localWorkflowsOpen}
-                aria-label="Workflows"
-                title="Build sequential workflows and choose connected models for each step"
-                onClick={() => setLocalWorkflowsOpen(true)}
-                className="text-sidebar-foreground/70"
-              >
-                <Workflow className="size-4" />
-                <span className="flex-1 truncate">Workflows</span>
-              </SidebarMenuButton>
+              ) : null}
             </SidebarMenuItem>
-            <LocalWorkflowsPanel
-              open={localWorkflowsOpen}
-              onClose={() => setLocalWorkflowsOpen(false)}
-              client={props.auditClient}
-              workspaceId={props.selectedWorkspaceId}
-              onOpenSession={props.onOpenSession}
+          </SidebarMenu>
+          {/* One row of icons for the places opened now and then, so the chat list keeps the height. */}
+          <div role="group" aria-label="Sidebar tools" data-testid="sidebar-tools" className="flex items-center gap-0.5">
+            <SidebarIconButton
+              icon={ShieldCheck}
+              label="Audit trail"
+              data-testid="audit-trail-toggle"
+              active={auditOpen}
+              aria-expanded={auditOpen}
+              title={`Audit trail${props.selectedWorkspaceId && auditSummary.records.length > 0 ? ` (${auditSummary.records.length})` : ""}: a local activity record reconstructed from this task and workspace. Integrity verification is not enabled in this version.`}
+              onClick={() => setAuditOpen((value) => !value)}
+              badge={auditSummary.records.some((record) => record.status === "failed")
+                ? <IconDot className="bg-destructive" label="Audit trail has a failure" />
+                : auditSummary.records.some((record) => record.status === "waiting")
+                  ? <IconDot className="bg-warning" label="Audit trail is waiting for approval" />
+                  : null}
+            />
+            <SidebarIconButton
+              icon={Workflow}
+              label="Workflows"
+              data-testid="local-workflows-toggle"
+              aria-expanded={localWorkflowsOpen}
+              title="Workflows: build sequential workflows and choose connected models for each step"
+              onClick={() => setLocalWorkflowsOpen(true)}
             />
             {props.onOpenDashboard ? (
-              <SidebarDestination
-                active={props.dashboardActive === true}
-                icon={Blocks}
-                label="Dashboard"
-                onSelect={props.onOpenDashboard}
-              />
+              <SidebarIconButton icon={Blocks} label="Dashboard" active={props.dashboardActive === true} onClick={props.onOpenDashboard} />
             ) : null}
             {props.onOpenTasks ? (
-              <SidebarDestination
-                active={props.tasksActive === true}
+              <SidebarIconButton
                 icon={Layers}
                 label="Parallel tasks"
-                labelContent={(
-                  <span className="flex min-w-0 flex-1 items-center gap-2" data-testid="sidebar-tasks">
-                    <span className="truncate">Parallel tasks</span>
-                    {props.tasksRunningCount ? (
-                      <span className="ml-auto rounded bg-muted px-1 text-[10px] text-muted-foreground" aria-label={`${props.tasksRunningCount} running`} data-testid="sidebar-tasks-running">
-                        {props.tasksRunningCount}
-                      </span>
-                    ) : null}
-                  </span>
-                )}
-                onSelect={props.onOpenTasks}
+                data-testid="sidebar-tasks"
+                active={props.tasksActive === true}
+                onClick={props.onOpenTasks}
+                title={props.tasksRunningCount ? `Parallel tasks (${props.tasksRunningCount} running)` : "Parallel tasks"}
+                badge={props.tasksRunningCount ? (
+                  <IconCount value={props.tasksRunningCount} label={`${props.tasksRunningCount} running`} data-testid="sidebar-tasks-running" />
+                ) : null}
               />
             ) : null}
             {props.onOpenAutomations ? (
-              <SidebarDestination
-                active={props.automationsActive === true}
+              <SidebarIconButton
                 icon={Clock3}
                 label="Automations"
-                labelContent={(
-                  <span className="flex min-w-0 flex-1 items-center gap-2">
-                    <span className="truncate">Automations</span>
-                    {props.automationsNeedAttention ? (
-                      <AlertTriangle
-                        data-automations-attention-indicator
-                        className="ml-auto size-3.5 shrink-0 text-warning"
-                        aria-label="An Automation needs attention"
-                      />
-                    ) : null}
-                  </span>
-                )}
-                onSelect={props.onOpenAutomations}
+                active={props.automationsActive === true}
+                onClick={props.onOpenAutomations}
+                badge={props.automationsNeedAttention ? (
+                  <AlertTriangle
+                    data-automations-attention-indicator
+                    className="absolute -end-0.5 -top-0.5 size-3! text-warning"
+                    aria-label="An Automation needs attention"
+                  />
+                ) : null}
               />
             ) : null}
-            <SidebarDestination
-              active={props.extensionsActive === true}
+            <SidebarIconButton
               icon={LayoutGrid}
               label={t("settings.tab_extensions")}
-              onSelect={props.onOpenExtensions}
+              active={props.extensionsActive === true}
+              onClick={props.onOpenExtensions}
             />
-            <SidebarMenuItem>
-              <NotificationBell variant="sidebar-row" />
-            </SidebarMenuItem>
-          </SidebarMenu>
+            <NotificationBell variant="sidebar-icon" />
+          </div>
+          {auditOpen ? (
+            <AuditTrailMiniPanel
+              open={auditOpen}
+              onClose={() => setAuditOpen(false)}
+              client={props.auditClient}
+              workspaceId={props.selectedWorkspaceId}
+              sessionId={props.selectedSessionId}
+              workspacePath={props.workspaceSessionGroups.find((group) => group.workspace.id === props.selectedWorkspaceId)?.workspace.path}
+            />
+          ) : null}
+          <LocalWorkflowsPanel
+            open={localWorkflowsOpen}
+            onClose={() => setLocalWorkflowsOpen(false)}
+            client={props.auditClient}
+            workspaceId={props.selectedWorkspaceId}
+            onOpenSession={props.onOpenSession}
+          />
         </SidebarHeader>
         <SidebarReorderScope>
           <m.div
@@ -1564,7 +1560,7 @@ export function AppSidebar(props: AppSidebarProps) {
             {pinnedSessions.length > 0 ? (
               <GlobalPinnedSessions entries={pinnedSessions} />
             ) : null}
-            <div className={cn("group/workspaces-header flex h-6 items-center mt-4", SIDEBAR_SECTION_LANE)}>
+            <div className={cn("group/workspaces-header flex h-6 items-center mt-1", SIDEBAR_SECTION_LANE)}>
               <span className={SIDEBAR_SECTION_LABEL}>
                 {t("workspace_list.title")}
               </span>
@@ -2663,7 +2659,7 @@ function SessionMenuItem({
     // (light: --ow-light-hover ≈ black/5, dark: #FFFFFF17 ≈ white/9).
     // The end padding tracks SessionHoverQuickActions: reserve their width
     // whenever they show, including the layouts that show them without hover.
-    "relative h-8 rounded-md transition-[padding,background-color] duration-75 pe-7 group-hover/menu-sub-item:pe-18 group-has-data-popup-open/menu-sub-item:pe-18 max-lg:pe-18 pointer-coarse:pe-18 group-hover/menu-sub-item:bg-black/[0.05] dark:group-hover/menu-sub-item:bg-white/[0.09] data-active:bg-black/[0.07] dark:data-active:bg-white/[0.12] text-[13px] text-sidebar-foreground/80 data-active:text-sidebar-foreground",
+    "relative h-7 rounded-md transition-[padding,background-color] duration-75 pe-7 group-hover/menu-sub-item:pe-18 group-has-data-popup-open/menu-sub-item:pe-18 max-lg:pe-18 pointer-coarse:pe-18 group-hover/menu-sub-item:bg-black/[0.05] dark:group-hover/menu-sub-item:bg-white/[0.09] data-active:bg-black/[0.07] dark:data-active:bg-white/[0.12] text-[13px] text-sidebar-foreground/80 data-active:text-sidebar-foreground",
   );
   const rowButtonStyle = {
     paddingInlineStart: sidebarRowPaddingInlineStart(0),
